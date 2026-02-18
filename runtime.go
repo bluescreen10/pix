@@ -85,3 +85,17 @@ func (w *wgpuRuntime) init(width, height uint32, descriptor *wgpu.SurfaceDescrip
 
 	return nil
 }
+
+func (r *wgpuRuntime) Destroy() {
+	r.Surface.Release()
+	r.Queue.Release()
+	r.Device.Release()
+	r.Adapter.Release()
+
+	r.Surface = nil
+	r.Queue = nil
+	r.Device = nil
+	r.Adapter = nil
+	r.Config = nil
+	r.Features = make(map[wgpu.FeatureName]bool)
+}

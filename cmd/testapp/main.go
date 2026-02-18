@@ -40,9 +40,13 @@ func main() {
 	}
 
 	camera := cameras.NewPerpectiveCamera(45, float32(width)/float32(height), 0.01, 2000)
+	camera.SetPosition(0, 0, -5)
+	mesh := pix.NewMesh(
+		pix.NewBoxGeometry(1, 1, 1),
+	)
 
 	for !window.ShouldClose() {
-		err := renderer.Render(camera)
+		err := renderer.Render(mesh, camera)
 		if err != nil {
 			panic(err)
 		}
