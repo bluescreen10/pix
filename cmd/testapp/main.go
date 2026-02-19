@@ -42,13 +42,20 @@ func main() {
 
 	camera := cameras.NewPerpectiveCamera(45, float32(width)/float32(height), 0.01, 2000)
 	camera.SetPosition(0, 0, -5)
+
+	material := &pix.BasicMaterial{}
+	material.SetColor(glm.Color3f{0, 1, 0})
+
 	mesh := pix.NewMesh(
 		pix.NewBoxGeometry(1, 1, 1),
+		material,
 	)
 
 	scene := &pix.Scene{}
 	scene.Add(mesh)
 	scene.SetBackground(glm.Color4f{0.5, 0.5, 0, 1})
+
+	var count int
 
 	for !window.ShouldClose() {
 		err := renderer.Render(scene, camera)
@@ -56,6 +63,12 @@ func main() {
 			panic(err)
 		}
 		camera.Move(0.01, 0, -0.01)
+		count++
+		if count%100 == 0 {
+			material.SetColor(glm.Color3f{1, 0, 0})
+		} else if count%50 == 0 {
+			material.SetColor(glm.Color3f{0, 1, 0})
+		}
 		glfw.PollEvents()
 	}
 }

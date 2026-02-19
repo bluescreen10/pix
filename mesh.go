@@ -4,13 +4,14 @@ import "github.com/bluescreen10/pix/glm"
 
 type Mesh struct {
 	node
-	model    glm.Mat4f
 	geometry *Geometry
+	material Material
 }
 
-func NewMesh(geometry *Geometry) *Mesh {
+func NewMesh(geometry *Geometry, material Material) *Mesh {
 	return &Mesh{
 		geometry: geometry,
-		model:    glm.Mat4Identity[float32](),
+		material: material,
+		node:     node{model: glm.Mat4Identity[float32]()},
 	}
 }

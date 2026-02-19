@@ -24,8 +24,10 @@ type Renderer struct {
 
 	pipelineCache *pipelineCache
 
+	// shader registry
+	shaders map[string]Shader
+
 	// temp
-	basicShader           *basicShader
 	globalUniformBuffer   *wgpu.Buffer
 	globalBindGroupLayout *wgpu.BindGroupLayout
 	globalBindGroup       *wgpu.BindGroup
@@ -36,6 +38,8 @@ type Renderer struct {
 }
 
 func NewRenderer(width, height uint32) *Renderer {
+	defaultShader := &basicMaterialShader{}
+
 	return &Renderer{
 		width:   width,
 		height:  height,
@@ -43,9 +47,9 @@ func NewRenderer(width, height uint32) *Renderer {
 		runtime: &wgpuRuntime{},
 
 		pipelineCache: newPipelineCache(),
-
-		// temp
-		basicShader: &basicShader{},
+		shaders: map[string]Shader{
+			defaultShader.Name(): defaultShader,
+		},
 	}
 }
 
@@ -104,6 +108,10 @@ func (r *Renderer) Render(scene *Scene, camera Camera) error {
 				r.logger.Error("error uploading geometry", slog.Any("err", err))
 			}
 		}
+
+		material := mesh.material
+		shader := r.getShader(material.Shader())
+		shader.Prepare(material, r.runtime.Device, r.runtime.Queue)
 	}
 
 	// Update Global Uniforms
@@ -155,15 +163,22 @@ func (r *Renderer) renderMesh(mesh *Mesh, bgColor glm.Color4f) error {
 		}},
 	})
 
-	pipeline, err := r.getPipelineFor(mesh)
+	shader := r.getShader(mesh.material.Shader())
+
+	pipeline, err := r.getPipelineFor(shader, mesh)
 	if err != nil {
 		r.logger.Error("error getting pipeline", slog.Any("err", err))
 		return err
 	}
 
+	if err := shader.Bind(mesh.material, renderPass, r.runtime.Queue); err != nil {
+		r.logger.Error("errror binding material", slog.Any("err", err))
+		return err
+	}
+
 	renderPass.SetPipeline(pipeline)
 	renderPass.SetBindGroup(0, r.globalBindGroup, []uint32{})
-	renderPass.SetBindGroup(1, r.objectBindGroup, []uint32{})
+	renderPass.SetBindGroup(2, r.objectBindGroup, []uint32{})
 
 	//TODO: use attributes instead
 	renderPass.SetVertexBuffer(0, mesh.geometry.positionBuffer, 0, wgpu.WholeSize)
@@ -188,8 +203,8 @@ func (r *Renderer) renderMesh(mesh *Mesh, bgColor glm.Color4f) error {
 	return nil
 }
 
-func (r *Renderer) getPipelineFor(mesh *Mesh) (*wgpu.RenderPipeline, error) {
-	pipelineKey := renderPipelineKey{r.basicShader.Name()}
+func (r *Renderer) getPipelineFor(shader Shader, mesh *Mesh) (*wgpu.RenderPipeline, error) {
+	pipelineKey := renderPipelineKey{shader.Name()}
 	pipline := r.pipelineCache.GetRenderPipeline(pipelineKey)
 
 	if pipline != nil {
@@ -197,7 +212,7 @@ func (r *Renderer) getPipelineFor(mesh *Mesh) (*wgpu.RenderPipeline, error) {
 	}
 
 	vertexLayout := mesh.geometry.VertexLayout()
-	pipeline, err := r.createRenderPipeline(r.basicShader, vertexLayout)
+	pipeline, err := r.createRenderPipeline(shader, vertexLayout)
 	if err != nil {
 		return nil, err
 	}
@@ -207,16 +222,16 @@ func (r *Renderer) getPipelineFor(mesh *Mesh) (*wgpu.RenderPipeline, error) {
 }
 
 func (r *Renderer) createRenderPipeline(shader Shader, vertexLayout []wgpu.VertexBufferLayout) (*wgpu.RenderPipeline, error) {
-	// shaderBindGroupLayout, err := shader.BindGroupLayout(r.runtime.Device)
-	// if err != nil {
-	// 	return nil, err
-	// }
+	shaderBindGroupLayout, err := shader.BindGroupLayout(r.runtime.Device)
+	if err != nil {
+		return nil, err
+	}
 
 	layout, err := r.runtime.Device.CreatePipelineLayout(&wgpu.PipelineLayoutDescriptor{
 		Label: "", // TODO: add a descriptive name for debugging
 		BindGroupLayouts: []*wgpu.BindGroupLayout{
 			r.globalBindGroupLayout,
-			//shaderBindGroupLayout,
+			shaderBindGroupLayout,
 			r.objectBindGroupLayout,
 		},
 	})
@@ -284,34 +299,19 @@ func (r *Renderer) createRenderPipeline(shader Shader, vertexLayout []wgpu.Verte
 }
 
 func (r *Renderer) compileShader(device *wgpu.Device, shader Shader) (*wgpu.ShaderModule, string, *wgpu.ShaderModule, string, error) {
-	vsFile := shader.VertexShader()
-	fsFile := shader.FragmentShader()
+	vsCode := shader.VertexShader()
+	fsCode := shader.FragmentShader()
 
-	if vsFile == fsFile {
-		code, err := os.ReadFile(vsFile)
-		if err != nil {
-			return nil, "", nil, "", err
-		}
-
+	if vsCode == fsCode {
 		module, err := device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
-			WGSLDescriptor: &wgpu.ShaderModuleWGSLDescriptor{Code: string(code)},
+			WGSLDescriptor: &wgpu.ShaderModuleWGSLDescriptor{Code: vsCode},
 		})
 
 		return module, "vs_main", module, "fs_main", err
 
 	} else {
-		vsCode, err := os.ReadFile(vsFile)
-		if err != nil {
-			return nil, "", nil, "", err
-		}
-
-		fsCode, err := os.ReadFile(fsFile)
-		if err != nil {
-			return nil, "", nil, "", err
-		}
-
 		vsModule, err := device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
-			WGSLDescriptor: &wgpu.ShaderModuleWGSLDescriptor{Code: string(vsCode)},
+			WGSLDescriptor: &wgpu.ShaderModuleWGSLDescriptor{Code: vsCode},
 		})
 
 		if err != nil {
@@ -319,7 +319,7 @@ func (r *Renderer) compileShader(device *wgpu.Device, shader Shader) (*wgpu.Shad
 		}
 
 		fsModule, err := device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
-			WGSLDescriptor: &wgpu.ShaderModuleWGSLDescriptor{Code: string(fsCode)},
+			WGSLDescriptor: &wgpu.ShaderModuleWGSLDescriptor{Code: fsCode},
 		})
 
 		return vsModule, "main", fsModule, "main", err
@@ -468,4 +468,12 @@ func (r *Renderer) appendRenderables(meshes []*Mesh, node Node) []*Mesh {
 	}
 
 	return meshes
+}
+
+func (r *Renderer) getShader(name string) Shader {
+	if shader, ok := r.shaders[name]; ok {
+		return shader
+	} else {
+		return r.shaders["basic"]
+	}
 }

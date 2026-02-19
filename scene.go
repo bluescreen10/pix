@@ -11,6 +11,7 @@ type Node interface {
 var _ Node = &node{}
 
 type node struct {
+	model    glm.Mat4f
 	children []Node
 }
 
