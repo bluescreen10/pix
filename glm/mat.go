@@ -1,7 +1,7 @@
 package glm
 
 // items stored in column major
-type Mat4[T Number] [16]T
+type Mat4[T number] [16]T
 
 func (m Mat4[T]) Mul4x4(m2 Mat4[T]) Mat4[T] {
 	return Mat4[T]{
@@ -108,7 +108,7 @@ func (m Mat4[T]) Mat3() Mat3[T] {
 	}
 }
 
-func Mat4Identity[T Number]() Mat4[T] {
+func Mat4Identity[T number]() Mat4[T] {
 	return Mat4[T]{
 		1, 0, 0, 0,
 		0, 1, 0, 0,
@@ -117,7 +117,7 @@ func Mat4Identity[T Number]() Mat4[T] {
 	}
 }
 
-type Mat3[T Number] [9]T
+type Mat3[T number] [9]T
 
 func (m Mat3[T]) Transpose() Mat3[T] {
 	return Mat3[T]{

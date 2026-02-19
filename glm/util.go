@@ -6,7 +6,7 @@ import (
 	"github.com/chewxy/math32"
 )
 
-func PerspectiveRH[T Number](fovYrad, aspectRatio, zNear, zFar T) Mat4[T] {
+func PerspectiveRH[T number](fovYrad, aspectRatio, zNear, zFar T) Mat4[T] {
 	sinFov, cosFov := math.Sincos(float64(0.5) * float64(fovYrad))
 	h := T(cosFov) / T(sinFov)
 	w := h / aspectRatio
@@ -20,7 +20,7 @@ func PerspectiveRH[T Number](fovYrad, aspectRatio, zNear, zFar T) Mat4[T] {
 	}
 }
 
-func LookAtRH[T Number](eye, center, up Vec3[T]) Mat4[T] {
+func LookAtRH[T number](eye, center, up Vec3[T]) Mat4[T] {
 	f := (center.Sub(eye)).Normalize()
 	s := f.Cross(up).Normalize()
 	u := s.Cross(f)
@@ -33,7 +33,7 @@ func LookAtRH[T Number](eye, center, up Vec3[T]) Mat4[T] {
 	}
 }
 
-func OrthoRH[T Number](aspectRatio, zNear, zFar T) Mat4[T] {
+func OrthoRH[T number](aspectRatio, zNear, zFar T) Mat4[T] {
 	h := T(1)
 	w := h / aspectRatio
 	r := T(1) / (zNear - zFar)
@@ -46,7 +46,7 @@ func OrthoRH[T Number](aspectRatio, zNear, zFar T) Mat4[T] {
 	}
 }
 
-func ToRadians[T Number](angle T) T {
+func ToRadians[T number](angle T) T {
 	switch any(angle).(type) {
 	case float32:
 		return T(float32(angle) * math32.Pi / 180)
@@ -55,7 +55,7 @@ func ToRadians[T Number](angle T) T {
 	}
 }
 
-func ToDegrees[T Number](angle T) T {
+func ToDegrees[T number](angle T) T {
 	switch any(angle).(type) {
 	case float32:
 		return T(float32(angle) * 180 / math32.Pi)

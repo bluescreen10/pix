@@ -5,6 +5,7 @@ import (
 
 	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
+	"github.com/bluescreen10/pix/glm"
 	"github.com/cogentcore/webgpu/wgpuglfw"
 	"github.com/go-gl/glfw/v3.3/glfw"
 )
@@ -45,11 +46,16 @@ func main() {
 		pix.NewBoxGeometry(1, 1, 1),
 	)
 
+	scene := &pix.Scene{}
+	scene.Add(mesh)
+	scene.SetBackground(glm.Color4f{0.5, 0.5, 0, 1})
+
 	for !window.ShouldClose() {
-		err := renderer.Render(mesh, camera)
+		err := renderer.Render(scene, camera)
 		if err != nil {
 			panic(err)
 		}
+		camera.Move(0.01, 0, -0.01)
 		glfw.PollEvents()
 	}
 }

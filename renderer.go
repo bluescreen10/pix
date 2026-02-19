@@ -1,14 +1,20 @@
 package pix
 
 import (
-	"log"
 	"log/slog"
 	"os"
+	"sync"
 	"unsafe"
 
 	"github.com/bluescreen10/pix/glm"
 	"github.com/cogentcore/webgpu/wgpu"
 )
+
+var renderablesPool = sync.Pool{
+	New: func() any {
+		return make([]*Mesh, 0, 4096)
+	},
+}
 
 type Renderer struct {
 	runtime       *wgpuRuntime
@@ -45,12 +51,12 @@ func NewRenderer(width, height uint32) *Renderer {
 
 func (r *Renderer) Init(descriptor *wgpu.SurfaceDescriptor) error {
 	if err := r.runtime.init(r.width, r.height, descriptor); err != nil {
-		log.Fatalf("error creating runtime", slog.Any("err", err))
+		slog.Error("error creating runtime", slog.Any("err", err))
 		return err
 	}
 
 	if err := r.createGlobalResources(); err != nil {
-		log.Fatalf("error creating global resources", slog.Any("err", err))
+		slog.Error("error creating global resources", slog.Any("err", err))
 	}
 
 	return nil
@@ -79,15 +85,24 @@ func (r *Renderer) Destroy() {
 	r.objectBindGroupLayout = nil
 }
 
-func (r *Renderer) Render(mesh *Mesh, camera Camera) error {
+func (r *Renderer) Render(scene *Scene, camera Camera) error {
 	r.frameCount++
 
+	//Extract objects
+	//TODO: use sync.Pool to avoid allocations
+	meshes := renderablesPool.Get().([]*Mesh)
+	defer renderablesPool.Put(meshes)
+	meshes = meshes[:0]
+	renderables := r.appendRenderables(meshes, scene)
+
 	//Prepare Objects
-	geometry := mesh.geometry
-	if geometry.IsDirty() {
-		err := geometry.Upload(r.runtime.Device, r.runtime.Queue)
-		if err != nil {
-			r.logger.Error("error uploading geometry", slog.Any("err", err))
+	for _, mesh := range renderables {
+		geometry := mesh.geometry
+		if geometry.IsDirty() {
+			err := geometry.Upload(r.runtime.Device, r.runtime.Queue)
+			if err != nil {
+				r.logger.Error("error uploading geometry", slog.Any("err", err))
+			}
 		}
 	}
 
@@ -98,14 +113,16 @@ func (r *Renderer) Render(mesh *Mesh, camera Camera) error {
 	}
 
 	//Draw
-	if err := r.renderMesh(mesh); err != nil {
-		return err
+	for _, mesh := range renderables {
+		if err := r.renderMesh(mesh, scene.background); err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-func (r *Renderer) renderMesh(mesh *Mesh) error {
+func (r *Renderer) renderMesh(mesh *Mesh, bgColor glm.Color4f) error {
 
 	texture, err := r.runtime.Surface.GetCurrentTexture()
 	if err != nil {
@@ -134,7 +151,7 @@ func (r *Renderer) renderMesh(mesh *Mesh) error {
 			View:       view,
 			LoadOp:     wgpu.LoadOpClear,
 			StoreOp:    wgpu.StoreOpStore,
-			ClearValue: wgpu.Color{R: 0, G: 0, B: 0, A: 1}, //TODO: make it something the user can define
+			ClearValue: wgpu.Color{R: float64(bgColor.R()), G: (float64(bgColor.G())), B: (float64(bgColor.B())), A: float64(bgColor.A())}, //TODO: make it something the user can define
 		}},
 	})
 
@@ -437,4 +454,18 @@ func (r *Renderer) createGlobalBindGroups() error {
 	r.objectBindGroup = bindingGroup
 
 	return nil
+}
+
+func (r *Renderer) appendRenderables(meshes []*Mesh, node Node) []*Mesh {
+	for _, child := range node.Children() {
+		switch object := any(child).(type) {
+
+		case *Mesh:
+			meshes = append(meshes, object)
+		}
+
+		meshes = r.appendRenderables(meshes, child)
+	}
+
+	return meshes
 }

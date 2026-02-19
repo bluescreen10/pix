@@ -3,6 +3,7 @@ package pix
 import "github.com/bluescreen10/pix/glm"
 
 type Mesh struct {
+	node
 	model    glm.Mat4f
 	geometry *Geometry
 }

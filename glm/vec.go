@@ -7,12 +7,12 @@ import (
 	"golang.org/x/exp/constraints"
 )
 
-type Number interface {
+type number interface {
 	constraints.Float | constraints.Signed
 }
 
 // Vec2
-type Vec2[T Number] [2]T
+type Vec2[T number] [2]T
 
 func (v Vec2[T]) X() T {
 	return v[0]
@@ -31,7 +31,7 @@ func (v Vec2[T]) Scale(s T) Vec2[T] {
 }
 
 // Vec3
-type Vec3[T Number] [3]T
+type Vec3[T number] [3]T
 
 func (v Vec3[T]) X() T {
 	return v[0]
@@ -43,18 +43,6 @@ func (v Vec3[T]) Y() T {
 
 func (v Vec3[T]) Z() T {
 	return v[2]
-}
-
-func (v Vec3[T]) R() T {
-	return v[0]
-}
-
-func (v Vec3[T]) G() T {
-	return v[1]
-}
-
-func (v Vec3[T]) B() T {
-	return v[1]
 }
 
 func (v Vec3[T]) Normalize() Vec3[T] {
@@ -123,7 +111,7 @@ func (v Vec3[T]) Vec4() Vec4[T] {
 }
 
 // Vec4
-type Vec4[T Number] [4]T
+type Vec4[T number] [4]T
 
 func (v Vec4[T]) X() T {
 	return v[0]
@@ -138,22 +126,6 @@ func (v Vec4[T]) Z() T {
 }
 
 func (v Vec4[T]) W() T {
-	return v[3]
-}
-
-func (v Vec4[T]) R() T {
-	return v[0]
-}
-
-func (v Vec4[T]) G() T {
-	return v[1]
-}
-
-func (v Vec4[T]) B() T {
-	return v[2]
-}
-
-func (v Vec4[T]) A() T {
 	return v[3]
 }
 

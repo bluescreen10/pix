@@ -6,9 +6,9 @@ import (
 	"github.com/chewxy/math32"
 )
 
-type Quat[T Number] [4]T
+type Quat[T number] [4]T
 
-func NewQuat[T Number](angle T, v Vec3[T]) Quat[T] {
+func NewQuat[T number](angle T, v Vec3[T]) Quat[T] {
 	switch any(v[0]).(type) {
 	case float32:
 		sin, cos := math32.Sincos(float32(angle) / 2)
