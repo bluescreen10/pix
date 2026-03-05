@@ -15,6 +15,9 @@ type Geometry struct {
 	indices       []uint32
 	indicesBuffer *wgpu.Buffer
 
+	uvs       []glm.Vec2f
+	uvsBuffer *wgpu.Buffer
+
 	isDirty bool
 }
 
@@ -39,6 +42,22 @@ func (g *Geometry) Upload(device *wgpu.Device, queue *wgpu.Queue) error {
 	}
 
 	g.positionBuffer = buf
+
+	if g.uvsBuffer != nil {
+		g.uvsBuffer.Destroy()
+	}
+
+	buf, err = device.CreateBufferInit(&wgpu.BufferInitDescriptor{
+		Label:    "UV Buffer",
+		Contents: wgpu.ToBytes(g.uvs),
+		Usage:    wgpu.BufferUsageVertex | wgpu.BufferUsageCopyDst,
+	})
+
+	if err != nil {
+		return err
+	}
+
+	g.uvsBuffer = buf
 
 	if g.indicesBuffer != nil {
 		g.indicesBuffer.Destroy()
@@ -74,18 +93,18 @@ func (g *Geometry) VertexLayout() []wgpu.VertexBufferLayout {
 				},
 			},
 		},
-		// // Slot 1: TexCoords (glm.Vec2f)
-		// {
-		// 	ArrayStride: uint64(unsafe.Sizeof(glm.Vec2f{})), // 8 bytes (2 floats)
-		// 	StepMode:    wgpu.VertexStepModeVertex,
-		// 	Attributes: []wgpu.VertexAttribute{
-		// 		{
-		// 			Format:         wgpu.VertexFormatFloat32x2, // vec2<f32>
-		// 			Offset:         0,
-		// 			ShaderLocation: 1, // @location(1) in shader
-		// 		},
-		// 	},
-		// },
+		// Slot 1: TexCoords (glm.Vec2f)
+		{
+			ArrayStride: uint64(unsafe.Sizeof(glm.Vec2f{})), // 8 bytes (2 floats)
+			StepMode:    wgpu.VertexStepModeVertex,
+			Attributes: []wgpu.VertexAttribute{
+				{
+					Format:         wgpu.VertexFormatFloat32x2, // vec2<f32>
+					Offset:         0,
+					ShaderLocation: 1, // @location(1) in shader
+				},
+			},
+		},
 		// // Slot 2: Normals (glm.Vec3f)
 		// {
 		// 	ArrayStride: uint64(unsafe.Sizeof(glm.Vec3f{})),

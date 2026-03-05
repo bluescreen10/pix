@@ -17,6 +17,8 @@ var renderablesPool = sync.Pool{
 }
 
 type Renderer struct {
+	Resources ResourceManager
+
 	runtime       *wgpuRuntime
 	width, height uint32
 	frameCount    uint32
@@ -99,6 +101,12 @@ func (r *Renderer) Render(scene *Scene, camera Camera) error {
 	meshes = meshes[:0]
 	renderables := r.appendRenderables(meshes, scene)
 
+	// Prepare resources
+	err := r.Resources.prepareResources(r.runtime.Device)
+	if err != nil {
+		panic(err)
+	}
+
 	//Prepare Objects
 	for _, mesh := range renderables {
 		geometry := mesh.geometry
@@ -111,7 +119,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) error {
 
 		material := mesh.material
 		shader := r.getShader(material.Shader())
-		shader.Prepare(material, r.runtime.Device, r.runtime.Queue)
+		shader.Prepare(material, r.runtime.Device, &r.Resources)
 	}
 
 	// Update Global Uniforms
@@ -182,6 +190,7 @@ func (r *Renderer) renderMesh(mesh *Mesh, bgColor glm.Color4f) error {
 
 	//TODO: use attributes instead
 	renderPass.SetVertexBuffer(0, mesh.geometry.positionBuffer, 0, wgpu.WholeSize)
+	renderPass.SetVertexBuffer(1, mesh.geometry.uvsBuffer, 0, wgpu.WholeSize)
 	renderPass.SetIndexBuffer(mesh.geometry.indicesBuffer, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
 	renderPass.DrawIndexed(uint32(len(mesh.geometry.indices)), 1, 0, 0, 0)
 

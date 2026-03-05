@@ -3,6 +3,7 @@ package pix
 import (
 	"errors"
 	"os"
+	"unsafe"
 
 	"github.com/bluescreen10/pix/glm"
 	"github.com/cogentcore/webgpu/wgpu"
@@ -44,7 +45,25 @@ func (s *basicMaterialShader) BindGroupLayout(device *wgpu.Device) (*wgpu.BindGr
 				Buffer: wgpu.BufferBindingLayout{
 					Type:             wgpu.BufferBindingTypeUniform,
 					HasDynamicOffset: false,
-					MinBindingSize:   basicMaterialUniformSize,
+					MinBindingSize:   uint64(unsafe.Sizeof(basicMaterialUniform{})),
+				},
+			},
+			{
+				Binding:    1, // Color map
+				Visibility: wgpu.ShaderStageFragment,
+
+				Texture: wgpu.TextureBindingLayout{
+					Multisampled:  false,
+					ViewDimension: wgpu.TextureViewDimension2D,
+					SampleType:    wgpu.TextureSampleTypeFloat,
+				},
+			},
+			{
+				Binding:    2, // Color map sampler
+				Visibility: wgpu.ShaderStageFragment,
+
+				Sampler: wgpu.SamplerBindingLayout{
+					Type: wgpu.SamplerBindingTypeFiltering,
 				},
 			},
 		},
@@ -58,7 +77,11 @@ func (s *basicMaterialShader) BindGroupLayout(device *wgpu.Device) (*wgpu.BindGr
 	return layout, nil
 }
 
-func (s *basicMaterialShader) Prepare(rawMaterial Material, device *wgpu.Device, queue *wgpu.Queue) error {
+func (s *basicMaterialShader) Prepare(rawMaterial Material, device *wgpu.Device, resources *ResourceManager) error {
+	material, ok := rawMaterial.(*BasicMaterial)
+	if !ok {
+		return errors.New("invalid material")
+	}
 	//TODO we can't have a global bindGroup it has to be one per instance
 	if s.bindGroup != nil {
 		return nil
@@ -67,7 +90,7 @@ func (s *basicMaterialShader) Prepare(rawMaterial Material, device *wgpu.Device,
 	if s.uniformBuffer == nil {
 		buf, err := device.CreateBuffer(&wgpu.BufferDescriptor{
 			Label: s.Name() + " uniform buffer",
-			Size:  basicMaterialUniformSize,
+			Size:  uint64(unsafe.Sizeof(basicMaterialUniform{})),
 			Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
 		})
 
@@ -85,6 +108,14 @@ func (s *basicMaterialShader) Prepare(rawMaterial Material, device *wgpu.Device,
 		}
 	}
 
+	texture := resources.GetTexture(material.ColorMap())
+	view := texture.gpuView
+
+	sampler, ok := resources.samplers[texture.Sampler]
+	if !ok {
+		return errors.New("sampler not found")
+	}
+
 	bindGroup, err := device.CreateBindGroup(&wgpu.BindGroupDescriptor{
 		Label:  s.Name() + " bind group",
 		Layout: s.bindGroupLayout,
@@ -94,6 +125,15 @@ func (s *basicMaterialShader) Prepare(rawMaterial Material, device *wgpu.Device,
 				Buffer:  s.uniformBuffer,
 				Offset:  0,
 				Size:    wgpu.WholeSize,
+			},
+			{
+				Binding: 1, // Color map
+				//TODO: pass in resources and get the texture that way
+				TextureView: view,
+			},
+			{
+				Binding: 2, // Color map sampler
+				Sampler: sampler,
 			},
 		},
 	})
@@ -106,12 +146,24 @@ func (s *basicMaterialShader) Prepare(rawMaterial Material, device *wgpu.Device,
 	return nil
 }
 
+type basicMaterialUniform struct {
+	color       glm.Color4f
+	hasColorMap uint32
+	_padding    [3]uint32 // Padding to align to 16 bytes (4 bytes + 12 bytes padding = 16)
+}
+
 func (s *basicMaterialShader) Bind(rawMaterial Material, pass *wgpu.RenderPassEncoder, queue *wgpu.Queue) error {
 	material, ok := rawMaterial.(*BasicMaterial)
 	if !ok {
 		return errors.New("invalid material")
 	}
-	err := queue.WriteBuffer(s.uniformBuffer, 0, wgpu.ToBytes([]glm.Color3f{material.Color()}))
+
+	var hasColorMap uint32
+	if material.ColorMap().IsValid() {
+		hasColorMap = 1
+	}
+
+	err := queue.WriteBuffer(s.uniformBuffer, 0, wgpu.ToBytes([]basicMaterialUniform{{color: material.Color().RGBA(), hasColorMap: hasColorMap}}))
 	if err != nil {
 		return err
 	}
@@ -125,6 +177,6 @@ type Shader interface {
 	VertexShader() string
 	FragmentShader() string
 	BindGroupLayout(device *wgpu.Device) (*wgpu.BindGroupLayout, error)
-	Prepare(material Material, device *wgpu.Device, queue *wgpu.Queue) error
+	Prepare(material Material, device *wgpu.Device, resources *ResourceManager) error
 	Bind(material Material, pass *wgpu.RenderPassEncoder, queue *wgpu.Queue) error
 }

@@ -8,6 +8,8 @@ import (
 	"github.com/bluescreen10/pix/glm"
 	"github.com/cogentcore/webgpu/wgpuglfw"
 	"github.com/go-gl/glfw/v3.3/glfw"
+
+	_ "image/png"
 )
 
 func init() {
@@ -43,8 +45,15 @@ func main() {
 	camera := cameras.NewPerpectiveCamera(45, float32(width)/float32(height), 0.01, 2000)
 	camera.SetPosition(0, 0, -5)
 
+	texture, err := renderer.Resources.LoadTexture("cmd/testapp/assets/uv_grid.png")
+	//texture, err := renderer.Resources.LoadTexture("assets/uv_grid.png")
+	if err != nil {
+		panic(err)
+	}
+
 	material := &pix.BasicMaterial{}
 	material.SetColor(glm.Color3f{0, 1, 0})
+	material.SetColorMap(texture)
 
 	mesh := pix.NewMesh(
 		pix.NewBoxGeometry(1, 1, 1),

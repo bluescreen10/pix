@@ -14,6 +14,10 @@ func (c Color3[T]) B() T {
 	return c[2]
 }
 
+func (c Color3[T]) RGBA() Color4[T] {
+	return Color4[T]{c[0], c[1], c[2], 1}
+}
+
 type Color3f = Color3[float32]
 type Color3i = Color3[int]
 
