@@ -240,7 +240,7 @@ func (r *Renderer) createRenderPipeline(shader Shader, vertexLayout []wgpu.Verte
 		return nil, err
 	}
 
-	vsModule, vsMain, fsModule, fsMain, err := r.compileShader(r.runtime.Device, shader)
+	vsModule, fsModule, err := r.compileShader(r.runtime.Device, shader)
 	if err != nil {
 		return nil, err
 	}
@@ -250,12 +250,12 @@ func (r *Renderer) createRenderPipeline(shader Shader, vertexLayout []wgpu.Verte
 		Layout: layout,
 		Vertex: wgpu.VertexState{
 			Module:     vsModule,
-			EntryPoint: vsMain,
+			EntryPoint: "main",
 			Buffers:    vertexLayout,
 		},
 		Fragment: &wgpu.FragmentState{
 			Module:     fsModule,
-			EntryPoint: fsMain,
+			EntryPoint: "main",
 			Targets: []wgpu.ColorTargetState{
 				{
 					Format:    r.runtime.Format,
@@ -298,32 +298,24 @@ func (r *Renderer) createRenderPipeline(shader Shader, vertexLayout []wgpu.Verte
 	return pipeline, err
 }
 
-func (r *Renderer) compileShader(device *wgpu.Device, shader Shader) (*wgpu.ShaderModule, string, *wgpu.ShaderModule, string, error) {
+func (r *Renderer) compileShader(device *wgpu.Device, shader Shader) (*wgpu.ShaderModule, *wgpu.ShaderModule, error) {
 	vsCode := shader.VertexShader()
 	fsCode := shader.FragmentShader()
 
-	if vsCode == fsCode {
-		module, err := device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
-			WGSLDescriptor: &wgpu.ShaderModuleWGSLDescriptor{Code: vsCode},
-		})
+	vsModule, err := device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
+		GLSLDescriptor: &wgpu.ShaderModuleGLSLDescriptor{Code: vsCode, ShaderStage: wgpu.ShaderStageVertex},
+	})
 
-		return module, "vs_main", module, "fs_main", err
-
-	} else {
-		vsModule, err := device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
-			WGSLDescriptor: &wgpu.ShaderModuleWGSLDescriptor{Code: vsCode},
-		})
-
-		if err != nil {
-			return nil, "", nil, "", err
-		}
-
-		fsModule, err := device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
-			WGSLDescriptor: &wgpu.ShaderModuleWGSLDescriptor{Code: fsCode},
-		})
-
-		return vsModule, "main", fsModule, "main", err
+	if err != nil {
+		return nil, nil, err
 	}
+
+	fsModule, err := device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
+		GLSLDescriptor: &wgpu.ShaderModuleGLSLDescriptor{Code: fsCode, ShaderStage: wgpu.ShaderStageFragment},
+	})
+
+	return vsModule, fsModule, err
+
 }
 
 func (r *Renderer) createGlobalResources() error {

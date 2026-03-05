@@ -24,12 +24,12 @@ func (s *basicMaterialShader) Name() string {
 }
 
 func (s *basicMaterialShader) VertexShader() string {
-	code, _ := os.ReadFile("shaderlib/basic.wgsl")
+	code, _ := os.ReadFile("shaderlib/basic_material.vs")
 	return string(code)
 }
 
 func (s *basicMaterialShader) FragmentShader() string {
-	code, _ := os.ReadFile("shaderlib/basic.wgsl")
+	code, _ := os.ReadFile("shaderlib/basic_material.fs")
 	return string(code)
 }
 
@@ -38,7 +38,7 @@ func (s *basicMaterialShader) BindGroupLayout(device *wgpu.Device) (*wgpu.BindGr
 		Label: "Basic material bind group",
 		Entries: []wgpu.BindGroupLayoutEntry{
 			{
-				Binding:    0, //TODO: Make it a constant
+				Binding:    0, //TODO: Make it a named constant
 				Visibility: wgpu.ShaderStageFragment,
 
 				Buffer: wgpu.BufferBindingLayout{
