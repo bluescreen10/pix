@@ -36,6 +36,12 @@ func (c *PerspectiveCamera) Move(x, y, z float32) {
 	c.position[2] += z
 }
 
+func (c *PerspectiveCamera) SetTarget(x, y, z float32) {
+	c.target[0] = x
+	c.target[1] = y
+	c.target[2] = z
+}
+
 func (c *PerspectiveCamera) ViewProjection() glm.Mat4f {
 	target := c.target.Add(c.position)
 	view := glm.LookAtRH(c.position, target, c.up)

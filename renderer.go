@@ -10,14 +10,20 @@ import (
 	"github.com/cogentcore/webgpu/wgpu"
 )
 
-var renderablesPool = sync.Pool{
+var viewableMeshesPool = sync.Pool{
 	New: func() any {
 		return make([]*Mesh, 0, 4096)
 	},
 }
 
+var renderablesPool = sync.Pool{
+	New: func() any {
+		return make([]renderable, 0, 4096)
+	},
+}
+
 type Renderer struct {
-	Resources ResourceManager
+	resources resourceManager
 
 	runtime       *wgpuRuntime
 	width, height uint32
@@ -61,6 +67,8 @@ func (r *Renderer) Init(descriptor *wgpu.SurfaceDescriptor) error {
 		return err
 	}
 
+	r.resources.init()
+
 	if err := r.createGlobalResources(); err != nil {
 		slog.Error("error creating global resources", slog.Any("err", err))
 	}
@@ -89,26 +97,23 @@ func (r *Renderer) Destroy() {
 
 	r.objectBindGroupLayout.Release()
 	r.objectBindGroupLayout = nil
+
+	r.resources.destroy()
 }
 
 func (r *Renderer) Render(scene *Scene, camera Camera) error {
 	r.frameCount++
 
 	//Extract objects
-	//TODO: use sync.Pool to avoid allocations
-	meshes := renderablesPool.Get().([]*Mesh)
-	defer renderablesPool.Put(meshes)
-	meshes = meshes[:0]
-	renderables := r.appendRenderables(meshes, scene)
+	visibleObjects := viewableMeshesPool.Get().([]*Mesh)
+	defer viewableMeshesPool.Put(visibleObjects[:0])
+	visibleObjects = r.appendViewable(visibleObjects, scene)
 
-	// Prepare resources
-	err := r.Resources.prepareResources(r.runtime.Device)
-	if err != nil {
-		panic(err)
-	}
+	renderables := renderablesPool.Get().([]renderable)
+	defer renderablesPool.Put(renderables[:0])
 
 	//Prepare Objects
-	for _, mesh := range renderables {
+	for _, mesh := range visibleObjects {
 		geometry := mesh.geometry
 		if geometry.IsDirty() {
 			err := geometry.Upload(r.runtime.Device, r.runtime.Queue)
@@ -117,9 +122,19 @@ func (r *Renderer) Render(scene *Scene, camera Camera) error {
 			}
 		}
 
-		material := mesh.material
-		shader := r.getShader(material.Shader())
-		shader.Prepare(material, r.runtime.Device, &r.Resources)
+		materialData := mesh.material
+		shader := r.getShader(materialData.Shader())
+		material, err := shader.Prepare(materialData, r.runtime.Device, &r.resources)
+
+		if err != nil {
+			r.logger.Error("error preparing material", slog.Any("err", err))
+			continue
+		}
+
+		renderables = append(renderables, renderable{
+			geometry: geometry,
+			material: material,
+		})
 	}
 
 	// Update Global Uniforms
@@ -129,16 +144,22 @@ func (r *Renderer) Render(scene *Scene, camera Camera) error {
 	}
 
 	//Draw
-	for _, mesh := range renderables {
-		if err := r.renderMesh(mesh, scene.background); err != nil {
+	for _, renderable := range renderables {
+		if err := r.renderObject(renderable, scene.background); err != nil {
 			return err
 		}
+	}
+
+	// Process pending resources
+	err := r.resources.processPending(r.runtime.Device)
+	if err != nil {
+		panic(err)
 	}
 
 	return nil
 }
 
-func (r *Renderer) renderMesh(mesh *Mesh, bgColor glm.Color4f) error {
+func (r *Renderer) renderObject(obj renderable, bgColor glm.Color4f) error {
 
 	texture, err := r.runtime.Surface.GetCurrentTexture()
 	if err != nil {
@@ -171,28 +192,24 @@ func (r *Renderer) renderMesh(mesh *Mesh, bgColor glm.Color4f) error {
 		}},
 	})
 
-	shader := r.getShader(mesh.material.Shader())
+	shader := obj.material.shader
 
-	pipeline, err := r.getPipelineFor(shader, mesh)
+	pipeline, err := r.getPipelineFor(shader, obj)
 	if err != nil {
 		r.logger.Error("error getting pipeline", slog.Any("err", err))
 		return err
 	}
 
-	if err := shader.Bind(mesh.material, renderPass, r.runtime.Queue); err != nil {
-		r.logger.Error("errror binding material", slog.Any("err", err))
-		return err
-	}
-
 	renderPass.SetPipeline(pipeline)
 	renderPass.SetBindGroup(0, r.globalBindGroup, []uint32{})
+	renderPass.SetBindGroup(1, obj.material.bindGroup, []uint32{})
 	renderPass.SetBindGroup(2, r.objectBindGroup, []uint32{})
 
 	//TODO: use attributes instead
-	renderPass.SetVertexBuffer(0, mesh.geometry.positionBuffer, 0, wgpu.WholeSize)
-	renderPass.SetVertexBuffer(1, mesh.geometry.uvsBuffer, 0, wgpu.WholeSize)
-	renderPass.SetIndexBuffer(mesh.geometry.indicesBuffer, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
-	renderPass.DrawIndexed(uint32(len(mesh.geometry.indices)), 1, 0, 0, 0)
+	renderPass.SetVertexBuffer(0, obj.geometry.positionBuffer, 0, wgpu.WholeSize)
+	renderPass.SetVertexBuffer(1, obj.geometry.uvsBuffer, 0, wgpu.WholeSize)
+	renderPass.SetIndexBuffer(obj.geometry.indicesBuffer, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
+	renderPass.DrawIndexed(uint32(len(obj.geometry.indices)), 1, 0, 0, 0)
 
 	err = renderPass.End()
 	if err != nil {
@@ -212,7 +229,7 @@ func (r *Renderer) renderMesh(mesh *Mesh, bgColor glm.Color4f) error {
 	return nil
 }
 
-func (r *Renderer) getPipelineFor(shader Shader, mesh *Mesh) (*wgpu.RenderPipeline, error) {
+func (r *Renderer) getPipelineFor(shader Shader, obj renderable) (*wgpu.RenderPipeline, error) {
 	pipelineKey := renderPipelineKey{shader.Name()}
 	pipline := r.pipelineCache.GetRenderPipeline(pipelineKey)
 
@@ -220,7 +237,7 @@ func (r *Renderer) getPipelineFor(shader Shader, mesh *Mesh) (*wgpu.RenderPipeli
 		return pipline, nil
 	}
 
-	vertexLayout := mesh.geometry.VertexLayout()
+	vertexLayout := obj.geometry.VertexLayout()
 	pipeline, err := r.createRenderPipeline(shader, vertexLayout)
 	if err != nil {
 		return nil, err
@@ -457,7 +474,7 @@ func (r *Renderer) createGlobalBindGroups() error {
 	return nil
 }
 
-func (r *Renderer) appendRenderables(meshes []*Mesh, node Node) []*Mesh {
+func (r *Renderer) appendViewable(meshes []*Mesh, node Node) []*Mesh {
 	for _, child := range node.Children() {
 		switch object := any(child).(type) {
 
@@ -465,7 +482,7 @@ func (r *Renderer) appendRenderables(meshes []*Mesh, node Node) []*Mesh {
 			meshes = append(meshes, object)
 		}
 
-		meshes = r.appendRenderables(meshes, child)
+		meshes = r.appendViewable(meshes, child)
 	}
 
 	return meshes

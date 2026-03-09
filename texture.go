@@ -4,98 +4,137 @@ import "github.com/cogentcore/webgpu/wgpu"
 
 type TextureFormat = wgpu.TextureFormat
 
+type TextureData struct {
+	id          int
+	version     int
+	width       int
+	height      int
+	format      TextureFormat
+	sampler     Sampler
+	pendingData []byte
+}
+
+func (td *TextureData) AddressModeU() wgpu.AddressMode {
+	return td.sampler.AddressModeU
+}
+
+func (td *TextureData) SetAddressModeU(mode wgpu.AddressMode) {
+	td.sampler.AddressModeU = mode
+	td.version++
+}
+
+func (td *TextureData) AddressModeV() wgpu.AddressMode {
+	return td.sampler.AddressModeV
+}
+
+func (td *TextureData) SetAddressModeV(mode wgpu.AddressMode) {
+	td.sampler.AddressModeV = mode
+	td.version++
+}
+
+func (td *TextureData) AddressModeW() wgpu.AddressMode {
+	return td.sampler.AddressModeW
+}
+
+func (td *TextureData) SetAddressModeW(mode wgpu.AddressMode) {
+	td.sampler.AddressModeW = mode
+	td.version++
+}
+
+func (td *TextureData) MagFilter() wgpu.FilterMode {
+	return td.sampler.MagFilter
+}
+
+func (td *TextureData) SetMagFilter(mode wgpu.FilterMode) {
+	td.sampler.MagFilter = mode
+	td.version++
+}
+
+func (td *TextureData) MinFilter() wgpu.FilterMode {
+	return td.sampler.MinFilter
+}
+
+func (td *TextureData) SetMinFilter(mode wgpu.FilterMode) {
+	td.sampler.MinFilter = mode
+	td.version++
+}
+
+func (td *TextureData) MipmapFilter() wgpu.MipmapFilterMode {
+	return td.sampler.MipmapFilter
+}
+
+func (td *TextureData) SetMipmapFilter(mode wgpu.MipmapFilterMode) {
+	td.sampler.MipmapFilter = mode
+	td.version++
+}
+
+func (td *TextureData) LodMinClamp() float32 {
+	return td.sampler.LodMinClamp
+}
+
+func (td *TextureData) SetLodMinClamp(clamp float32) {
+	td.sampler.LodMinClamp = clamp
+	td.version++
+}
+
+func (td *TextureData) LodMaxClamp() float32 {
+	return td.sampler.LodMaxClamp
+}
+
+func (td *TextureData) SetLodMaxClamp(clamp float32) {
+	td.sampler.LodMaxClamp = clamp
+	td.version++
+}
+
+func (td *TextureData) Compare() wgpu.CompareFunction {
+	return td.sampler.Compare
+}
+
+func (td *TextureData) SetCompare(compare wgpu.CompareFunction) {
+	td.sampler.Compare = compare
+	td.version++
+}
+
+func (td *TextureData) MaxAnisotropy() uint16 {
+	return td.sampler.MaxAnisotropy
+}
+
+func (td *TextureData) SetMaxAnisotropy(max uint16) {
+	td.sampler.MaxAnisotropy = max
+	td.version++
+}
+
+func (td *TextureData) Version() int {
+	return td.version
+}
+
+func (td *TextureData) hasPendingData() bool {
+	return td.pendingData != nil
+}
+
+func (td *TextureData) flush() []byte {
+	data := td.pendingData
+	td.pendingData = nil
+	return data
+}
+
 type Texture struct {
-	Width       int
-	Height      int
-	Format      TextureFormat
-	Sampler     Sampler
-	PendingData []byte
-
-	// gpu resources
-	gpuTexture *wgpu.Texture
-	gpuView    *wgpu.TextureView
+	version int
+	ref     *wgpu.Texture
+	view    *wgpu.TextureView
+	sampler *wgpu.Sampler
 }
 
-func (t *Texture) AddressModeU() wgpu.AddressMode {
-	return t.Sampler.AddressModeU
+func (t *Texture) Destroy() {
+	if t.view != nil {
+		t.view.Release()
+	}
+
+	if t.ref != nil {
+		t.ref.Destroy()
+	}
 }
 
-func (t *Texture) SetAddressModeU(mode wgpu.AddressMode) {
-	t.Sampler.AddressModeU = mode
-}
-
-func (t *Texture) AddressModeV() wgpu.AddressMode {
-	return t.Sampler.AddressModeV
-}
-
-func (t *Texture) SetAddressModeV(mode wgpu.AddressMode) {
-	t.Sampler.AddressModeV = mode
-}
-
-func (t *Texture) AddressModeW() wgpu.AddressMode {
-	return t.Sampler.AddressModeW
-}
-
-func (t *Texture) SetAddressModeW(mode wgpu.AddressMode) {
-	t.Sampler.AddressModeW = mode
-}
-
-func (t *Texture) MagFilter() wgpu.FilterMode {
-	return t.Sampler.MagFilter
-}
-
-func (t *Texture) SetMagFilter(mode wgpu.FilterMode) {
-	t.Sampler.MagFilter = mode
-}
-
-func (t *Texture) MinFilter() wgpu.FilterMode {
-	return t.Sampler.MinFilter
-}
-
-func (t *Texture) SetMinFilter(mode wgpu.FilterMode) {
-	t.Sampler.MinFilter = mode
-}
-
-func (t *Texture) MipmapFilter() wgpu.MipmapFilterMode {
-	return t.Sampler.MipmapFilter
-}
-
-func (t *Texture) SetMipmapFilter(mode wgpu.MipmapFilterMode) {
-	t.Sampler.MipmapFilter = mode
-}
-
-func (t *Texture) LodMinClamp() float32 {
-	return t.Sampler.LodMinClamp
-}
-
-func (t *Texture) SetLodMinClamp(clamp float32) {
-	t.Sampler.LodMinClamp = clamp
-}
-
-func (t *Texture) LodMaxClamp() float32 {
-	return t.Sampler.LodMaxClamp
-}
-
-func (t *Texture) SetLodMaxClamp(clamp float32) {
-	t.Sampler.LodMaxClamp = clamp
-}
-
-func (t *Texture) Compare() wgpu.CompareFunction {
-	return t.Sampler.Compare
-}
-
-func (t *Texture) SetCompare(compare wgpu.CompareFunction) {
-	t.Sampler.Compare = compare
-}
-
-func (t *Texture) MaxAnisotropy() uint16 {
-	return t.Sampler.MaxAnisotropy
-}
-
-func (t *Texture) SetMaxAnisotropy(max uint16) {
-	t.Sampler.MaxAnisotropy = max
-}
-
-func (t *Texture) View() *wgpu.TextureView {
-	return t.gpuView
+func (t *Texture) Version() int {
+	return t.version
 }
