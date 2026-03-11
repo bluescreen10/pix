@@ -14,9 +14,9 @@ layout(binding = 2, set = 1) uniform sampler colorMapSampler;
 layout(location = 0) out vec4 FragColor;
 
 void main() {
-    //if (material.hasColorMap != 0u) {
+    #ifdef HAS_FLAG0
         FragColor = texture(sampler2D(colorMap, colorMapSampler), vUv) * vec4(color, 1.0);
-    //    return;
-    // }
-    // FragColor = material.color;
+    #else
+        FragColor = color;
+    #endif
 }

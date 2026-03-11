@@ -3,7 +3,8 @@ package pix
 import "github.com/cogentcore/webgpu/wgpu"
 
 type renderPipelineKey struct {
-	shader string
+	shaderHash    uint64
+	materialFlags uint64
 }
 
 type pipelineCache struct {

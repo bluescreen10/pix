@@ -58,6 +58,7 @@ type Material struct {
 	vertexShader    string
 	uniformBuffers  []*wgpu.Buffer
 	flags           uint64
+	hash            uint64
 	defines         map[string]string
 }
 

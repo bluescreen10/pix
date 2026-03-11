@@ -2,7 +2,9 @@ package pix
 
 import (
 	"log/slog"
+	"math/bits"
 	"os"
+	"strconv"
 	"sync"
 	"unsafe"
 
@@ -224,7 +226,10 @@ func (r *Renderer) renderObject(obj renderable, bgColor glm.Color4f) error {
 }
 
 func (r *Renderer) getPipelineFor(obj renderable) (*wgpu.RenderPipeline, error) {
-	pipelineKey := renderPipelineKey{}
+	pipelineKey := renderPipelineKey{
+		shaderHash:    obj.material.hash,
+		materialFlags: obj.material.flags,
+	}
 	pipline := r.pipelineCache.GetRenderPipeline(pipelineKey)
 
 	if pipline != nil {
@@ -256,12 +261,22 @@ func (r *Renderer) createRenderPipeline(material Material, vertexLayout []wgpu.V
 		return nil, err
 	}
 
-	vsModule, err := r.compileShader(r.runtime.Device, material.vertexShader, wgpu.ShaderStageVertex)
+	defines := make(map[string]string)
+
+	for flags := material.flags; flags != 0; {
+		bit := bits.TrailingZeros64(flags)
+		flags &= flags - 1
+
+		name := "HAS_FLAG" + strconv.Itoa(bit)
+		defines[name] = "true"
+	}
+
+	vsModule, err := r.compileShader(r.runtime.Device, material.vertexShader, defines, wgpu.ShaderStageVertex)
 	if err != nil {
 		return nil, err
 	}
 
-	fsModule, err := r.compileShader(r.runtime.Device, material.fragmentShader, wgpu.ShaderStageFragment)
+	fsModule, err := r.compileShader(r.runtime.Device, material.fragmentShader, defines, wgpu.ShaderStageFragment)
 	if err != nil {
 		return nil, err
 	}
@@ -319,9 +334,9 @@ func (r *Renderer) createRenderPipeline(material Material, vertexLayout []wgpu.V
 	return pipeline, err
 }
 
-func (r *Renderer) compileShader(device *wgpu.Device, code string, stage wgpu.ShaderStage) (*wgpu.ShaderModule, error) {
+func (r *Renderer) compileShader(device *wgpu.Device, code string, defines map[string]string, stage wgpu.ShaderStage) (*wgpu.ShaderModule, error) {
 	module, err := device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
-		GLSLDescriptor: &wgpu.ShaderModuleGLSLDescriptor{Code: code, ShaderStage: stage},
+		GLSLDescriptor: &wgpu.ShaderModuleGLSLDescriptor{Code: code, Defines: defines, ShaderStage: stage},
 	})
 
 	return module, err

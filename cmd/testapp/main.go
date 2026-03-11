@@ -73,11 +73,11 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		camera.Move(-0.01, 0, 0.00)
+		//camera.Move(-0.01, 0, 0.00)
 		count++
 		if count%100 == 0 {
 			if flip {
-				material.SetColorMap(nil)
+				material.SetColorMap(tex)
 				//td.SetAddressModeU(wgpu.AddressModeClampToEdge)
 				// td.SetMinFilter(wgpu.FilterModeLinear)
 				// td.SetMagFilter(wgpu.FilterModeLinear)
@@ -87,7 +87,7 @@ func main() {
 				// td.SetLodMaxClamp(1)
 				// td.SetLodMinClamp(0)
 			} else {
-				material.SetColorMap(tex)
+				material.SetColorMap(nil)
 
 				// td.SetMinFilter(wgpu.FilterModeNearest)
 				// td.SetMagFilter(wgpu.FilterModeNearest)

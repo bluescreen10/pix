@@ -49,6 +49,8 @@ func prepareMaterial(device *wgpu.Device, data *MaterialData, material Material,
 
 	material.vertexShader = data.vertexShader
 	material.fragmentShader = data.fragmentShader
+	material.flags = data.flags
+	material.hash = data.hash
 	material.bindGroup = bindGroup
 	material.version = data.version
 	return material, nil
