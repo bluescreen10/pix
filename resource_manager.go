@@ -10,6 +10,8 @@ type resourceManager struct {
 	//geometries ResourceList[GeometryData, Geometry]
 
 	samplers map[Sampler]*wgpu.Sampler
+
+	defaultTexture int
 }
 
 func (rm *resourceManager) GetTextureByData(device *wgpu.Device, td *TextureData) Texture {
@@ -22,6 +24,21 @@ func (rm *resourceManager) GetTextureByData(device *wgpu.Device, td *TextureData
 	if texture.version != td.version {
 		rm.uploadTexture(td, device)
 		texture = rm.textures.GetResource(td.slot)
+	}
+
+	return texture
+}
+
+func (rm *resourceManager) GetDefaultTexture(device *wgpu.Device) Texture {
+	texture := rm.textures.GetResource(rm.defaultTexture)
+
+	// FIXME: horrible hack
+	if texture.version == 0 {
+		err := rm.uploadTexture(rm.textures.Get(rm.defaultTexture), device)
+		if err != nil {
+			panic(err)
+		}
+		texture = rm.textures.GetResource(rm.defaultTexture)
 	}
 
 	return texture
@@ -41,6 +58,12 @@ func (rm *resourceManager) SetMaterial(id int, resource Material) {
 func (rm *resourceManager) init() {
 	rm.textures.Init()
 	rm.samplers = make(map[Sampler]*wgpu.Sampler)
+
+	// default Texture
+	// FIXME: hacky
+	td := NewDataTexture([]byte{255, 255, 255, 255}, 1, 1, wgpu.TextureFormatRGBA8Unorm)
+	td.slot = rm.textures.Add(td)
+	rm.defaultTexture = td.slot
 }
 
 func (rm *resourceManager) destroy() {

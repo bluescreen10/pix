@@ -80,7 +80,8 @@ func createMaterialBindGroupLayout(device *wgpu.Device, data *MaterialData) (*wg
 				Texture: wgpu.TextureBindingLayout{
 					Multisampled:  false,
 					ViewDimension: wgpu.TextureViewDimension2D,
-					SampleType:    wgpu.TextureSampleTypeFloat,
+					//FIXME: the sample type should depend on the texture
+					SampleType: wgpu.TextureSampleTypeFloat,
 				},
 			},
 			wgpu.BindGroupLayoutEntry{
@@ -135,7 +136,13 @@ func createMaterialBindGroup(device *wgpu.Device, data *MaterialData, material M
 	}
 
 	for _, td := range data.textures {
-		t := resources.GetTextureByData(device, td)
+		var t Texture
+
+		if td != nil {
+			t = resources.GetTextureByData(device, td)
+		} else {
+			t = resources.GetDefaultTexture(device)
+		}
 		bgEntries = append(bgEntries,
 			wgpu.BindGroupEntry{
 				Binding:     binding,
