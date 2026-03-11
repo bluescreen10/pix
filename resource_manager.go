@@ -6,32 +6,28 @@ import (
 
 type resourceManager struct {
 	textures  ResourceList[*TextureData, Texture]
-	materials ResourceList[*BasicMaterial, PreparedMaterial]
+	materials ResourceList[*Material, PreparedMaterial]
 	//geometries ResourceList[GeometryData, Geometry]
 
 	samplers map[Sampler]*wgpu.Sampler
 }
 
 func (rm *resourceManager) GetTextureByData(td *TextureData) Texture {
-	if td.id == 0 {
-		td.id = rm.textures.Add(td)
+	if td.slot == 0 {
+		td.slot = rm.textures.Add(td)
 	}
 
-	return rm.textures.GetResource(td.id)
+	return rm.textures.GetResource(td.slot)
 }
 
-func (rm *resourceManager) GetTextureByID(id int) Texture {
-	return rm.textures.GetResource(id)
-}
-
-func (rm *resourceManager) GetBasicMaterialByData(m *BasicMaterial) PreparedMaterial {
-	if m.id == 0 {
-		m.id = rm.materials.Add(m)
+func (rm *resourceManager) GetMaterialByData(m *Material) PreparedMaterial {
+	if m.slot == 0 {
+		m.slot = rm.materials.Add(m)
 	}
-	return rm.materials.GetResource(m.id)
+	return rm.materials.GetResource(m.slot)
 }
 
-func (rm *resourceManager) SetBasicMaterialResource(id int, resource PreparedMaterial) {
+func (rm *resourceManager) SetMaterial(id int, resource PreparedMaterial) {
 	rm.materials.SetResource(id, resource)
 }
 
@@ -91,7 +87,7 @@ func (rm *resourceManager) uploadTexture(data *TextureData, device *wgpu.Device)
 	tex.version = data.version
 
 	if !data.hasPendingData() {
-		rm.textures.SetResource(data.id, tex)
+		rm.textures.SetResource(data.slot, tex)
 		return nil
 	}
 
@@ -140,6 +136,6 @@ func (rm *resourceManager) uploadTexture(data *TextureData, device *wgpu.Device)
 
 	tex.ref = gpuTexture
 	tex.view = view
-	rm.textures.SetResource(data.id, tex)
+	rm.textures.SetResource(data.slot, tex)
 	return nil
 }

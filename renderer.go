@@ -32,9 +32,6 @@ type Renderer struct {
 
 	pipelineCache *pipelineCache
 
-	// shader registry
-	shaders map[string]Shader
-
 	// temp
 	globalUniformBuffer   *wgpu.Buffer
 	globalBindGroupLayout *wgpu.BindGroupLayout
@@ -46,7 +43,6 @@ type Renderer struct {
 }
 
 func NewRenderer(width, height uint32) *Renderer {
-	defaultShader := &basicMaterialShader{}
 
 	return &Renderer{
 		width:   width,
@@ -55,9 +51,6 @@ func NewRenderer(width, height uint32) *Renderer {
 		runtime: &wgpuRuntime{},
 
 		pipelineCache: newPipelineCache(),
-		shaders: map[string]Shader{
-			defaultShader.Name(): defaultShader,
-		},
 	}
 }
 
@@ -123,13 +116,16 @@ func (r *Renderer) Render(scene *Scene, camera Camera) error {
 		}
 
 		materialData := mesh.material
-		shader := r.getShader(materialData.Shader())
-		material, err := shader.Prepare(materialData, r.runtime.Device, &r.resources)
+		material := r.resources.GetMaterialByData(materialData)
+		material, err := r.prepareMaterial(materialData, material, r.runtime.Device, &r.resources)
 
 		if err != nil {
 			r.logger.Error("error preparing material", slog.Any("err", err))
 			continue
 		}
+
+		// FIXME: the renderer shouldn't need to know what resources use to store
+		r.resources.SetMaterial(materialData.slot, material)
 
 		renderables = append(renderables, renderable{
 			geometry: geometry,
@@ -192,9 +188,7 @@ func (r *Renderer) renderObject(obj renderable, bgColor glm.Color4f) error {
 		}},
 	})
 
-	shader := obj.material.shader
-
-	pipeline, err := r.getPipelineFor(shader, obj)
+	pipeline, err := r.getPipelineFor(obj)
 	if err != nil {
 		r.logger.Error("error getting pipeline", slog.Any("err", err))
 		return err
@@ -229,8 +223,8 @@ func (r *Renderer) renderObject(obj renderable, bgColor glm.Color4f) error {
 	return nil
 }
 
-func (r *Renderer) getPipelineFor(shader Shader, obj renderable) (*wgpu.RenderPipeline, error) {
-	pipelineKey := renderPipelineKey{shader.Name()}
+func (r *Renderer) getPipelineFor(obj renderable) (*wgpu.RenderPipeline, error) {
+	pipelineKey := renderPipelineKey{}
 	pipline := r.pipelineCache.GetRenderPipeline(pipelineKey)
 
 	if pipline != nil {
@@ -238,7 +232,7 @@ func (r *Renderer) getPipelineFor(shader Shader, obj renderable) (*wgpu.RenderPi
 	}
 
 	vertexLayout := obj.geometry.VertexLayout()
-	pipeline, err := r.createRenderPipeline(shader, vertexLayout)
+	pipeline, err := r.createRenderPipeline(obj.material, vertexLayout)
 	if err != nil {
 		return nil, err
 	}
@@ -247,17 +241,13 @@ func (r *Renderer) getPipelineFor(shader Shader, obj renderable) (*wgpu.RenderPi
 	return pipeline, nil
 }
 
-func (r *Renderer) createRenderPipeline(shader Shader, vertexLayout []wgpu.VertexBufferLayout) (*wgpu.RenderPipeline, error) {
-	shaderBindGroupLayout, err := shader.BindGroupLayout(r.runtime.Device)
-	if err != nil {
-		return nil, err
-	}
+func (r *Renderer) createRenderPipeline(material PreparedMaterial, vertexLayout []wgpu.VertexBufferLayout) (*wgpu.RenderPipeline, error) {
 
 	layout, err := r.runtime.Device.CreatePipelineLayout(&wgpu.PipelineLayoutDescriptor{
 		Label: "", // TODO: add a descriptive name for debugging
 		BindGroupLayouts: []*wgpu.BindGroupLayout{
 			r.globalBindGroupLayout,
-			shaderBindGroupLayout,
+			material.bindGroupLayout,
 			r.objectBindGroupLayout,
 		},
 	})
@@ -266,7 +256,12 @@ func (r *Renderer) createRenderPipeline(shader Shader, vertexLayout []wgpu.Verte
 		return nil, err
 	}
 
-	vsModule, fsModule, err := r.compileShader(r.runtime.Device, shader)
+	vsModule, err := r.compileShader(r.runtime.Device, material.vertexShader, wgpu.ShaderStageVertex)
+	if err != nil {
+		return nil, err
+	}
+
+	fsModule, err := r.compileShader(r.runtime.Device, material.fragmentShader, wgpu.ShaderStageFragment)
 	if err != nil {
 		return nil, err
 	}
@@ -324,23 +319,12 @@ func (r *Renderer) createRenderPipeline(shader Shader, vertexLayout []wgpu.Verte
 	return pipeline, err
 }
 
-func (r *Renderer) compileShader(device *wgpu.Device, shader Shader) (*wgpu.ShaderModule, *wgpu.ShaderModule, error) {
-	vsCode := shader.VertexShader()
-	fsCode := shader.FragmentShader()
-
-	vsModule, err := device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
-		GLSLDescriptor: &wgpu.ShaderModuleGLSLDescriptor{Code: vsCode, ShaderStage: wgpu.ShaderStageVertex},
+func (r *Renderer) compileShader(device *wgpu.Device, code string, stage wgpu.ShaderStage) (*wgpu.ShaderModule, error) {
+	module, err := device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
+		GLSLDescriptor: &wgpu.ShaderModuleGLSLDescriptor{Code: code, ShaderStage: stage},
 	})
 
-	if err != nil {
-		return nil, nil, err
-	}
-
-	fsModule, err := device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
-		GLSLDescriptor: &wgpu.ShaderModuleGLSLDescriptor{Code: fsCode, ShaderStage: wgpu.ShaderStageFragment},
-	})
-
-	return vsModule, fsModule, err
+	return module, err
 
 }
 
@@ -486,12 +470,4 @@ func (r *Renderer) appendViewable(meshes []*Mesh, node Node) []*Mesh {
 	}
 
 	return meshes
-}
-
-func (r *Renderer) getShader(name string) Shader {
-	if shader, ok := r.shaders[name]; ok {
-		return shader
-	} else {
-		return r.shaders["basic"]
-	}
 }

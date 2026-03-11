@@ -4,8 +4,11 @@ import "github.com/cogentcore/webgpu/wgpu"
 
 type TextureFormat = wgpu.TextureFormat
 
+var textureID idGen
+
 type TextureData struct {
-	id          int
+	id          uint32
+	slot        int
 	version     int
 	width       int
 	height      int

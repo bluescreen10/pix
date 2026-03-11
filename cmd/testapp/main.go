@@ -53,12 +53,12 @@ func main() {
 	}
 
 	material := pix.NewBasicMaterial()
-	//material.SetColor(glm.Color3f{0, 1, 1})
+	material.SetColor(glm.Color3f{0, 1, 1})
 	material.SetColorMap(tex)
 
 	mesh := pix.NewMesh(
 		pix.NewBoxGeometry(1, 1, 1),
-		material,
+		material.Material,
 	)
 
 	scene := &pix.Scene{}

@@ -1,57 +1,64 @@
 package pix
 
 import (
+	"io"
+
 	"github.com/bluescreen10/pix/glm"
 )
 
-var _ Material = &BasicMaterial{}
-
-type resourceHash uint64
-
-func (h resourceHash) Combine(v uint64) resourceHash {
-	const magic resourceHash = 0x9e3779b97f4a7c15
-	return h ^ (resourceHash(v) + magic + (h << 6) + (h >> 2))
-}
+var basicMaterialFragmentShader string
+var basicMaterialVertexShader string
 
 type BasicMaterial struct {
-	id       int
-	version  int
-	color    glm.Color3f
-	colorMap *TextureData
+	*Material
 }
 
 func (m *BasicMaterial) SetColor(color glm.Color3f) {
-	m.color = color
-	m.NeedsUpdate()
+	m.uniforms[0].SetVec3("color", glm.Vec3f{color[0], color[1], color[2]})
+	m.version++
 }
 
 func (m *BasicMaterial) Color() glm.Color3f {
-	return m.color
+	v := m.uniforms[0].Vec3("color")
+	return glm.Color3f{v[0], v[1], v[2]}
 }
 
 func (m *BasicMaterial) SetColorMap(texture *TextureData) {
-	m.colorMap = texture
+	m.textures[0] = texture
 	m.NeedsUpdate()
 }
 
 func (m *BasicMaterial) ColorMap() *TextureData {
-	return m.colorMap
-}
-
-func (m *BasicMaterial) Shader() string {
-	return "basic"
+	return m.textures[0]
 }
 
 func (m *BasicMaterial) NeedsUpdate() {
 	m.version++
 }
 
-func (m *BasicMaterial) Version() int {
-	return m.version
-}
-
 func NewBasicMaterial() *BasicMaterial {
+	if basicMaterialFragmentShader == "" {
+		f, _ := shaderlib.Open("shaderlib/basic_material.fs")
+		code, _ := io.ReadAll(f)
+		basicMaterialFragmentShader = string(code)
+	}
+
+	if basicMaterialVertexShader == "" {
+		f, _ := shaderlib.Open("shaderlib/basic_material.vs")
+		code, _ := io.ReadAll(f)
+		basicMaterialVertexShader = string(code)
+	}
+
+	rawMat := NewMaterial(
+		basicMaterialVertexShader,
+		basicMaterialFragmentShader,
+		[]*Uniform{
+			(&Uniform{}).AddVec3("color").Build(),
+		},
+		1,
+	)
+
 	return &BasicMaterial{
-		color: glm.Color3f{1, 1, 1},
+		Material: rawMat,
 	}
 }
