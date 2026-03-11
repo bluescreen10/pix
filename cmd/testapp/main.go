@@ -53,8 +53,8 @@ func main() {
 	}
 
 	material := pix.NewBasicMaterial()
-	material.SetColor(glm.Color3f{0, 1, 1})
-	material.SetColorMap(tex)
+	//material.SetColor(glm.Color3f{1, 1, 1})
+	//material.SetColorMap(tex)
 
 	mesh := pix.NewMesh(
 		pix.NewBoxGeometry(1, 1, 1),
@@ -77,7 +77,7 @@ func main() {
 		count++
 		if count%100 == 0 {
 			if flip {
-				material.SetColor(glm.Color3f{1, 0, 0})
+				material.SetColorMap(nil)
 				//td.SetAddressModeU(wgpu.AddressModeClampToEdge)
 				// td.SetMinFilter(wgpu.FilterModeLinear)
 				// td.SetMagFilter(wgpu.FilterModeLinear)
@@ -87,7 +87,7 @@ func main() {
 				// td.SetLodMaxClamp(1)
 				// td.SetLodMinClamp(0)
 			} else {
-				material.SetColor(glm.Color3f{0, 1, 0})
+				material.SetColorMap(tex)
 
 				// td.SetMinFilter(wgpu.FilterModeNearest)
 				// td.SetMagFilter(wgpu.FilterModeNearest)

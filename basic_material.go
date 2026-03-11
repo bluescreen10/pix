@@ -9,6 +9,10 @@ import (
 var basicMaterialFragmentShader string
 var basicMaterialVertexShader string
 
+const (
+	BasicMaterialColorMapFlag = uint64(1 << iota)
+)
+
 type BasicMaterial struct {
 	*MaterialData
 }
@@ -24,6 +28,14 @@ func (m *BasicMaterial) Color() glm.Color3f {
 }
 
 func (m *BasicMaterial) SetColorMap(texture *TextureData) {
+
+	// adjust flags
+	if texture != nil {
+		m.flags |= BasicMaterialColorMapFlag
+	} else {
+		m.flags &^= BasicMaterialColorMapFlag
+	}
+
 	m.textures[0] = texture
 	m.NeedsUpdate()
 }
@@ -53,16 +65,21 @@ func NewBasicMaterial() *BasicMaterial {
 		basicMaterialVertexShader = string(code)
 	}
 
+	uniform := (&Uniform{}).AddVec3("color").Build()
+
 	data := NewMaterial(
+		"Basic Material",
 		basicMaterialVertexShader,
 		basicMaterialFragmentShader,
-		[]*Uniform{
-			(&Uniform{}).AddVec3("color").Build(),
-		},
+		[]*Uniform{uniform},
 		1,
 	)
 
-	return &BasicMaterial{
+	builder := &BasicMaterial{
 		MaterialData: data,
 	}
+
+	builder.SetColor(glm.Color3f{1, 1, 1})
+
+	return builder
 }

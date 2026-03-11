@@ -1,6 +1,11 @@
 package pix
 
-import "github.com/cogentcore/webgpu/wgpu"
+import (
+	"hash/fnv"
+	"unsafe"
+
+	"github.com/cogentcore/webgpu/wgpu"
+)
 
 var matID idGen
 
@@ -10,9 +15,11 @@ type MaterialData struct {
 	version        int
 	vertexShader   string
 	fragmentShader string
-
-	textures []*TextureData
-	uniforms []*Uniform
+	name           string
+	hash           uint64
+	flags          uint64
+	textures       []*TextureData
+	uniforms       []*Uniform
 }
 
 func (m *MaterialData) Texture(id int) *TextureData {
@@ -30,12 +37,14 @@ func (m *MaterialData) Uniforms() []*Uniform {
 	return m.uniforms
 }
 
-func NewMaterial(vertexShader, fragmentShader string, uniforms []*Uniform, numTextures int) *MaterialData {
+func NewMaterial(name string, vertexShader, fragmentShader string, uniforms []*Uniform, numTextures int) *MaterialData {
 	return &MaterialData{
 		id:             matID.Next(),
+		name:           name,
 		version:        1, // Force upload
 		vertexShader:   vertexShader,
 		fragmentShader: fragmentShader,
+		hash:           hashShaders(vertexShader, fragmentShader),
 		uniforms:       uniforms,
 		textures:       make([]*TextureData, numTextures),
 	}
@@ -48,6 +57,8 @@ type Material struct {
 	fragmentShader  string
 	vertexShader    string
 	uniformBuffers  []*wgpu.Buffer
+	flags           uint64
+	defines         map[string]string
 }
 
 func (m Material) Destroy() {
@@ -62,4 +73,13 @@ func (m Material) Destroy() {
 	for _, b := range m.uniformBuffers {
 		b.Destroy()
 	}
+}
+
+// function to identify a material
+func hashShaders(a, b string) uint64 {
+	h := fnv.New64a()
+	h.Write(unsafe.Slice(unsafe.StringData(a), len(a)))
+	h.Write([]byte{0})
+	h.Write(unsafe.Slice(unsafe.StringData(b), len(b)))
+	return h.Sum64()
 }
