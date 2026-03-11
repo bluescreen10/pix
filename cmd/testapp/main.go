@@ -58,7 +58,7 @@ func main() {
 
 	mesh := pix.NewMesh(
 		pix.NewBoxGeometry(1, 1, 1),
-		material.Material,
+		material.Build(),
 	)
 
 	scene := &pix.Scene{}
@@ -77,7 +77,7 @@ func main() {
 		count++
 		if count%100 == 0 {
 			if flip {
-				//material.SetColor(glm.Color3f{1, 0, 0})
+				material.SetColor(glm.Color3f{1, 0, 0})
 				//td.SetAddressModeU(wgpu.AddressModeClampToEdge)
 				// td.SetMinFilter(wgpu.FilterModeLinear)
 				// td.SetMagFilter(wgpu.FilterModeLinear)
@@ -87,7 +87,7 @@ func main() {
 				// td.SetLodMaxClamp(1)
 				// td.SetLodMinClamp(0)
 			} else {
-				//material.SetColor(glm.Color3f{0, 1, 0})
+				material.SetColor(glm.Color3f{0, 1, 0})
 
 				// td.SetMinFilter(wgpu.FilterModeNearest)
 				// td.SetMagFilter(wgpu.FilterModeNearest)

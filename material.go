@@ -4,7 +4,7 @@ import "github.com/cogentcore/webgpu/wgpu"
 
 var matID idGen
 
-type Material struct {
+type MaterialData struct {
 	id             uint32
 	slot           int
 	version        int
@@ -15,24 +15,25 @@ type Material struct {
 	uniforms []*Uniform
 }
 
-func (m *Material) Texture(id int) *TextureData {
+func (m *MaterialData) Texture(id int) *TextureData {
 	//FIXME: do bounds checking
 	return m.textures[id]
 }
 
-func (m *Material) SetTexture(id int, texture *TextureData) {
+func (m *MaterialData) SetTexture(id int, texture *TextureData) {
 	//FIXME: do bounds checking
 	m.textures[id] = texture
 	m.version++
 }
 
-func (m *Material) Uniforms() []*Uniform {
+func (m *MaterialData) Uniforms() []*Uniform {
 	return m.uniforms
 }
 
-func NewMaterial(vertexShader, fragmentShader string, uniforms []*Uniform, numTextures int) *Material {
-	return &Material{
+func NewMaterial(vertexShader, fragmentShader string, uniforms []*Uniform, numTextures int) *MaterialData {
+	return &MaterialData{
 		id:             matID.Next(),
+		version:        1, // Force upload
 		vertexShader:   vertexShader,
 		fragmentShader: fragmentShader,
 		uniforms:       uniforms,
@@ -40,11 +41,25 @@ func NewMaterial(vertexShader, fragmentShader string, uniforms []*Uniform, numTe
 	}
 }
 
-type PreparedMaterial struct {
+type Material struct {
 	version         int
 	bindGroup       *wgpu.BindGroup
 	bindGroupLayout *wgpu.BindGroupLayout
 	fragmentShader  string
 	vertexShader    string
 	uniformBuffers  []*wgpu.Buffer
+}
+
+func (m Material) Destroy() {
+	if m.bindGroup != nil {
+		m.bindGroup.Release()
+	}
+
+	if m.bindGroupLayout != nil {
+		m.bindGroupLayout.Release()
+	}
+
+	for _, b := range m.uniformBuffers {
+		b.Destroy()
+	}
 }

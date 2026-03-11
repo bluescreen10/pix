@@ -10,7 +10,7 @@ var basicMaterialFragmentShader string
 var basicMaterialVertexShader string
 
 type BasicMaterial struct {
-	*Material
+	*MaterialData
 }
 
 func (m *BasicMaterial) SetColor(color glm.Color3f) {
@@ -36,6 +36,10 @@ func (m *BasicMaterial) NeedsUpdate() {
 	m.version++
 }
 
+func (m *BasicMaterial) Build() *MaterialData {
+	return m.MaterialData
+}
+
 func NewBasicMaterial() *BasicMaterial {
 	if basicMaterialFragmentShader == "" {
 		f, _ := shaderlib.Open("shaderlib/basic_material.fs")
@@ -49,7 +53,7 @@ func NewBasicMaterial() *BasicMaterial {
 		basicMaterialVertexShader = string(code)
 	}
 
-	rawMat := NewMaterial(
+	data := NewMaterial(
 		basicMaterialVertexShader,
 		basicMaterialFragmentShader,
 		[]*Uniform{
@@ -59,6 +63,6 @@ func NewBasicMaterial() *BasicMaterial {
 	)
 
 	return &BasicMaterial{
-		Material: rawMat,
+		MaterialData: data,
 	}
 }

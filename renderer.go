@@ -117,7 +117,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) error {
 
 		materialData := mesh.material
 		material := r.resources.GetMaterialByData(materialData)
-		material, err := r.prepareMaterial(materialData, material, r.runtime.Device, &r.resources)
+		material, err := prepareMaterial(r.runtime.Device, materialData, material, &r.resources)
 
 		if err != nil {
 			r.logger.Error("error preparing material", slog.Any("err", err))
@@ -241,7 +241,7 @@ func (r *Renderer) getPipelineFor(obj renderable) (*wgpu.RenderPipeline, error) 
 	return pipeline, nil
 }
 
-func (r *Renderer) createRenderPipeline(material PreparedMaterial, vertexLayout []wgpu.VertexBufferLayout) (*wgpu.RenderPipeline, error) {
+func (r *Renderer) createRenderPipeline(material Material, vertexLayout []wgpu.VertexBufferLayout) (*wgpu.RenderPipeline, error) {
 
 	layout, err := r.runtime.Device.CreatePipelineLayout(&wgpu.PipelineLayoutDescriptor{
 		Label: "", // TODO: add a descriptive name for debugging

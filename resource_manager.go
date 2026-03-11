@@ -6,28 +6,35 @@ import (
 
 type resourceManager struct {
 	textures  ResourceList[*TextureData, Texture]
-	materials ResourceList[*Material, PreparedMaterial]
+	materials ResourceList[*MaterialData, Material]
 	//geometries ResourceList[GeometryData, Geometry]
 
 	samplers map[Sampler]*wgpu.Sampler
 }
 
-func (rm *resourceManager) GetTextureByData(td *TextureData) Texture {
+func (rm *resourceManager) GetTextureByData(device *wgpu.Device, td *TextureData) Texture {
 	if td.slot == 0 {
 		td.slot = rm.textures.Add(td)
+		rm.uploadTexture(td, device)
 	}
 
-	return rm.textures.GetResource(td.slot)
+	texture := rm.textures.GetResource(td.slot)
+	if texture.version != td.version {
+		rm.uploadTexture(td, device)
+		texture = rm.textures.GetResource(td.slot)
+	}
+
+	return texture
 }
 
-func (rm *resourceManager) GetMaterialByData(m *Material) PreparedMaterial {
+func (rm *resourceManager) GetMaterialByData(m *MaterialData) Material {
 	if m.slot == 0 {
 		m.slot = rm.materials.Add(m)
 	}
 	return rm.materials.GetResource(m.slot)
 }
 
-func (rm *resourceManager) SetMaterial(id int, resource PreparedMaterial) {
+func (rm *resourceManager) SetMaterial(id int, resource Material) {
 	rm.materials.SetResource(id, resource)
 }
 
@@ -59,7 +66,7 @@ func (rm *resourceManager) processPending(device *wgpu.Device) error {
 
 func (rm *resourceManager) uploadTexture(data *TextureData, device *wgpu.Device) error {
 	sampler, ok := rm.samplers[data.sampler]
-	tex := rm.GetTextureByData(data)
+	tex := rm.textures.GetResource(data.slot)
 
 	if !ok {
 		newSampler, err := device.CreateSampler(&wgpu.SamplerDescriptor{

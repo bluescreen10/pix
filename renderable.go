@@ -2,5 +2,5 @@ package pix
 
 type renderable struct {
 	geometry *Geometry
-	material PreparedMaterial
+	material Material
 }
