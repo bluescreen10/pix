@@ -5,9 +5,10 @@ import (
 )
 
 type resourceManager struct {
-	textures  ResourceList[*TextureData, Texture]
-	materials ResourceList[*MaterialData, Material]
-	//geometries ResourceList[GeometryData, Geometry]
+	// TODO: remove reference to Texturedata
+	textures   ResourceList[*TextureData, Texture]
+	materials  ResourceList[*MaterialData, Material]
+	geometries ResourceList[*GeometryData, Geometry]
 
 	samplers map[Sampler]*wgpu.Sampler
 
@@ -44,6 +45,14 @@ func (rm *resourceManager) GetDefaultTexture(device *wgpu.Device) Texture {
 	return texture
 }
 
+func (rm *resourceManager) GetGeometry(data *GeometryData) *Geometry {
+	if data.slot == 0 {
+		data.slot = rm.geometries.Add(data)
+	}
+
+	return rm.geometries.GetResourcePtr(data.slot)
+}
+
 func (rm *resourceManager) GetMaterialByData(m *MaterialData) Material {
 	if m.slot == 0 {
 		m.slot = rm.materials.Add(m)
@@ -57,6 +66,8 @@ func (rm *resourceManager) SetMaterial(id int, resource Material) {
 
 func (rm *resourceManager) init() {
 	rm.textures.Init()
+	rm.materials.Init()
+	rm.geometries.Init()
 	rm.samplers = make(map[Sampler]*wgpu.Sampler)
 
 	// default Texture
@@ -167,5 +178,56 @@ func (rm *resourceManager) uploadTexture(data *TextureData, device *wgpu.Device)
 	tex.ref = gpuTexture
 	tex.view = view
 	rm.textures.SetResource(data.slot, tex)
+	return nil
+}
+
+func (rm *resourceManager) uploadGeometry(device *wgpu.Device, data *GeometryData) error {
+	geometry := rm.geometries.GetResourcePtr(data.slot)
+
+	//TODO: instead of destroying all buffers
+	//      track the one that changed
+	geometry.Destroy()
+
+	// Allocate index buffer
+	if len(data.indices) > 0 {
+		buf, err := device.CreateBufferInit(&wgpu.BufferInitDescriptor{
+			Label:    "index buffer",
+			Contents: wgpu.ToBytes(data.indices),
+			Usage:    wgpu.BufferUsageIndex | wgpu.BufferUsageCopyDst,
+		})
+
+		if err != nil {
+			return err
+		}
+		geometry.count = len(data.indices)
+		geometry.index = buf
+	} else {
+		//FIXME: hack
+		if len(data.attrs) > 0 {
+			geometry.count = data.attrs[0].len
+		}
+	}
+
+	geometry.bufs = make([]GeometryBuffer, len(data.attrs))
+
+	for i, a := range data.attrs {
+		buf, err := device.CreateBufferInit(&wgpu.BufferInitDescriptor{
+			Label:    a.name + " buffer",
+			Contents: a.data,
+			Usage:    wgpu.BufferUsageVertex | wgpu.BufferUsageCopyDst,
+		})
+
+		if err != nil {
+			return err
+		}
+
+		geometry.bufs[i] = GeometryBuffer{
+			loc:     a.loc,
+			buf:     buf,
+			version: a.version,
+		}
+	}
+
+	geometry.version = data.version
 	return nil
 }

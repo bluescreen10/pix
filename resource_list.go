@@ -58,6 +58,11 @@ func (rl *ResourceList[T, R]) GetResource(index int) R {
 	return rl.resource[index]
 }
 
+// FIXME: Hack for now
+func (rl *ResourceList[T, R]) GetResourcePtr(index int) *R {
+	return &rl.resource[index]
+}
+
 func (rl *ResourceList[T, R]) Set(index int, item T) {
 	rl.items[index] = item
 }

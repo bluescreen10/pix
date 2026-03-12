@@ -4,11 +4,11 @@ import "github.com/bluescreen10/pix/glm"
 
 type Mesh struct {
 	node
-	geometry *Geometry
+	geometry *GeometryData
 	material *MaterialData
 }
 
-func NewMesh(geometry *Geometry, material *MaterialData) *Mesh {
+func NewMesh(geometry *GeometryData, material *MaterialData) *Mesh {
 	return &Mesh{
 		geometry: geometry,
 		material: material,

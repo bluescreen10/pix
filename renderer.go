@@ -109,13 +109,25 @@ func (r *Renderer) Render(scene *Scene, camera Camera) error {
 
 	//Prepare Objects
 	for _, mesh := range visibleObjects {
-		geometry := mesh.geometry
-		if geometry.IsDirty() {
-			err := geometry.Upload(r.runtime.Device, r.runtime.Queue)
+		geometryData := mesh.geometry
+		geometry := r.resources.GetGeometry(geometryData)
+
+		if geometry.version < geometryData.version {
+			if geometry.version == 0 {
+				geometry.layout = createVertexLayout(geometryData)
+			}
+			err := r.resources.uploadGeometry(r.runtime.Device, geometryData)
 			if err != nil {
 				r.logger.Error("error uploading geometry", slog.Any("err", err))
 			}
 		}
+
+		// if geometry.IsDirty() {
+		// 	err := geometry.Upload(r.runtime.Device, r.runtime.Queue)
+		// 	if err != nil {
+		// 		r.logger.Error("error uploading geometry", slog.Any("err", err))
+		// 	}
+		// }
 
 		materialData := mesh.material
 		material := r.resources.GetMaterialByData(materialData)
@@ -130,7 +142,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) error {
 		r.resources.SetMaterial(materialData.slot, material)
 
 		renderables = append(renderables, renderable{
-			geometry: geometry,
+			geometry: *geometry,
 			material: material,
 		})
 	}
@@ -201,11 +213,17 @@ func (r *Renderer) renderObject(obj renderable, bgColor glm.Color4f) error {
 	renderPass.SetBindGroup(1, obj.material.bindGroup, []uint32{})
 	renderPass.SetBindGroup(2, r.objectBindGroup, []uint32{})
 
-	//TODO: use attributes instead
-	renderPass.SetVertexBuffer(0, obj.geometry.positionBuffer, 0, wgpu.WholeSize)
-	renderPass.SetVertexBuffer(1, obj.geometry.uvsBuffer, 0, wgpu.WholeSize)
-	renderPass.SetIndexBuffer(obj.geometry.indicesBuffer, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
-	renderPass.DrawIndexed(uint32(len(obj.geometry.indices)), 1, 0, 0, 0)
+	for _, b := range obj.geometry.bufs {
+		renderPass.SetVertexBuffer(uint32(b.loc), b.buf, 0, wgpu.WholeSize)
+	}
+
+	if obj.geometry.index != nil {
+		//TODO support other formats for index buffers
+		renderPass.SetIndexBuffer(obj.geometry.index, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
+		renderPass.DrawIndexed(uint32(obj.geometry.count), 1, 0, 0, 0)
+	} else {
+		renderPass.Draw(uint32(obj.geometry.count), 1, 0, 0)
+	}
 
 	err = renderPass.End()
 	if err != nil {
@@ -236,8 +254,7 @@ func (r *Renderer) getPipelineFor(obj renderable) (*wgpu.RenderPipeline, error) 
 		return pipline, nil
 	}
 
-	vertexLayout := obj.geometry.VertexLayout()
-	pipeline, err := r.createRenderPipeline(obj.material, vertexLayout)
+	pipeline, err := r.createRenderPipeline(obj.material, obj.geometry.layout)
 	if err != nil {
 		return nil, err
 	}

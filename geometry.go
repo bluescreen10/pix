@@ -1,121 +1,67 @@
 package pix
 
 import (
-	"unsafe"
+	"fmt"
 
-	"github.com/bluescreen10/pix/glm"
 	"github.com/cogentcore/webgpu/wgpu"
 )
 
+type GeometryData struct {
+	version int
+	slot    int
+	indices []uint32
+	attrs   []*Attribute
+}
+
+func (g *GeometryData) Indices() []uint32 {
+	return g.indices
+}
+
+func (g *GeometryData) SetIndices(indices []uint32) {
+	g.indices = indices
+	g.version++
+}
+
+func (g *GeometryData) AttributeData(name string) []byte {
+	for _, a := range g.attrs {
+		if a.name == name {
+			return a.data
+		}
+	}
+	panic(fmt.Sprintf("geometry: attribute %q not found", name))
+}
+
+func (g *GeometryData) SetAttributeData(name string, data []byte) {
+	for _, a := range g.attrs {
+		if a.name == name {
+			a.SetBytes(data)
+		}
+	}
+	panic(fmt.Sprintf("geometry: attribute %q not found", name))
+}
+
 type Geometry struct {
-	version        int
-	positions      []glm.Vec3f
-	positionBuffer *wgpu.Buffer
-
-	indices       []uint32
-	indicesBuffer *wgpu.Buffer
-
-	uvs       []glm.Vec2f
-	uvsBuffer *wgpu.Buffer
-
-	isDirty bool
+	version int
+	index   *wgpu.Buffer
+	bufs    []GeometryBuffer
+	count   int
+	layout  []wgpu.VertexBufferLayout
 }
 
-func (g *Geometry) IsDirty() bool {
-	return g.isDirty
+type GeometryBuffer struct {
+	version int
+	loc     int
+	buf     *wgpu.Buffer
 }
 
-func (g *Geometry) Upload(device *wgpu.Device, queue *wgpu.Queue) error {
-	//TODO: maybe reuse buffer
-	if g.positionBuffer != nil {
-		g.positionBuffer.Destroy()
+func (g Geometry) Destroy() {
+	if g.index != nil {
+		g.index.Destroy()
 	}
 
-	buf, err := device.CreateBufferInit(&wgpu.BufferInitDescriptor{
-		Label:    "Position Buffer",
-		Contents: wgpu.ToBytes(g.positions),
-		Usage:    wgpu.BufferUsageVertex | wgpu.BufferUsageCopyDst,
-	})
-
-	if err != nil {
-		return err
-	}
-
-	g.positionBuffer = buf
-
-	if g.uvsBuffer != nil {
-		g.uvsBuffer.Destroy()
-	}
-
-	buf, err = device.CreateBufferInit(&wgpu.BufferInitDescriptor{
-		Label:    "UV Buffer",
-		Contents: wgpu.ToBytes(g.uvs),
-		Usage:    wgpu.BufferUsageVertex | wgpu.BufferUsageCopyDst,
-	})
-
-	if err != nil {
-		return err
-	}
-
-	g.uvsBuffer = buf
-
-	if g.indicesBuffer != nil {
-		g.indicesBuffer.Destroy()
-	}
-
-	buf, err = device.CreateBufferInit(&wgpu.BufferInitDescriptor{
-		Label:    "Index Buffer",
-		Contents: wgpu.ToBytes(g.indices),
-		Usage:    wgpu.BufferUsageIndex | wgpu.BufferUsageCopyDst,
-	})
-
-	if err != nil {
-		return err
-	}
-
-	g.indicesBuffer = buf
-
-	g.isDirty = false
-	return nil
-}
-
-func (g *Geometry) VertexLayout() []wgpu.VertexBufferLayout {
-	return []wgpu.VertexBufferLayout{
-		// Slot 0: Positions (glm.Vec3f)
-		{
-			ArrayStride: uint64(unsafe.Sizeof(glm.Vec3f{})), // 12 bytes (3 floats)
-			StepMode:    wgpu.VertexStepModeVertex,
-			Attributes: []wgpu.VertexAttribute{
-				{
-					Format:         wgpu.VertexFormatFloat32x3, // vec3<f32>
-					Offset:         0,
-					ShaderLocation: 0, // @location(0) in shader
-				},
-			},
-		},
-		// Slot 1: TexCoords (glm.Vec2f)
-		{
-			ArrayStride: uint64(unsafe.Sizeof(glm.Vec2f{})), // 8 bytes (2 floats)
-			StepMode:    wgpu.VertexStepModeVertex,
-			Attributes: []wgpu.VertexAttribute{
-				{
-					Format:         wgpu.VertexFormatFloat32x2, // vec2<f32>
-					Offset:         0,
-					ShaderLocation: 1, // @location(1) in shader
-				},
-			},
-		},
-		// // Slot 2: Normals (glm.Vec3f)
-		// {
-		// 	ArrayStride: uint64(unsafe.Sizeof(glm.Vec3f{})),
-		// 	StepMode:    wgpu.VertexStepModeVertex,
-		// 	Attributes: []wgpu.VertexAttribute{
-		// 		{
-		// 			Format:         wgpu.VertexFormatFloat32x3, // vec3<f32>
-		// 			Offset:         0,
-		// 			ShaderLocation: 2, // @location(2) in shader
-		// 		},
-		// 	},
-		// },
+	for _, gb := range g.bufs {
+		if gb.buf != nil {
+			gb.buf.Destroy()
+		}
 	}
 }
