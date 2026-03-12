@@ -9,14 +9,6 @@ import (
 
 type AttributeType int
 
-var attributeTypeFor = map[AttributeType]wgpu.VertexFormat{
-	Float32:   wgpu.VertexFormatFloat32,
-	Float32x2: wgpu.VertexFormatFloat32x2,
-	Float32x3: wgpu.VertexFormatFloat32x3,
-	Float32x4: wgpu.VertexFormatFloat32x4,
-	Uint32:    wgpu.VertexFormatUint32,
-}
-
 const (
 	InvalidAttributeType = AttributeType(iota)
 	Float32
@@ -26,6 +18,22 @@ const (
 
 	Uint32
 )
+
+const (
+	PositionLocation = iota
+	UVLocation
+	NormalLocation
+	TangentLocation
+	ColorLocation
+)
+
+var attributeTypeFor = map[AttributeType]wgpu.VertexFormat{
+	Float32:   wgpu.VertexFormatFloat32,
+	Float32x2: wgpu.VertexFormatFloat32x2,
+	Float32x3: wgpu.VertexFormatFloat32x3,
+	Float32x4: wgpu.VertexFormatFloat32x4,
+	Uint32:    wgpu.VertexFormatUint32,
+}
 
 func (t AttributeType) Size() int {
 	switch t {

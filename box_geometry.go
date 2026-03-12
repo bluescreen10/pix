@@ -57,8 +57,8 @@ func NewBoxGeometry(width, height, depth float32) *GeometryData {
 	return &GeometryData{
 		version: 1,
 		attrs: []*Attribute{
-			NewAttribute("position", 0, Float32x3, pos),
-			NewAttribute("uv", 1, Float32x2, uvs),
+			NewAttribute("position", PositionLocation, Float32x3, pos),
+			NewAttribute("uv", UVLocation, Float32x2, uvs),
 		},
 
 		indices: []uint32{
