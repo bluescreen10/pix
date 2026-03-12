@@ -53,38 +53,35 @@ func NewBoxGeometry(width, height, depth float32) *GeometryData {
 		{0, 0}, {1, 0}, {1, 1}, {0, 1},
 	}
 
-	//FIXME: provide a constructor
-	return &GeometryData{
-		version: 1,
-		attrs: []*Attribute{
-			NewAttribute("position", PositionLocation, Float32x3, pos),
-			NewAttribute("uv", UVLocation, Float32x2, uvs),
-		},
+	indices := []uint32{
+		// Left face (-X)
+		0, 1, 2,
+		0, 2, 3,
 
-		indices: []uint32{
-			// Left face (-X)
-			0, 1, 2,
-			0, 2, 3,
+		// Right face (+X)
+		4, 6, 5,
+		4, 7, 6,
 
-			// Right face (+X)
-			4, 6, 5,
-			4, 7, 6,
+		// Bottom face (-Y)
+		8, 9, 10,
+		8, 10, 11,
 
-			// Bottom face (-Y)
-			8, 9, 10,
-			8, 10, 11,
+		// Top face (+Y)
+		12, 13, 14,
+		12, 14, 15,
 
-			// Top face (+Y)
-			12, 13, 14,
-			12, 14, 15,
+		// Back face (-Z)
+		16, 17, 18,
+		16, 18, 19,
 
-			// Back face (-Z)
-			16, 17, 18,
-			16, 18, 19,
-
-			// Front face (+Z)
-			20, 21, 22,
-			20, 22, 23,
-		},
+		// Front face (+Z)
+		20, 21, 22,
+		20, 22, 23,
 	}
+
+	//FIXME: provide a constructor
+	return (&GeometryData{}).
+		AddAttribute(NewAttribute(PositionAttrName, PositionLocation, Float32x3, pos)).
+		AddAttribute(NewAttribute(UVAttrName, UVLocation, Float32x2, uvs)).
+		SetIndices(indices)
 }

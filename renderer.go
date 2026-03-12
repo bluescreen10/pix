@@ -247,6 +247,7 @@ func (r *Renderer) getPipelineFor(obj renderable) (*wgpu.RenderPipeline, error) 
 	pipelineKey := renderPipelineKey{
 		shaderHash:    obj.material.hash,
 		materialFlags: obj.material.flags,
+		geometryFlags: obj.geometry.flags,
 	}
 	pipline := r.pipelineCache.GetRenderPipeline(pipelineKey)
 
@@ -254,7 +255,7 @@ func (r *Renderer) getPipelineFor(obj renderable) (*wgpu.RenderPipeline, error) 
 		return pipline, nil
 	}
 
-	pipeline, err := r.createRenderPipeline(obj.material, obj.geometry.layout)
+	pipeline, err := r.createRenderPipeline(obj)
 	if err != nil {
 		return nil, err
 	}
@@ -263,13 +264,13 @@ func (r *Renderer) getPipelineFor(obj renderable) (*wgpu.RenderPipeline, error) 
 	return pipeline, nil
 }
 
-func (r *Renderer) createRenderPipeline(material Material, vertexLayout []wgpu.VertexBufferLayout) (*wgpu.RenderPipeline, error) {
+func (r *Renderer) createRenderPipeline(obj renderable) (*wgpu.RenderPipeline, error) {
 
 	layout, err := r.runtime.Device.CreatePipelineLayout(&wgpu.PipelineLayoutDescriptor{
 		Label: "", // TODO: add a descriptive name for debugging
 		BindGroupLayouts: []*wgpu.BindGroupLayout{
 			r.globalBindGroupLayout,
-			material.bindGroupLayout,
+			obj.material.bindGroupLayout,
 			r.objectBindGroupLayout,
 		},
 	})
@@ -278,22 +279,14 @@ func (r *Renderer) createRenderPipeline(material Material, vertexLayout []wgpu.V
 		return nil, err
 	}
 
-	defines := make(map[string]string)
+	defines := createDefines(obj.material.flags, obj.geometry.flags)
 
-	for flags := material.flags; flags != 0; {
-		bit := bits.TrailingZeros64(flags)
-		flags &= flags - 1
-
-		name := "HAS_FLAG" + strconv.Itoa(bit)
-		defines[name] = "true"
-	}
-
-	vsModule, err := r.compileShader(r.runtime.Device, material.vertexShader, defines, wgpu.ShaderStageVertex)
+	vsModule, err := r.compileShader(r.runtime.Device, obj.material.vertexShader, defines, wgpu.ShaderStageVertex)
 	if err != nil {
 		return nil, err
 	}
 
-	fsModule, err := r.compileShader(r.runtime.Device, material.fragmentShader, defines, wgpu.ShaderStageFragment)
+	fsModule, err := r.compileShader(r.runtime.Device, obj.material.fragmentShader, defines, wgpu.ShaderStageFragment)
 	if err != nil {
 		return nil, err
 	}
@@ -304,7 +297,7 @@ func (r *Renderer) createRenderPipeline(material Material, vertexLayout []wgpu.V
 		Vertex: wgpu.VertexState{
 			Module:     vsModule,
 			EntryPoint: "main",
-			Buffers:    vertexLayout,
+			Buffers:    obj.geometry.layout,
 		},
 		Fragment: &wgpu.FragmentState{
 			Module:     fsModule,
@@ -502,4 +495,32 @@ func (r *Renderer) appendViewable(meshes []*Mesh, node Node) []*Mesh {
 	}
 
 	return meshes
+}
+
+func createDefines(matFlags MaterialFlags, geoFlags GeometryFlags) map[string]string {
+	defines := make(map[string]string)
+
+	for flags := matFlags; flags != 0; {
+		bit := bits.TrailingZeros64(uint64(flags))
+		flags &= flags - 1
+
+		name, ok := materialFlagNames[bit]
+		if ok {
+			defines[name] = "1"
+		}
+		defines["USE_FLAG"+strconv.Itoa(bit)] = "1"
+	}
+
+	for flags := geoFlags; flags != 0; {
+		bit := bits.TrailingZeros64(uint64(flags))
+		flags &= flags - 1
+		name, ok := geometryFlagNames[bit]
+		if ok {
+			defines[name] = "1"
+
+		}
+		defines["USE_GEOMETRY_FLAG"+strconv.Itoa(bit)] = "1"
+	}
+
+	return defines
 }

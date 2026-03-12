@@ -228,6 +228,7 @@ func (rm *resourceManager) uploadGeometry(device *wgpu.Device, data *GeometryDat
 		}
 	}
 
+	geometry.flags = data.flags
 	geometry.version = data.version
 	return nil
 }

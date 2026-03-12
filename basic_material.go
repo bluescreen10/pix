@@ -9,10 +9,6 @@ import (
 var basicMaterialFragmentShader string
 var basicMaterialVertexShader string
 
-const (
-	BasicMaterialColorMapFlag = uint64(1 << iota)
-)
-
 type BasicMaterial struct {
 	*MaterialData
 }
@@ -31,9 +27,9 @@ func (m *BasicMaterial) SetColorMap(texture *TextureData) {
 
 	// adjust flags
 	if texture != nil {
-		m.flags |= BasicMaterialColorMapFlag
+		m.flags |= ColorMapFlag
 	} else {
-		m.flags &^= BasicMaterialColorMapFlag
+		m.flags &^= ColorMapFlag
 	}
 
 	m.textures[0] = texture

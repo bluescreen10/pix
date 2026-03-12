@@ -27,6 +27,12 @@ const (
 	ColorLocation
 )
 
+const (
+	PositionAttrName = "position"
+	UVAttrName       = "uv"
+	NormalAttrName   = "normal"
+)
+
 var attributeTypeFor = map[AttributeType]wgpu.VertexFormat{
 	Float32:   wgpu.VertexFormatFloat32,
 	Float32x2: wgpu.VertexFormatFloat32x2,

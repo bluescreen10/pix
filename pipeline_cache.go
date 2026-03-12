@@ -4,7 +4,8 @@ import "github.com/cogentcore/webgpu/wgpu"
 
 type renderPipelineKey struct {
 	shaderHash    uint64
-	materialFlags uint64
+	materialFlags MaterialFlags
+	geometryFlags GeometryFlags
 }
 
 type pipelineCache struct {

@@ -9,6 +9,16 @@ import (
 
 var matID idGen
 
+type MaterialFlags uint64
+
+const (
+	ColorMapFlag = MaterialFlags(1 << iota)
+)
+
+var materialFlagNames = map[int]string{
+	0: "USE_MAP",
+}
+
 type MaterialData struct {
 	id             uint32
 	slot           int
@@ -17,7 +27,7 @@ type MaterialData struct {
 	fragmentShader string
 	name           string
 	hash           uint64
-	flags          uint64
+	flags          MaterialFlags
 	textures       []*TextureData
 	uniforms       []*Uniform
 }
@@ -57,7 +67,7 @@ type Material struct {
 	fragmentShader  string
 	vertexShader    string
 	uniformBuffers  []*wgpu.Buffer
-	flags           uint64
+	flags           MaterialFlags
 	hash            uint64
 	defines         map[string]string
 }
