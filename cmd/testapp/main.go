@@ -53,20 +53,17 @@ func main() {
 	}
 
 	material := pix.NewBasicMaterial()
-	//material.SetColor(glm.Color3f{1, 1, 1})
-	//material.SetColorMap(tex)
+	//material.SetColor(glm.Color3f{1, 0, 0})
+	material.SetColorMap(tex)
 
 	mesh := pix.NewMesh(
 		pix.NewBoxGeometry(1, 1, 1),
 		material.Build(),
 	)
 
-	scene := &pix.Scene{}
+	scene := pix.NewScene()
 	scene.Add(mesh)
 	scene.SetBackground(glm.Color4f{0.5, 0.5, 0, 1})
-
-	var count int
-	var flip bool
 
 	for !window.ShouldClose() {
 		err := renderer.Render(scene, camera)
@@ -74,31 +71,9 @@ func main() {
 			panic(err)
 		}
 		//camera.Move(-0.01, 0, 0.00)
-		count++
-		if count%100 == 0 {
-			if flip {
-				material.SetColorMap(tex)
-				//td.SetAddressModeU(wgpu.AddressModeClampToEdge)
-				// td.SetMinFilter(wgpu.FilterModeLinear)
-				// td.SetMagFilter(wgpu.FilterModeLinear)
-				// td.SetMipmapFilter(wgpu.MipmapFilterModeLinear)
+		mesh.Rotate(0, 0.005, 0)
+		//mesh.Move(0, 0, 0.05)
 
-				// td.SetMaxAnisotropy(16)
-				// td.SetLodMaxClamp(1)
-				// td.SetLodMinClamp(0)
-			} else {
-				material.SetColorMap(nil)
-
-				// td.SetMinFilter(wgpu.FilterModeNearest)
-				// td.SetMagFilter(wgpu.FilterModeNearest)
-				// td.SetMipmapFilter(wgpu.MipmapFilterModeNearest)
-
-				// td.SetMaxAnisotropy(1)
-				// td.SetLodMaxClamp(10)
-				// td.SetLodMinClamp(1)
-			}
-			flip = !flip
-		}
 		glfw.PollEvents()
 	}
 }

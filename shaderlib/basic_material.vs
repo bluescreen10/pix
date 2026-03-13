@@ -12,9 +12,11 @@ struct Camera {
 };
 
 layout(set = 0, binding = 0) uniform Camera camera;
+layout(set = 2, binding = 0) uniform mat4 model;
 
 void main() {
-    gl_Position = camera.view_projection * vec4(position, 1.0);
+    gl_Position = camera.view_projection * model * vec4(position, 1.0);
+    
     #ifdef USE_UV
     vUv = uv;
     #endif

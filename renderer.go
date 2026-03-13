@@ -99,6 +99,9 @@ func (r *Renderer) Destroy() {
 func (r *Renderer) Render(scene *Scene, camera Camera) error {
 	r.frameCount++
 
+	//Update local/world matrices
+	updateMatrix(scene, false)
+
 	//Extract objects
 	visibleObjects := viewableMeshesPool.Get().([]*Mesh)
 	defer viewableMeshesPool.Put(visibleObjects[:0])
@@ -144,6 +147,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) error {
 		renderables = append(renderables, renderable{
 			geometry: *geometry,
 			material: material,
+			model:    mesh.Model(),
 		})
 	}
 
@@ -201,6 +205,9 @@ func (r *Renderer) renderObject(obj renderable, bgColor glm.Color4f) error {
 			ClearValue: wgpu.Color{R: float64(bgColor.R()), G: (float64(bgColor.G())), B: (float64(bgColor.B())), A: float64(bgColor.A())}, //TODO: make it something the user can define
 		}},
 	})
+
+	//FIXME: use a better way to turn it into a matrix
+	r.runtime.Queue.WriteBuffer(r.objectUniformBuffer, 0, wgpu.ToBytes([]glm.Mat4f{obj.model}))
 
 	pipeline, err := r.getPipelineFor(obj)
 	if err != nil {
@@ -485,6 +492,7 @@ func (r *Renderer) createGlobalBindGroups() error {
 
 func (r *Renderer) appendViewable(meshes []*Mesh, node Node) []*Mesh {
 	for _, child := range node.Children() {
+
 		switch object := any(child).(type) {
 
 		case *Mesh:
@@ -523,4 +531,11 @@ func createDefines(matFlags MaterialFlags, geoFlags GeometryFlags) map[string]st
 	}
 
 	return defines
+}
+
+func updateMatrix(n Node, force bool) {
+	force = n.UpdateMatrix(force)
+	for _, child := range n.Children() {
+		updateMatrix(child, force)
+	}
 }

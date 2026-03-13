@@ -31,6 +31,49 @@ func NewQuat[T number](angle T, v Vec3[T]) Quat[T] {
 	}
 }
 
+func QuatFromEuler[T number](roll, pitch, yaw T) Quat[T] {
+	switch any(roll).(type) {
+	case float32:
+		sx, cx := math32.Sincos(float32(roll))
+		sy, cy := math32.Sincos(float32(pitch))
+		sz, cz := math32.Sincos(float32(yaw))
+
+		return Quat[T]{
+			T(sx*cy*cz - cx*sy*sz),
+			T(cx*sy*cz + sx*cy*sz),
+			T(cx*cy*sz - sx*sy*cz),
+			T(cx*cy*cz + sx*sy*sz),
+		}
+	default:
+		sx, cx := math.Sincos(float64(roll))
+		sy, cy := math.Sincos(float64(pitch))
+		sz, cz := math.Sincos(float64(yaw))
+
+		return Quat[T]{
+			T(sx*cy*cz - cx*sy*sz),
+			T(cx*sy*cz + sx*cy*sz),
+			T(cx*cy*sz - sx*sy*cz),
+			T(cx*cy*cz + sx*sy*sz),
+		}
+	}
+}
+
+func (q Quat[T]) X() T {
+	return q[0]
+}
+
+func (q Quat[T]) Y() T {
+	return q[1]
+}
+
+func (q Quat[T]) Z() T {
+	return q[2]
+}
+
+func (q Quat[T]) W() T {
+	return q[3]
+}
+
 func (q Quat[T]) Conjugate() Quat[T] {
 	return Quat[T]{
 		-q[0],
@@ -62,5 +105,11 @@ func (q Quat[T]) Vec3() Vec3[T] {
 	return Vec3[T]{q[0], q[1], q[2]}
 }
 
+func QuatIdentity[T number]() Quat[T] {
+	return Quat[T]{0, 0, 0, 1}
+}
+
 // aliases
 type Quatf = Quat[float32]
+
+var QuatIdentityf = QuatIdentity[float32]()

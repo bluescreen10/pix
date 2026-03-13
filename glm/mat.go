@@ -152,4 +152,4 @@ func (m Mat3[T]) MulVec3(v Vec3[T]) Vec3[T] {
 // aliases
 type Mat4f = Mat4[float32]
 
-var Mat4fIndentity = Mat4Identity[float32]
+var Mat4fIndentity = Mat4Identity[float32]()
