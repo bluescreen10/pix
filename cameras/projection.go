@@ -1,6 +1,9 @@
 package cameras
 
-import "github.com/bluescreen10/pix/glm"
+import (
+	"github.com/bluescreen10/pix/glm"
+	"github.com/chewxy/math32"
+)
 
 type PerspectiveCamera struct {
 	position    glm.Vec3f
@@ -36,10 +39,37 @@ func (c *PerspectiveCamera) Move(x, y, z float32) {
 	c.position[2] += z
 }
 
+// FIXME: use quaternions
+func (c *PerspectiveCamera) Rotate(roll, pitch, yaw float32) {
+	c.rotation[0] += roll
+	c.rotation[1] += pitch
+	c.rotation[2] += yaw
+	c.update()
+}
+
+// FIXME: use quaternions
+func (c *PerspectiveCamera) update() {
+	sy, cy := math32.Sincos(c.rotation[2])
+	sp, cp := math32.Sincos(c.rotation[1])
+	sr, cr := math32.Sincos(c.rotation[0])
+
+	c.target = glm.Vec3f{sy * cp, sp, cy * cp}.Normalize()
+	right := glm.Vec3f{sy*sp*sr + cy*cr, cp * sr, cy*sp*sr - sy*cr}.Normalize()
+	c.up = c.target.Cross(right).Normalize()
+}
+
 func (c *PerspectiveCamera) SetTarget(x, y, z float32) {
 	c.target[0] = x
 	c.target[1] = y
 	c.target[2] = z
+}
+
+func (c *PerspectiveCamera) Fwd() glm.Vec3f {
+	return c.target
+}
+
+func (c *PerspectiveCamera) Up() glm.Vec3f {
+	return c.up
 }
 
 func (c *PerspectiveCamera) ViewProjection() glm.Mat4f {

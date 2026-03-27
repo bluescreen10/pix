@@ -2,9 +2,11 @@ package main
 
 import (
 	"runtime"
+	"time"
 
 	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
+	"github.com/bluescreen10/pix/controls"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/cogentcore/webgpu/wgpuglfw"
 	"github.com/go-gl/glfw/v3.3/glfw"
@@ -45,6 +47,8 @@ func main() {
 	camera := cameras.NewPerpectiveCamera(45, float32(width)/float32(height), 0.01, 2000)
 	camera.SetPosition(0, 1, -3)
 
+	ctrl := controls.NewOrbit(camera, window)
+
 	// tex, err := loaders.LoadTexture("cmd/testapp/assets/uv_grid.png")
 	// //ex, err := loaders.LoadTexture("assets/uv_grid.png")
 	// if err != nil {
@@ -69,16 +73,17 @@ func main() {
 	}
 
 	scene.SetBackground(glm.Color4f{0.5, 0.5, 0, 1})
-
+	var start = time.Now()
 	for !window.ShouldClose() {
+		delta := time.Since(start)
+		start = time.Now()
 		err := renderer.Render(scene, camera)
 		if err != nil {
 			panic(err)
 		}
-		camera.Move(0, 0, -0.1)
 		//mesh.Rotate(0, 0.005, 0)
 		//mesh.Move(0, 0, 0.05)
-
+		ctrl.Update(delta)
 		glfw.PollEvents()
 	}
 }

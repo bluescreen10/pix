@@ -131,6 +131,10 @@ func (r *Renderer) ensureObjectStorageSize(neededObjects uint32) error {
 			r.objectStorageBindGroup.Release()
 		}
 
+		if r.objectStorageCapacity == 0 {
+			r.objectStorageCapacity = InitialStorageCapacity
+		}
+
 		for r.objectStorageCapacity < neededObjects {
 			r.objectStorageCapacity *= 2
 		}
