@@ -12,13 +12,15 @@ struct Camera {
 };
 
 layout(set = 0, binding = 0) uniform Camera camera;
-layout(set = 2, binding = 0) uniform mat4 model;
+
+layout(std430, set = 2 ,binding = 0) readonly buffer Object {
+    mat4 models[];
+};
 
 void main() {
-    gl_Position = camera.view_projection * model * vec4(position, 1.0);
+    gl_Position = camera.view_projection * models[gl_InstanceIndex] * vec4(position, 1.0);
     
     #ifdef USE_UV
     vUv = uv;
     #endif
 }
-

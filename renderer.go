@@ -12,6 +12,16 @@ import (
 	"github.com/cogentcore/webgpu/wgpu"
 )
 
+const (
+	InitialStorageCapacity = 1024
+)
+
+var modelsPool = sync.Pool{
+	New: func() any {
+		return make([]glm.Mat4f, 0, InitialStorageCapacity)
+	},
+}
+
 var viewableMeshesPool = sync.Pool{
 	New: func() any {
 		return make([]*Mesh, 0, 4096)
@@ -22,6 +32,13 @@ var renderablesPool = sync.Pool{
 	New: func() any {
 		return make([]renderable, 0, 4096)
 	},
+}
+
+type renderContext struct {
+	texture    *wgpu.Texture
+	view       *wgpu.TextureView
+	renderPass *wgpu.RenderPassEncoder
+	encoder    *wgpu.CommandEncoder
 }
 
 type Renderer struct {
@@ -39,9 +56,10 @@ type Renderer struct {
 	globalBindGroupLayout *wgpu.BindGroupLayout
 	globalBindGroup       *wgpu.BindGroup
 
-	objectUniformBuffer   *wgpu.Buffer
-	objectBindGroupLayout *wgpu.BindGroupLayout
-	objectBindGroup       *wgpu.BindGroup
+	objectStorageBuffer          *wgpu.Buffer
+	objectStorageBindGroupLayout *wgpu.BindGroupLayout
+	objectStorageBindGroup       *wgpu.BindGroup
+	objectStorageCapacity        uint32
 }
 
 func NewRenderer(width, height uint32) *Renderer {
@@ -75,8 +93,10 @@ func (r *Renderer) Destroy() {
 	r.runtime.Destroy()
 	r.runtime = nil
 
-	r.objectBindGroup.Release()
-	r.objectBindGroup = nil
+	if r.objectStorageBindGroup != nil {
+		r.objectStorageBindGroup.Release()
+		r.objectStorageBindGroup = nil
+	}
 
 	r.globalBindGroup.Release()
 	r.globalBindGroup = nil
@@ -84,16 +104,64 @@ func (r *Renderer) Destroy() {
 	r.globalUniformBuffer.Destroy()
 	r.globalUniformBuffer = nil
 
-	r.objectUniformBuffer.Destroy()
-	r.objectUniformBuffer = nil
+	if r.objectStorageBuffer != nil {
+		r.objectStorageBuffer.Destroy()
+		r.objectStorageBuffer = nil
+	}
 
 	r.globalBindGroupLayout.Release()
 	r.globalBindGroupLayout = nil
 
-	r.objectBindGroupLayout.Release()
-	r.objectBindGroupLayout = nil
+	if r.objectStorageBindGroupLayout != nil {
+		r.objectStorageBindGroupLayout.Release()
+		r.objectStorageBindGroupLayout = nil
+	}
 
 	r.resources.destroy()
+}
+
+func (r *Renderer) ensureObjectStorageSize(neededObjects uint32) error {
+	var err error
+
+	if r.objectStorageBuffer == nil || r.objectStorageCapacity < neededObjects {
+		if r.objectStorageBuffer != nil {
+			r.objectStorageBuffer.Destroy()
+		}
+		if r.objectStorageBindGroup != nil {
+			r.objectStorageBindGroup.Release()
+		}
+
+		for r.objectStorageCapacity < neededObjects {
+			r.objectStorageCapacity *= 2
+		}
+
+		r.objectStorageBuffer, err = r.runtime.Device.CreateBuffer(&wgpu.BufferDescriptor{
+			Label: "Object storage buffer",
+			Size:  uint64(r.objectStorageCapacity) * uint64(unsafe.Sizeof(glm.Mat4f{})),
+			Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst,
+		})
+		if err != nil {
+			return err
+		}
+
+		r.objectStorageBindGroup, err = r.runtime.Device.CreateBindGroup(&wgpu.BindGroupDescriptor{
+			Label:  "Object bind group",
+			Layout: r.objectStorageBindGroupLayout,
+			Entries: []wgpu.BindGroupEntry{
+				{
+					Binding: 0,
+					Buffer:  r.objectStorageBuffer,
+					Offset:  0,
+					Size:    wgpu.WholeSize,
+				},
+			},
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (r *Renderer) Render(scene *Scene, camera Camera) error {
@@ -110,6 +178,9 @@ func (r *Renderer) Render(scene *Scene, camera Camera) error {
 	renderables := renderablesPool.Get().([]renderable)
 	defer renderablesPool.Put(renderables[:0])
 
+	models := modelsPool.Get().([]glm.Mat4f)
+	defer modelsPool.Put(models[:0])
+
 	//Prepare Objects
 	for _, mesh := range visibleObjects {
 		geometryData := mesh.geometry
@@ -124,13 +195,6 @@ func (r *Renderer) Render(scene *Scene, camera Camera) error {
 				r.logger.Error("error uploading geometry", slog.Any("err", err))
 			}
 		}
-
-		// if geometry.IsDirty() {
-		// 	err := geometry.Upload(r.runtime.Device, r.runtime.Queue)
-		// 	if err != nil {
-		// 		r.logger.Error("error uploading geometry", slog.Any("err", err))
-		// 	}
-		// }
 
 		materialData := mesh.material
 		material := r.resources.GetMaterialByData(materialData)
@@ -147,8 +211,10 @@ func (r *Renderer) Render(scene *Scene, camera Camera) error {
 		renderables = append(renderables, renderable{
 			geometry: *geometry,
 			material: material,
-			model:    mesh.Model(),
 		})
+
+		models = append(models, mesh.Model())
+
 	}
 
 	// Update Global Uniforms
@@ -157,15 +223,33 @@ func (r *Renderer) Render(scene *Scene, camera Camera) error {
 		r.logger.Error("error updating global uniform", slog.Any("err", err))
 	}
 
-	//Draw
-	for _, renderable := range renderables {
-		if err := r.renderObject(renderable, scene.background); err != nil {
+	// Batch update object matrices using storage buffer
+	if count := len(models); count > 0 {
+		r.ensureObjectStorageSize(uint32(count))
+		r.runtime.Queue.WriteBuffer(r.objectStorageBuffer, 0, wgpu.ToBytes(models))
+	}
+
+	// Begin rendering
+	ctx, err := r.beginRendering(scene.background)
+	if err != nil {
+		return err
+	}
+
+	// Draw objects
+	for i, renderable := range renderables {
+		if err := r.renderObject(renderable, ctx, i); err != nil {
 			return err
 		}
 	}
 
+	// End rendering
+	err = r.endRendering(ctx)
+	if err != nil {
+		return err
+	}
+
 	// Process pending resources
-	err := r.resources.processPending(r.runtime.Device)
+	err = r.resources.processPending(r.runtime.Device)
 	if err != nil {
 		panic(err)
 	}
@@ -173,80 +257,90 @@ func (r *Renderer) Render(scene *Scene, camera Camera) error {
 	return nil
 }
 
-func (r *Renderer) renderObject(obj renderable, bgColor glm.Color4f) error {
-
-	texture, err := r.runtime.Surface.GetCurrentTexture()
-	if err != nil {
-		r.logger.Error("error obtaining next frame texture", slog.Any("err", err))
-		return err
-	}
-	defer texture.Release()
-
-	view, err := texture.CreateView(nil)
-	if err != nil {
-		r.logger.Error("error creating view", slog.Any("err", err))
-		return err
-	}
-	defer view.Release()
-
-	encoder, err := r.runtime.Device.CreateCommandEncoder(nil)
-	if err != nil {
-		r.logger.Error("error creating command encoder", slog.Any("err", err))
-		return err
-	}
-	defer encoder.Release()
-
-	//temp code
-	renderPass := encoder.BeginRenderPass(&wgpu.RenderPassDescriptor{
-		ColorAttachments: []wgpu.RenderPassColorAttachment{{
-			View:       view,
-			LoadOp:     wgpu.LoadOpClear,
-			StoreOp:    wgpu.StoreOpStore,
-			ClearValue: wgpu.Color{R: float64(bgColor.R()), G: (float64(bgColor.G())), B: (float64(bgColor.B())), A: float64(bgColor.A())}, //TODO: make it something the user can define
-		}},
-	})
-
-	//FIXME: use a better way to turn it into a matrix
-	r.runtime.Queue.WriteBuffer(r.objectUniformBuffer, 0, wgpu.ToBytes([]glm.Mat4f{obj.model}))
-
+func (r *Renderer) renderObject(obj renderable, ctx *renderContext, objIdx int) error {
 	pipeline, err := r.getPipelineFor(obj)
 	if err != nil {
 		r.logger.Error("error getting pipeline", slog.Any("err", err))
 		return err
 	}
 
-	renderPass.SetPipeline(pipeline)
-	renderPass.SetBindGroup(0, r.globalBindGroup, []uint32{})
-	renderPass.SetBindGroup(1, obj.material.bindGroup, []uint32{})
-	renderPass.SetBindGroup(2, r.objectBindGroup, []uint32{})
+	ctx.renderPass.SetPipeline(pipeline)
+	ctx.renderPass.SetBindGroup(0, r.globalBindGroup, []uint32{})
+	ctx.renderPass.SetBindGroup(1, obj.material.bindGroup, []uint32{})
+	ctx.renderPass.SetBindGroup(2, r.objectStorageBindGroup, []uint32{})
 
 	for _, b := range obj.geometry.bufs {
-		renderPass.SetVertexBuffer(uint32(b.loc), b.buf, 0, wgpu.WholeSize)
+		ctx.renderPass.SetVertexBuffer(uint32(b.loc), b.buf, 0, wgpu.WholeSize)
 	}
 
 	if obj.geometry.index != nil {
 		//TODO support other formats for index buffers
-		renderPass.SetIndexBuffer(obj.geometry.index, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
-		renderPass.DrawIndexed(uint32(obj.geometry.count), 1, 0, 0, 0)
+		ctx.renderPass.SetIndexBuffer(obj.geometry.index, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
+		ctx.renderPass.DrawIndexed(uint32(obj.geometry.count), 1, 0, 0, uint32(objIdx))
 	} else {
-		renderPass.Draw(uint32(obj.geometry.count), 1, 0, 0)
+		ctx.renderPass.Draw(uint32(obj.geometry.count), 1, 0, uint32(objIdx))
 	}
 
-	err = renderPass.End()
+	return nil
+}
+
+func (r *Renderer) beginRendering(bgColor glm.Color4f) (*renderContext, error) {
+	var err error
+
+	ctx := &renderContext{}
+
+	ctx.texture, err = r.runtime.Surface.GetCurrentTexture()
+	if err != nil {
+		r.logger.Error("error obtaining next frame texture", slog.Any("err", err))
+		return nil, err
+	}
+
+	ctx.view, err = ctx.texture.CreateView(nil)
+	if err != nil {
+		r.logger.Error("error creating view", slog.Any("err", err))
+		return nil, err
+	}
+
+	ctx.encoder, err = r.runtime.Device.CreateCommandEncoder(nil)
+	if err != nil {
+		r.logger.Error("error creating command encoder", slog.Any("err", err))
+		return nil, err
+	}
+
+	//temp code
+	ctx.renderPass = ctx.encoder.BeginRenderPass(&wgpu.RenderPassDescriptor{
+		ColorAttachments: []wgpu.RenderPassColorAttachment{{
+			View:       ctx.view,
+			LoadOp:     wgpu.LoadOpClear,
+			StoreOp:    wgpu.StoreOpStore,
+			ClearValue: wgpu.Color{R: float64(bgColor.R()), G: (float64(bgColor.G())), B: (float64(bgColor.B())), A: float64(bgColor.A())}, //TODO: make it something the user can define
+		}},
+	})
+
+	return ctx, nil
+}
+
+func (r *Renderer) endRendering(ctx *renderContext) error {
+	err := ctx.renderPass.End()
 	if err != nil {
 		r.logger.Error("error ending render pass", slog.Any("err", err))
 		return err
 	}
 
-	cmdBuf, err := encoder.Finish(nil)
+	cmdBuf, err := ctx.encoder.Finish(nil)
 	if err != nil {
 		r.logger.Error("error creating command buffer", slog.Any("err", err))
 		return err
 	}
-	defer cmdBuf.Release()
 
 	r.runtime.Queue.Submit(cmdBuf)
 	r.runtime.Surface.Present()
+
+	// release resources
+	cmdBuf.Release()
+	ctx.encoder.Release()
+	ctx.view.Release()
+	ctx.texture.Release()
 	return nil
 }
 
@@ -278,7 +372,7 @@ func (r *Renderer) createRenderPipeline(obj renderable) (*wgpu.RenderPipeline, e
 		BindGroupLayouts: []*wgpu.BindGroupLayout{
 			r.globalBindGroupLayout,
 			obj.material.bindGroupLayout,
-			r.objectBindGroupLayout,
+			r.objectStorageBindGroupLayout,
 		},
 	})
 
@@ -407,15 +501,15 @@ func (r *Renderer) createGlobalBindGroupLayouts() error {
 				Visibility: wgpu.ShaderStageVertex | wgpu.ShaderStageFragment,
 
 				Buffer: wgpu.BufferBindingLayout{
-					Type:             wgpu.BufferBindingTypeUniform,
+					Type:             wgpu.BufferBindingTypeReadOnlyStorage,
 					HasDynamicOffset: false,
-					MinBindingSize:   uint64(unsafe.Sizeof(glm.Mat4f{})), //TODO: replace this with a uniform (also implement a ring-buffer)
+					MinBindingSize:   uint64(unsafe.Sizeof(glm.Mat4f{})),
 				},
 			},
 		},
 	})
 
-	r.objectBindGroupLayout = layout
+	r.objectStorageBindGroupLayout = layout
 
 	return err
 }
@@ -433,17 +527,7 @@ func (r *Renderer) createGlobalBuffers() error {
 
 	r.globalUniformBuffer = buf
 
-	buf, err = r.runtime.Device.CreateBuffer(&wgpu.BufferDescriptor{
-		Label: "Object uniform buffer",
-		Size:  uint64(unsafe.Sizeof(glm.Mat4f{})), //TODO: use an actual uniform
-		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
-	})
-
-	if err != nil {
-		return err
-	}
-
-	r.objectUniformBuffer = buf
+	r.ensureObjectStorageSize(InitialStorageCapacity)
 
 	return nil
 }
@@ -467,26 +551,6 @@ func (r *Renderer) createGlobalBindGroups() error {
 	}
 
 	r.globalBindGroup = bindingGroup
-
-	bindingGroup, err = r.runtime.Device.CreateBindGroup(&wgpu.BindGroupDescriptor{
-		Label:  "Object bind group",
-		Layout: r.globalBindGroupLayout,
-		Entries: []wgpu.BindGroupEntry{
-			{
-				Binding: 0, //TODO: use a constant
-				Buffer:  r.objectUniformBuffer,
-				Offset:  0,
-				Size:    wgpu.WholeSize,
-			},
-		},
-	})
-
-	if err != nil {
-		return err
-	}
-
-	r.objectBindGroup = bindingGroup
-
 	return nil
 }
 
