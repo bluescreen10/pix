@@ -63,3 +63,12 @@ func ToDegrees[T number](angle T) T {
 		return T(float64(angle) * 180 / math.Pi)
 	}
 }
+
+func Clamp[T number](x, min, max T) T {
+	if x < min {
+		return min
+	} else if x > max {
+		return max
+	}
+	return x
+}

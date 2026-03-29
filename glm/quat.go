@@ -101,6 +101,18 @@ func (q Quat[T]) Mul(q2 Quat[T]) Quat[T] {
 	}
 }
 
+func (q Quat[T]) Rotate(v Vec3[T]) Vec3[T] {
+
+	// q * v * q⁻¹
+	res := q.Mul3x1(v).Mul(q.Conjugate())
+
+	return Vec3[T]{
+		res.X(),
+		res.Y(),
+		res.Z(),
+	}
+}
+
 func (q Quat[T]) Vec3() Vec3[T] {
 	return Vec3[T]{q[0], q[1], q[2]}
 }

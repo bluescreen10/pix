@@ -46,22 +46,8 @@ func (v Vec3[T]) Z() T {
 }
 
 func (v Vec3[T]) Normalize() Vec3[T] {
-	switch any(v[0]).(type) {
-	case float32:
-		l := math32.Sqrt(float32(v.Dot(v)))
-		return Vec3[T]{
-			T(float32(v[0]) / l),
-			T(float32(v[1]) / l),
-			T(float32(v[2]) / l),
-		}
-	default:
-		l := math.Sqrt(float64((v.Dot(v))))
-		return Vec3[T]{
-			T(float64(v[0]) / l),
-			T(float64(v[1]) / l),
-			T(float64(v[2]) / l),
-		}
-	}
+	l := v.Length()
+	return Vec3[T]{v[0] / l, v[1] / l, v[2] / l}
 }
 
 func (v Vec3[T]) Cross(v2 Vec3[T]) Vec3[T] {
@@ -74,6 +60,15 @@ func (v Vec3[T]) Cross(v2 Vec3[T]) Vec3[T] {
 
 func (v Vec3[T]) Dot(v2 Vec3[T]) T {
 	return v[0]*v2[0] + v[1]*v2[1] + v[2]*v2[2]
+}
+
+func (v Vec3[T]) Length() T {
+	switch any(v[0]).(type) {
+	case float32:
+		return T(math32.Sqrt(float32(v.Dot(v))))
+	default:
+		return T(math.Sqrt(float64((v.Dot(v)))))
+	}
 }
 
 func (v Vec3[T]) Scale(s T) Vec3[T] {

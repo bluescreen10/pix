@@ -45,7 +45,7 @@ func main() {
 	}
 
 	camera := cameras.NewPerpectiveCamera(45, float32(width)/float32(height), 0.01, 2000)
-	camera.SetPosition(0, 1, -3)
+	camera.SetPosition(glm.Vec3f{200, 2, 200})
 
 	ctrl := controls.NewOrbit(camera, window)
 
@@ -66,7 +66,7 @@ func main() {
 	for i := range 100 {
 		for j := range 100 {
 			mesh := pix.NewMesh(geo, material.Build())
-			mesh.SetPosition(float32(i)*4, 0, float32(j)*4)
+			mesh.SetPosition(200-float32(i)*4, 0, 200-float32(j)*4)
 			//mesh.SetRotation(float32(i), float32(j), 0)
 			scene.Add(mesh)
 		}
