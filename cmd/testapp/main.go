@@ -2,13 +2,13 @@ package main
 
 import (
 	"runtime"
-	"time"
 
 	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/controls"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/input/glfwinput"
+	"github.com/bluescreen10/pix/loaders"
 	"github.com/cogentcore/webgpu/wgpuglfw"
 	"github.com/go-gl/glfw/v3.3/glfw"
 
@@ -51,17 +51,17 @@ func main() {
 	input := glfwinput.New(window)
 	ctrl := controls.NewOrbit(camera, input)
 
-	// tex, err := loaders.LoadTexture("cmd/testapp/assets/uv_grid.png")
+	tex, err := loaders.LoadTexture("cmd/testapp/assets/uv_grid.png")
 	// //ex, err := loaders.LoadTexture("assets/uv_grid.png")
-	// if err != nil {
-	// 	panic(err)
-	// }
+	if err != nil {
+		panic(err)
+	}
 
 	scene := pix.NewScene()
 
 	material := pix.NewBasicMaterial()
-	material.SetColor(glm.Color3f{1, 0, 0})
-	//material.SetColorMap(tex)
+	//material.SetColor(glm.Color3f{1, 0, 0})
+	material.SetColorMap(tex)
 
 	geo := pix.NewBoxGeometry(1, 1, 1)
 
@@ -74,18 +74,12 @@ func main() {
 		}
 	}
 
-	scene.SetBackground(glm.Color4f{0.5, 0.5, 0, 1})
-	var start = time.Now()
 	for !window.ShouldClose() {
-		delta := time.Since(start)
-		start = time.Now()
 		err := renderer.Render(scene, camera)
 		if err != nil {
 			panic(err)
 		}
-		//mesh.Rotate(0, 0.005, 0)
-		//mesh.Move(0, 0, 0.05)
-		ctrl.Update(delta)
+		ctrl.Update()
 		glfw.PollEvents()
 	}
 }

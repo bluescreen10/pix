@@ -53,6 +53,7 @@ type OrbitControls struct {
 	isPanning  bool
 	mousePos   glm.Vec2f
 	scroll     glm.Vec2f
+	lastUpdate time.Time
 }
 
 type MouseButtonMapping struct {
@@ -66,7 +67,7 @@ func NewOrbit(camera camera, mouse input.MouseInput) *OrbitControls {
 	x, y := mouse.GetPos()
 	scrollX, scrollY := mouse.GetScroll()
 
-	c := &OrbitControls{
+	return &OrbitControls{
 		camera: camera,
 		mouse:  mouse,
 
@@ -84,14 +85,14 @@ func NewOrbit(camera camera, mouse input.MouseInput) *OrbitControls {
 			Pan:   input.MouseButtonRight,
 		},
 
-		mousePos: glm.Vec2f{float32(x), float32(y)},
-		scroll:   glm.Vec2f{float32(scrollX), float32(scrollY)},
+		mousePos:   glm.Vec2f{float32(x), float32(y)},
+		scroll:     glm.Vec2f{float32(scrollX), float32(scrollY)},
+		lastUpdate: time.Now(),
 	}
-
-	return c
 }
 
-func (c *OrbitControls) Update(dt time.Duration) {
+func (c *OrbitControls) Update() {
+	dt := time.Since(c.lastUpdate)
 	x, y := c.mouse.GetPos()
 	newPos := glm.Vec2f{float32(x), float32(y)}
 
@@ -140,9 +141,10 @@ func (c *OrbitControls) Update(dt time.Duration) {
 		offset = offset.Normalize().Scale(radius)
 	}
 
-	// update mouse position
+	// update internal state
 	c.mousePos = newPos
 	c.scroll = newScroll
+	c.lastUpdate = time.Now()
 
 	// damping
 	if c.dampingEnabled {
