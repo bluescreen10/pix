@@ -8,6 +8,7 @@ import (
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/controls"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/input/glfwinput"
 	"github.com/cogentcore/webgpu/wgpuglfw"
 	"github.com/go-gl/glfw/v3.3/glfw"
 
@@ -47,7 +48,8 @@ func main() {
 	camera := cameras.NewPerpectiveCamera(45, float32(width)/float32(height), 0.01, 2000)
 	camera.SetPosition(glm.Vec3f{200, 2, 200})
 
-	ctrl := controls.NewOrbit(camera, window)
+	input := glfwinput.New(window)
+	ctrl := controls.NewOrbit(camera, input)
 
 	// tex, err := loaders.LoadTexture("cmd/testapp/assets/uv_grid.png")
 	// //ex, err := loaders.LoadTexture("assets/uv_grid.png")

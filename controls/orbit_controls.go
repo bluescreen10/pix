@@ -4,8 +4,8 @@ import (
 	"time"
 
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/input"
 	"github.com/chewxy/math32"
-	"github.com/go-gl/glfw/v3.3/glfw"
 )
 
 type camera interface {
@@ -19,7 +19,7 @@ type camera interface {
 
 type OrbitControls struct {
 	camera camera
-	input  *glfw.Window
+	mouse  input.MouseInput
 
 	// target Point
 	target        glm.Vec3f
@@ -52,21 +52,23 @@ type OrbitControls struct {
 	isRotating bool
 	isPanning  bool
 	mousePos   glm.Vec2f
+	scroll     glm.Vec2f
 }
 
 type MouseButtonMapping struct {
-	Orbit glfw.MouseButton
-	Pan   glfw.MouseButton
-	Zoom  glfw.MouseButton
+	Orbit input.MouseButton
+	Pan   input.MouseButton
+	Zoom  input.MouseButton
 }
 
 // TODO: input should be an interface
-func NewOrbit(camera camera, input *glfw.Window) *OrbitControls {
-	x, y := input.GetCursorPos()
+func NewOrbit(camera camera, mouse input.MouseInput) *OrbitControls {
+	x, y := mouse.GetPos()
+	scrollX, scrollY := mouse.GetScroll()
 
 	c := &OrbitControls{
 		camera: camera,
-		input:  input,
+		mouse:  mouse,
 
 		target: glm.Vec3f{0, 0, 0},
 
@@ -78,28 +80,30 @@ func NewOrbit(camera camera, input *glfw.Window) *OrbitControls {
 		dampingFactor:  5,
 
 		mouseButtons: MouseButtonMapping{
-			Orbit: glfw.MouseButtonLeft,
-			Pan:   glfw.MouseButtonRight,
+			Orbit: input.MouseButtonLeft,
+			Pan:   input.MouseButtonRight,
 		},
 
 		mousePos: glm.Vec2f{float32(x), float32(y)},
+		scroll:   glm.Vec2f{float32(scrollX), float32(scrollY)},
 	}
-
-	input.SetScrollCallback(c.ScrollCb)
 
 	return c
 }
 
 func (c *OrbitControls) Update(dt time.Duration) {
-	x, y := c.input.GetCursorPos()
+	x, y := c.mouse.GetPos()
 	newPos := glm.Vec2f{float32(x), float32(y)}
+
+	x, y = c.mouse.GetScroll()
+	newScroll := glm.Vec2f{float32(x), float32(y)}
 
 	pos := c.camera.Position()
 	offset := pos.Sub(c.target)
 	radius := offset.Length()
 
 	// orbit
-	if c.input.GetMouseButton(c.mouseButtons.Orbit) == glfw.Press {
+	if c.mouse.GetButton(c.mouseButtons.Orbit) == input.ButtonPress {
 		if !c.isRotating {
 			c.mousePos = newPos
 			c.isRotating = true
@@ -114,7 +118,7 @@ func (c *OrbitControls) Update(dt time.Duration) {
 	}
 
 	// pan
-	if c.input.GetMouseButton(c.mouseButtons.Pan) == glfw.Press {
+	if c.mouse.GetButton(c.mouseButtons.Pan) == input.ButtonPress {
 		if !c.isPanning {
 			c.mousePos = newPos
 			c.isPanning = true
@@ -130,15 +134,15 @@ func (c *OrbitControls) Update(dt time.Duration) {
 		c.isPanning = false
 	}
 
-	// update mouse position
-	c.mousePos = newPos
-
 	// zoom
-	if c.scrollY != 0 {
-		radius *= glm.Clamp(1-float32(c.scrollY)*c.zoomSpeed, 0.1, 100)
-		c.scrollY = 0
+	if c.scroll.Y() != float32(newScroll.Y()) {
+		radius *= glm.Clamp(1-float32(newScroll.Y())*c.zoomSpeed, 0.1, 100)
 		offset = offset.Normalize().Scale(radius)
 	}
+
+	// update mouse position
+	c.mousePos = newPos
+	c.scroll = newScroll
 
 	// damping
 	if c.dampingEnabled {
@@ -169,9 +173,4 @@ func (c *OrbitControls) Update(dt time.Duration) {
 	c.camera.SetPosition(pos)
 	c.camera.SetFwd(forward)
 	c.camera.SetUp(up)
-}
-
-func (c *OrbitControls) ScrollCb(_ *glfw.Window, xoff, yoff float64) {
-	c.scrollX = xoff
-	c.scrollY = yoff
 }
