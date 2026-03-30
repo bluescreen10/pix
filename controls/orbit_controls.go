@@ -91,6 +91,18 @@ func NewOrbit(camera camera, mouse input.MouseInput) *OrbitControls {
 	}
 }
 
+func (c *OrbitControls) SetTarget(target glm.Vec3f) {
+	c.desiredTarget = target
+}
+
+func (c *OrbitControls) SetPitch(pitch float32) {
+	c.desiredPitch = pitch
+}
+
+func (c *OrbitControls) SetYaw(yaw float32) {
+	c.desiredYaw = yaw
+}
+
 func (c *OrbitControls) Update() {
 	dt := time.Since(c.lastUpdate)
 	x, y := c.mouse.GetPos()

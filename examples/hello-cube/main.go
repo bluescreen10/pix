@@ -26,60 +26,73 @@ const (
 )
 
 func main() {
+	// initialize glfw
 	if err := glfw.Init(); err != nil {
 		panic(err)
 	}
 
 	glfw.WindowHint(glfw.ClientAPI, glfw.NoAPI)
 
+	// create window
 	window, err := glfw.CreateWindow(width, height, title, nil, nil)
 	if err != nil {
 		panic(err)
 	}
 
+	// get framebuffer size and surface descriptor
 	width, height := window.GetFramebufferSize()
 	descriptor := wgpuglfw.GetSurfaceDescriptor(window)
 
+	// create & initialize renderer
 	renderer := pix.NewRenderer(uint32(width), uint32(height))
 	if err := renderer.Init(descriptor); err != nil {
 		panic(err)
 	}
 
-	camera := cameras.NewPerpectiveCamera(45, float32(width)/float32(height), 0.01, 2000)
-	camera.SetPosition(glm.Vec3f{200, 2, 200})
-
+	// create input handler
 	input := glfwinput.New(window)
-	ctrl := controls.NewOrbit(camera, input)
 
-	tex, err := loaders.LoadTexture("cmd/testapp/assets/uv_grid.png")
-	// //ex, err := loaders.LoadTexture("assets/uv_grid.png")
+	// create camera
+	camera := cameras.NewPerpectiveCamera(45, float32(width)/float32(height), 0.01, 2000)
+	camera.SetPosition(glm.Vec3f{1, 1, -2})
+
+	// create camera control
+	ctrl := controls.NewOrbit(camera, input)
+	ctrl.SetPitch(glm.ToRadians(float32(-45)))
+	ctrl.SetYaw(glm.ToRadians(float32(45)))
+
+	tex, err := loaders.LoadTexture("assets/uv_grid.png")
 	if err != nil {
 		panic(err)
 	}
 
-	scene := pix.NewScene()
-
+	// create material
 	material := pix.NewBasicMaterial()
-	//material.SetColor(glm.Color3f{1, 0, 0})
 	material.SetColorMap(tex)
 
+	// create geometry
 	geo := pix.NewBoxGeometry(1, 1, 1)
 
-	for i := range 100 {
-		for j := range 100 {
-			mesh := pix.NewMesh(geo, material.Build())
-			mesh.SetPosition(200-float32(i)*4, 0, 200-float32(j)*4)
-			//mesh.SetRotation(float32(i), float32(j), 0)
-			scene.Add(mesh)
-		}
-	}
+	// create mesh
+	mesh := pix.NewMesh(geo, material.Build())
 
+	// add mesh to scene
+	scene := pix.NewScene()
+	scene.Add(mesh)
+
+	// main render loop
 	for !window.ShouldClose() {
+
+		// render scene
 		err := renderer.Render(scene, camera)
 		if err != nil {
 			panic(err)
 		}
+
+		// update camera control
 		ctrl.Update()
+
+		// poll events
 		glfw.PollEvents()
 	}
 }
