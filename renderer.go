@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/bluescreen10/pix/glm"
@@ -60,16 +61,20 @@ type Renderer struct {
 	objectStorageBindGroupLayout *wgpu.BindGroupLayout
 	objectStorageBindGroup       *wgpu.BindGroup
 	objectStorageCapacity        uint32
+
+	gpuTimingEnabled bool
+
+	Stats *RendererStats
 }
 
 func NewRenderer(width, height uint32) *Renderer {
 
 	return &Renderer{
-		width:   width,
-		height:  height,
-		logger:  slog.New(slog.NewTextHandler(os.Stderr, nil)),
-		runtime: &wgpuRuntime{},
-
+		width:         width,
+		height:        height,
+		logger:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		runtime:       &wgpuRuntime{},
+		Stats:         NewRendererStats(60),
 		pipelineCache: newPipelineCache(),
 	}
 }
@@ -169,15 +174,19 @@ func (r *Renderer) ensureObjectStorageSize(neededObjects uint32) error {
 }
 
 func (r *Renderer) Render(scene *Scene, camera Camera) error {
-	r.frameCount++
+	r.Stats.NextFrame()
+	start := time.Now()
 
 	//Update local/world matrices
 	updateMatrix(scene, false)
 
+	// Extract frustum planes
+	frustumPlanes := planesFromViewProjection(camera.ViewProjection())
+
 	//Extract objects
 	visibleObjects := viewableMeshesPool.Get().([]*Mesh)
 	defer viewableMeshesPool.Put(visibleObjects[:0])
-	visibleObjects = r.appendViewable(visibleObjects, scene)
+	visibleObjects = r.appendViewable(visibleObjects, scene, frustumPlanes)
 
 	renderables := renderablesPool.Get().([]renderable)
 	defer renderablesPool.Put(renderables[:0])
@@ -258,6 +267,8 @@ func (r *Renderer) Render(scene *Scene, camera Camera) error {
 		panic(err)
 	}
 
+	r.Stats.AddFrameTime(time.Since(start).Seconds())
+	//r.runtime.Queue.OnSubmittedWorkDone(func(_ wgpu.QueueWorkDoneStatus) { r.Stats.AddGPUTime(time.Since(start).Seconds()) })
 	return nil
 }
 
@@ -558,16 +569,18 @@ func (r *Renderer) createGlobalBindGroups() error {
 	return nil
 }
 
-func (r *Renderer) appendViewable(meshes []*Mesh, node Node) []*Mesh {
+func (r *Renderer) appendViewable(meshes []*Mesh, node Node, frustumPlanes [6]glm.Vec4f) []*Mesh {
 	for _, child := range node.Children() {
 
 		switch object := any(child).(type) {
 
 		case *Mesh:
-			meshes = append(meshes, object)
+			if sphereInFrustum(frustumPlanes, object.BoundingSphere()) {
+				meshes = append(meshes, object)
+			}
 		}
 
-		meshes = r.appendViewable(meshes, child)
+		meshes = r.appendViewable(meshes, child, frustumPlanes)
 	}
 
 	return meshes
@@ -605,5 +618,90 @@ func updateMatrix(n Node, force bool) {
 	force = n.UpdateMatrix(force)
 	for _, child := range n.Children() {
 		updateMatrix(child, force)
+	}
+}
+
+func planesFromViewProjection(viewProj glm.Mat4f) [6]glm.Vec4f {
+
+	return [6]glm.Vec4f{
+		//left plane
+		glm.Vec4f{
+			viewProj[3] + viewProj[0],
+			viewProj[7] + viewProj[4],
+			viewProj[11] + viewProj[8],
+			viewProj[15] + viewProj[12],
+		}.Normalize(),
+
+		//right plane
+		glm.Vec4f{
+			viewProj[3] - viewProj[0],
+			viewProj[7] - viewProj[4],
+			viewProj[11] - viewProj[8],
+			viewProj[15] - viewProj[12],
+		}.Normalize(),
+
+		//top  plane
+		glm.Vec4f{
+			viewProj[3] - viewProj[1],
+			viewProj[7] - viewProj[5],
+			viewProj[11] - viewProj[9],
+			viewProj[15] - viewProj[13],
+		}.Normalize(),
+
+		//bottom plane
+		glm.Vec4f{
+			viewProj[3] + viewProj[1],
+			viewProj[7] + viewProj[5],
+			viewProj[11] + viewProj[9],
+			viewProj[15] + viewProj[13],
+		}.Normalize(),
+
+		//near plane
+		glm.Vec4f{
+			viewProj[3] + viewProj[2],
+			viewProj[7] + viewProj[6],
+			viewProj[11] + viewProj[10],
+			viewProj[15] + viewProj[14],
+		}.Normalize(),
+
+		//far plane
+		glm.Vec4f{
+			viewProj[3] - viewProj[2],
+			viewProj[7] - viewProj[6],
+			viewProj[11] - viewProj[10],
+			viewProj[15] - viewProj[14],
+		}.Normalize(),
+	}
+}
+
+func sphereInFrustum(planes [6]glm.Vec4f, sphere Sphere) bool {
+	for _, p := range planes {
+		distance :=
+			p[0]*sphere.Center[0] +
+				p[1]*sphere.Center[1] +
+				p[2]*sphere.Center[2] +
+				p[3]
+
+		if distance < -sphere.Radius {
+			return false // outside
+		}
+	}
+	return true // inside or intersecting
+}
+
+func transformSphere(sphere Sphere, model glm.Mat4f) Sphere {
+	// transform center
+	worldCenter := model.Mul4x1(glm.Vec4f{sphere.Center[0], sphere.Center[1], sphere.Center[2], 1.0})
+
+	// extract max scale (important!)
+	sx := glm.Vec3f{model[0], model[1], model[2]}.Length()
+	sy := glm.Vec3f{model[4], model[5], model[6]}.Length()
+	sz := glm.Vec3f{model[8], model[9], model[10]}.Length()
+
+	maxScale := max(sx, max(sy, sz))
+
+	return Sphere{
+		Center: glm.Vec3f{worldCenter[0], worldCenter[1], worldCenter[2]},
+		Radius: sphere.Radius * maxScale,
 	}
 }

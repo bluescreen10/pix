@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"runtime"
 
 	"github.com/bluescreen10/pix"
@@ -80,6 +81,7 @@ func main() {
 	scene := pix.NewScene()
 	scene.Add(mesh)
 
+	var count int
 	// main render loop
 	for !window.ShouldClose() {
 
@@ -91,6 +93,13 @@ func main() {
 
 		// update camera control
 		ctrl.Update()
+
+		count++
+		if count%60 == 0 {
+			fmt.Printf("FPS:%.02f\n", renderer.Stats.FPS())
+			fmt.Printf("GPUTime:%s\n", renderer.Stats.AvgGPUTime())
+			fmt.Printf("CPUTime:%s\n", renderer.Stats.AvgFrameTime())
+		}
 
 		// poll events
 		glfw.PollEvents()

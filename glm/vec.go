@@ -124,6 +124,24 @@ func (v Vec4[T]) W() T {
 	return v[3]
 }
 
+func (v Vec4[T]) Dot(v2 Vec4[T]) T {
+	return v[0]*v2[0] + v[1]*v2[1] + v[2]*v2[2] + v[3]*v2[3]
+}
+
+func (v Vec4[T]) Length() T {
+	switch any(v[0]).(type) {
+	case float32:
+		return T(math32.Sqrt(float32(v.Dot(v))))
+	default:
+		return T(math.Sqrt(float64((v.Dot(v)))))
+	}
+}
+
+func (v Vec4[T]) Normalize() Vec4[T] {
+	l := v.Length()
+	return Vec4[T]{v[0] / l, v[1] / l, v[2] / l, v[3] / l}
+}
+
 func (v Vec4[T]) Vec3() Vec3[T] {
 	return Vec3[T]{v[0], v[1], v[2]}
 }

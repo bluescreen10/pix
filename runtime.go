@@ -57,11 +57,17 @@ func (w *wgpuRuntime) init(width, height uint32, descriptor *wgpu.SurfaceDescrip
 		w.Features[f] = true
 	}
 
+	var requiredFeatures []wgpu.FeatureName
+
+	// Enable timestamp query feature if supported
+	if w.Features[wgpu.FeatureNameTimestampQuery] {
+		requiredFeatures = append(requiredFeatures, wgpu.FeatureNameTimestampQuery)
+	}
+
 	device, err := w.Adapter.RequestDevice(&wgpu.DeviceDescriptor{
-		RequiredFeatures: []wgpu.FeatureName{
-			wgpu.FeatureNameTimestampQuery,
-		},
+		RequiredFeatures: requiredFeatures,
 	})
+
 	if err != nil {
 		return err
 	}
