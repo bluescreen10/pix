@@ -1,7 +1,7 @@
 package pix
 
 import (
-	"github.com/cogentcore/webgpu/wgpu"
+	"github.com/oliverbestmann/webgpu/wgpu"
 )
 
 type resourceManager struct {
@@ -89,13 +89,11 @@ func (rm *resourceManager) destroy() {
 	rm.textures.Clear()
 }
 
-func (rm *resourceManager) processPending(device *wgpu.Device) error {
+func (rm *resourceManager) processPending(device *wgpu.Device) {
 	rm.textures.ProcessDelete(func(tex Texture) error {
 		tex.Destroy()
 		return nil
 	})
-
-	return nil
 }
 
 func (rm *resourceManager) uploadTexture(data *TextureData, device *wgpu.Device) error {
@@ -103,7 +101,7 @@ func (rm *resourceManager) uploadTexture(data *TextureData, device *wgpu.Device)
 	tex := rm.textures.GetResource(data.slot)
 
 	if !ok {
-		newSampler, err := device.CreateSampler(&wgpu.SamplerDescriptor{
+		newSampler := device.CreateSampler(&wgpu.SamplerDescriptor{
 			Label:         "", //TODO: better label
 			AddressModeU:  data.sampler.AddressModeU,
 			AddressModeV:  data.sampler.AddressModeV,
@@ -117,9 +115,6 @@ func (rm *resourceManager) uploadTexture(data *TextureData, device *wgpu.Device)
 			MaxAnisotropy: data.sampler.MaxAnisotropy,
 		})
 
-		if err != nil {
-			return err
-		}
 		sampler = newSampler
 		rm.samplers[data.sampler] = sampler
 	}
@@ -136,7 +131,7 @@ func (rm *resourceManager) uploadTexture(data *TextureData, device *wgpu.Device)
 		tex.ref.Destroy()
 	}
 
-	gpuTexture, err := device.CreateTexture(&wgpu.TextureDescriptor{
+	gpuTexture := device.CreateTexture(&wgpu.TextureDescriptor{
 		Label:         "Texture",
 		Size:          wgpu.Extent3D{Width: uint32(data.width), Height: uint32(data.height), DepthOrArrayLayers: 1},
 		MipLevelCount: 1,
@@ -146,19 +141,15 @@ func (rm *resourceManager) uploadTexture(data *TextureData, device *wgpu.Device)
 		Usage:         wgpu.TextureUsageCopyDst | wgpu.TextureUsageTextureBinding,
 	})
 
-	if err != nil {
-		return err
-	}
-
 	queue := device.GetQueue()
-	err = queue.WriteTexture(
-		&wgpu.ImageCopyTexture{
+	queue.WriteTexture(
+		&wgpu.TexelCopyTextureInfo{
 			Texture:  gpuTexture,
 			MipLevel: 0,
 			Origin:   wgpu.Origin3D{X: 0, Y: 0, Z: 0},
 		},
 		data.flush(),
-		&wgpu.TextureDataLayout{
+		&wgpu.TexelCopyBufferLayout{
 			Offset:       0,
 			BytesPerRow:  uint32(data.width) * 4, // Assuming RGBA8 format
 			RowsPerImage: uint32(data.height),
@@ -166,14 +157,7 @@ func (rm *resourceManager) uploadTexture(data *TextureData, device *wgpu.Device)
 		&wgpu.Extent3D{Width: uint32(data.width), Height: uint32(data.height), DepthOrArrayLayers: 1},
 	)
 
-	if err != nil {
-		return err
-	}
-
-	view, err := gpuTexture.CreateView(nil)
-	if err != nil {
-		return err
-	}
+	view := gpuTexture.CreateView(nil)
 
 	tex.ref = gpuTexture
 	tex.view = view
@@ -190,15 +174,12 @@ func (rm *resourceManager) uploadGeometry(device *wgpu.Device, data *GeometryDat
 
 	// Allocate index buffer
 	if len(data.indices) > 0 {
-		buf, err := device.CreateBufferInit(&wgpu.BufferInitDescriptor{
+		buf := device.CreateBufferInit(&wgpu.BufferInitDescriptor{
 			Label:    "index buffer",
 			Contents: wgpu.ToBytes(data.indices),
 			Usage:    wgpu.BufferUsageIndex | wgpu.BufferUsageCopyDst,
 		})
 
-		if err != nil {
-			return err
-		}
 		geometry.count = len(data.indices)
 		geometry.index = buf
 	} else {
@@ -211,15 +192,11 @@ func (rm *resourceManager) uploadGeometry(device *wgpu.Device, data *GeometryDat
 	geometry.bufs = make([]GeometryBuffer, len(data.attrs))
 
 	for i, a := range data.attrs {
-		buf, err := device.CreateBufferInit(&wgpu.BufferInitDescriptor{
+		buf := device.CreateBufferInit(&wgpu.BufferInitDescriptor{
 			Label:    a.name + " buffer",
 			Contents: a.data,
 			Usage:    wgpu.BufferUsageVertex | wgpu.BufferUsageCopyDst,
 		})
-
-		if err != nil {
-			return err
-		}
 
 		geometry.bufs[i] = GeometryBuffer{
 			loc:     a.loc,

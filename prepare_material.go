@@ -1,7 +1,7 @@
 package pix
 
 import (
-	"github.com/cogentcore/webgpu/wgpu"
+	"github.com/oliverbestmann/webgpu/wgpu"
 )
 
 // Basically there are the following possibilities:
@@ -96,25 +96,23 @@ func createMaterialBindGroupLayout(device *wgpu.Device, data *MaterialData) (*wg
 		binding += 2
 	}
 
-	return device.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
+	bgl := device.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
 		Label:   "", //TODO
 		Entries: bgLayoutEntries,
 	})
+
+	return bgl, nil
 }
 
 func createMaterialBuffers(device *wgpu.Device, data *MaterialData) ([]*wgpu.Buffer, error) {
 	var buffers []*wgpu.Buffer
 
 	for _, u := range data.uniforms {
-		buffer, err := device.CreateBuffer(&wgpu.BufferDescriptor{
+		buffer := device.CreateBuffer(&wgpu.BufferDescriptor{
 			Label: "", //TODO
 			Size:  uint64(u.Size()),
 			Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
 		})
-
-		if err != nil {
-			return buffers, err
-		}
 
 		buffers = append(buffers, buffer)
 	}
@@ -158,9 +156,11 @@ func createMaterialBindGroup(device *wgpu.Device, data *MaterialData, material M
 		binding += 2
 	}
 
-	return device.CreateBindGroup(&wgpu.BindGroupDescriptor{
+	bg := device.CreateBindGroup(&wgpu.BindGroupDescriptor{
 		Label:   "", //TODO
 		Layout:  material.bindGroupLayout,
 		Entries: bgEntries,
 	})
+
+	return bg, nil
 }

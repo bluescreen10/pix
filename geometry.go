@@ -5,7 +5,7 @@ import (
 	"math"
 
 	"github.com/bluescreen10/pix/glm"
-	"github.com/cogentcore/webgpu/wgpu"
+	"github.com/oliverbestmann/webgpu/wgpu"
 )
 
 type GeometryFlags uint64

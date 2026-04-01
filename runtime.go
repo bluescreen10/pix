@@ -3,7 +3,7 @@ package pix
 import (
 	"os"
 
-	"github.com/cogentcore/webgpu/wgpu"
+	"github.com/oliverbestmann/webgpu/wgpu"
 )
 
 func init() {
@@ -53,7 +53,7 @@ func (w *wgpuRuntime) init(width, height uint32, descriptor *wgpu.SurfaceDescrip
 	w.Adapter = adapter
 
 	w.Features = make(map[wgpu.FeatureName]bool)
-	for _, f := range adapter.EnumerateFeatures() {
+	for _, f := range adapter.GetFeatures() {
 		w.Features[f] = true
 	}
 
@@ -87,7 +87,7 @@ func (w *wgpuRuntime) init(width, height uint32, descriptor *wgpu.SurfaceDescrip
 		AlphaMode:   caps.AlphaModes[0],
 	}
 
-	w.Surface.Configure(w.Adapter, w.Device, w.Config)
+	w.Surface.Configure(w.Device, w.Config)
 
 	return nil
 }

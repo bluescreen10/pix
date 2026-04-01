@@ -4,7 +4,7 @@ import (
 	"hash/fnv"
 	"unsafe"
 
-	"github.com/cogentcore/webgpu/wgpu"
+	"github.com/oliverbestmann/webgpu/wgpu"
 )
 
 var matID idGen

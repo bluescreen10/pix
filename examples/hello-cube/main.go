@@ -10,8 +10,8 @@ import (
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/input/glfwinput"
 	"github.com/bluescreen10/pix/loaders"
-	"github.com/cogentcore/webgpu/wgpuglfw"
 	"github.com/go-gl/glfw/v3.3/glfw"
+	"github.com/oliverbestmann/webgpu/wgpuglfw"
 
 	_ "image/png"
 )
@@ -86,10 +86,7 @@ func main() {
 	for !window.ShouldClose() {
 
 		// render scene
-		err := renderer.Render(scene, camera)
-		if err != nil {
-			panic(err)
-		}
+		renderer.Render(scene, camera)
 
 		// update camera control
 		ctrl.Update()

@@ -5,7 +5,7 @@ import (
 	"os"
 
 	"github.com/bluescreen10/pix"
-	"github.com/cogentcore/webgpu/wgpu"
+	"github.com/oliverbestmann/webgpu/wgpu"
 )
 
 func LoadTexture(path string) (*pix.TextureData, error) {

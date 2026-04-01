@@ -1,6 +1,6 @@
 package pix
 
-import "github.com/cogentcore/webgpu/wgpu"
+import "github.com/oliverbestmann/webgpu/wgpu"
 
 type renderPipelineKey struct {
 	shaderHash    uint64

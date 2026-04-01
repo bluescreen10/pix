@@ -1,6 +1,6 @@
 package pix
 
-import "github.com/cogentcore/webgpu/wgpu"
+import "github.com/oliverbestmann/webgpu/wgpu"
 
 // TODO: reduce the size of the struct to fit in a register
 type Sampler struct {

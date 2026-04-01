@@ -10,7 +10,7 @@ import (
 	"unsafe"
 
 	"github.com/bluescreen10/pix/glm"
-	"github.com/cogentcore/webgpu/wgpu"
+	"github.com/oliverbestmann/webgpu/wgpu"
 )
 
 const (
@@ -36,10 +36,9 @@ var renderablesPool = sync.Pool{
 }
 
 type renderContext struct {
-	texture    *wgpu.Texture
-	view       *wgpu.TextureView
-	renderPass *wgpu.RenderPassEncoder
-	encoder    *wgpu.CommandEncoder
+	texture *wgpu.Texture
+	view    *wgpu.TextureView
+	encoder *wgpu.CommandEncoder
 }
 
 type Renderer struct {
@@ -61,8 +60,6 @@ type Renderer struct {
 	objectStorageBindGroupLayout *wgpu.BindGroupLayout
 	objectStorageBindGroup       *wgpu.BindGroup
 	objectStorageCapacity        uint32
-
-	gpuTimingEnabled bool
 
 	Stats *RendererStats
 }
@@ -86,11 +83,7 @@ func (r *Renderer) Init(descriptor *wgpu.SurfaceDescriptor) error {
 	}
 
 	r.resources.init()
-
-	if err := r.createGlobalResources(); err != nil {
-		slog.Error("error creating global resources", slog.Any("err", err))
-	}
-
+	r.createGlobalResources()
 	return nil
 }
 
@@ -125,9 +118,7 @@ func (r *Renderer) Destroy() {
 	r.resources.destroy()
 }
 
-func (r *Renderer) ensureObjectStorageSize(neededObjects uint32) error {
-	var err error
-
+func (r *Renderer) ensureObjectStorageSize(neededObjects uint32) {
 	if r.objectStorageBuffer == nil || r.objectStorageCapacity < neededObjects {
 		if r.objectStorageBuffer != nil {
 			r.objectStorageBuffer.Destroy()
@@ -144,16 +135,13 @@ func (r *Renderer) ensureObjectStorageSize(neededObjects uint32) error {
 			r.objectStorageCapacity *= 2
 		}
 
-		r.objectStorageBuffer, err = r.runtime.Device.CreateBuffer(&wgpu.BufferDescriptor{
+		r.objectStorageBuffer = r.runtime.Device.CreateBuffer(&wgpu.BufferDescriptor{
 			Label: "Object storage buffer",
 			Size:  uint64(r.objectStorageCapacity) * uint64(unsafe.Sizeof(glm.Mat4f{})),
 			Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst,
 		})
-		if err != nil {
-			return err
-		}
 
-		r.objectStorageBindGroup, err = r.runtime.Device.CreateBindGroup(&wgpu.BindGroupDescriptor{
+		r.objectStorageBindGroup = r.runtime.Device.CreateBindGroup(&wgpu.BindGroupDescriptor{
 			Label:  "Object bind group",
 			Layout: r.objectStorageBindGroupLayout,
 			Entries: []wgpu.BindGroupEntry{
@@ -165,17 +153,17 @@ func (r *Renderer) ensureObjectStorageSize(neededObjects uint32) error {
 				},
 			},
 		})
-		if err != nil {
-			return err
-		}
 	}
-
-	return nil
 }
 
-func (r *Renderer) Render(scene *Scene, camera Camera) error {
+func (r *Renderer) Render(scene *Scene, camera Camera) {
 	r.Stats.NextFrame()
 	start := time.Now()
+
+	var ctx renderContext
+	// acquire next texture
+
+	r.acquireNextFrame(&ctx)
 
 	//Update local/world matrices
 	updateMatrix(scene, false)
@@ -230,100 +218,74 @@ func (r *Renderer) Render(scene *Scene, camera Camera) error {
 
 	}
 
-	// Update Global Uniforms
-	viewProj := camera.ViewProjection()
-	if err := r.runtime.Queue.WriteBuffer(r.globalUniformBuffer, 0, wgpu.ToBytes(viewProj[:])); err != nil {
-		r.logger.Error("error updating global uniform", slog.Any("err", err))
-	}
-
 	// Batch update object matrices using storage buffer
 	if count := len(models); count > 0 {
 		r.ensureObjectStorageSize(uint32(count))
 		r.runtime.Queue.WriteBuffer(r.objectStorageBuffer, 0, wgpu.ToBytes(models))
 	}
 
+	// Update Global Uniforms
+	viewProj := camera.ViewProjection()
+	r.runtime.Queue.WriteBuffer(r.globalUniformBuffer, 0, wgpu.ToBytes(viewProj[:]))
+
 	// Begin rendering
-	ctx, err := r.beginRendering(scene.background)
-	if err != nil {
-		return err
-	}
+	renderPass := r.beginRendering(&ctx, scene.background)
 
 	// Draw objects
 	for i, renderable := range renderables {
-		if err := r.renderObject(renderable, ctx, i); err != nil {
-			return err
-		}
+		r.renderObject(renderPass, renderable, i)
 	}
 
-	// End rendering
-	err = r.endRendering(ctx)
-	if err != nil {
-		return err
-	}
+	//End rendering
+	r.endRendering(&ctx, renderPass)
+	r.Stats.AddFrameTime(time.Since(start).Seconds())
+
+	//Present Frame
+	r.presentFrame(&ctx)
 
 	// Process pending resources
-	err = r.resources.processPending(r.runtime.Device)
-	if err != nil {
-		panic(err)
-	}
-
-	r.Stats.AddFrameTime(time.Since(start).Seconds())
-	//r.runtime.Queue.OnSubmittedWorkDone(func(_ wgpu.QueueWorkDoneStatus) { r.Stats.AddGPUTime(time.Since(start).Seconds()) })
-	return nil
+	r.resources.processPending(r.runtime.Device)
 }
 
-func (r *Renderer) renderObject(obj renderable, ctx *renderContext, objIdx int) error {
-	pipeline, err := r.getPipelineFor(obj)
-	if err != nil {
-		r.logger.Error("error getting pipeline", slog.Any("err", err))
-		return err
-	}
-
-	ctx.renderPass.SetPipeline(pipeline)
-	ctx.renderPass.SetBindGroup(0, r.globalBindGroup, []uint32{})
-	ctx.renderPass.SetBindGroup(1, obj.material.bindGroup, []uint32{})
-	ctx.renderPass.SetBindGroup(2, r.objectStorageBindGroup, []uint32{})
+func (r *Renderer) renderObject(pass *wgpu.RenderPassEncoder, obj renderable, objIdx int) {
+	pipeline := r.getPipelineFor(obj)
+	pass.SetPipeline(pipeline)
+	pass.SetBindGroup(0, r.globalBindGroup, []uint32{})
+	pass.SetBindGroup(1, obj.material.bindGroup, []uint32{})
+	pass.SetBindGroup(2, r.objectStorageBindGroup, []uint32{})
 
 	for _, b := range obj.geometry.bufs {
-		ctx.renderPass.SetVertexBuffer(uint32(b.loc), b.buf, 0, wgpu.WholeSize)
+		pass.SetVertexBuffer(uint32(b.loc), b.buf, 0, wgpu.WholeSize)
 	}
 
 	if obj.geometry.index != nil {
 		//TODO support other formats for index buffers
-		ctx.renderPass.SetIndexBuffer(obj.geometry.index, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
-		ctx.renderPass.DrawIndexed(uint32(obj.geometry.count), 1, 0, 0, uint32(objIdx))
+		pass.SetIndexBuffer(obj.geometry.index, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
+		pass.DrawIndexed(uint32(obj.geometry.count), 1, 0, 0, uint32(objIdx))
 	} else {
-		ctx.renderPass.Draw(uint32(obj.geometry.count), 1, 0, uint32(objIdx))
+		pass.Draw(uint32(obj.geometry.count), 1, 0, uint32(objIdx))
 	}
-
-	return nil
 }
 
-func (r *Renderer) beginRendering(bgColor glm.Color4f) (*renderContext, error) {
-	var err error
+func (r *Renderer) acquireNextFrame(ctx *renderContext) {
+	ctx.texture = r.runtime.Surface.GetCurrentTexture()
+	ctx.view = ctx.texture.CreateView(nil)
+}
 
-	ctx := &renderContext{}
+func (r *Renderer) presentFrame(ctx *renderContext) {
+	r.runtime.Surface.Present()
+	ctx.view.Release()
+	ctx.view = nil
 
-	ctx.texture, err = r.runtime.Surface.GetCurrentTexture()
-	if err != nil {
-		r.logger.Error("error obtaining next frame texture", slog.Any("err", err))
-		return nil, err
-	}
+	ctx.texture.Release()
+	ctx.texture = nil
+}
 
-	ctx.view, err = ctx.texture.CreateView(nil)
-	if err != nil {
-		r.logger.Error("error creating view", slog.Any("err", err))
-		return nil, err
-	}
-
-	ctx.encoder, err = r.runtime.Device.CreateCommandEncoder(nil)
-	if err != nil {
-		r.logger.Error("error creating command encoder", slog.Any("err", err))
-		return nil, err
-	}
+func (r *Renderer) beginRendering(ctx *renderContext, bgColor glm.Color4f) *wgpu.RenderPassEncoder {
+	ctx.encoder = r.runtime.Device.CreateCommandEncoder(nil)
 
 	//temp code
-	ctx.renderPass = ctx.encoder.BeginRenderPass(&wgpu.RenderPassDescriptor{
+	return ctx.encoder.BeginRenderPass(&wgpu.RenderPassDescriptor{
 		ColorAttachments: []wgpu.RenderPassColorAttachment{{
 			View:       ctx.view,
 			LoadOp:     wgpu.LoadOpClear,
@@ -331,58 +293,40 @@ func (r *Renderer) beginRendering(bgColor glm.Color4f) (*renderContext, error) {
 			ClearValue: wgpu.Color{R: float64(bgColor.R()), G: (float64(bgColor.G())), B: (float64(bgColor.B())), A: float64(bgColor.A())}, //TODO: make it something the user can define
 		}},
 	})
-
-	return ctx, nil
 }
 
-func (r *Renderer) endRendering(ctx *renderContext) error {
-	err := ctx.renderPass.End()
-	if err != nil {
-		r.logger.Error("error ending render pass", slog.Any("err", err))
-		return err
-	}
+func (r *Renderer) endRendering(ctx *renderContext, pass *wgpu.RenderPassEncoder) {
+	pass.End()
+	pass.Release()
 
-	cmdBuf, err := ctx.encoder.Finish(nil)
-	if err != nil {
-		r.logger.Error("error creating command buffer", slog.Any("err", err))
-		return err
-	}
-
+	cmdBuf := ctx.encoder.Finish(nil)
 	r.runtime.Queue.Submit(cmdBuf)
-	r.runtime.Surface.Present()
 
 	// release resources
 	cmdBuf.Release()
 	ctx.encoder.Release()
-	ctx.view.Release()
-	ctx.texture.Release()
-	return nil
+	ctx.encoder = nil
 }
 
-func (r *Renderer) getPipelineFor(obj renderable) (*wgpu.RenderPipeline, error) {
+func (r *Renderer) getPipelineFor(obj renderable) *wgpu.RenderPipeline {
 	pipelineKey := renderPipelineKey{
 		shaderHash:    obj.material.hash,
 		materialFlags: obj.material.flags,
 		geometryFlags: obj.geometry.flags,
 	}
 	pipline := r.pipelineCache.GetRenderPipeline(pipelineKey)
-
 	if pipline != nil {
-		return pipline, nil
+		return pipline
 	}
 
-	pipeline, err := r.createRenderPipeline(obj)
-	if err != nil {
-		return nil, err
-	}
-
+	pipeline := r.createRenderPipeline(obj)
 	r.pipelineCache.SetRenderPipeline(pipelineKey, pipeline)
-	return pipeline, nil
+	return pipeline
 }
 
-func (r *Renderer) createRenderPipeline(obj renderable) (*wgpu.RenderPipeline, error) {
+func (r *Renderer) createRenderPipeline(obj renderable) *wgpu.RenderPipeline {
 
-	layout, err := r.runtime.Device.CreatePipelineLayout(&wgpu.PipelineLayoutDescriptor{
+	layout := r.runtime.Device.CreatePipelineLayout(&wgpu.PipelineLayoutDescriptor{
 		Label: "", // TODO: add a descriptive name for debugging
 		BindGroupLayouts: []*wgpu.BindGroupLayout{
 			r.globalBindGroupLayout,
@@ -391,23 +335,11 @@ func (r *Renderer) createRenderPipeline(obj renderable) (*wgpu.RenderPipeline, e
 		},
 	})
 
-	if err != nil {
-		return nil, err
-	}
-
 	defines := createDefines(obj.material.flags, obj.geometry.flags)
+	vsModule := r.compileShader(r.runtime.Device, obj.material.vertexShader, defines, wgpu.ShaderStageVertex)
+	fsModule := r.compileShader(r.runtime.Device, obj.material.fragmentShader, defines, wgpu.ShaderStageFragment)
 
-	vsModule, err := r.compileShader(r.runtime.Device, obj.material.vertexShader, defines, wgpu.ShaderStageVertex)
-	if err != nil {
-		return nil, err
-	}
-
-	fsModule, err := r.compileShader(r.runtime.Device, obj.material.fragmentShader, defines, wgpu.ShaderStageFragment)
-	if err != nil {
-		return nil, err
-	}
-
-	pipeline, err := r.runtime.Device.CreateRenderPipeline(&wgpu.RenderPipelineDescriptor{
+	pipeline := r.runtime.Device.CreateRenderPipeline(&wgpu.RenderPipelineDescriptor{
 		Label:  "", //TODO: provide a meaningful name
 		Layout: layout,
 		Vertex: wgpu.VertexState{
@@ -457,36 +389,25 @@ func (r *Renderer) createRenderPipeline(obj renderable) (*wgpu.RenderPipeline, e
 		},
 	})
 
-	return pipeline, err
+	return pipeline
 }
 
-func (r *Renderer) compileShader(device *wgpu.Device, code string, defines map[string]string, stage wgpu.ShaderStage) (*wgpu.ShaderModule, error) {
-	module, err := device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
-		GLSLDescriptor: &wgpu.ShaderModuleGLSLDescriptor{Code: code, Defines: defines, ShaderStage: stage},
+func (r *Renderer) compileShader(device *wgpu.Device, code string, defines map[string]string, stage wgpu.ShaderStage) *wgpu.ShaderModule {
+	module := device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
+		GLSLSource: &wgpu.ShaderSourceGLSL{Code: code, Defines: defines, ShaderStage: stage},
 	})
 
-	return module, err
-
+	return module
 }
 
-func (r *Renderer) createGlobalResources() error {
-	if err := r.createGlobalBindGroupLayouts(); err != nil {
-		return err
-	}
-
-	if err := r.createGlobalBuffers(); err != nil {
-		return err
-	}
-
-	if err := r.createGlobalBindGroups(); err != nil {
-		return err
-	}
-
-	return nil
+func (r *Renderer) createGlobalResources() {
+	r.createGlobalBindGroupLayouts()
+	r.createGlobalBuffers()
+	r.createGlobalBindGroups()
 }
 
-func (r *Renderer) createGlobalBindGroupLayouts() error {
-	layout, err := r.runtime.Device.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
+func (r *Renderer) createGlobalBindGroupLayouts() {
+	r.globalBindGroupLayout = r.runtime.Device.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
 		Label: "Global Bind Group Layout",
 		Entries: []wgpu.BindGroupLayoutEntry{
 			{
@@ -502,13 +423,7 @@ func (r *Renderer) createGlobalBindGroupLayouts() error {
 		},
 	})
 
-	if err != nil {
-		return err
-	}
-
-	r.globalBindGroupLayout = layout
-
-	layout, err = r.runtime.Device.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
+	r.objectStorageBindGroupLayout = r.runtime.Device.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
 		Label: "Object/Model Bind Group Layout",
 		Entries: []wgpu.BindGroupLayoutEntry{
 			{
@@ -523,32 +438,20 @@ func (r *Renderer) createGlobalBindGroupLayouts() error {
 			},
 		},
 	})
-
-	r.objectStorageBindGroupLayout = layout
-
-	return err
 }
 
-func (r *Renderer) createGlobalBuffers() error {
-	buf, err := r.runtime.Device.CreateBuffer(&wgpu.BufferDescriptor{
+func (r *Renderer) createGlobalBuffers() {
+	r.globalUniformBuffer = r.runtime.Device.CreateBuffer(&wgpu.BufferDescriptor{
 		Label: "Global uniform buffer",
 		Size:  uint64(unsafe.Sizeof(glm.Mat4f{})), //TODO: use an actual uniform
 		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
 	})
 
-	if err != nil {
-		return err
-	}
-
-	r.globalUniformBuffer = buf
-
 	r.ensureObjectStorageSize(InitialStorageCapacity)
-
-	return nil
 }
 
-func (r *Renderer) createGlobalBindGroups() error {
-	bindingGroup, err := r.runtime.Device.CreateBindGroup(&wgpu.BindGroupDescriptor{
+func (r *Renderer) createGlobalBindGroups() {
+	r.globalBindGroup = r.runtime.Device.CreateBindGroup(&wgpu.BindGroupDescriptor{
 		Label:  "Global bind group",
 		Layout: r.globalBindGroupLayout,
 		Entries: []wgpu.BindGroupEntry{
@@ -560,13 +463,6 @@ func (r *Renderer) createGlobalBindGroups() error {
 			},
 		},
 	})
-
-	if err != nil {
-		return err
-	}
-
-	r.globalBindGroup = bindingGroup
-	return nil
 }
 
 func (r *Renderer) appendViewable(meshes []*Mesh, node Node, frustumPlanes [6]glm.Vec4f) []*Mesh {
