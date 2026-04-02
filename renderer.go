@@ -15,17 +15,24 @@ import (
 
 const (
 	InitialStorageCapacity = 1024
+	MaxDirectionalLights   = 5
 )
 
-var modelsPool = sync.Pool{
+var objectPool = sync.Pool{
 	New: func() any {
-		return make([]glm.Mat4f, 0, InitialStorageCapacity)
+		return make([]objectUniform, 0, InitialStorageCapacity)
 	},
 }
 
 var viewableMeshesPool = sync.Pool{
 	New: func() any {
 		return make([]*Mesh, 0, 4096)
+	},
+}
+
+var viewableDirectionalLights = sync.Pool{
+	New: func() any {
+		return make([]*DirectionalLight, 0, MaxDirectionalLights)
 	},
 }
 
@@ -52,7 +59,9 @@ type Renderer struct {
 	pipelineCache *pipelineCache
 
 	// temp
-	globalUniformBuffer   *wgpu.Buffer
+	cameraUniformBuffer *wgpu.Buffer
+	lightsUniformBuffer *wgpu.Buffer
+
 	globalBindGroupLayout *wgpu.BindGroupLayout
 	globalBindGroup       *wgpu.BindGroup
 
@@ -100,11 +109,11 @@ func (r *Renderer) Destroy() {
 		r.objectStorageBindGroup = nil
 	}
 
-	r.globalBindGroup.Release()
-	r.globalBindGroup = nil
+	r.cameraUniformBuffer.Destroy()
+	r.cameraUniformBuffer = nil
 
-	r.globalUniformBuffer.Destroy()
-	r.globalUniformBuffer = nil
+	r.lightsUniformBuffer.Destroy()
+	r.lightsUniformBuffer = nil
 
 	if r.objectStorageBuffer != nil {
 		r.objectStorageBuffer.Destroy()
@@ -151,7 +160,7 @@ func (r *Renderer) ensureObjectStorageSize(neededObjects uint32) {
 
 		r.objectStorageBuffer = r.runtime.Device.CreateBuffer(&wgpu.BufferDescriptor{
 			Label: "Object storage buffer",
-			Size:  uint64(r.objectStorageCapacity) * uint64(unsafe.Sizeof(glm.Mat4f{})),
+			Size:  uint64(r.objectStorageCapacity) * uint64(unsafe.Sizeof(objectUniform{})),
 			Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst,
 		})
 
@@ -197,6 +206,21 @@ func (r *Renderer) ensureDepthTextureSize(width, height uint32) {
 	r.depthTextureView = r.depthTexture.CreateView(nil)
 }
 
+type sceneObjects struct {
+	meshes            []*Mesh
+	directionalLights []*DirectionalLight
+}
+
+func (o *sceneObjects) init() {
+	o.meshes = viewableMeshesPool.Get().([]*Mesh)
+	o.directionalLights = viewableDirectionalLights.Get().([]*DirectionalLight)
+}
+
+func (o *sceneObjects) release() {
+	viewableMeshesPool.Put(o.meshes[:0])
+	viewableDirectionalLights.Put(o.directionalLights[:0])
+}
+
 func (r *Renderer) Render(scene *Scene, camera Camera) {
 	var ctx renderContext
 	// acquire next texture
@@ -213,18 +237,22 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	frustumPlanes := planesFromViewProjection(camera.ViewProjection())
 
 	//Extract objects
-	visibleObjects := viewableMeshesPool.Get().([]*Mesh)
-	defer viewableMeshesPool.Put(visibleObjects[:0])
-	visibleObjects = r.appendViewable(visibleObjects, scene, frustumPlanes)
+	var visibleObjects sceneObjects
+	visibleObjects.init()
+	defer visibleObjects.release()
+
+	r.appendViewable(&visibleObjects, scene, frustumPlanes)
 
 	renderables := renderablesPool.Get().([]renderable)
 	defer renderablesPool.Put(renderables[:0])
 
-	models := modelsPool.Get().([]glm.Mat4f)
-	defer modelsPool.Put(models[:0])
+	objects := objectPool.Get().([]objectUniform)
+	defer objectPool.Put(objects[:0])
+
+	var useLights bool
 
 	//Prepare Objects
-	for _, mesh := range visibleObjects {
+	for _, mesh := range visibleObjects.meshes {
 		geometryData := mesh.geometry
 		geometry := r.resources.GetGeometry(geometryData)
 
@@ -250,24 +278,45 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 		// FIXME: the renderer shouldn't need to know what resources use to store
 		r.resources.SetMaterial(materialData.slot, material)
 
+		if material.isLit {
+			useLights = true
+		}
+
 		renderables = append(renderables, renderable{
 			geometry: *geometry,
 			material: material,
 		})
 
-		models = append(models, mesh.Model())
+		objects = append(objects, objectUniform{mesh.Model(), mesh.InvModel()})
 
 	}
 
 	// Batch update object matrices using storage buffer
-	if count := len(models); count > 0 {
+	if count := len(objects); count > 0 {
 		r.ensureObjectStorageSize(uint32(count))
-		r.runtime.Queue.WriteBuffer(r.objectStorageBuffer, 0, wgpu.ToBytes(models))
+		r.runtime.Queue.WriteBuffer(r.objectStorageBuffer, 0, wgpu.ToBytes(objects))
 	}
 
 	// Update Global Uniforms
-	viewProj := camera.ViewProjection()
-	r.runtime.Queue.WriteBuffer(r.globalUniformBuffer, 0, wgpu.ToBytes(viewProj[:]))
+	r.runtime.Queue.WriteBuffer(r.cameraUniformBuffer, 0, toBytes(&cameraUniform{
+		viewProj: camera.ViewProjection(),
+		position: camera.Position().Vec4(),
+	}))
+
+	if useLights {
+		var lights lightsUniform
+
+		// directional lights
+		count := min(MaxDirectionalLights, len(visibleObjects.directionalLights))
+		lights.directionalLightCount = uint32(count)
+		for i, l := range visibleObjects.directionalLights[:count] {
+			lights.directionalLights[i] = directionalLightUniform{
+				color:     l.color.RGBA(),
+				direction: l.target.Sub(l.pos).Normalize().Vec4(),
+			}
+		}
+		r.runtime.Queue.WriteBuffer(r.lightsUniformBuffer, 0, toBytes(&lights))
+	}
 
 	// Begin rendering
 	renderPass := r.beginRendering(&ctx, scene.background)
@@ -457,7 +506,7 @@ func (r *Renderer) createGlobalResources() {
 
 func (r *Renderer) createGlobalBindGroupLayouts() {
 	r.globalBindGroupLayout = r.runtime.Device.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
-		Label: "Global Bind Group Layout",
+		Label: "Global Lit Bind Group Layout",
 		Entries: []wgpu.BindGroupLayoutEntry{
 			{
 				Binding:    0, //TODO: Make it a constant
@@ -466,7 +515,16 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 				Buffer: wgpu.BufferBindingLayout{
 					Type:             wgpu.BufferBindingTypeUniform,
 					HasDynamicOffset: false,
-					MinBindingSize:   uint64(unsafe.Sizeof(glm.Mat4f{})), //TODO: replace this with a uniform
+					MinBindingSize:   uint64(unsafe.Sizeof(cameraUniform{})),
+				},
+			},
+			{
+				Binding:    1,
+				Visibility: wgpu.ShaderStageVertex | wgpu.ShaderStageFragment,
+				Buffer: wgpu.BufferBindingLayout{
+					Type:             wgpu.BufferBindingTypeUniform,
+					HasDynamicOffset: false,
+					MinBindingSize:   uint64(unsafe.Sizeof(lightsUniform{})),
 				},
 			},
 		},
@@ -482,7 +540,7 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 				Buffer: wgpu.BufferBindingLayout{
 					Type:             wgpu.BufferBindingTypeReadOnlyStorage,
 					HasDynamicOffset: false,
-					MinBindingSize:   uint64(unsafe.Sizeof(glm.Mat4f{})),
+					MinBindingSize:   uint64(unsafe.Sizeof(objectUniform{})),
 				},
 			},
 		},
@@ -490,9 +548,15 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 }
 
 func (r *Renderer) createGlobalBuffers() {
-	r.globalUniformBuffer = r.runtime.Device.CreateBuffer(&wgpu.BufferDescriptor{
-		Label: "Global uniform buffer",
-		Size:  uint64(unsafe.Sizeof(glm.Mat4f{})), //TODO: use an actual uniform
+	r.cameraUniformBuffer = r.runtime.Device.CreateBuffer(&wgpu.BufferDescriptor{
+		Label: "Camera uniform buffer",
+		Size:  uint64(unsafe.Sizeof(cameraUniform{})), //TODO: use an actual uniform
+		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
+	})
+
+	r.lightsUniformBuffer = r.runtime.Device.CreateBuffer(&wgpu.BufferDescriptor{
+		Label: "Lights uniform buffer",
+		Size:  uint64(unsafe.Sizeof(lightsUniform{})), //TODO: use an actual uniform
 		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
 	})
 
@@ -501,12 +565,18 @@ func (r *Renderer) createGlobalBuffers() {
 
 func (r *Renderer) createGlobalBindGroups() {
 	r.globalBindGroup = r.runtime.Device.CreateBindGroup(&wgpu.BindGroupDescriptor{
-		Label:  "Global bind group",
+		Label:  "Global Lit bind group",
 		Layout: r.globalBindGroupLayout,
 		Entries: []wgpu.BindGroupEntry{
 			{
 				Binding: 0, //TODO: use a constant
-				Buffer:  r.globalUniformBuffer,
+				Buffer:  r.cameraUniformBuffer,
+				Offset:  0,
+				Size:    wgpu.WholeSize,
+			},
+			{
+				Binding: 1,
+				Buffer:  r.lightsUniformBuffer,
 				Offset:  0,
 				Size:    wgpu.WholeSize,
 			},
@@ -514,25 +584,31 @@ func (r *Renderer) createGlobalBindGroups() {
 	})
 }
 
-func (r *Renderer) appendViewable(meshes []*Mesh, node Node, frustumPlanes [6]glm.Vec4f) []*Mesh {
+func (r *Renderer) appendViewable(visibleObjects *sceneObjects, node Node, frustumPlanes [6]glm.Vec4f) {
 	for _, child := range node.Children() {
 
 		switch object := any(child).(type) {
 
 		case *Mesh:
 			if sphereInFrustum(frustumPlanes, object.BoundingSphere()) {
-				meshes = append(meshes, object)
+				visibleObjects.meshes = append(visibleObjects.meshes, object)
 			}
+		case *DirectionalLight:
+			visibleObjects.directionalLights = append(visibleObjects.directionalLights, object)
 		}
 
-		meshes = r.appendViewable(meshes, child, frustumPlanes)
+		r.appendViewable(visibleObjects, child, frustumPlanes)
 	}
-
-	return meshes
 }
 
 func createDefines(matFlags MaterialFlags, geoFlags GeometryFlags) map[string]string {
-	defines := make(map[string]string)
+	defines := map[string]string{
+		//sets
+		"GLOBAL_SET":             "0",
+		"MATERIAL_SET":           "1",
+		"OBJECT_SET":             "2",
+		"MAX_DIRECTIONAL_LIGHTS": strconv.Itoa(MaxDirectionalLights),
+	}
 
 	for flags := matFlags; flags != 0; {
 		bit := bits.TrailingZeros64(uint64(flags))
@@ -649,4 +725,11 @@ func transformSphere(sphere Sphere, model glm.Mat4f) Sphere {
 		Center: glm.Vec3f{worldCenter[0], worldCenter[1], worldCenter[2]},
 		Radius: sphere.Radius * maxScale,
 	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

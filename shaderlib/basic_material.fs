@@ -1,7 +1,7 @@
 #version 450
 
 #ifdef USE_UV
-layout(location = 0) in vec2 vUv;
+layout(location = 1) in vec2 vUv;
 #endif
 
 // struct Material {
@@ -9,9 +9,9 @@ layout(location = 0) in vec2 vUv;
 // };
 
 //layout(binding = 0, set = 1) uniform Material material;
-layout(binding = 0, set = 1) uniform vec4 color;
-layout(binding = 1, set = 1) uniform texture2D colorMap;
-layout(binding = 2, set = 1) uniform sampler colorMapSampler;
+layout(set = MATERIAL_SET, binding = 0) uniform vec4 color;
+layout(set = MATERIAL_SET, binding = 1) uniform texture2D colorMap;
+layout(set = MATERIAL_SET, binding = 2) uniform sampler colorMapSampler;
 
 layout(location = 0) out vec4 FragColor;
 

@@ -53,6 +53,7 @@ func prepareMaterial(device *wgpu.Device, data *MaterialData, material Material,
 	material.hash = data.hash
 	material.bindGroup = bindGroup
 	material.version = data.version
+	material.isLit = data.isLit
 	return material, nil
 }
 

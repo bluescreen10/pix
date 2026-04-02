@@ -30,6 +30,7 @@ type MaterialData struct {
 	flags          MaterialFlags
 	textures       []*TextureData
 	uniforms       []*Uniform
+	isLit          bool
 }
 
 func (m *MaterialData) Texture(id int) *TextureData {
@@ -47,7 +48,7 @@ func (m *MaterialData) Uniforms() []*Uniform {
 	return m.uniforms
 }
 
-func NewMaterial(name string, vertexShader, fragmentShader string, uniforms []*Uniform, numTextures int) *MaterialData {
+func NewMaterial(name string, vertexShader, fragmentShader string, uniforms []*Uniform, numTextures int, isLit bool) *MaterialData {
 	return &MaterialData{
 		id:             matID.Next(),
 		name:           name,
@@ -57,6 +58,7 @@ func NewMaterial(name string, vertexShader, fragmentShader string, uniforms []*U
 		hash:           hashShaders(vertexShader, fragmentShader),
 		uniforms:       uniforms,
 		textures:       make([]*TextureData, numTextures),
+		isLit:          isLit,
 	}
 }
 
@@ -70,6 +72,7 @@ type Material struct {
 	flags           MaterialFlags
 	hash            uint64
 	defines         map[string]string
+	isLit           bool
 }
 
 func (m Material) Destroy() {

@@ -8,20 +8,22 @@ type Node interface {
 	SetParent(parent Node)
 	Children() []Node
 	Model() glm.Mat4f
+	InvModel() glm.Mat4f
 	UpdateMatrix(force bool) bool
 }
 
 var _ Node = &node{}
 
 type node struct {
-	pos        glm.Vec3f
-	scale      glm.Vec3f
-	rot        glm.Quatf
-	localModel glm.Mat4f
-	worldModel glm.Mat4f
-	parent     Node
-	children   []Node
-	dirty      bool
+	pos           glm.Vec3f
+	scale         glm.Vec3f
+	rot           glm.Quatf
+	localModel    glm.Mat4f
+	worldModel    glm.Mat4f
+	invWorldModel glm.Mat4f
+	parent        Node
+	children      []Node
+	dirty         bool
 }
 
 func (n *node) SetPosition(x, y, z float32) {
@@ -73,6 +75,10 @@ func (n *node) Model() glm.Mat4f {
 	return n.worldModel
 }
 
+func (n *node) InvModel() glm.Mat4f {
+	return n.worldModel
+}
+
 func (n *node) UpdateMatrix(force bool) bool {
 	if !n.dirty && !force {
 		return false
@@ -113,9 +119,10 @@ func NewScene() *Scene {
 
 func newNode() node {
 	return node{
-		scale:      glm.Vec3f{1, 1, 1},
-		rot:        glm.QuatIdentityf,
-		localModel: glm.Mat4fIndentity,
-		worldModel: glm.Mat4fIndentity,
+		scale:         glm.Vec3f{1, 1, 1},
+		rot:           glm.QuatIdentityf,
+		localModel:    glm.Mat4fIndentity,
+		worldModel:    glm.Mat4fIndentity,
+		invWorldModel: glm.Mat4fIndentity,
 	}
 }

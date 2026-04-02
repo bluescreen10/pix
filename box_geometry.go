@@ -53,6 +53,21 @@ func NewBoxGeometry(width, height, depth float32) *GeometryData {
 		{0, 0}, {1, 0}, {1, 1}, {0, 1},
 	}
 
+	normals := []glm.Vec3f{
+		// Left face (-X)
+		{-1, 0, 0}, {-1, 0, 0}, {-1, 0, 0}, {-1, 0, 0},
+		// Right face (+X)
+		{1, 0, 0}, {1, 0, 0}, {1, 0, 0}, {1, 0, 0},
+		// Bottom face (-Y)
+		{0, -1, 0}, {0, -1, 0}, {0, -1, 0}, {0, -1, 0},
+		// Top face (+Y)
+		{0, 1, 0}, {0, 1, 0}, {0, 1, 0}, {0, 1, 0},
+		// Back face (-Z)
+		{0, 0, -1}, {0, 0, -1}, {0, 0, -1}, {0, 0, -1},
+		// Front face (+Z)
+		{0, 0, 1}, {0, 0, 1}, {0, 0, 1}, {0, 0, 1},
+	}
+
 	indices := []uint32{
 		// Left face (-X)
 		0, 1, 2,
@@ -83,5 +98,6 @@ func NewBoxGeometry(width, height, depth float32) *GeometryData {
 	return (&GeometryData{}).
 		AddAttribute(NewAttribute(PositionAttrName, PositionLocation, Float32x3, pos)).
 		AddAttribute(NewAttribute(UVAttrName, UVLocation, Float32x2, uvs)).
+		AddAttribute(NewAttribute(NormalAttrName, NormalLocation, Float32x3, normals)).
 		SetIndices(indices)
 }

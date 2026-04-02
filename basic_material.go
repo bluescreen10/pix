@@ -69,6 +69,7 @@ func NewBasicMaterial() *BasicMaterial {
 		basicMaterialFragmentShader,
 		[]*Uniform{uniform},
 		1,
+		false,
 	)
 
 	builder := &BasicMaterial{
