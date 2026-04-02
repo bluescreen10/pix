@@ -86,6 +86,7 @@ func (n *node) UpdateMatrix(force bool) bool {
 		n.worldModel = n.localModel
 	}
 
+	n.dirty = false
 	return true
 }
 

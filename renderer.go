@@ -198,13 +198,13 @@ func (r *Renderer) ensureDepthTextureSize(width, height uint32) {
 }
 
 func (r *Renderer) Render(scene *Scene, camera Camera) {
-	r.Stats.NextFrame()
-	start := time.Now()
-
 	var ctx renderContext
 	// acquire next texture
 
 	r.acquireNextFrame(&ctx)
+
+	r.Stats.NextFrame()
+	start := time.Now()
 
 	//Update local/world matrices
 	updateMatrix(scene, false)
