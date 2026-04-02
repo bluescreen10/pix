@@ -61,6 +61,10 @@ type Renderer struct {
 	objectStorageBindGroup       *wgpu.BindGroup
 	objectStorageCapacity        uint32
 
+	//depth buffer
+	depthTexture     *wgpu.Texture
+	depthTextureView *wgpu.TextureView
+
 	Stats *RendererStats
 }
 
@@ -115,6 +119,16 @@ func (r *Renderer) Destroy() {
 		r.objectStorageBindGroupLayout = nil
 	}
 
+	if r.depthTextureView != nil {
+		r.depthTextureView.Release()
+		r.depthTexture = nil
+	}
+
+	if r.depthTexture != nil {
+		r.depthTexture.Destroy()
+		r.depthTexture = nil
+	}
+
 	r.resources.destroy()
 }
 
@@ -154,6 +168,33 @@ func (r *Renderer) ensureObjectStorageSize(neededObjects uint32) {
 			},
 		})
 	}
+}
+
+func (r *Renderer) ensureDepthTextureSize(width, height uint32) {
+	if r.depthTexture != nil && r.depthTexture.GetWidth() == width && r.depthTexture.GetHeight() == r.height {
+		return
+	}
+
+	if r.depthTexture != nil {
+		r.depthTextureView.Release()
+		r.depthTexture.Destroy()
+	}
+
+	r.depthTexture = r.runtime.Device.CreateTexture(&wgpu.TextureDescriptor{
+		Label:         "Depth Texture",
+		Usage:         wgpu.TextureUsageRenderAttachment,
+		Dimension:     wgpu.TextureDimension2D,
+		MipLevelCount: 1,
+		SampleCount:   1,
+		Format:        wgpu.TextureFormatDepth24Plus,
+		Size: wgpu.Extent3D{
+			Width:              width,
+			Height:             height,
+			DepthOrArrayLayers: 1,
+		},
+	})
+
+	r.depthTextureView = r.depthTexture.CreateView(nil)
 }
 
 func (r *Renderer) Render(scene *Scene, camera Camera) {
@@ -285,6 +326,8 @@ func (r *Renderer) beginRendering(ctx *renderContext, bgColor glm.Color4f) *wgpu
 	ctx.encoder = r.runtime.Device.CreateCommandEncoder(nil)
 
 	//temp code
+	r.ensureDepthTextureSize(ctx.texture.GetWidth(), ctx.texture.GetHeight())
+
 	return ctx.encoder.BeginRenderPass(&wgpu.RenderPassDescriptor{
 		ColorAttachments: []wgpu.RenderPassColorAttachment{{
 			View:       ctx.view,
@@ -292,6 +335,12 @@ func (r *Renderer) beginRendering(ctx *renderContext, bgColor glm.Color4f) *wgpu
 			StoreOp:    wgpu.StoreOpStore,
 			ClearValue: wgpu.Color{R: float64(bgColor.R()), G: (float64(bgColor.G())), B: (float64(bgColor.B())), A: float64(bgColor.A())}, //TODO: make it something the user can define
 		}},
+		DepthStencilAttachment: &wgpu.RenderPassDepthStencilAttachment{
+			View:            r.depthTextureView,
+			DepthLoadOp:     wgpu.LoadOpClear,
+			DepthStoreOp:    wgpu.StoreOpStore,
+			DepthClearValue: 1.0,
+		},
 	})
 }
 
@@ -363,25 +412,25 @@ func (r *Renderer) createRenderPipeline(obj renderable) *wgpu.RenderPipeline {
 			FrontFace: wgpu.FrontFaceCCW,                  //TODO: Shader should provide this
 			CullMode:  wgpu.CullModeBack,                  //TODO:Shader should provide this
 		},
-		// DepthStencil: &wgpu.DepthStencilState{
-		// 	Format:            wgpu.TextureFormatDepth24Plus,
-		// 	DepthWriteEnabled: true,
-		// 	DepthCompare:      wgpu.CompareFunctionLess,
-		// 	StencilFront: wgpu.StencilFaceState{
-		// 		Compare:     wgpu.CompareFunctionAlways,
-		// 		FailOp:      wgpu.StencilOperationKeep,
-		// 		DepthFailOp: wgpu.StencilOperationKeep,
-		// 		PassOp:      wgpu.StencilOperationKeep,
-		// 	},
-		// 	StencilBack: wgpu.StencilFaceState{
-		// 		Compare:     wgpu.CompareFunctionAlways,
-		// 		FailOp:      wgpu.StencilOperationKeep,
-		// 		DepthFailOp: wgpu.StencilOperationKeep,
-		// 		PassOp:      wgpu.StencilOperationKeep,
-		// 	},
-		// 	StencilReadMask:  0xFFFFFFFF,
-		// 	StencilWriteMask: 0xFFFFFFFF,
-		// },
+		DepthStencil: &wgpu.DepthStencilState{
+			Format:            wgpu.TextureFormatDepth24Plus,
+			DepthWriteEnabled: wgpu.OptionalBoolTrue,
+			DepthCompare:      wgpu.CompareFunctionLess,
+			StencilFront: wgpu.StencilFaceState{
+				Compare:     wgpu.CompareFunctionAlways,
+				FailOp:      wgpu.StencilOperationKeep,
+				DepthFailOp: wgpu.StencilOperationKeep,
+				PassOp:      wgpu.StencilOperationKeep,
+			},
+			StencilBack: wgpu.StencilFaceState{
+				Compare:     wgpu.CompareFunctionAlways,
+				FailOp:      wgpu.StencilOperationKeep,
+				DepthFailOp: wgpu.StencilOperationKeep,
+				PassOp:      wgpu.StencilOperationKeep,
+			},
+			StencilReadMask:  0xFFFFFFFF,
+			StencilWriteMask: 0xFFFFFFFF,
+		},
 		Multisample: wgpu.MultisampleState{
 			Count:                  1,
 			Mask:                   0xFFFFFFFF,
