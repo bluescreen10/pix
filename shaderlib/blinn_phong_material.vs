@@ -23,9 +23,9 @@ struct Object {
     mat4 invModel;
 };
 
-layout(set = GLOBAL_SET, binding = 0) uniform Camera camera;
+layout(set = GLOBAL_SET, binding = CAMERA_BINDING) uniform Camera camera;
 
-layout(std430, set = INSTANCE_SET, binding = 0) readonly buffer Objects {
+layout(std430, set = INSTANCE_SET, binding = INSTANCES_BINDING) readonly buffer Objects {
     Object []objects;
 };
 

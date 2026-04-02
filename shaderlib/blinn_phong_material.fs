@@ -27,8 +27,8 @@ struct Lights {
     uint directional_lights_count;
 };
 
-layout(set = GLOBAL_SET, binding = 0) uniform Camera camera;
-layout(set = GLOBAL_SET, binding = 1) uniform Lights lights;
+layout(set = GLOBAL_SET, binding = CAMERA_BINDING) uniform Camera camera;
+layout(set = GLOBAL_SET, binding = LIGHTS_BINDING) uniform Lights lights;
 
 
 layout(set = MATERIAL_SET, binding = 0) uniform vec4 color;

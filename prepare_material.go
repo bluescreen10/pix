@@ -125,7 +125,7 @@ func createMaterialBindGroup(device *wgpu.Device, data *MaterialData, material M
 	var bgEntries []wgpu.BindGroupEntry
 	var binding uint32
 
-	for i, _ := range data.uniforms {
+	for i := range data.uniforms {
 		bgEntries = append(bgEntries,
 			wgpu.BindGroupEntry{
 				Binding: binding,

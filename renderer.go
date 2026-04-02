@@ -18,6 +18,24 @@ const (
 	MaxDirectionalLights   = 5
 )
 
+// Shader Sets
+const (
+	GlobalSet = iota
+	MaterialSet
+	InstanceSet
+)
+
+// Global Bindings
+const (
+	CameraBinding = iota
+	LightsBinding
+)
+
+// Instance Bindings
+const (
+	InstancesBinding = iota
+)
+
 var instancesPool = sync.Pool{
 	New: func() any {
 		return make(InstancesUniform, 0, InitialStorageCapacity)
@@ -169,7 +187,7 @@ func (r *Renderer) ensureInstanceStorageSize(needInstances uint32) {
 			Layout: r.instanceStorageBindGroupLayout,
 			Entries: []wgpu.BindGroupEntry{
 				{
-					Binding: 0,
+					Binding: InstancesBinding,
 					Buffer:  r.instanceStorageBuffer,
 					Offset:  0,
 					Size:    wgpu.WholeSize,
@@ -342,9 +360,9 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 func (r *Renderer) renderInstance(pass *wgpu.RenderPassEncoder, obj drawing, objIdx int) {
 	pipeline := r.getPipelineFor(obj)
 	pass.SetPipeline(pipeline)
-	pass.SetBindGroup(0, r.globalBindGroup, []uint32{})
-	pass.SetBindGroup(1, obj.material.bindGroup, []uint32{})
-	pass.SetBindGroup(2, r.instanceStorageBindGroup, []uint32{})
+	pass.SetBindGroup(GlobalSet, r.globalBindGroup, []uint32{})
+	pass.SetBindGroup(MaterialSet, obj.material.bindGroup, []uint32{})
+	pass.SetBindGroup(InstanceSet, r.instanceStorageBindGroup, []uint32{})
 
 	for _, b := range obj.geometry.bufs {
 		pass.SetVertexBuffer(uint32(b.loc), b.buf, 0, wgpu.WholeSize)
@@ -511,7 +529,7 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 		Label: "Global Lit Bind Group Layout",
 		Entries: []wgpu.BindGroupLayoutEntry{
 			{
-				Binding:    0, //TODO: Make it a constant
+				Binding:    CameraBinding,
 				Visibility: wgpu.ShaderStageVertex | wgpu.ShaderStageFragment,
 
 				Buffer: wgpu.BufferBindingLayout{
@@ -521,7 +539,7 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 				},
 			},
 			{
-				Binding:    1,
+				Binding:    LightsBinding,
 				Visibility: wgpu.ShaderStageVertex | wgpu.ShaderStageFragment,
 				Buffer: wgpu.BufferBindingLayout{
 					Type:             wgpu.BufferBindingTypeUniform,
@@ -536,7 +554,7 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 		Label: "Instance/Model Bind Group Layout",
 		Entries: []wgpu.BindGroupLayoutEntry{
 			{
-				Binding:    0, //TODO: Make it a constant
+				Binding:    InstancesBinding,
 				Visibility: wgpu.ShaderStageVertex | wgpu.ShaderStageFragment,
 
 				Buffer: wgpu.BufferBindingLayout{
@@ -571,13 +589,13 @@ func (r *Renderer) createGlobalBindGroups() {
 		Layout: r.globalBindGroupLayout,
 		Entries: []wgpu.BindGroupEntry{
 			{
-				Binding: 0, //TODO: use a constant
+				Binding: CameraBinding,
 				Buffer:  r.cameraUniformBuffer,
 				Offset:  0,
 				Size:    wgpu.WholeSize,
 			},
 			{
-				Binding: 1,
+				Binding: LightsBinding,
 				Buffer:  r.lightsUniformBuffer,
 				Offset:  0,
 				Size:    wgpu.WholeSize,
@@ -606,10 +624,15 @@ func (r *Renderer) cullScene(list *renderList, node Node, frustum Frustum) {
 func createDefines(matFlags MaterialFlags, geoFlags GeometryFlags) map[string]string {
 	defines := map[string]string{
 		//sets
-		"GLOBAL_SET":             "0",
-		"MATERIAL_SET":           "1",
-		"INSTANCE_SET":           "2",
+		"GLOBAL_SET":             strconv.Itoa(GlobalSet),
+		"MATERIAL_SET":           strconv.Itoa(MaterialSet),
+		"INSTANCE_SET":           strconv.Itoa(InstanceSet),
 		"MAX_DIRECTIONAL_LIGHTS": strconv.Itoa(MaxDirectionalLights),
+
+		//bindings
+		"CAMERA_BINDING":    strconv.Itoa(CameraBinding),
+		"LIGHTS_BINDING":    strconv.Itoa(LightsBinding),
+		"INSTANCES_BINDING": strconv.Itoa(InstancesBinding),
 	}
 
 	for flags := matFlags; flags != 0; {
