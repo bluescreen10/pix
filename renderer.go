@@ -18,9 +18,9 @@ const (
 	MaxDirectionalLights   = 5
 )
 
-var objectPool = sync.Pool{
+var instancesPool = sync.Pool{
 	New: func() any {
-		return make([]objectUniform, 0, InitialStorageCapacity)
+		return make(InstancesUniform, 0, InitialStorageCapacity)
 	},
 }
 
@@ -36,9 +36,9 @@ var viewableDirectionalLights = sync.Pool{
 	},
 }
 
-var renderablesPool = sync.Pool{
+var drawingsPool = sync.Pool{
 	New: func() any {
-		return make([]renderable, 0, 4096)
+		return make([]drawing, 0, 4096)
 	},
 }
 
@@ -58,17 +58,17 @@ type Renderer struct {
 
 	pipelineCache *pipelineCache
 
-	// temp
-	cameraUniformBuffer *wgpu.Buffer
-	lightsUniformBuffer *wgpu.Buffer
-
+	//global
+	cameraUniformBuffer   *wgpu.Buffer
+	lightsUniformBuffer   *wgpu.Buffer
 	globalBindGroupLayout *wgpu.BindGroupLayout
 	globalBindGroup       *wgpu.BindGroup
 
-	objectStorageBuffer          *wgpu.Buffer
-	objectStorageBindGroupLayout *wgpu.BindGroupLayout
-	objectStorageBindGroup       *wgpu.BindGroup
-	objectStorageCapacity        uint32
+	//instance
+	instanceStorageBuffer          *wgpu.Buffer
+	instanceStorageBindGroupLayout *wgpu.BindGroupLayout
+	instanceStorageBindGroup       *wgpu.BindGroup
+	instanceStorageCapacity        uint32
 
 	//depth buffer
 	depthTexture     *wgpu.Texture
@@ -104,9 +104,9 @@ func (r *Renderer) Destroy() {
 	r.runtime.Destroy()
 	r.runtime = nil
 
-	if r.objectStorageBindGroup != nil {
-		r.objectStorageBindGroup.Release()
-		r.objectStorageBindGroup = nil
+	if r.instanceStorageBindGroup != nil {
+		r.instanceStorageBindGroup.Release()
+		r.instanceStorageBindGroup = nil
 	}
 
 	r.cameraUniformBuffer.Destroy()
@@ -115,17 +115,17 @@ func (r *Renderer) Destroy() {
 	r.lightsUniformBuffer.Destroy()
 	r.lightsUniformBuffer = nil
 
-	if r.objectStorageBuffer != nil {
-		r.objectStorageBuffer.Destroy()
-		r.objectStorageBuffer = nil
+	if r.instanceStorageBuffer != nil {
+		r.instanceStorageBuffer.Destroy()
+		r.instanceStorageBuffer = nil
 	}
 
 	r.globalBindGroupLayout.Release()
 	r.globalBindGroupLayout = nil
 
-	if r.objectStorageBindGroupLayout != nil {
-		r.objectStorageBindGroupLayout.Release()
-		r.objectStorageBindGroupLayout = nil
+	if r.instanceStorageBindGroupLayout != nil {
+		r.instanceStorageBindGroupLayout.Release()
+		r.instanceStorageBindGroupLayout = nil
 	}
 
 	if r.depthTextureView != nil {
@@ -141,36 +141,36 @@ func (r *Renderer) Destroy() {
 	r.resources.destroy()
 }
 
-func (r *Renderer) ensureObjectStorageSize(neededObjects uint32) {
-	if r.objectStorageBuffer == nil || r.objectStorageCapacity < neededObjects {
-		if r.objectStorageBuffer != nil {
-			r.objectStorageBuffer.Destroy()
+func (r *Renderer) ensureInstanceStorageSize(needInstances uint32) {
+	if r.instanceStorageBuffer == nil || r.instanceStorageCapacity < needInstances {
+		if r.instanceStorageBuffer != nil {
+			r.instanceStorageBuffer.Destroy()
 		}
-		if r.objectStorageBindGroup != nil {
-			r.objectStorageBindGroup.Release()
-		}
-
-		if r.objectStorageCapacity == 0 {
-			r.objectStorageCapacity = InitialStorageCapacity
+		if r.instanceStorageBindGroup != nil {
+			r.instanceStorageBindGroup.Release()
 		}
 
-		for r.objectStorageCapacity < neededObjects {
-			r.objectStorageCapacity *= 2
+		if r.instanceStorageCapacity == 0 {
+			r.instanceStorageCapacity = InitialStorageCapacity
 		}
 
-		r.objectStorageBuffer = r.runtime.Device.CreateBuffer(&wgpu.BufferDescriptor{
-			Label: "Object storage buffer",
-			Size:  uint64(r.objectStorageCapacity) * uint64(unsafe.Sizeof(objectUniform{})),
+		for r.instanceStorageCapacity < needInstances {
+			r.instanceStorageCapacity *= 2
+		}
+
+		r.instanceStorageBuffer = r.runtime.Device.CreateBuffer(&wgpu.BufferDescriptor{
+			Label: "Instance storage buffer",
+			Size:  uint64(r.instanceStorageCapacity) * uint64(unsafe.Sizeof(InstanceUniform{})),
 			Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst,
 		})
 
-		r.objectStorageBindGroup = r.runtime.Device.CreateBindGroup(&wgpu.BindGroupDescriptor{
-			Label:  "Object bind group",
-			Layout: r.objectStorageBindGroupLayout,
+		r.instanceStorageBindGroup = r.runtime.Device.CreateBindGroup(&wgpu.BindGroupDescriptor{
+			Label:  "Instance bind group",
+			Layout: r.instanceStorageBindGroupLayout,
 			Entries: []wgpu.BindGroupEntry{
 				{
 					Binding: 0,
-					Buffer:  r.objectStorageBuffer,
+					Buffer:  r.instanceStorageBuffer,
 					Offset:  0,
 					Size:    wgpu.WholeSize,
 				},
@@ -206,53 +206,53 @@ func (r *Renderer) ensureDepthTextureSize(width, height uint32) {
 	r.depthTextureView = r.depthTexture.CreateView(nil)
 }
 
-type sceneObjects struct {
+type renderList struct {
 	meshes            []*Mesh
 	directionalLights []*DirectionalLight
 }
 
-func (o *sceneObjects) init() {
+func (o *renderList) init() {
 	o.meshes = viewableMeshesPool.Get().([]*Mesh)
 	o.directionalLights = viewableDirectionalLights.Get().([]*DirectionalLight)
 }
 
-func (o *sceneObjects) release() {
+func (o *renderList) release() {
 	viewableMeshesPool.Put(o.meshes[:0])
 	viewableDirectionalLights.Put(o.directionalLights[:0])
 }
 
 func (r *Renderer) Render(scene *Scene, camera Camera) {
 	var ctx renderContext
-	// acquire next texture
 
+	//Acquire next texture
 	r.acquireNextFrame(&ctx)
 
+	//Update stats
 	r.Stats.NextFrame()
 	start := time.Now()
 
 	//Update local/world matrices
 	updateMatrix(scene, false)
 
-	// Extract frustum planes
-	frustumPlanes := planesFromViewProjection(camera.ViewProjection())
+	//Cull Scene
+	var list renderList
+	list.init()
+	defer list.release()
 
-	//Extract objects
-	var visibleObjects sceneObjects
-	visibleObjects.init()
-	defer visibleObjects.release()
+	viewProjection := camera.ViewProjection()
+	frustum := NewFrustumFromViewProjection(viewProjection)
+	r.cullScene(&list, scene, frustum)
 
-	r.appendViewable(&visibleObjects, scene, frustumPlanes)
+	drawings := drawingsPool.Get().([]drawing)
+	defer drawingsPool.Put(drawings[:0])
 
-	renderables := renderablesPool.Get().([]renderable)
-	defer renderablesPool.Put(renderables[:0])
-
-	objects := objectPool.Get().([]objectUniform)
-	defer objectPool.Put(objects[:0])
+	instances := instancesPool.Get().(InstancesUniform)
+	defer instancesPool.Put(instances[:0])
 
 	var useLights bool
 
-	//Prepare Objects
-	for _, mesh := range visibleObjects.meshes {
+	//Prepare Instances
+	for _, mesh := range list.meshes {
 		geometryData := mesh.geometry
 		geometry := r.resources.GetGeometry(geometryData)
 
@@ -282,48 +282,50 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 			useLights = true
 		}
 
-		renderables = append(renderables, renderable{
+		drawings = append(drawings, drawing{
 			geometry: *geometry,
 			material: material,
 		})
 
-		objects = append(objects, objectUniform{mesh.Model(), mesh.InvModel()})
-
+		instances = append(instances, InstanceUniform{mesh.Model(), mesh.InvModel()})
 	}
 
-	// Batch update object matrices using storage buffer
-	if count := len(objects); count > 0 {
-		r.ensureObjectStorageSize(uint32(count))
-		r.runtime.Queue.WriteBuffer(r.objectStorageBuffer, 0, wgpu.ToBytes(objects))
+	//Batch update object matrices using storage buffer
+	if count := len(instances); count > 0 {
+		r.ensureInstanceStorageSize(uint32(count))
+		r.runtime.Queue.WriteBuffer(r.instanceStorageBuffer, 0, instances.Bytes())
 	}
 
-	// Update Global Uniforms
-	r.runtime.Queue.WriteBuffer(r.cameraUniformBuffer, 0, toBytes(&cameraUniform{
-		viewProj: camera.ViewProjection(),
+	//Update Global Uniforms
+	cameraUniform := CameraUniform{
+		viewProj: viewProjection,
 		position: camera.Position().Vec4(),
-	}))
+	}
+	r.runtime.Queue.WriteBuffer(r.cameraUniformBuffer, 0, cameraUniform.Bytes())
 
 	if useLights {
-		var lights lightsUniform
+		var lights LightsUniform
 
-		// directional lights
-		count := min(MaxDirectionalLights, len(visibleObjects.directionalLights))
-		lights.directionalLightCount = uint32(count)
-		for i, l := range visibleObjects.directionalLights[:count] {
-			lights.directionalLights[i] = directionalLightUniform{
+		//Directional lights
+		count := min(MaxDirectionalLights, len(list.directionalLights))
+		lights.DirectionalLightCount = uint32(count)
+		for i, l := range list.directionalLights[:count] {
+			lights.DirectionalLights[i] = DirectionalLightUniform{
 				color:     l.color.RGBA(),
 				direction: l.target.Sub(l.pos).Normalize().Vec4(),
 			}
 		}
-		r.runtime.Queue.WriteBuffer(r.lightsUniformBuffer, 0, toBytes(&lights))
+
+		//Write light buffers
+		r.runtime.Queue.WriteBuffer(r.lightsUniformBuffer, 0, lights.Bytes())
 	}
 
-	// Begin rendering
+	//Begin rendering
 	renderPass := r.beginRendering(&ctx, scene.background)
 
-	// Draw objects
-	for i, renderable := range renderables {
-		r.renderObject(renderPass, renderable, i)
+	//Draw instances
+	for i, drawing := range drawings {
+		r.renderInstance(renderPass, drawing, i)
 	}
 
 	//End rendering
@@ -337,12 +339,12 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	r.resources.processPending(r.runtime.Device)
 }
 
-func (r *Renderer) renderObject(pass *wgpu.RenderPassEncoder, obj renderable, objIdx int) {
+func (r *Renderer) renderInstance(pass *wgpu.RenderPassEncoder, obj drawing, objIdx int) {
 	pipeline := r.getPipelineFor(obj)
 	pass.SetPipeline(pipeline)
 	pass.SetBindGroup(0, r.globalBindGroup, []uint32{})
 	pass.SetBindGroup(1, obj.material.bindGroup, []uint32{})
-	pass.SetBindGroup(2, r.objectStorageBindGroup, []uint32{})
+	pass.SetBindGroup(2, r.instanceStorageBindGroup, []uint32{})
 
 	for _, b := range obj.geometry.bufs {
 		pass.SetVertexBuffer(uint32(b.loc), b.buf, 0, wgpu.WholeSize)
@@ -406,7 +408,7 @@ func (r *Renderer) endRendering(ctx *renderContext, pass *wgpu.RenderPassEncoder
 	ctx.encoder = nil
 }
 
-func (r *Renderer) getPipelineFor(obj renderable) *wgpu.RenderPipeline {
+func (r *Renderer) getPipelineFor(obj drawing) *wgpu.RenderPipeline {
 	pipelineKey := renderPipelineKey{
 		shaderHash:    obj.material.hash,
 		materialFlags: obj.material.flags,
@@ -422,14 +424,14 @@ func (r *Renderer) getPipelineFor(obj renderable) *wgpu.RenderPipeline {
 	return pipeline
 }
 
-func (r *Renderer) createRenderPipeline(obj renderable) *wgpu.RenderPipeline {
+func (r *Renderer) createRenderPipeline(obj drawing) *wgpu.RenderPipeline {
 
 	layout := r.runtime.Device.CreatePipelineLayout(&wgpu.PipelineLayoutDescriptor{
 		Label: "", // TODO: add a descriptive name for debugging
 		BindGroupLayouts: []*wgpu.BindGroupLayout{
 			r.globalBindGroupLayout,
 			obj.material.bindGroupLayout,
-			r.objectStorageBindGroupLayout,
+			r.instanceStorageBindGroupLayout,
 		},
 	})
 
@@ -515,7 +517,7 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 				Buffer: wgpu.BufferBindingLayout{
 					Type:             wgpu.BufferBindingTypeUniform,
 					HasDynamicOffset: false,
-					MinBindingSize:   uint64(unsafe.Sizeof(cameraUniform{})),
+					MinBindingSize:   uint64(unsafe.Sizeof(CameraUniform{})),
 				},
 			},
 			{
@@ -524,14 +526,14 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 				Buffer: wgpu.BufferBindingLayout{
 					Type:             wgpu.BufferBindingTypeUniform,
 					HasDynamicOffset: false,
-					MinBindingSize:   uint64(unsafe.Sizeof(lightsUniform{})),
+					MinBindingSize:   uint64(unsafe.Sizeof(LightsUniform{})),
 				},
 			},
 		},
 	})
 
-	r.objectStorageBindGroupLayout = r.runtime.Device.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
-		Label: "Object/Model Bind Group Layout",
+	r.instanceStorageBindGroupLayout = r.runtime.Device.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
+		Label: "Instance/Model Bind Group Layout",
 		Entries: []wgpu.BindGroupLayoutEntry{
 			{
 				Binding:    0, //TODO: Make it a constant
@@ -540,7 +542,7 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 				Buffer: wgpu.BufferBindingLayout{
 					Type:             wgpu.BufferBindingTypeReadOnlyStorage,
 					HasDynamicOffset: false,
-					MinBindingSize:   uint64(unsafe.Sizeof(objectUniform{})),
+					MinBindingSize:   uint64(unsafe.Sizeof(InstanceUniform{})),
 				},
 			},
 		},
@@ -550,17 +552,17 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 func (r *Renderer) createGlobalBuffers() {
 	r.cameraUniformBuffer = r.runtime.Device.CreateBuffer(&wgpu.BufferDescriptor{
 		Label: "Camera uniform buffer",
-		Size:  uint64(unsafe.Sizeof(cameraUniform{})), //TODO: use an actual uniform
+		Size:  uint64(unsafe.Sizeof(CameraUniform{})), //TODO: use an actual uniform
 		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
 	})
 
 	r.lightsUniformBuffer = r.runtime.Device.CreateBuffer(&wgpu.BufferDescriptor{
 		Label: "Lights uniform buffer",
-		Size:  uint64(unsafe.Sizeof(lightsUniform{})), //TODO: use an actual uniform
+		Size:  uint64(unsafe.Sizeof(LightsUniform{})), //TODO: use an actual uniform
 		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
 	})
 
-	r.ensureObjectStorageSize(InitialStorageCapacity)
+	r.ensureInstanceStorageSize(InitialStorageCapacity)
 }
 
 func (r *Renderer) createGlobalBindGroups() {
@@ -584,20 +586,20 @@ func (r *Renderer) createGlobalBindGroups() {
 	})
 }
 
-func (r *Renderer) appendViewable(visibleObjects *sceneObjects, node Node, frustumPlanes [6]glm.Vec4f) {
+func (r *Renderer) cullScene(list *renderList, node Node, frustum Frustum) {
 	for _, child := range node.Children() {
 
 		switch object := any(child).(type) {
 
 		case *Mesh:
-			if sphereInFrustum(frustumPlanes, object.BoundingSphere()) {
-				visibleObjects.meshes = append(visibleObjects.meshes, object)
+			if frustum.ContainsSphere(object.BoundingSphere()) {
+				list.meshes = append(list.meshes, object)
 			}
 		case *DirectionalLight:
-			visibleObjects.directionalLights = append(visibleObjects.directionalLights, object)
+			list.directionalLights = append(list.directionalLights, object)
 		}
 
-		r.appendViewable(visibleObjects, child, frustumPlanes)
+		r.cullScene(list, child, frustum)
 	}
 }
 
@@ -606,7 +608,7 @@ func createDefines(matFlags MaterialFlags, geoFlags GeometryFlags) map[string]st
 		//sets
 		"GLOBAL_SET":             "0",
 		"MATERIAL_SET":           "1",
-		"OBJECT_SET":             "2",
+		"INSTANCE_SET":           "2",
 		"MAX_DIRECTIONAL_LIGHTS": strconv.Itoa(MaxDirectionalLights),
 	}
 
@@ -642,74 +644,6 @@ func updateMatrix(n Node, force bool) {
 	}
 }
 
-func planesFromViewProjection(viewProj glm.Mat4f) [6]glm.Vec4f {
-
-	return [6]glm.Vec4f{
-		//left plane
-		glm.Vec4f{
-			viewProj[3] + viewProj[0],
-			viewProj[7] + viewProj[4],
-			viewProj[11] + viewProj[8],
-			viewProj[15] + viewProj[12],
-		}.Normalize(),
-
-		//right plane
-		glm.Vec4f{
-			viewProj[3] - viewProj[0],
-			viewProj[7] - viewProj[4],
-			viewProj[11] - viewProj[8],
-			viewProj[15] - viewProj[12],
-		}.Normalize(),
-
-		//top  plane
-		glm.Vec4f{
-			viewProj[3] - viewProj[1],
-			viewProj[7] - viewProj[5],
-			viewProj[11] - viewProj[9],
-			viewProj[15] - viewProj[13],
-		}.Normalize(),
-
-		//bottom plane
-		glm.Vec4f{
-			viewProj[3] + viewProj[1],
-			viewProj[7] + viewProj[5],
-			viewProj[11] + viewProj[9],
-			viewProj[15] + viewProj[13],
-		}.Normalize(),
-
-		//near plane
-		glm.Vec4f{
-			viewProj[3] + viewProj[2],
-			viewProj[7] + viewProj[6],
-			viewProj[11] + viewProj[10],
-			viewProj[15] + viewProj[14],
-		}.Normalize(),
-
-		//far plane
-		glm.Vec4f{
-			viewProj[3] - viewProj[2],
-			viewProj[7] - viewProj[6],
-			viewProj[11] - viewProj[10],
-			viewProj[15] - viewProj[14],
-		}.Normalize(),
-	}
-}
-
-func sphereInFrustum(planes [6]glm.Vec4f, sphere Sphere) bool {
-	for _, p := range planes {
-		distance :=
-			p[0]*sphere.Center[0] +
-				p[1]*sphere.Center[1] +
-				p[2]*sphere.Center[2] +
-				p[3]
-
-		if distance < -sphere.Radius {
-			return false // outside
-		}
-	}
-	return true // inside or intersecting
-}
-
 func transformSphere(sphere Sphere, model glm.Mat4f) Sphere {
 	// transform center
 	worldCenter := model.Mul4x1(glm.Vec4f{sphere.Center[0], sphere.Center[1], sphere.Center[2], 1.0})
@@ -725,11 +659,4 @@ func transformSphere(sphere Sphere, model glm.Mat4f) Sphere {
 		Center: glm.Vec3f{worldCenter[0], worldCenter[1], worldCenter[2]},
 		Radius: sphere.Radius * maxScale,
 	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

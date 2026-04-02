@@ -25,7 +25,7 @@ struct Object {
 
 layout(set = GLOBAL_SET, binding = 0) uniform Camera camera;
 
-layout(std430, set = OBJECT_SET, binding = 0) readonly buffer Objects {
+layout(std430, set = INSTANCE_SET, binding = 0) readonly buffer Objects {
     Object []objects;
 };
 

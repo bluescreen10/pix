@@ -1,8 +1,6 @@
 package pix
 
 import (
-	"unsafe"
-
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -42,31 +40,4 @@ func NewDirectionalLight(color glm.Color3f, intensity float32) *DirectionalLight
 		color:     color,
 		intensity: intensity,
 	}
-}
-
-// TODO: find a better way to handle uniforms
-type lightsUniform struct {
-	directionalLights     [MaxDirectionalLights]directionalLightUniform
-	directionalLightCount uint32
-
-	_ [3]uint32 // 16-bit alignment
-}
-
-type directionalLightUniform struct {
-	color     glm.Color4f
-	direction glm.Vec4f
-}
-
-func toBytes[T any](v *T) []byte {
-	return unsafe.Slice((*byte)(unsafe.Pointer(v)), unsafe.Sizeof(*v))
-}
-
-type cameraUniform struct {
-	viewProj glm.Mat4f
-	position glm.Vec4f
-}
-
-type objectUniform struct {
-	model    glm.Mat4f
-	invModel glm.Mat4f
 }
