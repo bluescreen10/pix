@@ -11,7 +11,9 @@ type LightsUniform struct {
 	DirectionalLights     [MaxDirectionalLights]DirectionalLightUniform
 	DirectionalLightCount uint32
 
-	_ [3]uint32 // 16-bit alignment
+	_ [3]float32 // 16-bit alignment
+
+	AmbientLight AmbientLightUniform
 }
 
 func (u *LightsUniform) Bytes() []byte {
@@ -21,6 +23,12 @@ func (u *LightsUniform) Bytes() []byte {
 type DirectionalLightUniform struct {
 	color     glm.Color4f
 	direction glm.Vec4f
+}
+
+type AmbientLightUniform struct {
+	color     glm.Color4f
+	intensity float32
+	_         [3]float32 // pad to 32 bytes (vec4 alignment)
 }
 
 type CameraUniform struct {

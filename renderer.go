@@ -235,6 +235,7 @@ func (r *Renderer) ensureDepthTextureSize(width, height uint32) {
 
 type renderList struct {
 	meshes            []*Mesh
+	ambientLight      *AmbientLight
 	directionalLights []*DirectionalLight
 }
 
@@ -342,6 +343,9 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 				direction: l.target.Sub(l.pos).Normalize().Vec4(),
 			}
 		}
+
+		lights.AmbientLight.color = list.ambientLight.color.RGBA()
+		lights.AmbientLight.intensity = list.ambientLight.intensity
 
 		//Write light buffers
 		r.runtime.Queue.WriteBuffer(r.lightsUniformBuffer, 0, lights.Bytes())
@@ -622,16 +626,18 @@ func (r *Renderer) createGlobalBindGroups() {
 func (r *Renderer) cullScene(list *renderList, node Node, frustum Frustum) {
 	for _, child := range node.Children() {
 
-		switch object := any(child).(type) {
+		switch child := any(child).(type) {
 
 		case *Mesh:
-			if frustum.ContainsSphere(object.BoundingSphere()) {
-				list.meshes = append(list.meshes, object)
+			if frustum.ContainsSphere(child.BoundingSphere()) {
+				list.meshes = append(list.meshes, child)
 			}
 		case *DirectionalLight:
-			list.directionalLights = append(list.directionalLights, object)
-		}
+			list.directionalLights = append(list.directionalLights, child)
 
+		case *AmbientLight:
+			list.ambientLight = child
+		}
 		r.cullScene(list, child, frustum)
 	}
 }

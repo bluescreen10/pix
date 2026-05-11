@@ -17,9 +17,16 @@ struct DirectionalLight {
     direction: vec4<f32>,
 }
 
+struct AmbientLight {
+    color: vec4<f32>,
+    intensity: f32,
+}
+
 struct Lights {
     directional_lights:       array<DirectionalLight, MAX_DIRECTIONAL_LIGHTS>,
     directional_lights_count: u32,
+
+    ambient_light: AmbientLight,
 }
 
 struct VertexInput {
@@ -82,7 +89,7 @@ fn fs_main(in: FragmentInput) -> @location(0) vec4<f32> {
 
     let normal   = normalize(in.v_normal);
     let view_dir = normalize(camera.position.xyz - in.v_world_pos);
-    var lighting = vec3<f32>(AMBIENT);
+    var lighting = vec3<f32>(lights.ambient_light.intensity);
 
     for (var i = 0u; i < lights.directional_lights_count; i++) {
         let light     = lights.directional_lights[i];

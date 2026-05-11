@@ -41,3 +41,32 @@ func NewDirectionalLight(color glm.Color3f, intensity float32) *DirectionalLight
 		intensity: intensity,
 	}
 }
+
+type AmbientLight struct {
+	node
+	color     glm.Color3f
+	intensity float32
+}
+
+func (l *AmbientLight) Color() glm.Color3f {
+	return l.color
+}
+
+func (l *AmbientLight) SetColor(color glm.Color3f) {
+	l.color = color
+}
+
+func (l *AmbientLight) Intensity() float32 {
+	return l.intensity
+}
+
+func (l *AmbientLight) SetIntenstity(intensity float32) {
+	l.intensity = intensity
+}
+
+func NewAmbientLight(intensity float32) *AmbientLight {
+	return &AmbientLight{
+		color:     glm.Color3f{1, 1, 1},
+		intensity: intensity,
+	}
+}
