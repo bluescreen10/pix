@@ -105,8 +105,8 @@ type Renderer struct {
 	depthTexture     *wgpu.Texture
 	depthTextureView *wgpu.TextureView
 
-	Stats *RendererStats
-	wesl  *wesl.Compiler
+	Stats   *RendererStats
+	shaders *wesl.Compiler
 }
 
 func NewRenderer(width, height uint32) *Renderer {
@@ -117,7 +117,7 @@ func NewRenderer(width, height uint32) *Renderer {
 		runtime:       &wgpuRuntime{},
 		Stats:         NewRendererStats(60),
 		pipelineCache: newPipelineCache(),
-		wesl:          wesl.New(),
+		shaders:       wesl.New(),
 	}
 }
 
@@ -128,7 +128,7 @@ func (r *Renderer) Init(descriptor wgpu.SurfaceDescriptor) error {
 	}
 
 	r.resources.init()
-	r.wesl.ParseFS(shaderlib)
+	r.shaders.ParseFS(shaderlib)
 	r.createGlobalResources()
 	return nil
 }
@@ -621,7 +621,7 @@ func (r *Renderer) createRenderPipeline(obj drawing) *wgpu.RenderPipeline {
 }
 
 func (r *Renderer) compileShader(device *wgpu.Device, code string, defines map[string]bool) *wgpu.ShaderModule {
-	compiled, err := r.wesl.Compile(code, defines)
+	compiled, err := r.shaders.Compile(code, defines)
 	if err != nil {
 		r.logger.Error("shader compilation failed", slog.Any("err", err))
 		compiled = code
@@ -725,7 +725,7 @@ func (r *Renderer) createShadowResources() {
 }
 
 func (r *Renderer) createShadowPipeline() {
-	module := r.compileShader(r.runtime.Device, "shaderlib/shadow.wgsl", nil)
+	module := r.compileShader(r.runtime.Device, "shadow.wgsl", nil)
 
 	layout := r.runtime.Device.CreatePipelineLayout(wgpu.PipelineLayoutDescriptor{
 		Label: "Shadow Pipeline Layout",

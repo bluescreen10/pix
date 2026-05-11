@@ -48,7 +48,7 @@ func NewBlinnPhongMaterial() *BlinnPhongMaterial {
 
 	data := NewMaterial(
 		"Blinn-Phong Material",
-		"shaderlib/blinn_phong_material.wgsl",
+		"blinn_phong_material.wgsl",
 		[]*Uniform{uniform},
 		1,
 		true,

@@ -1,6 +1,17 @@
 package pix
 
-import "embed"
+import (
+	"embed"
+	"io/fs"
+)
 
 //go:embed shaderlib
-var shaderlib embed.FS
+var shaderlibEmbed embed.FS
+
+var shaderlib fs.FS = func() fs.FS {
+	sub, err := fs.Sub(shaderlibEmbed, "shaderlib")
+	if err != nil {
+		panic(err)
+	}
+	return sub
+}()
