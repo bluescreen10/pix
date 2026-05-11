@@ -4,8 +4,8 @@ import (
 	"image"
 	"os"
 
+	"github.com/bluescreen10/dawn-go/wgpu"
 	"github.com/bluescreen10/pix"
-	"github.com/oliverbestmann/webgpu/wgpu"
 )
 
 func LoadTexture(path string) (*pix.TextureData, error) {

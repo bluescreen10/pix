@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"runtime"
 
+	"github.com/bluescreen10/dawn-go/wgpuglfw"
 	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/controls"
@@ -11,7 +12,6 @@ import (
 	"github.com/bluescreen10/pix/input/glfwinput"
 	"github.com/bluescreen10/pix/loaders"
 	"github.com/go-gl/glfw/v3.3/glfw"
-	"github.com/oliverbestmann/webgpu/wgpuglfw"
 
 	_ "image/png"
 )

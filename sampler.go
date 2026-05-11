@@ -1,6 +1,6 @@
 package pix
 
-import "github.com/oliverbestmann/webgpu/wgpu"
+import "github.com/bluescreen10/dawn-go/wgpu"
 
 // TODO: reduce the size of the struct to fit in a register
 type Sampler struct {

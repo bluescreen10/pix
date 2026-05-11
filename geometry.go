@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/bluescreen10/dawn-go/wgpu"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/oliverbestmann/webgpu/wgpu"
 )
 
 type GeometryFlags uint64

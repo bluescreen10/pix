@@ -1,6 +1,6 @@
 package pix
 
-import "github.com/oliverbestmann/webgpu/wgpu"
+import "github.com/bluescreen10/dawn-go/wgpu"
 
 type TextureFormat = wgpu.TextureFormat
 

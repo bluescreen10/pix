@@ -3,8 +3,8 @@ package pix
 import (
 	"unsafe"
 
+	"github.com/bluescreen10/dawn-go/wgpu"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/oliverbestmann/webgpu/wgpu"
 )
 
 type LightsUniform struct {

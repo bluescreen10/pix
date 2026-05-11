@@ -1,7 +1,7 @@
 package pix
 
 import (
-	"github.com/oliverbestmann/webgpu/wgpu"
+	"github.com/bluescreen10/dawn-go/wgpu"
 )
 
 func createVertexLayout(data *GeometryData) []wgpu.VertexBufferLayout {

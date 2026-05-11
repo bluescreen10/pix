@@ -1,13 +1,8 @@
 package pix
 
 import (
-	"io"
-
 	"github.com/bluescreen10/pix/glm"
 )
-
-var blinnPhongMaterialFragmentShader string
-var blinnPhongMaterialVertexShader string
 
 type BlinnPhongMaterial struct {
 	*MaterialData
@@ -49,24 +44,11 @@ func (m *BlinnPhongMaterial) Build() *MaterialData {
 }
 
 func NewBlinnPhongMaterial() *BlinnPhongMaterial {
-	if blinnPhongMaterialFragmentShader == "" {
-		f, _ := shaderlib.Open("shaderlib/blinn_phong_material.fs")
-		code, _ := io.ReadAll(f)
-		blinnPhongMaterialFragmentShader = string(code)
-	}
-
-	if blinnPhongMaterialVertexShader == "" {
-		f, _ := shaderlib.Open("shaderlib/blinn_phong_material.vs")
-		code, _ := io.ReadAll(f)
-		blinnPhongMaterialVertexShader = string(code)
-	}
-
 	uniform := (&Uniform{}).AddVec3("color").Build()
 
 	data := NewMaterial(
 		"Basic Material",
-		blinnPhongMaterialVertexShader,
-		blinnPhongMaterialFragmentShader,
+		"shaderlib/blinn_phong_material.wgsl",
 		[]*Uniform{uniform},
 		1,
 		true,

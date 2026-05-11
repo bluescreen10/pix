@@ -1,13 +1,11 @@
 package pix
 
 import (
-	"io"
-
 	"github.com/bluescreen10/pix/glm"
 )
 
-var basicMaterialFragmentShader string
-var basicMaterialVertexShader string
+//go embed shaderlib/basic_material.wgsl
+//var basicMaterialShaderCode string
 
 type BasicMaterial struct {
 	*MaterialData
@@ -49,24 +47,12 @@ func (m *BasicMaterial) Build() *MaterialData {
 }
 
 func NewBasicMaterial() *BasicMaterial {
-	if basicMaterialFragmentShader == "" {
-		f, _ := shaderlib.Open("shaderlib/basic_material.fs")
-		code, _ := io.ReadAll(f)
-		basicMaterialFragmentShader = string(code)
-	}
-
-	if basicMaterialVertexShader == "" {
-		f, _ := shaderlib.Open("shaderlib/basic_material.vs")
-		code, _ := io.ReadAll(f)
-		basicMaterialVertexShader = string(code)
-	}
-
 	uniform := (&Uniform{}).AddVec3("color").Build()
 
 	data := NewMaterial(
 		"Basic Material",
-		basicMaterialVertexShader,
-		basicMaterialFragmentShader,
+		//basicMaterialShaderCode,
+		"shaderlib/basic_material.wgsl",
 		[]*Uniform{uniform},
 		1,
 		false,

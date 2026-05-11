@@ -1,7 +1,7 @@
 package pix
 
 import (
-	"github.com/oliverbestmann/webgpu/wgpu"
+	"github.com/bluescreen10/dawn-go/wgpu"
 )
 
 type resourceManager struct {
@@ -143,18 +143,18 @@ func (rm *resourceManager) uploadTexture(data *TextureData, device *wgpu.Device)
 
 	queue := device.GetQueue()
 	queue.WriteTexture(
-		&wgpu.TexelCopyTextureInfo{
+		wgpu.TexelCopyTextureInfo{
 			Texture:  gpuTexture,
 			MipLevel: 0,
 			Origin:   wgpu.Origin3D{X: 0, Y: 0, Z: 0},
 		},
 		data.flush(),
-		&wgpu.TexelCopyBufferLayout{
+		wgpu.TexelCopyBufferLayout{
 			Offset:       0,
 			BytesPerRow:  uint32(data.width) * 4, // Assuming RGBA8 format
 			RowsPerImage: uint32(data.height),
 		},
-		&wgpu.Extent3D{Width: uint32(data.width), Height: uint32(data.height), DepthOrArrayLayers: 1},
+		wgpu.Extent3D{Width: uint32(data.width), Height: uint32(data.height), DepthOrArrayLayers: 1},
 	)
 
 	view := gpuTexture.CreateView(nil)
@@ -174,7 +174,7 @@ func (rm *resourceManager) uploadGeometry(device *wgpu.Device, data *GeometryDat
 
 	// Allocate index buffer
 	if len(data.indices) > 0 {
-		buf := device.CreateBufferInit(&wgpu.BufferInitDescriptor{
+		buf := device.CreateBufferInit(wgpu.BufferInitDescriptor{
 			Label:    "index buffer",
 			Contents: wgpu.ToBytes(data.indices),
 			Usage:    wgpu.BufferUsageIndex | wgpu.BufferUsageCopyDst,
@@ -192,7 +192,7 @@ func (rm *resourceManager) uploadGeometry(device *wgpu.Device, data *GeometryDat
 	geometry.bufs = make([]GeometryBuffer, len(data.attrs))
 
 	for i, a := range data.attrs {
-		buf := device.CreateBufferInit(&wgpu.BufferInitDescriptor{
+		buf := device.CreateBufferInit(wgpu.BufferInitDescriptor{
 			Label:    a.name + " buffer",
 			Contents: a.data,
 			Usage:    wgpu.BufferUsageVertex | wgpu.BufferUsageCopyDst,

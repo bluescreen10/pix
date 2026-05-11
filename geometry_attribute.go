@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"unsafe"
 
-	"github.com/oliverbestmann/webgpu/wgpu"
+	"github.com/bluescreen10/dawn-go/wgpu"
 )
 
 type AttributeType int

@@ -1,7 +1,7 @@
 package pix
 
 import (
-	"github.com/oliverbestmann/webgpu/wgpu"
+	"github.com/bluescreen10/dawn-go/wgpu"
 )
 
 // Basically there are the following possibilities:
@@ -47,8 +47,7 @@ func prepareMaterial(device *wgpu.Device, data *MaterialData, material Material,
 		return material, err
 	}
 
-	material.vertexShader = data.vertexShader
-	material.fragmentShader = data.fragmentShader
+	material.shaderCode = data.shaderCode
 	material.flags = data.flags
 	material.hash = data.hash
 	material.bindGroup = bindGroup
@@ -97,7 +96,7 @@ func createMaterialBindGroupLayout(device *wgpu.Device, data *MaterialData) (*wg
 		binding += 2
 	}
 
-	bgl := device.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
+	bgl := device.CreateBindGroupLayout(wgpu.BindGroupLayoutDescriptor{
 		Label:   "", //TODO
 		Entries: bgLayoutEntries,
 	})
@@ -109,7 +108,7 @@ func createMaterialBuffers(device *wgpu.Device, data *MaterialData) ([]*wgpu.Buf
 	var buffers []*wgpu.Buffer
 
 	for _, u := range data.uniforms {
-		buffer := device.CreateBuffer(&wgpu.BufferDescriptor{
+		buffer := device.CreateBuffer(wgpu.BufferDescriptor{
 			Label: "", //TODO
 			Size:  uint64(u.Size()),
 			Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
@@ -157,7 +156,7 @@ func createMaterialBindGroup(device *wgpu.Device, data *MaterialData, material M
 		binding += 2
 	}
 
-	bg := device.CreateBindGroup(&wgpu.BindGroupDescriptor{
+	bg := device.CreateBindGroup(wgpu.BindGroupDescriptor{
 		Label:   "", //TODO
 		Layout:  material.bindGroupLayout,
 		Entries: bgEntries,

@@ -1,6 +1,8 @@
 package pix
 
 import (
+	"embed"
+	_ "embed"
 	"log/slog"
 	"math/bits"
 	"os"
@@ -9,9 +11,13 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/bluescreen10/dawn-go/wgpu"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/oliverbestmann/webgpu/wgpu"
+	"github.com/bluescreen10/wesl-go"
 )
+
+//go:embed shaderlib/*
+var shaders embed.FS
 
 const (
 	InitialStorageCapacity = 1024
@@ -92,7 +98,8 @@ type Renderer struct {
 	depthTexture     *wgpu.Texture
 	depthTextureView *wgpu.TextureView
 
-	Stats *RendererStats
+	Stats   *RendererStats
+	shaders *wesl.Compiler
 }
 
 func NewRenderer(width, height uint32) *Renderer {
@@ -104,10 +111,11 @@ func NewRenderer(width, height uint32) *Renderer {
 		runtime:       &wgpuRuntime{},
 		Stats:         NewRendererStats(60),
 		pipelineCache: newPipelineCache(),
+		shaders:       wesl.New(),
 	}
 }
 
-func (r *Renderer) Init(descriptor *wgpu.SurfaceDescriptor) error {
+func (r *Renderer) Init(descriptor wgpu.SurfaceDescriptor) error {
 	if err := r.runtime.init(r.width, r.height, descriptor); err != nil {
 		slog.Error("error creating runtime", slog.Any("err", err))
 		return err
@@ -115,6 +123,7 @@ func (r *Renderer) Init(descriptor *wgpu.SurfaceDescriptor) error {
 
 	r.resources.init()
 	r.createGlobalResources()
+	r.shaders.ParseFS(shaders, "*.wgsl")
 	return nil
 }
 
@@ -176,13 +185,13 @@ func (r *Renderer) ensureInstanceStorageSize(needInstances uint32) {
 			r.instanceStorageCapacity *= 2
 		}
 
-		r.instanceStorageBuffer = r.runtime.Device.CreateBuffer(&wgpu.BufferDescriptor{
+		r.instanceStorageBuffer = r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
 			Label: "Instance storage buffer",
 			Size:  uint64(r.instanceStorageCapacity) * uint64(unsafe.Sizeof(InstanceUniform{})),
 			Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst,
 		})
 
-		r.instanceStorageBindGroup = r.runtime.Device.CreateBindGroup(&wgpu.BindGroupDescriptor{
+		r.instanceStorageBindGroup = r.runtime.Device.CreateBindGroup(wgpu.BindGroupDescriptor{
 			Label:  "Instance bind group",
 			Layout: r.instanceStorageBindGroupLayout,
 			Entries: []wgpu.BindGroupEntry{
@@ -387,7 +396,7 @@ func (r *Renderer) presentFrame(ctx *renderContext) {
 	ctx.view.Release()
 	ctx.view = nil
 
-	ctx.texture.Release()
+	ctx.texture.Destroy()
 	ctx.texture = nil
 }
 
@@ -397,7 +406,7 @@ func (r *Renderer) beginRendering(ctx *renderContext, bgColor glm.Color4f) *wgpu
 	//temp code
 	r.ensureDepthTextureSize(ctx.texture.GetWidth(), ctx.texture.GetHeight())
 
-	return ctx.encoder.BeginRenderPass(&wgpu.RenderPassDescriptor{
+	return ctx.encoder.BeginRenderPass(wgpu.RenderPassDescriptor{
 		ColorAttachments: []wgpu.RenderPassColorAttachment{{
 			View:       ctx.view,
 			LoadOp:     wgpu.LoadOpClear,
@@ -444,7 +453,7 @@ func (r *Renderer) getPipelineFor(obj drawing) *wgpu.RenderPipeline {
 
 func (r *Renderer) createRenderPipeline(obj drawing) *wgpu.RenderPipeline {
 
-	layout := r.runtime.Device.CreatePipelineLayout(&wgpu.PipelineLayoutDescriptor{
+	layout := r.runtime.Device.CreatePipelineLayout(wgpu.PipelineLayoutDescriptor{
 		Label: "", // TODO: add a descriptive name for debugging
 		BindGroupLayouts: []*wgpu.BindGroupLayout{
 			r.globalBindGroupLayout,
@@ -454,20 +463,21 @@ func (r *Renderer) createRenderPipeline(obj drawing) *wgpu.RenderPipeline {
 	})
 
 	defines := createDefines(obj.material.flags, obj.geometry.flags)
-	vsModule := r.compileShader(r.runtime.Device, obj.material.vertexShader, defines, wgpu.ShaderStageVertex)
-	fsModule := r.compileShader(r.runtime.Device, obj.material.fragmentShader, defines, wgpu.ShaderStageFragment)
+	module := r.compileShader(r.runtime.Device, obj.material.shaderCode, defines)
 
-	pipeline := r.runtime.Device.CreateRenderPipeline(&wgpu.RenderPipelineDescriptor{
+	pipeline := r.runtime.Device.CreateRenderPipeline(wgpu.RenderPipelineDescriptor{
 		Label:  "", //TODO: provide a meaningful name
 		Layout: layout,
 		Vertex: wgpu.VertexState{
-			Module:     vsModule,
-			EntryPoint: "main",
-			Buffers:    obj.geometry.layout,
+			Module:     module,
+			EntryPoint: "vs_main",
+			//Constants:  constants,
+			Buffers: obj.geometry.layout,
 		},
 		Fragment: &wgpu.FragmentState{
-			Module:     fsModule,
-			EntryPoint: "main",
+			Module:     module,
+			EntryPoint: "fs_main",
+			//Constants:  constants,
 			Targets: []wgpu.ColorTargetState{
 				{
 					Format:    r.runtime.Format,
@@ -510,9 +520,14 @@ func (r *Renderer) createRenderPipeline(obj drawing) *wgpu.RenderPipeline {
 	return pipeline
 }
 
-func (r *Renderer) compileShader(device *wgpu.Device, code string, defines map[string]string, stage wgpu.ShaderStage) *wgpu.ShaderModule {
-	module := device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
-		GLSLSource: &wgpu.ShaderSourceGLSL{Code: code, Defines: defines, ShaderStage: stage},
+func (r *Renderer) compileShader(device *wgpu.Device, filename string, defines map[string]bool) *wgpu.ShaderModule {
+	code, err := r.shaders.Compile(filename, defines)
+	if err != nil {
+		panic(err)
+	}
+
+	module := device.CreateShaderModule(wgpu.ShaderModuleDescriptor{
+		WGSLSource: &wgpu.ShaderSourceWGSL{Code: code},
 	})
 
 	return module
@@ -525,7 +540,7 @@ func (r *Renderer) createGlobalResources() {
 }
 
 func (r *Renderer) createGlobalBindGroupLayouts() {
-	r.globalBindGroupLayout = r.runtime.Device.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
+	r.globalBindGroupLayout = r.runtime.Device.CreateBindGroupLayout(wgpu.BindGroupLayoutDescriptor{
 		Label: "Global Lit Bind Group Layout",
 		Entries: []wgpu.BindGroupLayoutEntry{
 			{
@@ -550,7 +565,7 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 		},
 	})
 
-	r.instanceStorageBindGroupLayout = r.runtime.Device.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
+	r.instanceStorageBindGroupLayout = r.runtime.Device.CreateBindGroupLayout(wgpu.BindGroupLayoutDescriptor{
 		Label: "Instance/Model Bind Group Layout",
 		Entries: []wgpu.BindGroupLayoutEntry{
 			{
@@ -568,13 +583,13 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 }
 
 func (r *Renderer) createGlobalBuffers() {
-	r.cameraUniformBuffer = r.runtime.Device.CreateBuffer(&wgpu.BufferDescriptor{
+	r.cameraUniformBuffer = r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
 		Label: "Camera uniform buffer",
 		Size:  uint64(unsafe.Sizeof(CameraUniform{})), //TODO: use an actual uniform
 		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
 	})
 
-	r.lightsUniformBuffer = r.runtime.Device.CreateBuffer(&wgpu.BufferDescriptor{
+	r.lightsUniformBuffer = r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
 		Label: "Lights uniform buffer",
 		Size:  uint64(unsafe.Sizeof(LightsUniform{})), //TODO: use an actual uniform
 		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
@@ -584,7 +599,7 @@ func (r *Renderer) createGlobalBuffers() {
 }
 
 func (r *Renderer) createGlobalBindGroups() {
-	r.globalBindGroup = r.runtime.Device.CreateBindGroup(&wgpu.BindGroupDescriptor{
+	r.globalBindGroup = r.runtime.Device.CreateBindGroup(wgpu.BindGroupDescriptor{
 		Label:  "Global Lit bind group",
 		Layout: r.globalBindGroupLayout,
 		Entries: []wgpu.BindGroupEntry{
@@ -621,19 +636,8 @@ func (r *Renderer) cullScene(list *renderList, node Node, frustum Frustum) {
 	}
 }
 
-func createDefines(matFlags MaterialFlags, geoFlags GeometryFlags) map[string]string {
-	defines := map[string]string{
-		//sets
-		"GLOBAL_SET":             strconv.Itoa(GlobalSet),
-		"MATERIAL_SET":           strconv.Itoa(MaterialSet),
-		"INSTANCE_SET":           strconv.Itoa(InstanceSet),
-		"MAX_DIRECTIONAL_LIGHTS": strconv.Itoa(MaxDirectionalLights),
-
-		//bindings
-		"CAMERA_BINDING":    strconv.Itoa(CameraBinding),
-		"LIGHTS_BINDING":    strconv.Itoa(LightsBinding),
-		"INSTANCES_BINDING": strconv.Itoa(InstancesBinding),
-	}
+func createDefines(matFlags MaterialFlags, geoFlags GeometryFlags) map[string]bool {
+	defines := make(map[string]bool)
 
 	for flags := matFlags; flags != 0; {
 		bit := bits.TrailingZeros64(uint64(flags))
@@ -641,9 +645,9 @@ func createDefines(matFlags MaterialFlags, geoFlags GeometryFlags) map[string]st
 
 		name, ok := materialFlagNames[bit]
 		if ok {
-			defines[name] = "1"
+			defines[name] = true
 		}
-		defines["USE_FLAG"+strconv.Itoa(bit)] = "1"
+		defines["USE_FLAG"+strconv.Itoa(bit)] = true
 	}
 
 	for flags := geoFlags; flags != 0; {
@@ -651,10 +655,10 @@ func createDefines(matFlags MaterialFlags, geoFlags GeometryFlags) map[string]st
 		flags &= flags - 1
 		name, ok := geometryFlagNames[bit]
 		if ok {
-			defines[name] = "1"
+			defines[name] = true
 
 		}
-		defines["USE_GEOMETRY_FLAG"+strconv.Itoa(bit)] = "1"
+		defines["USE_GEOMETRY_FLAG"+strconv.Itoa(bit)] = true
 	}
 
 	return defines
