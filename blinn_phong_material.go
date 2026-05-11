@@ -47,7 +47,7 @@ func NewBlinnPhongMaterial() *BlinnPhongMaterial {
 	uniform := (&Uniform{}).AddVec3("color").Build()
 
 	data := NewMaterial(
-		"Basic Material",
+		"Blinn-Phong Material",
 		"shaderlib/blinn_phong_material.wgsl",
 		[]*Uniform{uniform},
 		1,

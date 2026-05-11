@@ -46,6 +46,15 @@ func OrthoRH[T number](aspectRatio, zNear, zFar T) Mat4[T] {
 	}
 }
 
+func OrthoFullRH[T number](left, right, bottom, top, near, far T) Mat4[T] {
+	return Mat4[T]{
+		2 / (right - left), 0, 0, 0,
+		0, 2 / (top - bottom), 0, 0,
+		0, 0, 1 / (near - far), 0,
+		-(right + left) / (right - left), -(top + bottom) / (top - bottom), near / (near - far), 1,
+	}
+}
+
 func ToRadians[T number](angle T) T {
 	switch any(angle).(type) {
 	case float32:

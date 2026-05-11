@@ -1,12 +1,9 @@
 package pix
 
 import (
-	"embed"
-	_ "embed"
 	"log/slog"
 	"math/bits"
 	"os"
-	"strconv"
 	"sync"
 	"time"
 	"unsafe"
@@ -16,12 +13,10 @@ import (
 	"github.com/bluescreen10/wesl-go"
 )
 
-//go:embed shaderlib/*
-var shaders embed.FS
-
 const (
 	InitialStorageCapacity = 1024
 	MaxDirectionalLights   = 5
+	DefaultShadowMapSize   = 1024
 )
 
 // Shader Sets
@@ -35,6 +30,8 @@ const (
 const (
 	CameraBinding = iota
 	LightsBinding
+	ShadowMapBinding
+	ShadowSamplerBinding
 )
 
 // Instance Bindings
@@ -82,28 +79,37 @@ type Renderer struct {
 
 	pipelineCache *pipelineCache
 
-	//global
+	// global
 	cameraUniformBuffer   *wgpu.Buffer
 	lightsUniformBuffer   *wgpu.Buffer
 	globalBindGroupLayout *wgpu.BindGroupLayout
 	globalBindGroup       *wgpu.BindGroup
 
-	//instance
+	// instance
 	instanceStorageBuffer          *wgpu.Buffer
 	instanceStorageBindGroupLayout *wgpu.BindGroupLayout
 	instanceStorageBindGroup       *wgpu.BindGroup
 	instanceStorageCapacity        uint32
 
-	//depth buffer
+	// shadow
+	shadowMapTexture    *wgpu.Texture
+	shadowMapView       *wgpu.TextureView
+	shadowMapLayerViews [MaxDirectionalLights]*wgpu.TextureView
+	shadowSampler       *wgpu.Sampler
+	shadowCamBuffer     *wgpu.Buffer
+	shadowCamBGL        *wgpu.BindGroupLayout
+	shadowCamBG         *wgpu.BindGroup
+	shadowPipeline      *wgpu.RenderPipeline
+
+	// depth buffer
 	depthTexture     *wgpu.Texture
 	depthTextureView *wgpu.TextureView
 
-	Stats   *RendererStats
-	shaders *wesl.Compiler
+	Stats *RendererStats
+	wesl  *wesl.Compiler
 }
 
 func NewRenderer(width, height uint32) *Renderer {
-
 	return &Renderer{
 		width:         width,
 		height:        height,
@@ -111,7 +117,7 @@ func NewRenderer(width, height uint32) *Renderer {
 		runtime:       &wgpuRuntime{},
 		Stats:         NewRendererStats(60),
 		pipelineCache: newPipelineCache(),
-		shaders:       wesl.New(),
+		wesl:          wesl.New(),
 	}
 }
 
@@ -122,8 +128,8 @@ func (r *Renderer) Init(descriptor wgpu.SurfaceDescriptor) error {
 	}
 
 	r.resources.init()
+	r.wesl.ParseFS(shaderlib)
 	r.createGlobalResources()
-	r.shaders.ParseFS(shaders, "*.wgsl")
 	return nil
 }
 
@@ -153,6 +159,41 @@ func (r *Renderer) Destroy() {
 	if r.instanceStorageBindGroupLayout != nil {
 		r.instanceStorageBindGroupLayout.Release()
 		r.instanceStorageBindGroupLayout = nil
+	}
+
+	for i := range r.shadowMapLayerViews {
+		if r.shadowMapLayerViews[i] != nil {
+			r.shadowMapLayerViews[i].Release()
+			r.shadowMapLayerViews[i] = nil
+		}
+	}
+	if r.shadowMapView != nil {
+		r.shadowMapView.Release()
+		r.shadowMapView = nil
+	}
+	if r.shadowMapTexture != nil {
+		r.shadowMapTexture.Destroy()
+		r.shadowMapTexture = nil
+	}
+	if r.shadowSampler != nil {
+		r.shadowSampler.Release()
+		r.shadowSampler = nil
+	}
+	if r.shadowCamBuffer != nil {
+		r.shadowCamBuffer.Destroy()
+		r.shadowCamBuffer = nil
+	}
+	if r.shadowCamBGL != nil {
+		r.shadowCamBGL.Release()
+		r.shadowCamBGL = nil
+	}
+	if r.shadowCamBG != nil {
+		r.shadowCamBG.Release()
+		r.shadowCamBG = nil
+	}
+	if r.shadowPipeline != nil {
+		r.shadowPipeline.Release()
+		r.shadowPipeline = nil
 	}
 
 	if r.depthTextureView != nil {
@@ -235,13 +276,14 @@ func (r *Renderer) ensureDepthTextureSize(width, height uint32) {
 
 type renderList struct {
 	meshes            []*Mesh
-	ambientLight      *AmbientLight
 	directionalLights []*DirectionalLight
+	ambientLight      *AmbientLight
 }
 
 func (o *renderList) init() {
 	o.meshes = viewableMeshesPool.Get().([]*Mesh)
 	o.directionalLights = viewableDirectionalLights.Get().([]*DirectionalLight)
+	o.ambientLight = nil
 }
 
 func (o *renderList) release() {
@@ -252,17 +294,12 @@ func (o *renderList) release() {
 func (r *Renderer) Render(scene *Scene, camera Camera) {
 	var ctx renderContext
 
-	//Acquire next texture
 	r.acquireNextFrame(&ctx)
-
-	//Update stats
 	r.Stats.NextFrame()
 	start := time.Now()
 
-	//Update local/world matrices
 	updateMatrix(scene, false)
 
-	//Cull Scene
 	var list renderList
 	list.init()
 	defer list.release()
@@ -279,7 +316,6 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 
 	var useLights bool
 
-	//Prepare Instances
 	for _, mesh := range list.meshes {
 		geometryData := mesh.geometry
 		geometry := r.resources.GetGeometry(geometryData)
@@ -303,7 +339,6 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 			continue
 		}
 
-		// FIXME: the renderer shouldn't need to know what resources use to store
 		r.resources.SetMaterial(materialData.slot, material)
 
 		if material.isLit {
@@ -318,13 +353,11 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 		instances = append(instances, InstanceUniform{mesh.Model(), mesh.InvModel()})
 	}
 
-	//Batch update object matrices using storage buffer
 	if count := len(instances); count > 0 {
 		r.ensureInstanceStorageSize(uint32(count))
 		r.runtime.Queue.WriteBuffer(r.instanceStorageBuffer, 0, instances.Bytes())
 	}
 
-	//Update Global Uniforms
 	cameraUniform := CameraUniform{
 		viewProj: viewProjection,
 		position: camera.Position().Vec4(),
@@ -332,42 +365,111 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	r.runtime.Queue.WriteBuffer(r.cameraUniformBuffer, 0, cameraUniform.Bytes())
 
 	if useLights {
-		var lights LightsUniform
+		var lightsUniform LightsUniform
 
-		//Directional lights
 		count := min(MaxDirectionalLights, len(list.directionalLights))
-		lights.DirectionalLightCount = uint32(count)
+		lightsUniform.DirectionalLightCount = uint32(count)
+
 		for i, l := range list.directionalLights[:count] {
-			lights.DirectionalLights[i] = DirectionalLightUniform{
-				color:     l.color.RGBA(),
-				direction: l.target.Sub(l.pos).Normalize().Vec4(),
+			colorRGBA := l.color.RGBA()
+			colorRGBA[3] = l.intensity
+
+			var lightSpaceMat glm.Mat4f
+			var castsShadow uint32
+			var shadowBias float32
+
+			if l.shadow != nil {
+				l.shadow.Camera.SetPosition(l.pos)
+				l.shadow.Camera.SetTarget(l.target)
+				lightSpaceMat = l.shadow.Camera.ViewProjection()
+				castsShadow = 1
+				shadowBias = l.shadow.Bias
+			}
+
+			lightsUniform.DirectionalLights[i] = DirectionalLightUniform{
+				color:            colorRGBA,
+				direction:        l.target.Sub(l.pos).Normalize().Vec4(),
+				lightSpaceMatrix: lightSpaceMat,
+				castsShadow:      castsShadow,
+				shadowBias:       shadowBias,
 			}
 		}
 
-		lights.AmbientLight.color = list.ambientLight.color.RGBA()
-		lights.AmbientLight.intensity = list.ambientLight.intensity
+		if list.ambientLight != nil {
+			lightsUniform.AmbientLight = AmbientLightUniform{
+				color:     list.ambientLight.color.RGBA(),
+				intensity: list.ambientLight.intensity,
+			}
+		}
 
-		//Write light buffers
-		r.runtime.Queue.WriteBuffer(r.lightsUniformBuffer, 0, lights.Bytes())
+		r.runtime.Queue.WriteBuffer(r.lightsUniformBuffer, 0, lightsUniform.Bytes())
+
+		r.renderShadowMaps(&list, drawings)
 	}
 
-	//Begin rendering
 	renderPass := r.beginRendering(&ctx, scene.background)
 
-	//Draw instances
 	for i, drawing := range drawings {
 		r.renderInstance(renderPass, drawing, i)
 	}
 
-	//End rendering
 	r.endRendering(&ctx, renderPass)
 	r.Stats.AddFrameTime(time.Since(start).Seconds())
 
-	//Present Frame
 	r.presentFrame(&ctx)
-
-	// Process pending resources
 	r.resources.processPending(r.runtime.Device)
+}
+
+func (r *Renderer) renderShadowMaps(list *renderList, drawings []drawing) {
+	count := min(MaxDirectionalLights, len(list.directionalLights))
+
+	for i, light := range list.directionalLights[:count] {
+		if light.shadow == nil {
+			continue
+		}
+
+		vp := light.shadow.Camera.ViewProjection()
+		r.runtime.Queue.WriteBuffer(r.shadowCamBuffer, 0,
+			unsafe.Slice((*byte)(unsafe.Pointer(&vp)), unsafe.Sizeof(vp)))
+
+		encoder := r.runtime.Device.CreateCommandEncoder(nil)
+		pass := encoder.BeginRenderPass(wgpu.RenderPassDescriptor{
+			DepthStencilAttachment: &wgpu.RenderPassDepthStencilAttachment{
+				View:            r.shadowMapLayerViews[i],
+				DepthLoadOp:     wgpu.LoadOpClear,
+				DepthStoreOp:    wgpu.StoreOpStore,
+				DepthClearValue: 1.0,
+			},
+		})
+
+		pass.SetPipeline(r.shadowPipeline)
+		pass.SetBindGroup(0, r.shadowCamBG, []uint32{})
+		pass.SetBindGroup(1, r.instanceStorageBindGroup, []uint32{})
+
+		for j, d := range drawings {
+			for _, b := range d.geometry.bufs {
+				if b.loc == PositionLocation {
+					pass.SetVertexBuffer(0, b.buf, 0, wgpu.WholeSize)
+					break
+				}
+			}
+
+			if d.geometry.index != nil {
+				pass.SetIndexBuffer(d.geometry.index, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
+				pass.DrawIndexed(uint32(d.geometry.count), 1, 0, 0, uint32(j))
+			} else {
+				pass.Draw(uint32(d.geometry.count), 1, 0, uint32(j))
+			}
+		}
+
+		pass.End()
+		pass.Release()
+
+		cmdBuf := encoder.Finish(nil)
+		r.runtime.Queue.Submit(cmdBuf)
+		cmdBuf.Release()
+		encoder.Release()
+	}
 }
 
 func (r *Renderer) renderInstance(pass *wgpu.RenderPassEncoder, obj drawing, objIdx int) {
@@ -382,7 +484,6 @@ func (r *Renderer) renderInstance(pass *wgpu.RenderPassEncoder, obj drawing, obj
 	}
 
 	if obj.geometry.index != nil {
-		//TODO support other formats for index buffers
 		pass.SetIndexBuffer(obj.geometry.index, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
 		pass.DrawIndexed(uint32(obj.geometry.count), 1, 0, 0, uint32(objIdx))
 	} else {
@@ -407,7 +508,6 @@ func (r *Renderer) presentFrame(ctx *renderContext) {
 func (r *Renderer) beginRendering(ctx *renderContext, bgColor glm.Color4f) *wgpu.RenderPassEncoder {
 	ctx.encoder = r.runtime.Device.CreateCommandEncoder(nil)
 
-	//temp code
 	r.ensureDepthTextureSize(ctx.texture.GetWidth(), ctx.texture.GetHeight())
 
 	return ctx.encoder.BeginRenderPass(wgpu.RenderPassDescriptor{
@@ -415,7 +515,7 @@ func (r *Renderer) beginRendering(ctx *renderContext, bgColor glm.Color4f) *wgpu
 			View:       ctx.view,
 			LoadOp:     wgpu.LoadOpClear,
 			StoreOp:    wgpu.StoreOpStore,
-			ClearValue: wgpu.Color{R: float64(bgColor.R()), G: (float64(bgColor.G())), B: (float64(bgColor.B())), A: float64(bgColor.A())}, //TODO: make it something the user can define
+			ClearValue: wgpu.Color{R: float64(bgColor.R()), G: float64(bgColor.G()), B: float64(bgColor.B()), A: float64(bgColor.A())},
 		}},
 		DepthStencilAttachment: &wgpu.RenderPassDepthStencilAttachment{
 			View:            r.depthTextureView,
@@ -433,7 +533,6 @@ func (r *Renderer) endRendering(ctx *renderContext, pass *wgpu.RenderPassEncoder
 	cmdBuf := ctx.encoder.Finish(nil)
 	r.runtime.Queue.Submit(cmdBuf)
 
-	// release resources
 	cmdBuf.Release()
 	ctx.encoder.Release()
 	ctx.encoder = nil
@@ -445,20 +544,19 @@ func (r *Renderer) getPipelineFor(obj drawing) *wgpu.RenderPipeline {
 		materialFlags: obj.material.flags,
 		geometryFlags: obj.geometry.flags,
 	}
-	pipline := r.pipelineCache.GetRenderPipeline(pipelineKey)
-	if pipline != nil {
-		return pipline
+	pipeline := r.pipelineCache.GetRenderPipeline(pipelineKey)
+	if pipeline != nil {
+		return pipeline
 	}
 
-	pipeline := r.createRenderPipeline(obj)
+	pipeline = r.createRenderPipeline(obj)
 	r.pipelineCache.SetRenderPipeline(pipelineKey, pipeline)
 	return pipeline
 }
 
 func (r *Renderer) createRenderPipeline(obj drawing) *wgpu.RenderPipeline {
-
 	layout := r.runtime.Device.CreatePipelineLayout(wgpu.PipelineLayoutDescriptor{
-		Label: "", // TODO: add a descriptive name for debugging
+		Label: "",
 		BindGroupLayouts: []*wgpu.BindGroupLayout{
 			r.globalBindGroupLayout,
 			obj.material.bindGroupLayout,
@@ -466,34 +564,32 @@ func (r *Renderer) createRenderPipeline(obj drawing) *wgpu.RenderPipeline {
 		},
 	})
 
-	defines := createDefines(obj.material.flags, obj.geometry.flags)
-	module := r.compileShader(r.runtime.Device, obj.material.shaderCode, defines)
+	defines := buildDefines(obj.material.flags, obj.geometry.flags)
+	module := r.compileShader(r.runtime.Device, obj.material.shader, defines)
 
 	pipeline := r.runtime.Device.CreateRenderPipeline(wgpu.RenderPipelineDescriptor{
-		Label:  "", //TODO: provide a meaningful name
+		Label:  "",
 		Layout: layout,
 		Vertex: wgpu.VertexState{
 			Module:     module,
 			EntryPoint: "vs_main",
-			//Constants:  constants,
-			Buffers: obj.geometry.layout,
+			Buffers:    obj.geometry.layout,
 		},
 		Fragment: &wgpu.FragmentState{
 			Module:     module,
 			EntryPoint: "fs_main",
-			//Constants:  constants,
 			Targets: []wgpu.ColorTargetState{
 				{
 					Format:    r.runtime.Format,
-					Blend:     nil, //TODO: Shader should provide this
+					Blend:     nil,
 					WriteMask: wgpu.ColorWriteMaskAll,
 				},
 			},
 		},
 		Primitive: wgpu.PrimitiveState{
-			Topology:  wgpu.PrimitiveTopologyTriangleList, //TODO: Shader should provide this
-			FrontFace: wgpu.FrontFaceCCW,                  //TODO: Shader should provide this
-			CullMode:  wgpu.CullModeBack,                  //TODO:Shader should provide this
+			Topology:  wgpu.PrimitiveTopologyTriangleList,
+			FrontFace: wgpu.FrontFaceCCW,
+			CullMode:  wgpu.CullModeBack,
 		},
 		DepthStencil: &wgpu.DepthStencilState{
 			Format:            wgpu.TextureFormatDepth24Plus,
@@ -524,33 +620,180 @@ func (r *Renderer) createRenderPipeline(obj drawing) *wgpu.RenderPipeline {
 	return pipeline
 }
 
-func (r *Renderer) compileShader(device *wgpu.Device, filename string, defines map[string]bool) *wgpu.ShaderModule {
-	code, err := r.shaders.Compile(filename, defines)
+func (r *Renderer) compileShader(device *wgpu.Device, code string, defines map[string]bool) *wgpu.ShaderModule {
+	compiled, err := r.wesl.Compile(code, defines)
 	if err != nil {
-		panic(err)
+		r.logger.Error("shader compilation failed", slog.Any("err", err))
+		compiled = code
 	}
 
-	module := device.CreateShaderModule(wgpu.ShaderModuleDescriptor{
-		WGSLSource: &wgpu.ShaderSourceWGSL{Code: code},
+	return device.CreateShaderModule(wgpu.ShaderModuleDescriptor{
+		WGSLSource: &wgpu.ShaderSourceWGSL{Code: compiled},
 	})
-
-	return module
 }
 
 func (r *Renderer) createGlobalResources() {
+	r.createShadowResources()
 	r.createGlobalBindGroupLayouts()
 	r.createGlobalBuffers()
 	r.createGlobalBindGroups()
+	r.createShadowPipeline()
+}
+
+func (r *Renderer) createShadowResources() {
+	r.shadowMapTexture = r.runtime.Device.CreateTexture(&wgpu.TextureDescriptor{
+		Label:         "Shadow Map Array",
+		Usage:         wgpu.TextureUsageRenderAttachment | wgpu.TextureUsageTextureBinding,
+		Dimension:     wgpu.TextureDimension2D,
+		Format:        wgpu.TextureFormatDepth32Float,
+		MipLevelCount: 1,
+		SampleCount:   1,
+		Size: wgpu.Extent3D{
+			Width:              DefaultShadowMapSize,
+			Height:             DefaultShadowMapSize,
+			DepthOrArrayLayers: MaxDirectionalLights,
+		},
+	})
+
+	r.shadowMapView = r.shadowMapTexture.CreateView(&wgpu.TextureViewDescriptor{
+		Format:          wgpu.TextureFormatDepth32Float,
+		Dimension:       wgpu.TextureViewDimension2DArray,
+		BaseMipLevel:    0,
+		MipLevelCount:   1,
+		BaseArrayLayer:  0,
+		ArrayLayerCount: MaxDirectionalLights,
+		Aspect:          wgpu.TextureAspectDepthOnly,
+	})
+
+	for i := range r.shadowMapLayerViews {
+		r.shadowMapLayerViews[i] = r.shadowMapTexture.CreateView(&wgpu.TextureViewDescriptor{
+			Format:          wgpu.TextureFormatDepth32Float,
+			Dimension:       wgpu.TextureViewDimension2D,
+			BaseMipLevel:    0,
+			MipLevelCount:   1,
+			BaseArrayLayer:  uint32(i),
+			ArrayLayerCount: 1,
+			Aspect:          wgpu.TextureAspectDepthOnly,
+		})
+	}
+
+	r.shadowSampler = r.runtime.Device.CreateSampler(&wgpu.SamplerDescriptor{
+		Label:         "Shadow Comparison Sampler",
+		AddressModeU:  wgpu.AddressModeClampToEdge,
+		AddressModeV:  wgpu.AddressModeClampToEdge,
+		AddressModeW:  wgpu.AddressModeClampToEdge,
+		MagFilter:     wgpu.FilterModeNearest,
+		MinFilter:     wgpu.FilterModeNearest,
+		MipmapFilter:  wgpu.MipmapFilterModeNearest,
+		LodMaxClamp:   32,
+		Compare:       wgpu.CompareFunctionLessEqual,
+		MaxAnisotropy: 1,
+	})
+
+	r.shadowCamBuffer = r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
+		Label: "Shadow Camera Buffer",
+		Size:  uint64(unsafe.Sizeof(glm.Mat4f{})),
+		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
+	})
+
+	r.shadowCamBGL = r.runtime.Device.CreateBindGroupLayout(wgpu.BindGroupLayoutDescriptor{
+		Label: "Shadow Camera BGL",
+		Entries: []wgpu.BindGroupLayoutEntry{
+			{
+				Binding:    0,
+				Visibility: wgpu.ShaderStageVertex,
+				Buffer: wgpu.BufferBindingLayout{
+					Type:           wgpu.BufferBindingTypeUniform,
+					MinBindingSize: uint64(unsafe.Sizeof(glm.Mat4f{})),
+				},
+			},
+		},
+	})
+
+	r.shadowCamBG = r.runtime.Device.CreateBindGroup(wgpu.BindGroupDescriptor{
+		Label:  "Shadow Camera BG",
+		Layout: r.shadowCamBGL,
+		Entries: []wgpu.BindGroupEntry{
+			{
+				Binding: 0,
+				Buffer:  r.shadowCamBuffer,
+				Offset:  0,
+				Size:    wgpu.WholeSize,
+			},
+		},
+	})
+}
+
+func (r *Renderer) createShadowPipeline() {
+	module := r.compileShader(r.runtime.Device, "shaderlib/shadow.wgsl", nil)
+
+	layout := r.runtime.Device.CreatePipelineLayout(wgpu.PipelineLayoutDescriptor{
+		Label: "Shadow Pipeline Layout",
+		BindGroupLayouts: []*wgpu.BindGroupLayout{
+			r.shadowCamBGL,
+			r.instanceStorageBindGroupLayout,
+		},
+	})
+
+	r.shadowPipeline = r.runtime.Device.CreateRenderPipeline(wgpu.RenderPipelineDescriptor{
+		Label:  "Shadow Pipeline",
+		Layout: layout,
+		Vertex: wgpu.VertexState{
+			Module:     module,
+			EntryPoint: "vs_shadow",
+			Buffers: []wgpu.VertexBufferLayout{
+				{
+					ArrayStride: uint64(Float32x3.Size()),
+					StepMode:    wgpu.VertexStepModeVertex,
+					Attributes: []wgpu.VertexAttribute{
+						{
+							Format:         wgpu.VertexFormatFloat32x3,
+							Offset:         0,
+							ShaderLocation: 0,
+						},
+					},
+				},
+			},
+		},
+		Primitive: wgpu.PrimitiveState{
+			Topology:  wgpu.PrimitiveTopologyTriangleList,
+			FrontFace: wgpu.FrontFaceCCW,
+			CullMode:  wgpu.CullModeFront, // render back faces to reduce self-shadowing
+		},
+		DepthStencil: &wgpu.DepthStencilState{
+			Format:            wgpu.TextureFormatDepth32Float,
+			DepthWriteEnabled: wgpu.OptionalBoolTrue,
+			DepthCompare:      wgpu.CompareFunctionLessEqual,
+			StencilFront: wgpu.StencilFaceState{
+				Compare:     wgpu.CompareFunctionAlways,
+				FailOp:      wgpu.StencilOperationKeep,
+				DepthFailOp: wgpu.StencilOperationKeep,
+				PassOp:      wgpu.StencilOperationKeep,
+			},
+			StencilBack: wgpu.StencilFaceState{
+				Compare:     wgpu.CompareFunctionAlways,
+				FailOp:      wgpu.StencilOperationKeep,
+				DepthFailOp: wgpu.StencilOperationKeep,
+				PassOp:      wgpu.StencilOperationKeep,
+			},
+			StencilReadMask:  0xFFFFFFFF,
+			StencilWriteMask: 0xFFFFFFFF,
+		},
+		Multisample: wgpu.MultisampleState{
+			Count:                  1,
+			Mask:                   0xFFFFFFFF,
+			AlphaToCoverageEnabled: false,
+		},
+	})
 }
 
 func (r *Renderer) createGlobalBindGroupLayouts() {
 	r.globalBindGroupLayout = r.runtime.Device.CreateBindGroupLayout(wgpu.BindGroupLayoutDescriptor{
-		Label: "Global Lit Bind Group Layout",
+		Label: "Global Bind Group Layout",
 		Entries: []wgpu.BindGroupLayoutEntry{
 			{
 				Binding:    CameraBinding,
 				Visibility: wgpu.ShaderStageVertex | wgpu.ShaderStageFragment,
-
 				Buffer: wgpu.BufferBindingLayout{
 					Type:             wgpu.BufferBindingTypeUniform,
 					HasDynamicOffset: false,
@@ -566,6 +809,22 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 					MinBindingSize:   uint64(unsafe.Sizeof(LightsUniform{})),
 				},
 			},
+			{
+				Binding:    ShadowMapBinding,
+				Visibility: wgpu.ShaderStageFragment,
+				Texture: wgpu.TextureBindingLayout{
+					SampleType:    wgpu.TextureSampleTypeDepth,
+					ViewDimension: wgpu.TextureViewDimension2DArray,
+					Multisampled:  false,
+				},
+			},
+			{
+				Binding:    ShadowSamplerBinding,
+				Visibility: wgpu.ShaderStageFragment,
+				Sampler: wgpu.SamplerBindingLayout{
+					Type: wgpu.SamplerBindingTypeComparison,
+				},
+			},
 		},
 	})
 
@@ -575,7 +834,6 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 			{
 				Binding:    InstancesBinding,
 				Visibility: wgpu.ShaderStageVertex | wgpu.ShaderStageFragment,
-
 				Buffer: wgpu.BufferBindingLayout{
 					Type:             wgpu.BufferBindingTypeReadOnlyStorage,
 					HasDynamicOffset: false,
@@ -589,13 +847,13 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 func (r *Renderer) createGlobalBuffers() {
 	r.cameraUniformBuffer = r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
 		Label: "Camera uniform buffer",
-		Size:  uint64(unsafe.Sizeof(CameraUniform{})), //TODO: use an actual uniform
+		Size:  uint64(unsafe.Sizeof(CameraUniform{})),
 		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
 	})
 
 	r.lightsUniformBuffer = r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
 		Label: "Lights uniform buffer",
-		Size:  uint64(unsafe.Sizeof(LightsUniform{})), //TODO: use an actual uniform
+		Size:  uint64(unsafe.Sizeof(LightsUniform{})),
 		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
 	})
 
@@ -604,7 +862,7 @@ func (r *Renderer) createGlobalBuffers() {
 
 func (r *Renderer) createGlobalBindGroups() {
 	r.globalBindGroup = r.runtime.Device.CreateBindGroup(wgpu.BindGroupDescriptor{
-		Label:  "Global Lit bind group",
+		Label:  "Global bind group",
 		Layout: r.globalBindGroupLayout,
 		Entries: []wgpu.BindGroupEntry{
 			{
@@ -619,52 +877,54 @@ func (r *Renderer) createGlobalBindGroups() {
 				Offset:  0,
 				Size:    wgpu.WholeSize,
 			},
+			{
+				Binding:     ShadowMapBinding,
+				TextureView: r.shadowMapView,
+			},
+			{
+				Binding: ShadowSamplerBinding,
+				Sampler: r.shadowSampler,
+			},
 		},
 	})
 }
 
 func (r *Renderer) cullScene(list *renderList, node Node, frustum Frustum) {
 	for _, child := range node.Children() {
-
-		switch child := any(child).(type) {
-
+		switch object := any(child).(type) {
 		case *Mesh:
-			if frustum.ContainsSphere(child.BoundingSphere()) {
-				list.meshes = append(list.meshes, child)
+			if frustum.ContainsSphere(object.BoundingSphere()) {
+				list.meshes = append(list.meshes, object)
 			}
 		case *DirectionalLight:
-			list.directionalLights = append(list.directionalLights, child)
-
+			list.directionalLights = append(list.directionalLights, object)
 		case *AmbientLight:
-			list.ambientLight = child
+			if list.ambientLight == nil {
+				list.ambientLight = object
+			}
 		}
+
 		r.cullScene(list, child, frustum)
 	}
 }
 
-func createDefines(matFlags MaterialFlags, geoFlags GeometryFlags) map[string]bool {
-	defines := make(map[string]bool)
+func buildDefines(matFlags MaterialFlags, geoFlags GeometryFlags) map[string]bool {
+	var defines = make(map[string]bool)
 
 	for flags := matFlags; flags != 0; {
 		bit := bits.TrailingZeros64(uint64(flags))
 		flags &= flags - 1
-
-		name, ok := materialFlagNames[bit]
-		if ok {
+		if name, ok := materialFlagNames[bit]; ok {
 			defines[name] = true
 		}
-		defines["USE_FLAG"+strconv.Itoa(bit)] = true
 	}
 
 	for flags := geoFlags; flags != 0; {
 		bit := bits.TrailingZeros64(uint64(flags))
 		flags &= flags - 1
-		name, ok := geometryFlagNames[bit]
-		if ok {
+		if name, ok := geometryFlagNames[bit]; ok {
 			defines[name] = true
-
 		}
-		defines["USE_GEOMETRY_FLAG"+strconv.Itoa(bit)] = true
 	}
 
 	return defines
@@ -678,10 +938,8 @@ func updateMatrix(n Node, force bool) {
 }
 
 func transformSphere(sphere Sphere, model glm.Mat4f) Sphere {
-	// transform center
 	worldCenter := model.Mul4x1(glm.Vec4f{sphere.Center[0], sphere.Center[1], sphere.Center[2], 1.0})
 
-	// extract max scale (important!)
 	sx := glm.Vec3f{model[0], model[1], model[2]}.Length()
 	sy := glm.Vec3f{model[4], model[5], model[6]}.Length()
 	sz := glm.Vec3f{model[8], model[9], model[10]}.Length()

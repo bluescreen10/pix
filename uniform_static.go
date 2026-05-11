@@ -21,8 +21,12 @@ func (u *LightsUniform) Bytes() []byte {
 }
 
 type DirectionalLightUniform struct {
-	color     glm.Color4f
-	direction glm.Vec4f
+	color            glm.Color4f // 16 — w holds intensity
+	direction        glm.Vec4f   // 16
+	lightSpaceMatrix glm.Mat4f   // 64
+	castsShadow      uint32      //  4
+	shadowBias       float32     //  4
+	_                [2]float32  //  8 pad → 112 total (vec4 align)
 }
 
 type AmbientLightUniform struct {

@@ -1,6 +1,7 @@
 package pix
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/bluescreen10/dawn-go/wgpu"
@@ -48,7 +49,10 @@ func (w *wgpuRuntime) init(width, height uint32, descriptor wgpu.SurfaceDescript
 	}
 
 	device := w.Adapter.RequestDevice(&wgpu.DeviceDescriptor{
-		//	RequiredFeatures: requiredFeatures,
+		RequiredFeatures: requiredFeatures,
+		UncapturedErrorCallback: wgpu.UncapturedErrorCallback(func(device *wgpu.Device, typ wgpu.ErrorType, message string) {
+			panic(fmt.Sprintf("(%s): %s", typ, message))
+		}),
 	})
 
 	if err != nil {

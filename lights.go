@@ -9,6 +9,7 @@ type DirectionalLight struct {
 	intensity float32
 	color     glm.Color3f
 	target    glm.Vec3f
+	shadow    *DirectionalShadow
 }
 
 func (l *DirectionalLight) Color() glm.Color3f {
@@ -34,6 +35,9 @@ func (l *DirectionalLight) Target() glm.Vec3f {
 func (l *DirectionalLight) SetTarget(target glm.Vec3f) {
 	l.target = target
 }
+
+func (l *DirectionalLight) Shadow() *DirectionalShadow    { return l.shadow }
+func (l *DirectionalLight) SetShadow(s *DirectionalShadow) { l.shadow = s }
 
 func NewDirectionalLight(color glm.Color3f, intensity float32) *DirectionalLight {
 	return &DirectionalLight{

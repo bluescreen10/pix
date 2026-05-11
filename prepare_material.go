@@ -47,7 +47,7 @@ func prepareMaterial(device *wgpu.Device, data *MaterialData, material Material,
 		return material, err
 	}
 
-	material.shaderCode = data.shaderCode
+	material.shader = data.shader
 	material.flags = data.flags
 	material.hash = data.hash
 	material.bindGroup = bindGroup

@@ -4,9 +4,6 @@ import (
 	"github.com/bluescreen10/pix/glm"
 )
 
-//go embed shaderlib/basic_material.wgsl
-//var basicMaterialShaderCode string
-
 type BasicMaterial struct {
 	*MaterialData
 }
@@ -51,7 +48,7 @@ func NewBasicMaterial() *BasicMaterial {
 
 	data := NewMaterial(
 		"Basic Material",
-		//basicMaterialShaderCode,
+		//basicMaterialshader,
 		"shaderlib/basic_material.wgsl",
 		[]*Uniform{uniform},
 		1,

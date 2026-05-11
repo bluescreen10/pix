@@ -2,5 +2,5 @@ package pix
 
 import "embed"
 
-//go:embed shaderlib/*
+//go:embed shaderlib
 var shaderlib embed.FS
