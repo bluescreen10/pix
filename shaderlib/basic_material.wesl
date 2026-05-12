@@ -1,3 +1,8 @@
+import global;
+
+const GLOBAL_SET :i32 = 0;
+const INSTANCE_SET :i32 = 2;
+
 struct Camera {
     view_projection: mat4x4<f32>,
     position:        vec4<f32>,
@@ -18,8 +23,8 @@ struct VertexOutput {
     @if(USE_UV) @location(1) v_uv:          vec2<f32>,
 }
 
-@group(0) @binding(0) var<uniform>       camera:  Camera;
-@group(2) @binding(0) var<storage, read> objects: array<Object>;
+@group(global::GLOBAL_SET) @binding(0) var<uniform>       camera:  Camera;
+@group(global::INSTANCE_SET) @binding(0) var<storage, read> objects: array<Object>;
 
 @vertex
 fn vs_main(

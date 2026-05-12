@@ -49,7 +49,7 @@ func NewBasicMaterial() *BasicMaterial {
 	data := NewMaterial(
 		"Basic Material",
 		//basicMaterialshader,
-		"basic_material.wgsl",
+		"basic_material.wesl",
 		[]*Uniform{uniform},
 		1,
 		false,

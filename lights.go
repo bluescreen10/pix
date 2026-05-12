@@ -5,7 +5,7 @@ import (
 )
 
 type DirectionalLight struct {
-	node
+	Object3D
 	intensity float32
 	color     glm.Color3f
 	target    glm.Vec3f
@@ -36,7 +36,7 @@ func (l *DirectionalLight) SetTarget(target glm.Vec3f) {
 	l.target = target
 }
 
-func (l *DirectionalLight) Shadow() *DirectionalShadow    { return l.shadow }
+func (l *DirectionalLight) Shadow() *DirectionalShadow     { return l.shadow }
 func (l *DirectionalLight) SetShadow(s *DirectionalShadow) { l.shadow = s }
 
 func NewDirectionalLight(color glm.Color3f, intensity float32) *DirectionalLight {
@@ -47,7 +47,7 @@ func NewDirectionalLight(color glm.Color3f, intensity float32) *DirectionalLight
 }
 
 type AmbientLight struct {
-	node
+	Object3D
 	color     glm.Color3f
 	intensity float32
 }

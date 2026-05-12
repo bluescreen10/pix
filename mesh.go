@@ -1,7 +1,7 @@
 package pix
 
 type Mesh struct {
-	node
+	Object3D
 	geometry *GeometryData
 	material *MaterialData
 
@@ -13,7 +13,7 @@ func NewMesh(geometry *GeometryData, material *MaterialData) *Mesh {
 	return &Mesh{
 		geometry: geometry,
 		material: material,
-		node:     newNode(),
+		Object3D: newObject3D(),
 	}
 }
 
@@ -30,7 +30,7 @@ func (m *Mesh) NeedsUpdate() {
 }
 
 func (m *Mesh) UpdateMatrix(force bool) bool {
-	updated := m.node.UpdateMatrix(force)
+	updated := m.Object3D.UpdateMatrix(force)
 
 	// if the world matrix updated invalidate bounding sphere
 	if updated {
