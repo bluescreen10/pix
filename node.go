@@ -11,5 +11,5 @@ type Node interface {
 	InvModel() glm.Mat4f
 	UpdateMatrix(force bool) bool
 	CastShadow() bool
-	RecieveShadow() bool
+	ReceiveShadow() bool
 }
