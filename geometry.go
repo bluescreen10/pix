@@ -29,14 +29,21 @@ var geometryFlagNames = map[int]string{
 }
 
 type GeometryData struct {
+	// CPU-side mesh data.
 	version int
-	slot    int
 	indices []uint32
 	attrs   []*Attribute
 	flags   GeometryFlags
 
 	isBoundingSphereValid bool
-	boundingSpehere       Sphere
+	boundingSphere        Sphere
+
+	// GPU-side resources, populated by the renderer.
+	gpuVersion int
+	gpuIndex   *wgpu.Buffer
+	gpuBufs    []GeometryBuffer
+	gpuCount   int
+	gpuLayout  []wgpu.VertexBufferLayout
 }
 
 func (g *GeometryData) Indices() []uint32 {
@@ -72,7 +79,6 @@ func (g *GeometryData) SetAttributeData(name string, data []byte) {
 			a.SetBytes(data)
 		}
 
-		// if they set positions invlidate bounds
 		if a.name == PositionAttrName {
 			g.isBoundingSphereValid = false
 		}
@@ -86,53 +92,54 @@ func (g *GeometryData) BoundingSphere() Sphere {
 		g.calcBoundingSphere()
 	}
 
-	return g.boundingSpehere
+	return g.boundingSphere
 }
 
 func (g *GeometryData) calcBoundingSphere() {
 	points := CastTo[glm.Vec3f](g.AttributeData(PositionAttrName))
 
-	g.boundingSpehere.Center = glm.Vec3f{0, 0, 0}
-	g.boundingSpehere.Radius = 0
+	g.boundingSphere.Center = glm.Vec3f{0, 0, 0}
+	g.boundingSphere.Radius = 0
 
 	if len(points) == 0 {
 		return
 	}
 
-	// center
 	for _, p := range points {
-		g.boundingSpehere.Center[0] += p[0]
-		g.boundingSpehere.Center[1] += p[1]
-		g.boundingSpehere.Center[2] += p[2]
+		g.boundingSphere.Center[0] += p[0]
+		g.boundingSphere.Center[1] += p[1]
+		g.boundingSphere.Center[2] += p[2]
 	}
 
 	inv := 1.0 / float32(len(points))
-	g.boundingSpehere.Center[0] *= inv
-	g.boundingSpehere.Center[1] *= inv
-	g.boundingSpehere.Center[2] *= inv
+	g.boundingSphere.Center[0] *= inv
+	g.boundingSphere.Center[1] *= inv
+	g.boundingSphere.Center[2] *= inv
 
-	//radius
 	var maxDistSq float32
 	for _, p := range points {
-		d := p.Sub(g.boundingSpehere.Center)
+		d := p.Sub(g.boundingSphere.Center)
 		dSq := d[0]*d[0] + d[1]*d[1] + d[2]*d[2]
-
 		if dSq > maxDistSq {
 			maxDistSq = dSq
 		}
 	}
 
-	g.boundingSpehere.Radius = float32(math.Sqrt(float64(maxDistSq)))
+	g.boundingSphere.Radius = float32(math.Sqrt(float64(maxDistSq)))
 }
 
-type Geometry struct {
-	topolgy wgpu.PrimitiveTopology
-	version int
-	index   *wgpu.Buffer
-	bufs    []GeometryBuffer
-	count   int
-	layout  []wgpu.VertexBufferLayout
-	flags   GeometryFlags
+// Destroy releases the GPU buffers held by this geometry.
+func (g *GeometryData) Destroy() {
+	if g.gpuIndex != nil {
+		g.gpuIndex.Destroy()
+		g.gpuIndex = nil
+	}
+	for _, gb := range g.gpuBufs {
+		if gb.buf != nil {
+			gb.buf.Destroy()
+		}
+	}
+	g.gpuBufs = nil
 }
 
 type GeometryBuffer struct {
@@ -141,14 +148,23 @@ type GeometryBuffer struct {
 	buf     *wgpu.Buffer
 }
 
-func (g Geometry) Destroy() {
-	if g.index != nil {
-		g.index.Destroy()
-	}
+// Geometry is the public handle for a renderer-owned geometry resource.
+type Geometry struct {
+	renderer *Renderer
+	ref      Ref[Geometry]
+}
 
-	for _, gb := range g.bufs {
-		if gb.buf != nil {
-			gb.buf.Destroy()
-		}
-	}
+func (g Geometry) Ref() Ref[Geometry] { return g.ref }
+
+// Release surrenders this handle's reference to the geometry resource.
+func (g Geometry) Release() { g.ref.Release() }
+
+// Copy increments the reference count and returns an additional Geometry handle.
+func (g Geometry) Copy() Geometry { return Geometry{renderer: g.renderer, ref: g.ref.Copy()} }
+
+// Valid reports whether the underlying geometry resource is still alive.
+func (g Geometry) Valid() bool { return g.ref.Valid() }
+
+func (g Geometry) BoundingSphere() Sphere {
+	return g.renderer.geometries.get(g.ref.ID()).BoundingSphere()
 }

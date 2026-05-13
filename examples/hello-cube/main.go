@@ -27,66 +27,55 @@ const (
 )
 
 func main() {
-	// initialize glfw
 	if err := glfw.Init(); err != nil {
 		panic(err)
 	}
 
 	glfw.WindowHint(glfw.ClientAPI, glfw.NoAPI)
 
-	// create window
 	window, err := glfw.CreateWindow(width, height, title, nil, nil)
 	if err != nil {
 		panic(err)
 	}
 
-	// get framebuffer size and surface descriptor
 	width, height := window.GetFramebufferSize()
 	descriptor := wgpuglfw.GetSurfaceDescriptor(window)
 
-	// create & initialize renderer
 	renderer := pix.NewRenderer(uint32(width), uint32(height))
 	if err := renderer.Init(descriptor); err != nil {
 		panic(err)
 	}
 
-	// create input handler
 	input := glfwinput.New(window)
 
-	// create camera
 	camera := cameras.NewPerpectiveCamera(45, float32(width)/float32(height), 0.01, 2000)
 	camera.SetPosition(glm.Vec3f{1, 1, -2})
 
-	// create camera control
 	ctrl := controls.NewOrbit(camera, input)
 	ctrl.SetPitch(glm.ToRadians(float32(-45)))
 	ctrl.SetYaw(glm.ToRadians(float32(45)))
 
-	tex, err := loaders.LoadTexture("assets/uv_grid.png")
+	tex, err := loaders.LoadTexture(renderer, "assets/uv_grid.png")
 	if err != nil {
 		panic(err)
 	}
 
-	// create material
-	material := pix.NewBasicMaterial()
+	material := renderer.NewBasicMaterial()
 	material.SetColorMap(tex)
+	tex.Release()
 
-	// create geometry
-	geo := pix.NewBoxGeometry(1, 1, 1)
+	geo := renderer.NewBoxGeometry(1, 1, 1)
 
-	// create scene and mesh
 	scene := pix.NewScene()
-	mesh := scene.NewMesh(geo, material.Build())
+	mesh := scene.NewMesh(geo, material.Ref())
+	geo.Release()
+	material.Release()
 	scene.Add(mesh)
 
 	var count int
-	// main render loop
 	for !window.ShouldClose() {
-
-		// render scene
 		renderer.Render(scene, camera)
 
-		// update camera control
 		ctrl.Update()
 
 		count++
@@ -96,7 +85,6 @@ func main() {
 			fmt.Printf("CPUTime:%s\n", renderer.Stats.AvgFrameTime())
 		}
 
-		// poll events
 		glfw.PollEvents()
 	}
 }

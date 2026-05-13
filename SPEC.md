@@ -24,8 +24,12 @@ type Scene struct {
     parent, firstChild, lastChild   []NodeID
     nextSibling, prevSibling        []NodeID
 
-    // Transforms
-    local, world []Mat4
+    // Transforms (all index by the same key) Stored cached friendly
+    local, world []glm.Mat4f
+
+    rotations []glm.Quatf
+    positions []glm.Vec3f
+    scales    []glm.Vec3f
 
     // State
     flags      []uint32   // alive | visible | castShadow | receiveShadow | dirty | static | visibleEffective
@@ -51,12 +55,12 @@ These arrays may contain gaps (destroyed slots). That's intentional — slot sta
 Type-specific data lives in separate compact arrays:
 
 ```go
-meshes        []MeshData          // {geometryID, materialID, boundsLocal, ownerNode}
-skinned       []SkinnedMeshData   // mesh + skeletonID + boneMatricesOffset
+meshes        []Meshes          // {geometryID, materialID, boundsLocal, ownerNode}
+skinned       []SkinnedMesh   // mesh + skeletonID + boneMatricesOffset
 dirLights     []DirectionalLight  // {color, intensity, direction, shadowMapIdx}
 pointLights   []PointLight        // {color, intensity, range, decay}
 ambientLights []AmbientLight
-cameras       []CameraData
+cameras       []Camera
 ```
 
 Each payload entry stores an `OwnerNode uint32` back-pointer for swap-remove on destroy.
@@ -108,28 +112,28 @@ func (n Node) Destroy()                            // destroys subtree
 Each kind has a typed handle that embeds `Node`, inheriting all hierarchy methods:
 
 ```go
-type GroupNode             struct { Node }
-type MeshNode              struct { Node }
-type SkinnedMeshNode       struct { Node }
-type DirectionalLightNode  struct { Node }
-type PointLightNode        struct { Node }
-type AmbientLightNode      struct { Node }
-type CameraNode            struct { Node }
+type Group             struct { Node }
+type Mesh              struct { Node }
+type SkinnedMesh       struct { Node }
+type DirectionalLight  struct { Node }
+type PointLight        struct { Node }
+type AmbientLight      struct { Node }
+type Camera            struct { Node }
 ```
 
 Typed methods access kind-specific data:
 
 ```go
-func (m MeshNode) Geometry() GeometryID
-func (m MeshNode) Material() MaterialID
-func (m MeshNode) SetMaterial(MaterialID)
+func (m Mesh) Geometry() GeometryID
+func (m Mesh) Material() MaterialID
+func (m Mesh) SetMaterial(MaterialID)
 
 func (l DirectionalLightNode) Color() Color
 func (l DirectionalLightNode) SetColor(Color)
 func (l DirectionalLightNode) SetIntensity(float32)
 ```
 
-Because `MeshNode` embeds `Node`, `crate1.Add(crate2)` works without any per-kind reimplementation. Any node may parent any other — this avoids forcing intermediate Groups for simple parent/child relationships (e.g., a turret mesh with a barrel mesh child).
+Because `Mesh` embeds `Node`, `crate1.Add(crate2)` works without any per-kind reimplementation. Any node may parent any other — this avoids forcing intermediate Groups for simple parent/child relationships (e.g., a turret mesh with a barrel mesh child).
 
 ### Construction
 
@@ -290,32 +294,41 @@ Returns `GeometryID`. Vertex/index data uploaded once; reused by every mesh refe
 ### Materials
 
 ```go
-mat := renderer.NewStandardMaterial(StandardMaterialDesc{
+mat := renderer.NewStandardMaterial(pix.StandardMaterialDesc{
     Albedo:    Color{1, 0.5, 0.2, 1},
     Metallic:  0.0,
     Roughness: 0.5,
     AlbedoMap: tex,
 })
+
+/* return */
+type StandardMaterial struct {
+    renderer *Renderer
+    ref       Ref[Material]
+}
+
 ```
 
 Material state is split by mutation cost:
 
 ```go
-type MaterialData struct {
+type Material struct {
+    name string (optional)
     // pipeline-affecting (blend, depth, cull, shader defines)
-    pipelineKey PipelineKey
-    pipelineID  PipelineID
+    materialKey uint64 // today called materialFlags
 
     // bind-group-affecting (textures, samplers, buffer bindings)
-    albedoTex   TextureID
+    textures []TextureID
     sampler     SamplerID
+
     bindGroup   *wgpu.BindGroup
+    bindGroupLayout *wgpu.BindGroupLayout
 
     // uniforms-only (colors, scalars)
-    uniforms    StandardUniforms
-    uniformBuf  *wgpu.Buffer
+    uniforms    []*Uniforms
+    uniformBuf  []*wgpu.Buffer
 
-    dirty       uint32   // dirtyUniforms | dirtyBindGroup | dirtyPipeline
+    dirty       uint32   // dirtyUniforms | dirtyBindGroup | dirtyKey
 }
 ```
 
@@ -323,7 +336,7 @@ Setters mutate data and set the right dirty bit:
 
 ```go
 func (m StandardMaterial) SetColor(c Color)         // dirtyUniforms
-func (m StandardMaterial) SetAlbedo(t TextureID)    // dirtyBindGroup
+func (m StandardMaterial) SetColorMap(t TextureID)    // dirtyBindGroup
 func (m StandardMaterial) SetBlendMode(b BlendMode) // dirtyPipeline
 ```
 
@@ -353,18 +366,11 @@ Format selection is explicit. Albedo/color → `RGBA8UnormSrgb`. Normal maps and
 
 ### Samplers
 
-Separate resource (matches wgpu/WebGPU). Aggressively cached — `NewSampler` hashes the descriptor and returns existing ID on match. A typical scene has 5–10 unique samplers regardless of texture count.
+Separate resource (matches wgpu/WebGPU). Aggressively cached — `Sampler` hashes the descriptor and returns existing ID on match. A typical scene has 5–10 unique samplers regardless of texture count.
 
 ```go
-linearWrap := renderer.NewSampler(SamplerDesc{
-    MinFilter:  FilterLinear,
-    MagFilter:  FilterLinear,
-    MipFilter:  FilterLinear,
-    AddressU:   AddressRepeat,
-    AddressV:   AddressRepeat,
-    Anisotropy: 16,
-})
-mat.SetAlbedoSampler(linearWrap)
+texture.SetMinFilter(...)
+mat.NeedsUpdate()
 ```
 
 ### Material instances (optional layer)
@@ -372,9 +378,9 @@ mat.SetAlbedoSampler(linearWrap)
 For per-mesh appearance variation without losing pipeline dedup:
 
 ```go
-inst := renderer.NewMaterialInstance(baseMat)
+inst := mat.Clone()
 inst.SetColor(Color{1, 0, 0, 1})   // only this instance's uniforms
-meshNode.SetMaterial(inst.ID())
+Mesh.SetMaterial(inst.ID())
 ```
 
 Each instance has its own small uniform block layered on the base material. Maps cleanly to GPU instancing.
@@ -384,7 +390,7 @@ Each instance has its own small uniform block layered on the base material. Maps
 GPU resources are refcounted by node-side references:
 
 - `scene.NewMesh(geo, mat)` increments `geometries[geo].refcount` and `materials[mat].refcount`
-- `meshNode.SetMaterial(newMat)` decrements old material refcount, increments new
+- `Mesh.SetMaterial(newMat)` decrements old material refcount, increments new
 - Destroying a mesh node decrements both
 - When refcount hits zero, the resource enters `deferredFree`
 - After the current frame's GPU work completes (`Device.Poll`), `deferredFree` is drained and actual `wgpu.Texture.Release()` etc. happen
@@ -466,6 +472,297 @@ Each part of a glTF file lands in its rightful owner:
 The scene contributes **what's where**; the renderer contributes **how to draw it**. Neither needs to know the other's internal layout — they communicate through small ID handles and a per-frame `DrawCommand` list.
 
 ---
+
+# pix — Resource Refcounting Supplement
+
+Supplements `spec.md`. Covers the decoupled `Ref` design for GPU resource handles (geometries, materials, textures, samplers), refcount semantics, lifetime rules, and the generation vs. version distinction.
+
+---
+
+## Goals
+
+- Decouple `Scene` from `Renderer`. Scene code stores and forwards refs without knowing what backs them.
+- Make resource lifetime explicit and safe: no use-after-free, no silent slot-reuse bugs (ABA), no leaks of unreferenced resources.
+- Keep the hot path cheap: refs sit in payload tables untouched during rendering; no per-frame refcount traffic.
+
+---
+
+## The `Ref` Type
+
+```go
+type Disposer interface {
+    Dispose(id uint32)
+    Generation(id uint32) uint32
+}
+
+type Ref[T any] struct {
+    id       uint32
+    gen      uint32       // captured at creation; compared against current to detect staleness
+    refCount *int32       // shared across all clones of this ref
+    owner    Disposer     // interface, not closure — avoids per-resource allocation
+}
+```
+
+Size: 24 bytes (8 + pointer + interface). Stored by value; cloned by `Retain()`.
+
+### Methods
+
+```go
+func (r Ref[T]) Retain() Ref {
+    atomic.AddInt32(r.refCount, 1)
+    return r
+}
+
+func (r Ref[T]) Release() {
+    if atomic.AddInt32(r.refCount, -1) == 0 {
+        r.owner.Dispose(r.id)
+    }
+}
+
+func (r Ref[T]) Valid() bool {
+    return r.owner != nil && r.owner.Generation(r.id) == r.gen
+}
+
+func (r Ref[T]) ID() uint32 { return r.id }
+```
+
+### Typed wrappers
+
+The base `Ref` is unsafe to mix across resource kinds. Wrap it:
+
+```go
+
+```
+
+Constructors return the typed wrapper; type system prevents passing a `Ref[Texture]` where a `Ref[Geometry]` is expected.
+
+---
+
+## Why `Ref` (and not `id + *Renderer`)
+
+- **Scene has no renderer dependency.** `Scene.NewMesh(geo GeometryRef, mat MaterialRef)` knows nothing about who created the refs. Mock/test/swap the renderer freely.
+- **Cross-package resources work uniformly.** Anything implementing `Disposer` can hand out refs — procedurally generated assets, CPU-side caches, network-backed textures.
+- **Refcount lives with the ref, not the storer.** Storer doesn't need to know which table to retain/release in.
+
+Tradeoff: 24 bytes per ref vs. 8 bytes for `(id, gen)` pair. With ~2 refs per mesh entry (geometry + material), that's 48 bytes/mesh extra. Acceptable; the inner render loop iterates `meshes[]` payload entries but doesn't touch refcounts.
+
+---
+
+## Lifetime Rules
+
+### Creation: refcount starts at 1
+
+```go
+tex := renderer.NewTexture2D(...)   // refcount = 1; caller owns one reference
+mat := renderer.NewStandardMaterial(...)
+```
+
+The `1` represents "the caller holds this ref." Caller must `Release()` exactly once, or pass the ref somewhere that will.
+
+### Storage: retain before storing, release on overwrite
+
+```go
+func (m Mesh) SetMaterial(newMat MaterialRef) {
+    md := &m.scene.meshes[m.scene.payload[m.slot()]]
+    newCopy := newMat.Retain()         // retain new first
+    md.Material.Release()               // then release old
+    md.Material = newCopy
+}
+```
+
+**Retain-before-release order matters.** If `newMat` and the existing stored material are the same logical resource, releasing first could briefly drop refcount to zero and trigger destruction before the retain restores it.
+
+### Destruction: storer releases what it stored
+
+```go
+func (s *Scene) destroyMeshPayload(payloadIdx uint32) {
+    md := s.meshes[payloadIdx]
+    md.Geometry.Release()
+    md.Material.Release()
+    // ... swap-remove, patch OwnerNode ...
+}
+```
+
+When a `Mesh` node is destroyed, its payload entry releases the geometry and material refs it stored at construction.
+
+### Typical end-to-end
+
+```go
+tex := renderer.NewTexture2D(...)       // refcount(tex) = 1
+mat := renderer.NewStandardMaterial(...) // refcount(mat) = 1
+mat.SetAlbedo(tex)                       // refcount(tex) = 2
+
+mesh := scene.NewMesh(geo, mat)          // refcount(geo) = 2, refcount(mat) = 2
+
+// caller no longer needs raw refs:
+tex.Release()                            // refcount(tex) = 1 (held by mat)
+mat.Release()                            // refcount(mat) = 1 (held by mesh)
+geo.Release()                            // refcount(geo) = 1 (held by mesh)
+
+mesh.Destroy()                           // releases geo and mat refs
+                                         // refcount(geo) = 0 → Dispose(geo.id)
+                                         // refcount(mat) = 0 → Dispose(mat.id)
+                                         // mat's Dispose releases its tex ref
+                                         // refcount(tex) = 0 → Dispose(tex.id)
+```
+
+Equally valid: skip the explicit `Release()` calls and let `renderer.Destroy()` drop everything at shutdown. Leaks bounded by renderer lifetime.
+
+---
+
+## NewMesh Signature
+
+```go
+func (s *Scene) NewMesh(geo GeometryRef, mat MaterialRef) Mesh {
+    id := s.allocNode(KindMesh)
+    s.meshes = append(s.meshes, MeshData{
+        Geometry:   geo.Retain(),       // refcount++
+        Material:   mat.Retain(),       // refcount++
+        OwnerNode:  id.index,
+        BoundsLocal: extractBounds(geo),
+    })
+    s.payload[id.index] = uint32(len(s.meshes) - 1)
+    return Mesh{Node{scene: s, id: id}}
+}
+```
+
+`MeshData` stores `GeometryRef` and `MaterialRef` by value. The `Retain()` calls bump refcount; the original refs passed in remain owned by the caller (who must release them separately or let them be released via assignment to other storers).
+
+---
+
+## Generation vs. Version: Two Different Counters
+
+The resource table tracks two independent integers per resource. They answer different questions.
+
+### `gen` — slot recycling detector
+
+Bumped **only on destroy**, when the slot is freed and may be reassigned.
+
+Purpose: detect stale `Ref` values whose underlying resource has been freed and possibly replaced.
+
+```go
+geo := renderer.NewBoxGeometry(...)     // (id=42, gen=1)
+geo.Release()                            // slot 42 freed; geometries[42].gen → 2
+                                         // any held (id=42, gen=1) ref fails Valid()
+
+newGeo := renderer.NewSphereGeometry(...) // reuses slot 42: (id=42, gen=2)
+                                          // old refs still detect staleness via gen mismatch
+```
+
+Without `gen`, slot reuse silently aliases old refs onto the new resource (the ABA problem).
+
+### `version` — content mutation tracker (optional)
+
+Bumped on `UpdateGeometry`, `SetVertices`, animated stream updates, etc. — anywhere the resource's *contents* change while its *identity* stays the same.
+
+Purpose: invalidate dependent caches (bind groups, pipeline state, derived buffers) without invalidating refs.
+
+```go
+geo := renderer.NewBoxGeometry(...)     // (gen=1, version=1), refcount=1
+g2  := geo.Retain()                      // refcount=2; both refs see same resource
+
+renderer.UpdateGeometry(geo, newVerts)   // version → 2; gen unchanged
+                                         // geo and g2 both still Valid()
+                                         // material pipeline cache sees version bump,
+                                         // rebuilds bind group on next flushMaterials()
+```
+
+**Mutation does not invalidate refs.** Every mesh sharing the geometry sees the updated data on the next draw — that's the whole point of shared-by-handle resources. Animation, morph targets, dynamic vertex streams all work this way.
+
+### Summary
+
+| Operation                       | `gen` | `version` | Refs invalidated? |
+|---------------------------------|-------|-----------|-------------------|
+| Create resource                 | =1    | =1        | n/a               |
+| Retain / Clone                  | —     | —         | no                |
+| Update contents (vertex data, uniforms) | —     | ++        | **no**            |
+| Last Release → destroy          | ++    | —         | **yes** (all)     |
+| Slot reused by new resource     | (already bumped) | reset | (already invalid) |
+
+---
+
+## Deferred Destruction
+
+`owner.Dispose(id)` does **not** immediately call `wgpu.Texture.Release()` etc. The GPU may still be reading from the resource in flight.
+
+```go
+func (r *Renderer) Dispose(id uint32) {
+    r.deferredFree = append(r.deferredFree, deferredResource{
+        kind:     /* texture/buffer/etc. */,
+        id:       id,
+        frame:    r.currentFrame,
+    })
+    // gen bumped here; slot marked free in the table
+    r.textures[id].gen++
+    r.pushFreeSlot(id)
+}
+```
+
+The drain happens after the in-flight frame completes (via `Device.Poll`):
+
+```go
+func (r *Renderer) drainDeferredFree() {
+    safe := r.currentFrame - framesInFlight
+    for i := 0; i < len(r.deferredFree); {
+        d := r.deferredFree[i]
+        if d.frame <= safe {
+            r.actuallyFree(d)              // wgpu.Texture.Release(), etc.
+            r.deferredFree[i] = r.deferredFree[len(r.deferredFree)-1]
+            r.deferredFree = r.deferredFree[:len(r.deferredFree)-1]
+        } else {
+            i++
+        }
+    }
+}
+```
+
+Key point: **gen bumps and slot freeing happen at `Dispose` time**, not at drain time. From the ref-validation perspective, the resource is dead the moment refcount hits zero. Only the GPU-side cleanup is deferred.
+
+---
+
+## Concurrency Rules
+
+`Retain` and `Release` are atomic and safe to call from any goroutine.
+
+**Constraint**: never `Retain()` a ref unless you already hold a live reference to it. Specifically, do not load a ref out of shared storage and clone it without synchronization that guarantees no concurrent `Release()` of the last reference.
+
+This is the standard rule for any refcounted system. The pattern that breaks it:
+
+```go
+// THREAD A                              // THREAD B
+ref := sharedSlot.Load()                 ref := sharedSlot.Load()
+                                         ref.Release()  // refcount 1 → 0, Dispose runs
+ref.Retain()  // BUG: incrementing freed refcount
+```
+
+Fix: protect the load+retain pair under a mutex, or use `sync/atomic.Pointer` semantics where the slot itself participates in the protocol.
+
+In practice, scene mutation is single-threaded (per the main spec's deferred question), so this is mostly a non-issue. The atomics on `refCount` exist for the renderer's own internal threading (deferred-free drain, async loaders) and for the case where game code releases refs from worker goroutines.
+
+---
+
+## Validation Discipline
+
+`Valid()` is a debug/safety check, not a performance path. Don't gate every render-loop access on it. The intended uses:
+
+- **Debug builds**: assert on `Valid()` in setters and renderer entry points.
+- **External APIs**: validate refs at the boundary (e.g., `mesh.SetMaterial`) so user errors surface immediately.
+- **Internal hot loops**: skip the check; lifetime invariants guarantee validity by construction (the payload table owns retains for everything it references).
+
+---
+
+## Implementation Checklist
+
+- [ ] `Ref` struct with `id`, `gen`, `*refCount`, `Disposer`
+- [ ] Typed wrappers: `GeometryRef`, `MaterialRef`, `TextureRef`, `SamplerRef`
+- [ ] `Retain` / `Release` / `Valid` / `ID`
+- [ ] `Renderer` implements `Disposer` for each resource kind (or one impl that switches on kind)
+- [ ] Resource tables carry `gen uint32` and `version uint32` per slot
+- [ ] `New*` constructors initialize `refCount = 1`
+- [ ] `Dispose` bumps `gen`, frees slot, appends to `deferredFree`
+- [ ] `drainDeferredFree` runs after `Device.Poll` confirms frame completion
+- [ ] `Scene.NewMesh` (and similar) retain stored refs; `Destroy` paths release them
+- [ ] Setters that overwrite stored refs retain-before-release
 
 ## Open / Deferred Questions
 

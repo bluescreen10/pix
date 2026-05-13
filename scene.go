@@ -257,6 +257,9 @@ func (s *Scene) destroyNode(id NodeID) {
 
 func (s *Scene) swapRemoveMesh(payloadIdx uint32) {
 	last := uint32(len(s.meshes) - 1)
+	// Release refs owned by the destroyed mesh payload.
+	s.meshes[payloadIdx].geometry.Release()
+	s.meshes[payloadIdx].material.Release()
 	if payloadIdx < last {
 		s.meshes[payloadIdx] = s.meshes[last]
 		s.payload[s.meshes[payloadIdx].ownerNode] = payloadIdx

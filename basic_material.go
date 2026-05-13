@@ -5,61 +5,52 @@ import (
 )
 
 type BasicMaterial struct {
-	*MaterialData
+	Material
+}
+
+func (m *BasicMaterial) data() *MaterialData {
+	return m.renderer.materials.get(m.ref.ID())
 }
 
 func (m *BasicMaterial) SetColor(color glm.Color3f) {
-	m.uniforms[0].SetVec3("color", glm.Vec3f{color[0], color[1], color[2]})
-	m.version++
+	data := m.data()
+	data.uniforms[0].SetVec3("color", glm.Vec3f{color[0], color[1], color[2]})
+	data.version++
 }
 
 func (m *BasicMaterial) Color() glm.Color3f {
-	v := m.uniforms[0].Vec3("color")
+	v := m.data().uniforms[0].Vec3("color")
 	return glm.Color3f{v[0], v[1], v[2]}
 }
 
-func (m *BasicMaterial) SetColorMap(texture *TextureData) {
-
-	// adjust flags
-	if texture != nil {
-		m.flags |= ColorMapFlag
+func (m *BasicMaterial) SetColorMap(texture Texture) {
+	data := m.data()
+	old := data.textures[0]
+	data.textures[0] = texture.ref.Copy()
+	old.Release()
+	if texture.ref.Valid() {
+		data.flags |= ColorMapFlag
 	} else {
-		m.flags &^= ColorMapFlag
+		data.flags &^= ColorMapFlag
 	}
-
-	m.textures[0] = texture
-	m.NeedsUpdate()
+	data.version++
 }
 
-func (m *BasicMaterial) ColorMap() *TextureData {
-	return m.textures[0]
+func (m *BasicMaterial) ColorMap() Ref[Texture] {
+	return m.data().textures[0]
 }
 
 func (m *BasicMaterial) NeedsUpdate() {
-	m.version++
+	m.data().version++
 }
 
-func (m *BasicMaterial) Build() *MaterialData {
-	return m.MaterialData
+// Ref returns a new Material handle sharing the same underlying resource.
+func (m *BasicMaterial) Ref() Material {
+	return m.Material.Copy()
 }
 
-func NewBasicMaterial() *BasicMaterial {
-	uniform := (&Uniform{}).AddVec3("color").Build()
-
-	data := NewMaterial(
-		"Basic Material",
-		//basicMaterialshader,
-		"basic_material.wesl",
-		[]*Uniform{uniform},
-		1,
-		false,
-	)
-
-	builder := &BasicMaterial{
-		MaterialData: data,
-	}
-
-	builder.SetColor(glm.Color3f{1, 1, 1})
-
-	return builder
+// Release surrenders the builder's own reference to the material resource.
+func (m *BasicMaterial) Release() {
+	m.Material.Release()
+	m.Material = Material{}
 }

@@ -4,56 +4,40 @@ import (
 	"github.com/bluescreen10/dawn-go/wgpu"
 )
 
-// Basically there are the following possibilities:
-// The prepared material exists but is out of date -> we need to update buffers
-// The preapred material exists but the binding group + data is invalid -> we need to update buffers and rebuild the bg
-// The prepared material has never been initialized -> we need to build layout + buffers + bg
-func prepareMaterial(device *wgpu.Device, data *MaterialData, material Material, resources *resourceManager) (Material, error) {
-	// if material is up-to-date don't don anything
-	if data.version == material.version {
-		return material, nil
+func prepareMaterial(device *wgpu.Device, data *MaterialData, r *Renderer) error {
+	if data.version == data.gpuVersion {
+		return nil
 	}
 
-	// full rebuild
-	if len(data.uniforms) != len(material.uniformBuffers) {
-		material.Destroy()
+	if len(data.uniforms) != len(data.gpuUniformBuffers) {
+		data.Destroy()
 
-		// Allocate buffers
 		buffers, err := createMaterialBuffers(device, data)
 		if err != nil {
-			return material, err
+			return err
 		}
-		material.uniformBuffers = buffers
+		data.gpuUniformBuffers = buffers
 
-		// Create BindGroup Layout
 		layout, err := createMaterialBindGroupLayout(device, data)
 		if err != nil {
-			return material, err
+			return err
 		}
-		material.bindGroupLayout = layout
-
+		data.gpuBindGroupLayout = layout
 	}
 
-	// only data has changed
 	queue := device.GetQueue()
 	for i, u := range data.uniforms {
-		queue.WriteBuffer(material.uniformBuffers[i], 0, u.Bytes())
+		queue.WriteBuffer(data.gpuUniformBuffers[i], 0, u.Bytes())
 	}
 
-	// recreate the bind group
-	bindGroup, err := createMaterialBindGroup(device, data, material, resources)
-
+	bindGroup, err := createMaterialBindGroup(device, data, r)
 	if err != nil {
-		return material, err
+		return err
 	}
 
-	material.shader = data.shader
-	material.flags = data.flags
-	material.hash = data.hash
-	material.bindGroup = bindGroup
-	material.version = data.version
-	material.isLit = data.isLit
-	return material, nil
+	data.gpuBindGroup = bindGroup
+	data.gpuVersion = data.version
+	return nil
 }
 
 func createMaterialBindGroupLayout(device *wgpu.Device, data *MaterialData) (*wgpu.BindGroupLayout, error) {
@@ -64,7 +48,7 @@ func createMaterialBindGroupLayout(device *wgpu.Device, data *MaterialData) (*wg
 		bgLayoutEntries = append(bgLayoutEntries,
 			wgpu.BindGroupLayoutEntry{
 				Binding:    binding,
-				Visibility: wgpu.ShaderStageFragment | wgpu.ShaderStageVertex, //FIXME: allow uniform to pass the stage
+				Visibility: wgpu.ShaderStageFragment | wgpu.ShaderStageVertex,
 				Buffer: wgpu.BufferBindingLayout{
 					Type:             wgpu.BufferBindingTypeUniform,
 					HasDynamicOffset: false,
@@ -78,17 +62,16 @@ func createMaterialBindGroupLayout(device *wgpu.Device, data *MaterialData) (*wg
 		bgLayoutEntries = append(bgLayoutEntries,
 			wgpu.BindGroupLayoutEntry{
 				Binding:    binding,
-				Visibility: wgpu.ShaderStageFragment | wgpu.ShaderStageVertex, //FIXME: allow user to specify visibility of texture
+				Visibility: wgpu.ShaderStageFragment | wgpu.ShaderStageVertex,
 				Texture: wgpu.TextureBindingLayout{
 					Multisampled:  false,
 					ViewDimension: wgpu.TextureViewDimension2D,
-					//FIXME: the sample type should depend on the texture
-					SampleType: wgpu.TextureSampleTypeFloat,
+					SampleType:    wgpu.TextureSampleTypeFloat,
 				},
 			},
 			wgpu.BindGroupLayoutEntry{
 				Binding:    binding + 1,
-				Visibility: wgpu.ShaderStageVertex | wgpu.ShaderStageFragment, //FIXME: allow user to specify visibility
+				Visibility: wgpu.ShaderStageVertex | wgpu.ShaderStageFragment,
 				Sampler: wgpu.SamplerBindingLayout{
 					Type: wgpu.SamplerBindingTypeFiltering,
 				},
@@ -97,7 +80,6 @@ func createMaterialBindGroupLayout(device *wgpu.Device, data *MaterialData) (*wg
 	}
 
 	bgl := device.CreateBindGroupLayout(wgpu.BindGroupLayoutDescriptor{
-		Label:   "", //TODO
 		Entries: bgLayoutEntries,
 	})
 
@@ -109,18 +91,16 @@ func createMaterialBuffers(device *wgpu.Device, data *MaterialData) ([]*wgpu.Buf
 
 	for _, u := range data.uniforms {
 		buffer := device.CreateBuffer(wgpu.BufferDescriptor{
-			Label: "", //TODO
 			Size:  uint64(u.Size()),
 			Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
 		})
-
 		buffers = append(buffers, buffer)
 	}
 
 	return buffers, nil
 }
 
-func createMaterialBindGroup(device *wgpu.Device, data *MaterialData, material Material, resources *resourceManager) (*wgpu.BindGroup, error) {
+func createMaterialBindGroup(device *wgpu.Device, data *MaterialData, r *Renderer) (*wgpu.BindGroup, error) {
 	var bgEntries []wgpu.BindGroupEntry
 	var binding uint32
 
@@ -128,37 +108,40 @@ func createMaterialBindGroup(device *wgpu.Device, data *MaterialData, material M
 		bgEntries = append(bgEntries,
 			wgpu.BindGroupEntry{
 				Binding: binding,
-				Buffer:  material.uniformBuffers[i],
+				Buffer:  data.gpuUniformBuffers[i],
 				Offset:  0,
 				Size:    wgpu.WholeSize,
 			})
 		binding++
 	}
 
-	for _, td := range data.textures {
-		var t Texture
-
-		if td != nil {
-			t = resources.GetTextureByData(device, td)
+	for _, texRef := range data.textures {
+		var td *TextureData
+		if texRef.Valid() {
+			id := texRef.ID()
+			td = r.textures.get(id)
+			if td.gpuVersion < td.version {
+				r.uploadTexture(id)
+			}
 		} else {
-			t = resources.GetDefaultTexture(device)
+			td = r.defaultTexture()
 		}
+
 		bgEntries = append(bgEntries,
 			wgpu.BindGroupEntry{
 				Binding:     binding,
-				TextureView: t.view,
+				TextureView: td.gpuView,
 			},
 			wgpu.BindGroupEntry{
 				Binding: binding + 1,
-				Sampler: t.sampler,
+				Sampler: td.gpuSampler,
 			},
 		)
 		binding += 2
 	}
 
 	bg := device.CreateBindGroup(wgpu.BindGroupDescriptor{
-		Label:   "", //TODO
-		Layout:  material.bindGroupLayout,
+		Layout:  data.gpuBindGroupLayout,
 		Entries: bgEntries,
 	})
 

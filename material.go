@@ -21,30 +21,51 @@ var materialFlagNames = map[int]string{
 
 type MaterialData struct {
 	id       uint32
-	slot     int
 	version  int
 	shader   string
 	name     string
 	hash     uint64
 	flags    MaterialFlags
-	textures []*TextureData
+	textures []Ref[Texture]
 	uniforms []*Uniform
 	isLit    bool
+
+	// GPU-side resources, populated by the renderer.
+	gpuVersion         int
+	gpuBindGroup       *wgpu.BindGroup
+	gpuBindGroupLayout *wgpu.BindGroupLayout
+	gpuUniformBuffers  []*wgpu.Buffer
 }
 
-func (m *MaterialData) Texture(id int) *TextureData {
-	//FIXME: do bounds checking
+func (m *MaterialData) Texture(id int) Ref[Texture] {
 	return m.textures[id]
 }
 
-func (m *MaterialData) SetTexture(id int, texture *TextureData) {
-	//FIXME: do bounds checking
-	m.textures[id] = texture
+func (m *MaterialData) SetTexture(id int, texture Texture) {
+	old := m.textures[id]
+	m.textures[id] = texture.ref.Copy()
+	old.Release()
 	m.version++
 }
 
 func (m *MaterialData) Uniforms() []*Uniform {
 	return m.uniforms
+}
+
+// Destroy releases the GPU resources held by this material.
+func (m *MaterialData) Destroy() {
+	if m.gpuBindGroup != nil {
+		m.gpuBindGroup.Release()
+		m.gpuBindGroup = nil
+	}
+	if m.gpuBindGroupLayout != nil {
+		m.gpuBindGroupLayout.Release()
+		m.gpuBindGroupLayout = nil
+	}
+	for _, b := range m.gpuUniformBuffers {
+		b.Destroy()
+	}
+	m.gpuUniformBuffers = nil
 }
 
 func NewMaterial(name string, shader string, uniforms []*Uniform, numTextures int, isLit bool) *MaterialData {
@@ -55,37 +76,30 @@ func NewMaterial(name string, shader string, uniforms []*Uniform, numTextures in
 		shader:   shader,
 		hash:     hashShaders(shader),
 		uniforms: uniforms,
-		textures: make([]*TextureData, numTextures),
+		textures: make([]Ref[Texture], numTextures),
 		isLit:    isLit,
 	}
 }
 
+// Material is the public handle for a renderer-owned material resource.
 type Material struct {
-	version         int
-	bindGroup       *wgpu.BindGroup
-	bindGroupLayout *wgpu.BindGroupLayout
-	shader          string
-	uniformBuffers  []*wgpu.Buffer
-	flags           MaterialFlags
-	hash            uint64
-	isLit           bool
+	renderer *Renderer
+	ref      Ref[Material]
 }
 
-func (m Material) Destroy() {
-	if m.bindGroup != nil {
-		m.bindGroup.Release()
-	}
-
-	if m.bindGroupLayout != nil {
-		m.bindGroupLayout.Release()
-	}
-
-	for _, b := range m.uniformBuffers {
-		b.Destroy()
-	}
+func (m Material) Ref() Ref[Material] {
+	return m.ref
 }
 
-// function to identify a material
+// Release surrenders this handle's reference to the material resource.
+func (m Material) Release() { m.ref.Release() }
+
+// Copy increments the reference count and returns an additional Material handle.
+func (m Material) Copy() Material { return Material{renderer: m.renderer, ref: m.ref.Copy()} }
+
+// Valid reports whether the underlying material resource is still alive.
+func (m Material) Valid() bool { return m.ref.Valid() }
+
 func hashShaders(a string) uint64 {
 	h := fnv.New64a()
 	h.Write(unsafe.Slice(unsafe.StringData(a), len(a)))

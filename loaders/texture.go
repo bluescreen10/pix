@@ -8,20 +8,17 @@ import (
 	"github.com/bluescreen10/pix"
 )
 
-func LoadTexture(path string) (*pix.TextureData, error) {
+func LoadTexture(r *pix.Renderer, path string) (pix.Texture, error) {
 	file, err := os.Open(path)
-
 	if err != nil {
-		return nil, err
+		return pix.Texture{}, err
 	}
 
 	img, _, err := image.Decode(file)
-
 	if err != nil {
-		return nil, err
+		return pix.Texture{}, err
 	}
 
-	// convert to RGBA
 	rgba := image.NewRGBA(img.Bounds())
 	for y := 0; y < img.Bounds().Dy(); y++ {
 		for x := 0; x < img.Bounds().Dx(); x++ {
@@ -29,5 +26,6 @@ func LoadTexture(path string) (*pix.TextureData, error) {
 		}
 	}
 
-	return pix.NewDataTexture(rgba.Pix, rgba.Bounds().Dx(), rgba.Bounds().Dy(), wgpu.TextureFormatRGBA8Unorm), nil
+	td := pix.NewDataTexture(rgba.Pix, rgba.Bounds().Dx(), rgba.Bounds().Dy(), wgpu.TextureFormatRGBA8Unorm)
+	return r.NewTexture(td), nil
 }

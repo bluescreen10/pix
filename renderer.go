@@ -64,7 +64,13 @@ type renderContext struct {
 }
 
 type Renderer struct {
-	resources resourceManager
+	geometries slab[GeometryData]
+	materials  slab[MaterialData]
+	textures   slab[TextureData]
+
+	samplerCache  map[Sampler]*wgpu.Sampler
+	defaultTexRef Ref[Texture]
+	deferredFree  []deferredFreeEntry
 
 	runtime       *wgpuRuntime
 	width, height uint32
@@ -121,7 +127,7 @@ func (r *Renderer) Init(descriptor wgpu.SurfaceDescriptor) error {
 		return err
 	}
 
-	r.resources.init()
+	r.initResources()
 	r.shaders.ParseFS(shaderlib)
 	r.createGlobalResources()
 	return nil
@@ -200,7 +206,7 @@ func (r *Renderer) Destroy() {
 		r.depthTexture = nil
 	}
 
-	r.resources.destroy()
+	r.destroyResources()
 }
 
 func (r *Renderer) ensureInstanceStorageSize(needInstances uint32) {
@@ -309,38 +315,30 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	var useLights bool
 
 	for _, mesh := range list.meshes {
-		geometryData := mesh.Geometry()
-		geometry := r.resources.GetGeometry(geometryData)
-
-		if geometry.version < geometryData.version {
-			if geometry.version == 0 {
-				geometry.layout = createVertexLayout(geometryData)
+		geoRef := mesh.Geometry().Ref()
+		geo := r.geometries.get(geoRef.ID())
+		if geo.gpuVersion < geo.version {
+			if geo.gpuVersion == 0 {
+				geo.gpuLayout = createVertexLayout(geo)
 			}
-			err := r.resources.uploadGeometry(r.runtime.Device, geometryData)
-			if err != nil {
-				r.logger.Error("error uploading geometry", slog.Any("err", err))
-			}
+			r.uploadGeometry(geoRef.ID())
 		}
 
-		materialData := mesh.Material()
-		material := r.resources.GetMaterialByData(materialData)
-		material, err := prepareMaterial(r.runtime.Device, materialData, material, &r.resources)
-
-		if err != nil {
+		matRef := mesh.Material().Ref()
+		mat := r.materials.get(matRef.ID())
+		if err := prepareMaterial(r.runtime.Device, mat, r); err != nil {
 			r.logger.Error("error preparing material", slog.Any("err", err))
 			continue
 		}
 
-		r.resources.SetMaterial(materialData.slot, material)
-
-		if material.isLit {
+		if mat.isLit {
 			useLights = true
 		}
 
 		drawings = append(drawings, drawing{
 			instanceId: uint32(len(instances)),
-			geometry:   *geometry,
-			material:   material,
+			geometry:   geo,
+			material:   mat,
 		})
 
 		worldModel := mesh.Model()
@@ -349,22 +347,18 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 
 	shadowCasterDrawings := make([]drawing, 0, len(list.shadowCasters))
 	for _, mesh := range list.shadowCasters {
-		geometryData := mesh.Geometry()
-		geometry := r.resources.GetGeometry(geometryData)
-
-		if geometry.version < geometryData.version {
-			if geometry.version == 0 {
-				geometry.layout = createVertexLayout(geometryData)
+		geoRef := mesh.Geometry().Ref()
+		geo := r.geometries.get(geoRef.ID())
+		if geo.gpuVersion < geo.version {
+			if geo.gpuVersion == 0 {
+				geo.gpuLayout = createVertexLayout(geo)
 			}
-			err := r.resources.uploadGeometry(r.runtime.Device, geometryData)
-			if err != nil {
-				r.logger.Error("error uploading geometry", slog.Any("err", err))
-			}
+			r.uploadGeometry(geoRef.ID())
 		}
 
 		shadowCasterDrawings = append(shadowCasterDrawings, drawing{
 			instanceId: uint32(len(instances)),
-			geometry:   *geometry,
+			geometry:   geo,
 		})
 
 		worldModel := mesh.Model()
@@ -419,10 +413,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 
 			if ld.shadow != nil {
 				if ld.shadow.target == nil {
-					ld.shadow.target = &Texture{
-						ref:  r.shadowMapTexture,
-						view: r.shadowMapLayerViews[i],
-					}
+					ld.shadow.target = r.shadowMapLayerViews[i]
 				}
 				lightFrustum := NewFrustumFromViewProjection(lightSpaceMat)
 				shadowDrawings := drawingsPool.Get().([]drawing)
@@ -431,7 +422,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 						shadowDrawings = append(shadowDrawings, shadowCasterDrawings[j])
 					}
 				}
-				r.renderShadowMap(ld.shadow.camera, ld.shadow.target.view, shadowDrawings)
+				r.renderShadowMap(ld.shadow.camera, ld.shadow.target, shadowDrawings)
 				drawingsPool.Put(shadowDrawings[:0])
 			}
 		}
@@ -456,7 +447,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	r.Stats.AddFrameTime(time.Since(start).Seconds())
 
 	r.presentFrame(&ctx)
-	r.resources.processPending(r.runtime.Device)
+	r.drainDeferredFree()
 }
 
 func (r *Renderer) renderShadowMap(shadowCam Camera, renderTarget *wgpu.TextureView, drawings []drawing) {
@@ -479,18 +470,18 @@ func (r *Renderer) renderShadowMap(shadowCam Camera, renderTarget *wgpu.TextureV
 	pass.SetBindGroup(1, r.instanceStorageBindGroup, []uint32{})
 
 	for _, d := range drawings {
-		for _, b := range d.geometry.bufs {
+		for _, b := range d.geometry.gpuBufs {
 			if b.loc == PositionLocation {
 				pass.SetVertexBuffer(0, b.buf, 0, wgpu.WholeSize)
 				break
 			}
 		}
 
-		if d.geometry.index != nil {
-			pass.SetIndexBuffer(d.geometry.index, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
-			pass.DrawIndexed(uint32(d.geometry.count), 1, 0, 0, d.instanceId)
+		if d.geometry.gpuIndex != nil {
+			pass.SetIndexBuffer(d.geometry.gpuIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
+			pass.DrawIndexed(uint32(d.geometry.gpuCount), 1, 0, 0, d.instanceId)
 		} else {
-			pass.Draw(uint32(d.geometry.count), 1, 0, d.instanceId)
+			pass.Draw(uint32(d.geometry.gpuCount), 1, 0, d.instanceId)
 		}
 	}
 
@@ -507,18 +498,18 @@ func (r *Renderer) renderInstance(pass *wgpu.RenderPassEncoder, obj drawing) {
 	pipeline := r.getPipelineFor(obj)
 	pass.SetPipeline(pipeline)
 	pass.SetBindGroup(GlobalSet, r.globalBindGroup, []uint32{})
-	pass.SetBindGroup(MaterialSet, obj.material.bindGroup, []uint32{})
+	pass.SetBindGroup(MaterialSet, obj.material.gpuBindGroup, []uint32{})
 	pass.SetBindGroup(InstanceSet, r.instanceStorageBindGroup, []uint32{})
 
-	for _, b := range obj.geometry.bufs {
+	for _, b := range obj.geometry.gpuBufs {
 		pass.SetVertexBuffer(uint32(b.loc), b.buf, 0, wgpu.WholeSize)
 	}
 
-	if obj.geometry.index != nil {
-		pass.SetIndexBuffer(obj.geometry.index, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
-		pass.DrawIndexed(uint32(obj.geometry.count), 1, 0, 0, obj.instanceId)
+	if obj.geometry.gpuIndex != nil {
+		pass.SetIndexBuffer(obj.geometry.gpuIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
+		pass.DrawIndexed(uint32(obj.geometry.gpuCount), 1, 0, 0, obj.instanceId)
 	} else {
-		pass.Draw(uint32(obj.geometry.count), 1, 0, obj.instanceId)
+		pass.Draw(uint32(obj.geometry.gpuCount), 1, 0, obj.instanceId)
 	}
 }
 
@@ -590,7 +581,7 @@ func (r *Renderer) createRenderPipeline(obj drawing) *wgpu.RenderPipeline {
 		Label: "",
 		BindGroupLayouts: []*wgpu.BindGroupLayout{
 			r.globalBindGroupLayout,
-			obj.material.bindGroupLayout,
+			obj.material.gpuBindGroupLayout,
 			r.instanceStorageBindGroupLayout,
 		},
 	})
@@ -604,7 +595,7 @@ func (r *Renderer) createRenderPipeline(obj drawing) *wgpu.RenderPipeline {
 		Vertex: wgpu.VertexState{
 			Module:     module,
 			EntryPoint: "vs_main",
-			Buffers:    obj.geometry.layout,
+			Buffers:    obj.geometry.gpuLayout,
 		},
 		Fragment: &wgpu.FragmentState{
 			Module:     module,
@@ -976,19 +967,4 @@ func buildDefines(matFlags MaterialFlags, geoFlags GeometryFlags) map[string]boo
 	}
 
 	return defines
-}
-
-func transformSphere(sphere Sphere, model glm.Mat4f) Sphere {
-	worldCenter := model.Mul4x1(glm.Vec4f{sphere.Center[0], sphere.Center[1], sphere.Center[2], 1.0})
-
-	sx := glm.Vec3f{model[0], model[1], model[2]}.Length()
-	sy := glm.Vec3f{model[4], model[5], model[6]}.Length()
-	sz := glm.Vec3f{model[8], model[9], model[10]}.Length()
-
-	maxScale := max(sx, max(sy, sz))
-
-	return Sphere{
-		Center: glm.Vec3f{worldCenter[0], worldCenter[1], worldCenter[2]},
-		Radius: sphere.Radius * maxScale,
-	}
 }
