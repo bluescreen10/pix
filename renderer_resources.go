@@ -86,9 +86,7 @@ func (r *Renderer) scheduleGeoFree(id uint32) {
 	r.deferredFree = append(r.deferredFree, deferredFreeEntry{kind: deferredGeo, id: id, frame: r.frameCount})
 }
 
-func (r *Renderer) uploadGeometry(id uint32) {
-	geo := r.geometries.get(id)
-
+func (r *Renderer) uploadGeometry(geo *GeometryData) {
 	geo.Destroy()
 
 	if len(geo.indices) > 0 {

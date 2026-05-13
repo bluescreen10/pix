@@ -17,12 +17,13 @@ const (
 // Node flags packed into flags[].
 const (
 	flagAlive = uint32(1 << iota)
-	flagVisible
 	flagCastShadow
 	flagReceiveShadow
 	flagDirty
 	flagStatic
-	flagVisibleEffective
+	flagLocalVisible
+	flagVisibleDirty
+	flagVisible
 )
 
 // NodeID is a generation-counted handle. Zero value is invalid (gen starts at 1).
@@ -82,7 +83,7 @@ func NewScene() *Scene {
 	s := &Scene{freeHead: invalidIdx, topoDirty: true}
 	s.root = s.allocNode(KindGroup)
 	// Root is permanently alive, visible, and effectively visible.
-	s.flags[s.root.index] = flagAlive | flagVisible | flagVisibleEffective
+	s.flags[s.root.index] = flagAlive | flagLocalVisible | flagVisible
 	return s
 }
 
@@ -125,7 +126,7 @@ func (s *Scene) allocNode(kind NodeKind) NodeID {
 		s.positions = append(s.positions, glm.Vec3f{})
 		s.rotations = append(s.rotations, glm.QuatIdentityf)
 		s.scales = append(s.scales, glm.Vec3f{1, 1, 1})
-		s.flags = append(s.flags, flagAlive|flagVisible|flagDirty)
+		s.flags = append(s.flags, flagAlive|flagLocalVisible|flagDirty|flagVisibleDirty)
 		s.generation = append(s.generation, 1)
 		s.kind = append(s.kind, kind)
 		s.payload = append(s.payload, 0)
@@ -147,7 +148,7 @@ func (s *Scene) resetSlot(idx uint32, kind NodeKind) {
 	s.positions[idx] = glm.Vec3f{}
 	s.rotations[idx] = glm.QuatIdentityf
 	s.scales[idx] = glm.Vec3f{1, 1, 1}
-	s.flags[idx] = flagAlive | flagVisible | flagDirty
+	s.flags[idx] = flagAlive | flagLocalVisible | flagDirty | flagVisibleDirty
 	s.kind[idx] = kind
 	s.payload[idx] = 0
 }
@@ -350,20 +351,30 @@ func (s *Scene) UpdateTransforms() {
 // UpdateVisibility propagates effectiveVisible flags in topological order.
 func (s *Scene) UpdateVisibility() {
 	for _, i := range s.topoOrder {
-		localVisible := s.flags[i]&flagVisible != 0
-		p := s.parents[i]
-
-		var parentEffective bool
-		if !p.isValid() {
-			parentEffective = true
-		} else {
-			parentEffective = s.flags[p.index]&flagVisibleEffective != 0
+		if s.flags[i]&flagVisibleDirty == 0 {
+			continue
 		}
 
-		if localVisible && parentEffective {
-			s.flags[i] |= flagVisibleEffective
+		localVisible := s.flags[i]&flagLocalVisible != 0
+		p := s.parents[i]
+
+		var parentVisible bool
+		if !p.isValid() {
+			parentVisible = true
 		} else {
-			s.flags[i] &^= flagVisibleEffective
+			parentVisible = s.flags[p.index]&flagVisible != 0
+		}
+
+		if localVisible && parentVisible {
+			s.flags[i] |= flagVisible
+		} else {
+			s.flags[i] &^= flagVisible
+		}
+
+		child := s.firstChildren[i]
+		for child.isValid() {
+			s.flags[child.index] |= flagVisibleDirty
+			child = s.nextSiblings[child.index]
 		}
 	}
 }

@@ -275,14 +275,14 @@ func (r *Renderer) ensureDepthTextureSize(width, height uint32) {
 }
 
 type renderList struct {
-	meshes            []Mesh
-	shadowCasters     []Mesh
+	visible           []drawing
+	shadowCasters     []drawing
 	directionalLights []directionalLightData
 	ambientLight      *ambientLightData
 }
 
 func (o *renderList) release() {
-	o.meshes = o.meshes[:0]
+	o.visible = o.visible[:0]
 	o.shadowCasters = o.shadowCasters[:0]
 	o.directionalLights = o.directionalLights[:0]
 	o.ambientLight = nil
@@ -306,61 +306,48 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	frustum := NewFrustumFromViewProjection(viewProjection)
 	r.collectRenderList(list, scene, frustum)
 
-	drawings := drawingsPool.Get().([]drawing)
-	defer drawingsPool.Put(drawings[:0])
-
 	instances := instancesPool.Get().(InstancesUniform)
 	defer instancesPool.Put(instances[:0])
 
 	var useLights bool
 
-	for _, mesh := range list.meshes {
-		geoRef := mesh.Geometry().Ref()
-		geo := r.geometries.get(geoRef.ID())
-		if geo.gpuVersion < geo.version {
-			if geo.gpuVersion == 0 {
-				geo.gpuLayout = createVertexLayout(geo)
+	validVisible := 0
+	for i := range list.visible {
+		d := &list.visible[i]
+		if d.geo.gpuVersion < d.geo.version {
+			if d.geo.gpuVersion == 0 {
+				d.geo.gpuLayout = createVertexLayout(d.geo)
 			}
-			r.uploadGeometry(geoRef.ID())
+			r.uploadGeometry(d.geo)
 		}
 
-		matRef := mesh.Material().Ref()
-		mat := r.materials.get(matRef.ID())
-		if err := prepareMaterial(r.runtime.Device, mat, r); err != nil {
+		if err := prepareMaterial(r.runtime.Device, d.mat, r); err != nil {
 			r.logger.Error("error preparing material", slog.Any("err", err))
 			continue
 		}
 
-		if mat.isLit {
+		if d.mat.isLit {
 			useLights = true
 		}
 
-		drawings = append(drawings, drawing{
-			instanceId: uint32(len(instances)),
-			geometry:   geo,
-			material:   mat,
-		})
-
-		instances = append(instances, InstanceUniform{mesh.WorldTransform(), mesh.WorldTransformInv()})
+		d.instanceId = uint32(len(instances))
+		instances = append(instances, InstanceUniform{d.model, d.modelInv})
+		list.visible[validVisible] = *d
+		validVisible++
 	}
+	list.visible = list.visible[:validVisible]
 
-	shadowCasterDrawings := make([]drawing, 0, len(list.shadowCasters))
-	for _, mesh := range list.shadowCasters {
-		geoRef := mesh.Geometry().Ref()
-		geo := r.geometries.get(geoRef.ID())
-		if geo.gpuVersion < geo.version {
-			if geo.gpuVersion == 0 {
-				geo.gpuLayout = createVertexLayout(geo)
+	for i := range list.shadowCasters {
+		d := &list.shadowCasters[i]
+		if d.geo.gpuVersion < d.geo.version {
+			if d.geo.gpuVersion == 0 {
+				d.geo.gpuLayout = createVertexLayout(d.geo)
 			}
-			r.uploadGeometry(geoRef.ID())
+			r.uploadGeometry(d.geo)
 		}
 
-		shadowCasterDrawings = append(shadowCasterDrawings, drawing{
-			instanceId: uint32(len(instances)),
-			geometry:   geo,
-		})
-
-		instances = append(instances, InstanceUniform{mesh.WorldTransform(), mesh.WorldTransformInv()})
+		d.instanceId = uint32(len(instances))
+		instances = append(instances, InstanceUniform{d.model, d.modelInv})
 	}
 
 	if count := len(instances); count > 0 {
@@ -412,9 +399,9 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 			if ld.shadow != nil {
 				lightFrustum := NewFrustumFromViewProjection(lightSpaceMat)
 				shadowDrawings := drawingsPool.Get().([]drawing)
-				for j, mesh := range list.shadowCasters {
-					if lightFrustum.ContainsSphere(mesh.BoundingSphere()) {
-						shadowDrawings = append(shadowDrawings, shadowCasterDrawings[j])
+				for _, caster := range list.shadowCasters {
+					if lightFrustum.ContainsSphere(caster.bounds) {
+						shadowDrawings = append(shadowDrawings, caster)
 					}
 				}
 				r.renderShadowMap(&ctx, ld.shadow.camera, ld.shadow.target, shadowDrawings)
@@ -434,8 +421,8 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 
 	renderPass := r.beginRendering(&ctx, scene.background)
 
-	for _, drawing := range drawings {
-		r.renderInstance(renderPass, drawing)
+	for _, d := range list.visible {
+		r.renderInstance(renderPass, d)
 	}
 
 	r.endRendering(&ctx, renderPass)
@@ -464,18 +451,18 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, renderT
 	pass.SetBindGroup(1, r.instanceStorageBindGroup, []uint32{})
 
 	for _, d := range drawings {
-		for _, b := range d.geometry.gpuBufs {
+		for _, b := range d.geo.gpuBufs {
 			if b.loc == PositionLocation {
 				pass.SetVertexBuffer(0, b.buf, 0, wgpu.WholeSize)
 				break
 			}
 		}
 
-		if d.geometry.gpuIndex != nil {
-			pass.SetIndexBuffer(d.geometry.gpuIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
-			pass.DrawIndexed(uint32(d.geometry.gpuCount), 1, 0, 0, d.instanceId)
+		if d.geo.gpuIndex != nil {
+			pass.SetIndexBuffer(d.geo.gpuIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
+			pass.DrawIndexed(uint32(d.geo.gpuCount), 1, 0, 0, d.instanceId)
 		} else {
-			pass.Draw(uint32(d.geometry.gpuCount), 1, 0, d.instanceId)
+			pass.Draw(uint32(d.geo.gpuCount), 1, 0, d.instanceId)
 		}
 	}
 
@@ -487,18 +474,18 @@ func (r *Renderer) renderInstance(pass *wgpu.RenderPassEncoder, obj drawing) {
 	pipeline := r.getPipelineFor(obj)
 	pass.SetPipeline(pipeline)
 	pass.SetBindGroup(GlobalSet, r.globalBindGroup, []uint32{})
-	pass.SetBindGroup(MaterialSet, obj.material.gpuBindGroup, []uint32{})
+	pass.SetBindGroup(MaterialSet, obj.mat.gpuBindGroup, []uint32{})
 	pass.SetBindGroup(InstanceSet, r.instanceStorageBindGroup, []uint32{})
 
-	for _, b := range obj.geometry.gpuBufs {
+	for _, b := range obj.geo.gpuBufs {
 		pass.SetVertexBuffer(uint32(b.loc), b.buf, 0, wgpu.WholeSize)
 	}
 
-	if obj.geometry.gpuIndex != nil {
-		pass.SetIndexBuffer(obj.geometry.gpuIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
-		pass.DrawIndexed(uint32(obj.geometry.gpuCount), 1, 0, 0, obj.instanceId)
+	if obj.geo.gpuIndex != nil {
+		pass.SetIndexBuffer(obj.geo.gpuIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
+		pass.DrawIndexed(uint32(obj.geo.gpuCount), 1, 0, 0, obj.instanceId)
 	} else {
-		pass.Draw(uint32(obj.geometry.gpuCount), 1, 0, obj.instanceId)
+		pass.Draw(uint32(obj.geo.gpuCount), 1, 0, obj.instanceId)
 	}
 }
 
@@ -550,9 +537,9 @@ func (r *Renderer) endRendering(ctx *renderContext, pass *wgpu.RenderPassEncoder
 
 func (r *Renderer) getPipelineFor(obj drawing) *wgpu.RenderPipeline {
 	pipelineKey := renderPipelineKey{
-		shaderHash:    obj.material.hash,
-		materialFlags: obj.material.flags,
-		geometryFlags: obj.geometry.flags,
+		shaderHash:    obj.mat.hash,
+		materialFlags: obj.mat.flags,
+		geometryFlags: obj.geo.flags,
 	}
 	pipeline := r.pipelineCache.GetRenderPipeline(pipelineKey)
 	if pipeline != nil {
@@ -569,14 +556,14 @@ func (r *Renderer) createRenderPipeline(obj drawing) *wgpu.RenderPipeline {
 		Label: "",
 		BindGroupLayouts: []*wgpu.BindGroupLayout{
 			r.globalBindGroupLayout,
-			obj.material.gpuBindGroupLayout,
+			obj.mat.gpuBindGroupLayout,
 			r.instanceStorageBindGroupLayout,
 		},
 	})
 	defer layout.Release()
 
-	defines := buildDefines(obj.material.flags, obj.geometry.flags)
-	module := r.compileShader(r.runtime.Device, obj.material.shader, defines)
+	defines := buildDefines(obj.mat.flags, obj.geo.flags)
+	module := r.compileShader(r.runtime.Device, obj.mat.shader, defines)
 
 	pipeline := r.runtime.Device.CreateRenderPipeline(wgpu.RenderPipelineDescriptor{
 		Label:  "",
@@ -584,7 +571,7 @@ func (r *Renderer) createRenderPipeline(obj drawing) *wgpu.RenderPipeline {
 		Vertex: wgpu.VertexState{
 			Module:     module,
 			EntryPoint: "vs_main",
-			Buffers:    obj.geometry.gpuLayout,
+			Buffers:    obj.geo.gpuLayout,
 		},
 		Fragment: &wgpu.FragmentState{
 			Module:     module,
@@ -907,15 +894,23 @@ func (r *Renderer) collectRenderList(list *renderList, scene *Scene, frustum Fru
 	for i := range scene.meshes {
 		md := &scene.meshes[i]
 		nodeFlags := scene.flags[md.ownerNode]
-		if nodeFlags&flagAlive == 0 || nodeFlags&flagVisibleEffective == 0 {
+		if nodeFlags&flagAlive == 0 || nodeFlags&flagVisible == 0 {
 			continue
 		}
-		mesh := Mesh{Node{scene: scene, id: NodeID{index: md.ownerNode, gen: scene.generation[md.ownerNode]}}}
-		if nodeFlags&flagCastShadow != 0 {
-			list.shadowCasters = append(list.shadowCasters, mesh)
+
+		d := drawing{
+			geo:      r.geometries.get(md.geometry.ref.ID()),
+			mat:      r.materials.get(md.material.ref.ID()),
+			model:    scene.world[md.ownerNode],
+			modelInv: scene.worldInv[md.ownerNode],
+			bounds:   md.boundingSphere,
 		}
-		if frustum.ContainsSphere(mesh.BoundingSphere()) {
-			list.meshes = append(list.meshes, mesh)
+
+		if nodeFlags&flagCastShadow != 0 {
+			list.shadowCasters = append(list.shadowCasters, d)
+		}
+		if frustum.ContainsSphere(d.bounds) {
+			list.visible = append(list.visible, d)
 		}
 	}
 
