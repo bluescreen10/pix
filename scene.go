@@ -15,8 +15,22 @@ const (
 )
 
 // Node flags packed into flags[].
+type NodeFlags uint32
+
+func (f NodeFlags) IsVisible() bool {
+	return f&flagVisible != 0
+}
+
+func (f NodeFlags) CastShadow() bool {
+	return f&flagCastShadow != 0
+}
+
+func (f NodeFlags) IsAlive() bool {
+	return f&flagAlive != 0
+}
+
 const (
-	flagAlive = uint32(1 << iota)
+	flagAlive = NodeFlags(1 << iota)
 	flagCastShadow
 	flagReceiveShadow
 	flagDirty
@@ -57,7 +71,7 @@ type Scene struct {
 	scales    []glm.Vec3f
 
 	// Per-node state.
-	flags      []uint32
+	flags      []NodeFlags
 	generation []uint32
 	kind       []NodeKind
 	payload    []uint32
@@ -104,6 +118,18 @@ func (s *Scene) Add(n SceneNode) {
 func (s *Scene) NewGroup() Group {
 	id := s.allocNode(KindGroup)
 	return Group{Node{scene: s, id: id}}
+}
+
+func (s *Scene) GetFlags(id uint32) NodeFlags {
+	return s.flags[id]
+}
+
+func (s *Scene) GetWorldTransform(id uint32) glm.Mat4f {
+	return s.world[id]
+}
+
+func (s *Scene) GetWorldTransformInv(id uint32) glm.Mat4f {
+	return s.worldInv[id]
 }
 
 // allocNode claims a slot (reusing a freed one when available) and returns its NodeID.

@@ -891,22 +891,21 @@ func (r *Renderer) createGlobalBindGroups() {
 // collectRenderList populates list by iterating the scene's compact payload tables
 // directly, avoiding a full tree traversal.
 func (r *Renderer) collectRenderList(list *renderList, scene *Scene, frustum Frustum) {
-	for i := range scene.meshes {
-		md := &scene.meshes[i]
-		nodeFlags := scene.flags[md.ownerNode]
-		if nodeFlags&flagAlive == 0 || nodeFlags&flagVisible == 0 {
+	for _, md := range scene.meshes {
+		flags := scene.GetFlags(md.ownerNode)
+		if !flags.IsAlive() || !flags.IsVisible() {
 			continue
 		}
 
 		d := drawing{
 			geo:      r.geometries.get(md.geometry.ref.ID()),
 			mat:      r.materials.get(md.material.ref.ID()),
-			model:    scene.world[md.ownerNode],
-			modelInv: scene.worldInv[md.ownerNode],
+			model:    scene.GetWorldTransform(md.ownerNode),
+			modelInv: scene.GetWorldTransformInv(md.ownerNode),
 			bounds:   md.boundingSphere,
 		}
 
-		if nodeFlags&flagCastShadow != 0 {
+		if flags.CastShadow() {
 			list.shadowCasters = append(list.shadowCasters, d)
 		}
 		if frustum.ContainsSphere(d.bounds) {
