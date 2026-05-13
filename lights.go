@@ -1,97 +1,112 @@
 package pix
 
-import (
-	"github.com/bluescreen10/pix/glm"
-)
+import "github.com/bluescreen10/pix/glm"
 
-type DirectionalLight struct {
-	Object3D  //TODO: Switch Object3D for LookAt3D equal but only contains Position / Target
-	intensity float32
+// DirectionalLight is a typed node handle for directional light nodes.
+type DirectionalLight struct{ Node }
+
+// DirectionalLightData is the per-light payload stored in Scene.dirLights.
+type directionalLightData struct {
 	color     glm.Color3f
+	intensity float32
 	target    glm.Vec3f
 	shadow    *DirectionalShadow
+	ownerNode uint32
 }
 
-func (l *DirectionalLight) Color() glm.Color3f {
-	return l.color
+func (l DirectionalLight) data() *directionalLightData {
+	return &l.scene.dirLights[l.scene.payload[l.slot()]]
 }
 
-func (l *DirectionalLight) SetColor(color glm.Color3f) {
-	l.color = color
+func (l DirectionalLight) Color() glm.Color3f {
+	return l.data().color
 }
 
-func (l *DirectionalLight) Intensity() float32 {
-	return l.intensity
+func (l DirectionalLight) SetColor(c glm.Color3f) {
+	l.data().color = c
 }
 
-func (l *DirectionalLight) SetIntenstity(intensity float32) {
-	l.intensity = intensity
+func (l DirectionalLight) Intensity() float32 {
+	return l.data().intensity
 }
 
-func (l *DirectionalLight) Target() glm.Vec3f {
-	return l.target
+func (l DirectionalLight) SetIntensity(v float32) {
+	l.data().intensity = v
 }
 
-func (l *DirectionalLight) SetPosition(pos glm.Vec3f) {
-	l.Object3D.SetPosition(pos)
-	if l.shadow != nil {
-		// adjust also the position of the camera
-		l.shadow.camera.SetPosition(pos)
-	}
+func (l DirectionalLight) Target() glm.Vec3f {
+	return l.data().target
+}
+func (l DirectionalLight) SetTarget(t glm.Vec3f) {
+	l.data().target = t
 }
 
-func (l *DirectionalLight) SetTarget(target glm.Vec3f) {
-	l.target = target
-	if l.shadow != nil {
-		// adjust the camera target
-		l.shadow.camera.SetTarget(target)
-	}
+func (l DirectionalLight) Shadow() *DirectionalShadow {
+	return l.data().shadow
 }
 
-func (l *DirectionalLight) SetCastShadow(castShadows bool) {
-	l.Object3D.SetCastShadow(castShadows)
+// SetCastShadow creates or destroys the shadow map for this light.
+// For directional lights, "cast shadow" means the light has a shadow map;
+// it does not use the generic node flagCastShadow.
+func (l DirectionalLight) SetCastShadow(castShadows bool) {
+	ld := l.data()
 	if castShadows {
-		l.shadow = NewDirectionalShadow(200, 0.1, 100)
+		ld.shadow = NewDirectionalShadow(200, 0.1, 100)
 	} else {
-		l.shadow = nil
+		ld.shadow = nil
 	}
 }
 
-func (l *DirectionalLight) Shadow() *DirectionalShadow     { return l.shadow }
-func (l *DirectionalLight) SetShadow(s *DirectionalShadow) { l.shadow = s }
-
-func NewDirectionalLight(color glm.Color3f, intensity float32) *DirectionalLight {
-	return &DirectionalLight{
+func (s *Scene) NewDirectionalLight(color glm.Color3f, intensity float32) DirectionalLight {
+	id := s.allocNode(KindDirectionalLight)
+	payloadIdx := uint32(len(s.dirLights))
+	s.dirLights = append(s.dirLights, directionalLightData{
 		color:     color,
 		intensity: intensity,
-	}
+		ownerNode: id.index,
+	})
+	s.payload[id.index] = payloadIdx
+	return DirectionalLight{Node{scene: s, id: id}}
 }
 
-type AmbientLight struct {
-	Object3D  //TODO: Switch for pos glm.Vec3f and implement Node interface
+// AmbientLight is a typed node handle for ambient light nodes.
+type AmbientLight struct{ Node }
+
+// AmbientLightData is the per-light payload stored in Scene.ambientLights.
+type ambientLightData struct {
 	color     glm.Color3f
 	intensity float32
+	ownerNode uint32
 }
 
-func (l *AmbientLight) Color() glm.Color3f {
-	return l.color
+func (l AmbientLight) data() *ambientLightData {
+	return &l.scene.ambientLights[l.scene.payload[l.slot()]]
 }
 
-func (l *AmbientLight) SetColor(color glm.Color3f) {
-	l.color = color
+func (l AmbientLight) Color() glm.Color3f {
+	return l.data().color
 }
 
-func (l *AmbientLight) Intensity() float32 {
-	return l.intensity
+func (l AmbientLight) SetColor(c glm.Color3f) {
+	l.data().color = c
 }
 
-func (l *AmbientLight) SetIntenstity(intensity float32) {
-	l.intensity = intensity
+func (l AmbientLight) Intensity() float32 {
+	return l.data().intensity
 }
 
-func NewAmbientLight(intensity float32) *AmbientLight {
-	return &AmbientLight{
+func (l AmbientLight) SetIntensity(v float32) {
+	l.data().intensity = v
+}
+
+func (s *Scene) NewAmbientLight(intensity float32) AmbientLight {
+	id := s.allocNode(KindAmbientLight)
+	payloadIdx := uint32(len(s.ambientLights))
+	s.ambientLights = append(s.ambientLights, ambientLightData{
 		color:     glm.Color3f{1, 1, 1},
 		intensity: intensity,
-	}
+		ownerNode: id.index,
+	})
+	s.payload[id.index] = payloadIdx
+	return AmbientLight{Node{scene: s, id: id}}
 }

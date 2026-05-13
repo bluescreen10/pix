@@ -74,11 +74,9 @@ func main() {
 	// create geometry
 	geo := pix.NewBoxGeometry(1, 1, 1)
 
-	// create mesh
-	mesh := pix.NewMesh(geo, material.Build())
-
-	// add mesh to scene
+	// create scene and mesh
 	scene := pix.NewScene()
+	mesh := scene.NewMesh(geo, material.Build())
 	scene.Add(mesh)
 
 	var count int

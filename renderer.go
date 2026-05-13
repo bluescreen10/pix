@@ -269,10 +269,10 @@ func (r *Renderer) ensureDepthTextureSize(width, height uint32) {
 }
 
 type renderList struct {
-	meshes            []*Mesh
-	shadowCasters     []*Mesh
-	directionalLights []*DirectionalLight
-	ambientLight      *AmbientLight
+	meshes            []Mesh
+	shadowCasters     []Mesh
+	directionalLights []directionalLightData
+	ambientLight      *ambientLightData
 }
 
 func (o *renderList) release() {
@@ -290,14 +290,15 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	r.Stats.NextFrame()
 	start := time.Now()
 
-	updateMatrix(scene, false)
+	scene.UpdateTransforms()
+	scene.UpdateVisibility()
 
 	list := renderListPool.Get().(*renderList)
 	defer list.release()
 
 	viewProjection := camera.ViewProjection()
 	frustum := NewFrustumFromViewProjection(viewProjection)
-	r.cullScene(list, scene, frustum)
+	r.collectRenderList(list, scene, frustum)
 
 	drawings := drawingsPool.Get().([]drawing)
 	defer drawingsPool.Put(drawings[:0])
@@ -308,7 +309,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	var useLights bool
 
 	for _, mesh := range list.meshes {
-		geometryData := mesh.geometry
+		geometryData := mesh.Geometry()
 		geometry := r.resources.GetGeometry(geometryData)
 
 		if geometry.version < geometryData.version {
@@ -321,7 +322,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 			}
 		}
 
-		materialData := mesh.material
+		materialData := mesh.Material()
 		material := r.resources.GetMaterialByData(materialData)
 		material, err := prepareMaterial(r.runtime.Device, materialData, material, &r.resources)
 
@@ -342,12 +343,13 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 			material:   material,
 		})
 
-		instances = append(instances, InstanceUniform{mesh.Model(), mesh.InvModel()})
+		worldModel := mesh.Model()
+		instances = append(instances, InstanceUniform{worldModel, worldModel.Inv()})
 	}
 
 	shadowCasterDrawings := make([]drawing, 0, len(list.shadowCasters))
 	for _, mesh := range list.shadowCasters {
-		geometryData := mesh.geometry
+		geometryData := mesh.Geometry()
 		geometry := r.resources.GetGeometry(geometryData)
 
 		if geometry.version < geometryData.version {
@@ -365,7 +367,8 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 			geometry:   *geometry,
 		})
 
-		instances = append(instances, InstanceUniform{mesh.Model(), mesh.InvModel()})
+		worldModel := mesh.Model()
+		instances = append(instances, InstanceUniform{worldModel, worldModel.Inv()})
 	}
 
 	if count := len(instances); count > 0 {
@@ -385,31 +388,38 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 		count := min(MaxDirectionalLights, len(list.directionalLights))
 		lightsUniform.DirectionalLightCount = uint32(count)
 
-		for i, l := range list.directionalLights[:count] {
-			colorRGBA := l.color.RGBA()
-			colorRGBA[3] = l.intensity
+		for i, ld := range list.directionalLights[:count] {
+			colorRGBA := ld.color.RGBA()
+			colorRGBA[3] = ld.intensity
 
 			var lightSpaceMat glm.Mat4f
 			var castsShadow uint32
 			var shadowBias float32
 
-			if l.shadow != nil {
-				lightSpaceMat = l.shadow.camera.ViewProjection()
+			if ld.shadow != nil {
+				// Sync shadow camera to the light's current world position.
+				w := scene.world[ld.ownerNode]
+				ld.shadow.camera.SetPosition(glm.Vec3f{w[12], w[13], w[14]})
+				ld.shadow.camera.SetTarget(ld.target)
+				lightSpaceMat = ld.shadow.camera.ViewProjection()
 				castsShadow = 1
-				shadowBias = l.shadow.bias
+				shadowBias = ld.shadow.bias
 			}
 
+			// Direction from world position to target.
+			w := scene.world[ld.ownerNode]
+			worldPos := glm.Vec3f{w[12], w[13], w[14]}
 			lightsUniform.DirectionalLights[i] = DirectionalLightUniform{
 				color:            colorRGBA,
-				direction:        l.target.Sub(l.pos).Normalize().Vec4(),
+				direction:        ld.target.Sub(worldPos).Normalize().Vec4(),
 				lightSpaceMatrix: lightSpaceMat,
 				castsShadow:      castsShadow,
 				shadowBias:       shadowBias,
 			}
 
-			if l.CastShadow() && l.shadow != nil {
-				if l.shadow.target == nil {
-					l.shadow.target = &Texture{
+			if ld.shadow != nil {
+				if ld.shadow.target == nil {
+					ld.shadow.target = &Texture{
 						ref:  r.shadowMapTexture,
 						view: r.shadowMapLayerViews[i],
 					}
@@ -421,7 +431,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 						shadowDrawings = append(shadowDrawings, shadowCasterDrawings[j])
 					}
 				}
-				r.renderShadowMap(l.shadow.camera, l.shadow.target.view, shadowDrawings)
+				r.renderShadowMap(ld.shadow.camera, ld.shadow.target.view, shadowDrawings)
 				drawingsPool.Put(shadowDrawings[:0])
 			}
 		}
@@ -910,25 +920,39 @@ func (r *Renderer) createGlobalBindGroups() {
 	})
 }
 
-func (r *Renderer) cullScene(list *renderList, node Node, frustum Frustum) {
-	for _, child := range node.Children() {
-		switch object := any(child).(type) {
-		case *Mesh:
-			if object.CastShadow() {
-				list.shadowCasters = append(list.shadowCasters, object)
-			}
-			if frustum.ContainsSphere(object.BoundingSphere()) {
-				list.meshes = append(list.meshes, object)
-			}
-		case *DirectionalLight:
-			list.directionalLights = append(list.directionalLights, object)
-		case *AmbientLight:
-			if list.ambientLight == nil {
-				list.ambientLight = object
-			}
+// collectRenderList populates list by iterating the scene's compact payload tables
+// directly, avoiding a full tree traversal.
+func (r *Renderer) collectRenderList(list *renderList, scene *Scene, frustum Frustum) {
+	for i := range scene.meshes {
+		md := &scene.meshes[i]
+		nodeFlags := scene.flags[md.ownerNode]
+		if nodeFlags&flagAlive == 0 || nodeFlags&flagVisibleEffective == 0 {
+			continue
 		}
+		mesh := Mesh{Node{scene: scene, id: NodeID{index: md.ownerNode, gen: scene.generation[md.ownerNode]}}}
+		if nodeFlags&flagCastShadow != 0 {
+			list.shadowCasters = append(list.shadowCasters, mesh)
+		}
+		if frustum.ContainsSphere(mesh.BoundingSphere()) {
+			list.meshes = append(list.meshes, mesh)
+		}
+	}
 
-		r.cullScene(list, child, frustum)
+	for i := range scene.dirLights {
+		ld := scene.dirLights[i]
+		if scene.flags[ld.ownerNode]&flagAlive == 0 {
+			continue
+		}
+		list.directionalLights = append(list.directionalLights, ld)
+	}
+
+	for i := range scene.ambientLights {
+		ld := &scene.ambientLights[i]
+		if scene.flags[ld.ownerNode]&flagAlive == 0 {
+			continue
+		}
+		list.ambientLight = ld
+		break
 	}
 }
 
@@ -952,13 +976,6 @@ func buildDefines(matFlags MaterialFlags, geoFlags GeometryFlags) map[string]boo
 	}
 
 	return defines
-}
-
-func updateMatrix(n Node, force bool) {
-	force = n.UpdateMatrix(force)
-	for _, child := range n.Children() {
-		updateMatrix(child, force)
-	}
 }
 
 func transformSphere(sphere Sphere, model glm.Mat4f) Sphere {
