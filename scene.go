@@ -47,8 +47,9 @@ type Scene struct {
 	prevSiblings  []NodeID
 
 	// Transforms — also parallel arrays.
-	local []glm.Mat4f
-	world []glm.Mat4f
+	local    []glm.Mat4f
+	world    []glm.Mat4f
+	worldInv []glm.Mat4f
 
 	positions []glm.Vec3f
 	rotations []glm.Quatf
@@ -120,6 +121,7 @@ func (s *Scene) allocNode(kind NodeKind) NodeID {
 		s.prevSiblings = append(s.prevSiblings, NodeID{})
 		s.local = append(s.local, glm.Mat4fIndentity)
 		s.world = append(s.world, glm.Mat4fIndentity)
+		s.worldInv = append(s.worldInv, glm.Mat4fIndentity)
 		s.positions = append(s.positions, glm.Vec3f{})
 		s.rotations = append(s.rotations, glm.QuatIdentityf)
 		s.scales = append(s.scales, glm.Vec3f{1, 1, 1})
@@ -141,6 +143,7 @@ func (s *Scene) resetSlot(idx uint32, kind NodeKind) {
 	s.prevSiblings[idx] = NodeID{}
 	s.local[idx] = glm.Mat4fIndentity
 	s.world[idx] = glm.Mat4fIndentity
+	s.worldInv[idx] = glm.Mat4fIndentity
 	s.positions[idx] = glm.Vec3f{}
 	s.rotations[idx] = glm.QuatIdentityf
 	s.scales[idx] = glm.Vec3f{1, 1, 1}
@@ -329,6 +332,7 @@ func (s *Scene) UpdateTransforms() {
 		} else {
 			s.world[i] = s.world[p.index].Mul4x4(s.local[i])
 		}
+		s.worldInv[i] = s.world[i].Inv()
 
 		s.flags[i] &^= flagDirty
 

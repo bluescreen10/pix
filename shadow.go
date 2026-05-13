@@ -7,7 +7,6 @@ import (
 )
 
 // DirectionalShadow holds the shadow configuration and the shadow map for a directional light.
-// target is nil until the renderer first renders shadows for this light.
 type DirectionalShadow struct {
 	lightShadow
 	camera *cameras.OrthographicCamera

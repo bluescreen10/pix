@@ -341,8 +341,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 			material:   mat,
 		})
 
-		worldModel := mesh.Model()
-		instances = append(instances, InstanceUniform{worldModel, worldModel.Inv()})
+		instances = append(instances, InstanceUniform{mesh.WorldTransform(), mesh.WorldTransformInv()})
 	}
 
 	shadowCasterDrawings := make([]drawing, 0, len(list.shadowCasters))
@@ -361,8 +360,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 			geometry:   geo,
 		})
 
-		worldModel := mesh.Model()
-		instances = append(instances, InstanceUniform{worldModel, worldModel.Inv()})
+		instances = append(instances, InstanceUniform{mesh.WorldTransform(), mesh.WorldTransformInv()})
 	}
 
 	if count := len(instances); count > 0 {
@@ -412,9 +410,6 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 			}
 
 			if ld.shadow != nil {
-				if ld.shadow.target == nil {
-					ld.shadow.target = r.shadowMapLayerViews[i]
-				}
 				lightFrustum := NewFrustumFromViewProjection(lightSpaceMat)
 				shadowDrawings := drawingsPool.Get().([]drawing)
 				for j, mesh := range list.shadowCasters {
@@ -422,7 +417,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 						shadowDrawings = append(shadowDrawings, shadowCasterDrawings[j])
 					}
 				}
-				r.renderShadowMap(ld.shadow.camera, ld.shadow.target, shadowDrawings)
+				r.renderShadowMap(&ctx, ld.shadow.camera, ld.shadow.target, shadowDrawings)
 				drawingsPool.Put(shadowDrawings[:0])
 			}
 		}
@@ -450,13 +445,12 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	r.drainDeferredFree()
 }
 
-func (r *Renderer) renderShadowMap(shadowCam Camera, renderTarget *wgpu.TextureView, drawings []drawing) {
+func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, renderTarget *wgpu.TextureView, drawings []drawing) {
 	vp := shadowCam.ViewProjection()
 	r.runtime.Queue.WriteBuffer(r.shadowCamBuffer, 0,
 		unsafe.Slice((*byte)(unsafe.Pointer(&vp)), unsafe.Sizeof(vp)))
 
-	encoder := r.runtime.Device.CreateCommandEncoder(nil)
-	pass := encoder.BeginRenderPass(wgpu.RenderPassDescriptor{
+	pass := ctx.encoder.BeginRenderPass(wgpu.RenderPassDescriptor{
 		DepthStencilAttachment: &wgpu.RenderPassDepthStencilAttachment{
 			View:            renderTarget,
 			DepthLoadOp:     wgpu.LoadOpClear,
@@ -487,11 +481,6 @@ func (r *Renderer) renderShadowMap(shadowCam Camera, renderTarget *wgpu.TextureV
 
 	pass.End()
 	pass.Release()
-
-	cmdBuf := encoder.Finish(nil)
-	r.runtime.Queue.Submit(cmdBuf)
-	cmdBuf.Release()
-	encoder.Release()
 }
 
 func (r *Renderer) renderInstance(pass *wgpu.RenderPassEncoder, obj drawing) {
@@ -516,6 +505,7 @@ func (r *Renderer) renderInstance(pass *wgpu.RenderPassEncoder, obj drawing) {
 func (r *Renderer) acquireNextFrame(ctx *renderContext) {
 	ctx.texture = r.runtime.Surface.GetCurrentTexture()
 	ctx.view = ctx.texture.CreateView(nil)
+	ctx.encoder = r.runtime.Device.CreateCommandEncoder(nil)
 }
 
 func (r *Renderer) presentFrame(ctx *renderContext) {
@@ -528,8 +518,6 @@ func (r *Renderer) presentFrame(ctx *renderContext) {
 }
 
 func (r *Renderer) beginRendering(ctx *renderContext, bgColor glm.Color4f) *wgpu.RenderPassEncoder {
-	ctx.encoder = r.runtime.Device.CreateCommandEncoder(nil)
-
 	r.ensureDepthTextureSize(ctx.texture.GetWidth(), ctx.texture.GetHeight())
 
 	return ctx.encoder.BeginRenderPass(wgpu.RenderPassDescriptor{
@@ -585,6 +573,7 @@ func (r *Renderer) createRenderPipeline(obj drawing) *wgpu.RenderPipeline {
 			r.instanceStorageBindGroupLayout,
 		},
 	})
+	defer layout.Release()
 
 	defines := buildDefines(obj.material.flags, obj.geometry.flags)
 	module := r.compileShader(r.runtime.Device, obj.material.shader, defines)
@@ -756,6 +745,7 @@ func (r *Renderer) createShadowPipeline() {
 			r.instanceStorageBindGroupLayout,
 		},
 	})
+	defer layout.Release()
 
 	r.shadowPipeline = r.runtime.Device.CreateRenderPipeline(wgpu.RenderPipelineDescriptor{
 		Label:  "Shadow Pipeline",
@@ -929,10 +919,17 @@ func (r *Renderer) collectRenderList(list *renderList, scene *Scene, frustum Fru
 		}
 	}
 
+	shadowLayer := 0
 	for i := range scene.dirLights {
 		ld := scene.dirLights[i]
 		if scene.flags[ld.ownerNode]&flagAlive == 0 {
 			continue
+		}
+		if ld.shadow != nil && shadowLayer < MaxDirectionalLights {
+			if ld.shadow.target == nil {
+				ld.shadow.target = r.shadowMapLayerViews[shadowLayer]
+			}
+			shadowLayer++
 		}
 		list.directionalLights = append(list.directionalLights, ld)
 	}

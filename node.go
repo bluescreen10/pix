@@ -92,9 +92,9 @@ func (n Node) Transform() glm.Mat4f {
 	return n.scene.local[n.slot()]
 }
 
-// Model is an alias for WorldTransform kept for renderer compatibility.
-func (n Node) Model() glm.Mat4f {
-	return n.scene.world[n.slot()]
+// WorldTransformInv returns the cached inverse of the world-space matrix.
+func (n Node) WorldTransformInv() glm.Mat4f {
+	return n.scene.worldInv[n.slot()]
 }
 
 // Flags
