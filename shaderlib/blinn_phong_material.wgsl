@@ -31,25 +31,16 @@ struct Lights {
 }
 
 struct VertexInput {
-    @location(0)
-    position: vec3<f32>,
-    @if(USE_UV)
-    @location(1) uv: vec2<f32>,
-    @if(USE_NORMAL)
-    @location(2) normal: vec3<f32>,
+    @location(0) position: vec3<f32>,
+    @if(USE_UV) @location(1) uv: vec2<f32>,
+    @if(USE_NORMAL) @location(2) normal: vec3<f32>,
 }
 
 struct VertexOutput {
-    @builtin(position)
-    clip_position: vec4<f32>,
-    @location(0)
-    v_world_pos: vec3<f32>,
-    @if(USE_UV)
-    @location(1)
-    v_uv: vec2<f32>,
-    @if(USE_NORMAL)
-    @location(2)
-    v_normal: vec3<f32>,
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) v_world_pos: vec3<f32>,
+    @if(USE_UV) @location(1) v_uv: vec2<f32>,
+    @if(USE_NORMAL) @location(2) v_normal: vec3<f32>,
 }
 
 @group(0) @binding(0)
@@ -107,14 +98,9 @@ fn vs_main(
 }
 
 struct FragmentInput {
-    @location(0)
-    v_world_pos: vec3<f32>,
-    @if(USE_UV)
-    @location(1)
-    v_uv: vec2<f32>,
-    @if(USE_NORMAL)
-    @location(2)
-    v_normal: vec3<f32>,
+    @location(0) v_world_pos: vec3<f32>,
+    @if(USE_UV) @location(1) v_uv: vec2<f32>,
+    @if(USE_NORMAL) @location(2) v_normal: vec3<f32>,
 }
 
 @group(1) @binding(0)

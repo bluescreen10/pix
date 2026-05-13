@@ -4,7 +4,7 @@ import "github.com/bluescreen10/pix/glm"
 
 type Frustum [6]glm.Vec4f
 
-func NewFrustumFromViewProjection(viewProj glm.Mat4f) [6]glm.Vec4f {
+func NewFrustumFromViewProjection(viewProj glm.Mat4f) Frustum {
 
 	return [6]glm.Vec4f{
 		//left plane

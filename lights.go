@@ -5,7 +5,7 @@ import (
 )
 
 type DirectionalLight struct {
-	Object3D
+	Object3D  //TODO: Switch Object3D for LookAt3D equal but only contains Position / Target
 	intensity float32
 	color     glm.Color3f
 	target    glm.Vec3f
@@ -32,8 +32,29 @@ func (l *DirectionalLight) Target() glm.Vec3f {
 	return l.target
 }
 
+func (l *DirectionalLight) SetPosition(pos glm.Vec3f) {
+	l.Object3D.SetPosition(pos)
+	if l.shadow != nil {
+		// adjust also the position of the camera
+		l.shadow.camera.SetPosition(pos)
+	}
+}
+
 func (l *DirectionalLight) SetTarget(target glm.Vec3f) {
 	l.target = target
+	if l.shadow != nil {
+		// adjust the camera target
+		l.shadow.camera.SetTarget(target)
+	}
+}
+
+func (l *DirectionalLight) SetCastShadow(castShadows bool) {
+	l.Object3D.SetCastShadow(castShadows)
+	if castShadows {
+		l.shadow = NewDirectionalShadow(200, 0.1, 100)
+	} else {
+		l.shadow = nil
+	}
 }
 
 func (l *DirectionalLight) Shadow() *DirectionalShadow     { return l.shadow }
@@ -47,7 +68,7 @@ func NewDirectionalLight(color glm.Color3f, intensity float32) *DirectionalLight
 }
 
 type AmbientLight struct {
-	Object3D
+	Object3D  //TODO: Switch for pos glm.Vec3f and implement Node interface
 	color     glm.Color3f
 	intensity float32
 }

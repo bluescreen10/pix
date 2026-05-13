@@ -45,15 +45,9 @@ var instancesPool = sync.Pool{
 	},
 }
 
-var viewableMeshesPool = sync.Pool{
+var renderListPool = sync.Pool{
 	New: func() any {
-		return make([]*Mesh, 0, 4096)
-	},
-}
-
-var viewableDirectionalLights = sync.Pool{
-	New: func() any {
-		return make([]*DirectionalLight, 0, MaxDirectionalLights)
+		return &renderList{}
 	},
 }
 
@@ -276,19 +270,17 @@ func (r *Renderer) ensureDepthTextureSize(width, height uint32) {
 
 type renderList struct {
 	meshes            []*Mesh
+	shadowCasters     []*Mesh
 	directionalLights []*DirectionalLight
 	ambientLight      *AmbientLight
 }
 
-func (o *renderList) init() {
-	o.meshes = viewableMeshesPool.Get().([]*Mesh)
-	o.directionalLights = viewableDirectionalLights.Get().([]*DirectionalLight)
-	o.ambientLight = nil
-}
-
 func (o *renderList) release() {
-	viewableMeshesPool.Put(o.meshes[:0])
-	viewableDirectionalLights.Put(o.directionalLights[:0])
+	o.meshes = o.meshes[:0]
+	o.shadowCasters = o.shadowCasters[:0]
+	o.directionalLights = o.directionalLights[:0]
+	o.ambientLight = nil
+	renderListPool.Put(o)
 }
 
 func (r *Renderer) Render(scene *Scene, camera Camera) {
@@ -300,13 +292,12 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 
 	updateMatrix(scene, false)
 
-	var list renderList
-	list.init()
+	list := renderListPool.Get().(*renderList)
 	defer list.release()
 
 	viewProjection := camera.ViewProjection()
 	frustum := NewFrustumFromViewProjection(viewProjection)
-	r.cullScene(&list, scene, frustum)
+	r.cullScene(list, scene, frustum)
 
 	drawings := drawingsPool.Get().([]drawing)
 	defer drawingsPool.Put(drawings[:0])
@@ -346,8 +337,32 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 		}
 
 		drawings = append(drawings, drawing{
-			geometry: *geometry,
-			material: material,
+			instanceId: uint32(len(instances)),
+			geometry:   *geometry,
+			material:   material,
+		})
+
+		instances = append(instances, InstanceUniform{mesh.Model(), mesh.InvModel()})
+	}
+
+	shadowCasterDrawings := make([]drawing, 0, len(list.shadowCasters))
+	for _, mesh := range list.shadowCasters {
+		geometryData := mesh.geometry
+		geometry := r.resources.GetGeometry(geometryData)
+
+		if geometry.version < geometryData.version {
+			if geometry.version == 0 {
+				geometry.layout = createVertexLayout(geometryData)
+			}
+			err := r.resources.uploadGeometry(r.runtime.Device, geometryData)
+			if err != nil {
+				r.logger.Error("error uploading geometry", slog.Any("err", err))
+			}
+		}
+
+		shadowCasterDrawings = append(shadowCasterDrawings, drawing{
+			instanceId: uint32(len(instances)),
+			geometry:   *geometry,
 		})
 
 		instances = append(instances, InstanceUniform{mesh.Model(), mesh.InvModel()})
@@ -379,11 +394,9 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 			var shadowBias float32
 
 			if l.shadow != nil {
-				l.shadow.Camera.SetPosition(l.pos)
-				l.shadow.Camera.SetTarget(l.target)
-				lightSpaceMat = l.shadow.Camera.ViewProjection()
+				lightSpaceMat = l.shadow.camera.ViewProjection()
 				castsShadow = 1
-				shadowBias = l.shadow.Bias
+				shadowBias = l.shadow.bias
 			}
 
 			lightsUniform.DirectionalLights[i] = DirectionalLightUniform{
@@ -392,6 +405,24 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 				lightSpaceMatrix: lightSpaceMat,
 				castsShadow:      castsShadow,
 				shadowBias:       shadowBias,
+			}
+
+			if l.CastShadow() && l.shadow != nil {
+				if l.shadow.target == nil {
+					l.shadow.target = &Texture{
+						ref:  r.shadowMapTexture,
+						view: r.shadowMapLayerViews[i],
+					}
+				}
+				lightFrustum := NewFrustumFromViewProjection(lightSpaceMat)
+				shadowDrawings := drawingsPool.Get().([]drawing)
+				for j, mesh := range list.shadowCasters {
+					if lightFrustum.ContainsSphere(mesh.BoundingSphere()) {
+						shadowDrawings = append(shadowDrawings, shadowCasterDrawings[j])
+					}
+				}
+				r.renderShadowMap(l.shadow.camera, l.shadow.target.view, shadowDrawings)
+				drawingsPool.Put(shadowDrawings[:0])
 			}
 		}
 
@@ -403,14 +434,12 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 		}
 
 		r.runtime.Queue.WriteBuffer(r.lightsUniformBuffer, 0, lightsUniform.Bytes())
-
-		r.renderShadowMaps(&list, drawings)
 	}
 
 	renderPass := r.beginRendering(&ctx, scene.background)
 
-	for i, drawing := range drawings {
-		r.renderInstance(renderPass, drawing, i)
+	for _, drawing := range drawings {
+		r.renderInstance(renderPass, drawing)
 	}
 
 	r.endRendering(&ctx, renderPass)
@@ -420,59 +449,51 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	r.resources.processPending(r.runtime.Device)
 }
 
-func (r *Renderer) renderShadowMaps(list *renderList, drawings []drawing) {
-	count := min(MaxDirectionalLights, len(list.directionalLights))
+func (r *Renderer) renderShadowMap(shadowCam Camera, renderTarget *wgpu.TextureView, drawings []drawing) {
+	vp := shadowCam.ViewProjection()
+	r.runtime.Queue.WriteBuffer(r.shadowCamBuffer, 0,
+		unsafe.Slice((*byte)(unsafe.Pointer(&vp)), unsafe.Sizeof(vp)))
 
-	for i, light := range list.directionalLights[:count] {
-		if light.shadow == nil {
-			continue
-		}
+	encoder := r.runtime.Device.CreateCommandEncoder(nil)
+	pass := encoder.BeginRenderPass(wgpu.RenderPassDescriptor{
+		DepthStencilAttachment: &wgpu.RenderPassDepthStencilAttachment{
+			View:            renderTarget,
+			DepthLoadOp:     wgpu.LoadOpClear,
+			DepthStoreOp:    wgpu.StoreOpStore,
+			DepthClearValue: 1.0,
+		},
+	})
 
-		vp := light.shadow.Camera.ViewProjection()
-		r.runtime.Queue.WriteBuffer(r.shadowCamBuffer, 0,
-			unsafe.Slice((*byte)(unsafe.Pointer(&vp)), unsafe.Sizeof(vp)))
+	pass.SetPipeline(r.shadowPipeline)
+	pass.SetBindGroup(0, r.shadowCamBG, []uint32{})
+	pass.SetBindGroup(1, r.instanceStorageBindGroup, []uint32{})
 
-		encoder := r.runtime.Device.CreateCommandEncoder(nil)
-		pass := encoder.BeginRenderPass(wgpu.RenderPassDescriptor{
-			DepthStencilAttachment: &wgpu.RenderPassDepthStencilAttachment{
-				View:            r.shadowMapLayerViews[i],
-				DepthLoadOp:     wgpu.LoadOpClear,
-				DepthStoreOp:    wgpu.StoreOpStore,
-				DepthClearValue: 1.0,
-			},
-		})
-
-		pass.SetPipeline(r.shadowPipeline)
-		pass.SetBindGroup(0, r.shadowCamBG, []uint32{})
-		pass.SetBindGroup(1, r.instanceStorageBindGroup, []uint32{})
-
-		for j, d := range drawings {
-			for _, b := range d.geometry.bufs {
-				if b.loc == PositionLocation {
-					pass.SetVertexBuffer(0, b.buf, 0, wgpu.WholeSize)
-					break
-				}
-			}
-
-			if d.geometry.index != nil {
-				pass.SetIndexBuffer(d.geometry.index, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
-				pass.DrawIndexed(uint32(d.geometry.count), 1, 0, 0, uint32(j))
-			} else {
-				pass.Draw(uint32(d.geometry.count), 1, 0, uint32(j))
+	for _, d := range drawings {
+		for _, b := range d.geometry.bufs {
+			if b.loc == PositionLocation {
+				pass.SetVertexBuffer(0, b.buf, 0, wgpu.WholeSize)
+				break
 			}
 		}
 
-		pass.End()
-		pass.Release()
-
-		cmdBuf := encoder.Finish(nil)
-		r.runtime.Queue.Submit(cmdBuf)
-		cmdBuf.Release()
-		encoder.Release()
+		if d.geometry.index != nil {
+			pass.SetIndexBuffer(d.geometry.index, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
+			pass.DrawIndexed(uint32(d.geometry.count), 1, 0, 0, d.instanceId)
+		} else {
+			pass.Draw(uint32(d.geometry.count), 1, 0, d.instanceId)
+		}
 	}
+
+	pass.End()
+	pass.Release()
+
+	cmdBuf := encoder.Finish(nil)
+	r.runtime.Queue.Submit(cmdBuf)
+	cmdBuf.Release()
+	encoder.Release()
 }
 
-func (r *Renderer) renderInstance(pass *wgpu.RenderPassEncoder, obj drawing, objIdx int) {
+func (r *Renderer) renderInstance(pass *wgpu.RenderPassEncoder, obj drawing) {
 	pipeline := r.getPipelineFor(obj)
 	pass.SetPipeline(pipeline)
 	pass.SetBindGroup(GlobalSet, r.globalBindGroup, []uint32{})
@@ -485,9 +506,9 @@ func (r *Renderer) renderInstance(pass *wgpu.RenderPassEncoder, obj drawing, obj
 
 	if obj.geometry.index != nil {
 		pass.SetIndexBuffer(obj.geometry.index, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
-		pass.DrawIndexed(uint32(obj.geometry.count), 1, 0, 0, uint32(objIdx))
+		pass.DrawIndexed(uint32(obj.geometry.count), 1, 0, 0, obj.instanceId)
 	} else {
-		pass.Draw(uint32(obj.geometry.count), 1, 0, uint32(objIdx))
+		pass.Draw(uint32(obj.geometry.count), 1, 0, obj.instanceId)
 	}
 }
 
@@ -893,6 +914,9 @@ func (r *Renderer) cullScene(list *renderList, node Node, frustum Frustum) {
 	for _, child := range node.Children() {
 		switch object := any(child).(type) {
 		case *Mesh:
+			if object.CastShadow() {
+				list.shadowCasters = append(list.shadowCasters, object)
+			}
 			if frustum.ContainsSphere(object.BoundingSphere()) {
 				list.meshes = append(list.meshes, object)
 			}

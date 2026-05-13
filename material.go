@@ -68,7 +68,6 @@ type Material struct {
 	uniformBuffers  []*wgpu.Buffer
 	flags           MaterialFlags
 	hash            uint64
-	defines         map[string]string
 	isLit           bool
 }
 

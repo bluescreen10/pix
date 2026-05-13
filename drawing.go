@@ -1,6 +1,7 @@
 package pix
 
 type drawing struct {
-	geometry Geometry
-	material Material
+	instanceId uint32
+	geometry   Geometry
+	material   Material
 }
