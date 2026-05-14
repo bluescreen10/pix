@@ -393,7 +393,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	renderPass := r.beginRendering(&ctx, scene.background)
 
 	for _, d := range list.visible {
-		r.renderInstance(renderPass, d)
+		r.renderInstance(&ctx, renderPass, d)
 	}
 
 	r.endRendering(&ctx, renderPass)
@@ -423,7 +423,7 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, renderT
 		},
 	})
 
-	pipeline := r.getPipeline(drawings[0])
+	pipeline := r.getPipeline(drawings[0], nil)
 
 	pass.SetPipeline(pipeline)
 	pass.SetBindGroup(0, r.shadowMat.BindGroup(), []uint32{})
@@ -449,17 +449,8 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, renderT
 	pass.Release()
 }
 
-// sceneParams holds per-frame light/shadow counts used to select the right pipeline variant.
-type sceneParams struct {
-	dirLights   uint8
-	shadows     uint8
-	pointLights uint8
-	spotLights  uint8
-	hasAmbient  bool
-}
-
-func (r *Renderer) renderInstance(pass *wgpu.RenderPassEncoder, obj drawing) {
-	pipeline := r.getPipeline(obj)
+func (r *Renderer) renderInstance(ctx *renderContext, pass *wgpu.RenderPassEncoder, obj drawing) {
+	pipeline := r.getPipeline(obj, ctx.texture)
 	pass.SetPipeline(pipeline)
 	pass.SetBindGroup(GlobalSet, r.globalBindGroup, []uint32{})
 	pass.SetBindGroup(MaterialSet, obj.mat.gpuBindGroup, []uint32{})
@@ -523,7 +514,7 @@ func (r *Renderer) endRendering(ctx *renderContext, pass *wgpu.RenderPassEncoder
 	ctx.encoder = nil
 }
 
-func (r *Renderer) getPipeline(obj drawing) *wgpu.RenderPipeline {
+func (r *Renderer) getPipeline(obj drawing, renderTarget *wgpu.Texture) *wgpu.RenderPipeline {
 	key := renderPipelineKey{
 		shaderHash:    obj.mat.hash,
 		materialFlags: obj.mat.flags,
@@ -532,53 +523,89 @@ func (r *Renderer) getPipeline(obj drawing) *wgpu.RenderPipeline {
 	if p := r.pipelineCache.GetRenderPipeline(key); p != nil {
 		return p
 	}
-	p := r.createRenderPipeline(obj)
+	p := r.createPipeline(obj, renderTarget)
 	r.pipelineCache.SetRenderPipeline(key, p)
 	return p
 }
 
-func (r *Renderer) createRenderPipeline(obj drawing) *wgpu.RenderPipeline {
-	layout := r.runtime.Device.CreatePipelineLayout(wgpu.PipelineLayoutDescriptor{
-		Label: "",
-		BindGroupLayouts: []*wgpu.BindGroupLayout{
+// createPipeline builds a render pipeline. When colorFormat is nil the pipeline
+// is depth-only (shadow pass); otherwise it includes a full fragment stage.
+func (r *Renderer) createPipeline(obj drawing, renderTarget *wgpu.Texture) *wgpu.RenderPipeline {
+	shadow := renderTarget == nil
+
+	var bindGroupLayouts []*wgpu.BindGroupLayout
+	if shadow {
+		bindGroupLayouts = []*wgpu.BindGroupLayout{
+			obj.mat.gpuBindGroupLayout,
+			r.instanceStorageBindGroupLayout,
+		}
+	} else {
+		bindGroupLayouts = []*wgpu.BindGroupLayout{
 			r.globalBindGroupLayout,
 			obj.mat.gpuBindGroupLayout,
 			r.instanceStorageBindGroupLayout,
-		},
+		}
+	}
+
+	layout := r.runtime.Device.CreatePipelineLayout(wgpu.PipelineLayoutDescriptor{
+		BindGroupLayouts: bindGroupLayouts,
 	})
 	defer layout.Release()
 
-	defines := buildDefines(obj.mat.flags, obj.geo.flags)
+	var defines map[string]bool
+	if !shadow {
+		defines = buildDefines(obj.mat.flags, obj.geo.flags)
+	}
 	module := r.compileShader(r.runtime.Device, obj.mat.shader, defines)
 
-	pipeline := r.runtime.Device.CreateRenderPipeline(wgpu.RenderPipelineDescriptor{
-		Label:  "",
-		Layout: layout,
-		Vertex: wgpu.VertexState{
-			Module:     module,
-			EntryPoint: "vs_main",
-			Buffers:    obj.geo.gpuLayout,
-		},
-		Fragment: &wgpu.FragmentState{
+	vertexBuffers := obj.geo.gpuLayout
+
+	cullMode := wgpu.CullModeBack
+	if shadow {
+		cullMode = wgpu.CullModeFront
+	} else if obj.mat.flags&DoubleSidedFlag != 0 {
+		cullMode = wgpu.CullModeNone
+	}
+
+	depthFormat := wgpu.TextureFormatDepth24Plus
+	depthCompare := wgpu.CompareFunctionLess
+	if shadow {
+		depthFormat = wgpu.TextureFormatDepth32Float
+		depthCompare = wgpu.CompareFunctionLessEqual
+	}
+
+	var fragment *wgpu.FragmentState
+	if !shadow {
+		fragment = &wgpu.FragmentState{
 			Module:     module,
 			EntryPoint: "fs_main",
 			Targets: []wgpu.ColorTargetState{
 				{
-					Format:    r.runtime.Format,
+					Format:    renderTarget.GetFormat(),
 					Blend:     nil,
 					WriteMask: wgpu.ColorWriteMaskAll,
 				},
 			},
+		}
+	}
+
+	return r.runtime.Device.CreateRenderPipeline(wgpu.RenderPipelineDescriptor{
+		Layout: layout,
+		Vertex: wgpu.VertexState{
+			Module:     module,
+			EntryPoint: "vs_main",
+			Buffers:    vertexBuffers,
 		},
+		Fragment: fragment,
 		Primitive: wgpu.PrimitiveState{
 			Topology:  wgpu.PrimitiveTopologyTriangleList,
 			FrontFace: wgpu.FrontFaceCCW,
-			CullMode:  wgpu.CullModeBack,
+			CullMode:  cullMode,
 		},
 		DepthStencil: &wgpu.DepthStencilState{
-			Format:            wgpu.TextureFormatDepth24Plus,
+			Format:            depthFormat,
 			DepthWriteEnabled: wgpu.OptionalBoolTrue,
-			DepthCompare:      wgpu.CompareFunctionLess,
+			DepthCompare:      depthCompare,
 			StencilFront: wgpu.StencilFaceState{
 				Compare:     wgpu.CompareFunctionAlways,
 				FailOp:      wgpu.StencilOperationKeep,
@@ -600,8 +627,6 @@ func (r *Renderer) createRenderPipeline(obj drawing) *wgpu.RenderPipeline {
 			AlphaToCoverageEnabled: false,
 		},
 	})
-
-	return pipeline
 }
 
 func (r *Renderer) compileShader(device *wgpu.Device, code string, defines map[string]bool) *wgpu.ShaderModule {
@@ -676,80 +701,6 @@ func (r *Renderer) createShadowResources() {
 
 	r.shadowMat = r.NewShadowMaterial()
 }
-
-// func (r *Renderer) getShadowPipeline() *wgpu.RenderPipeline {
-// 	key := pipelieKey(r.shadowMat.data().hash, 0, 0, 0, 0, 0, 0, false)
-// 	if p := r.pipelineCache.GetRenderPipeline(key); p != nil {
-// 		return p
-// 	}
-// 	p := r.createShadowPipeline()
-// 	r.pipelineCache.SetRenderPipeline(key, p)
-// 	return p
-// }
-
-// func (r *Renderer) createShadowPipeline() *wgpu.RenderPipeline {
-// 	module := r.compileShader(r.runtime.Device, "shadow.wgsl", nil)
-
-// 	layout := r.runtime.Device.CreatePipelineLayout(wgpu.PipelineLayoutDescriptor{
-// 		Label: "Shadow Pipeline Layout",
-// 		BindGroupLayouts: []*wgpu.BindGroupLayout{
-// 			r.shadowMat.BindGroupLayout(),
-// 			r.instanceStorageBindGroupLayout,
-// 		},
-// 	})
-// 	defer layout.Release()
-
-// 	return r.runtime.Device.CreateRenderPipeline(wgpu.RenderPipelineDescriptor{
-// 		Label:  "Shadow Pipeline",
-// 		Layout: layout,
-// 		Vertex: wgpu.VertexState{
-// 			Module:     module,
-// 			EntryPoint: "vs_shadow",
-// 			Buffers: []wgpu.VertexBufferLayout{
-// 				{
-// 					ArrayStride: uint64(Float32x3.Size()),
-// 					StepMode:    wgpu.VertexStepModeVertex,
-// 					Attributes: []wgpu.VertexAttribute{
-// 						{
-// 							Format:         wgpu.VertexFormatFloat32x3,
-// 							Offset:         0,
-// 							ShaderLocation: 0,
-// 						},
-// 					},
-// 				},
-// 			},
-// 		},
-// 		Primitive: wgpu.PrimitiveState{
-// 			Topology:  wgpu.PrimitiveTopologyTriangleList,
-// 			FrontFace: wgpu.FrontFaceCCW,
-// 			CullMode:  wgpu.CullModeFront, // render back faces to reduce self-shadowing
-// 		},
-// 		DepthStencil: &wgpu.DepthStencilState{
-// 			Format:            wgpu.TextureFormatDepth32Float,
-// 			DepthWriteEnabled: wgpu.OptionalBoolTrue,
-// 			DepthCompare:      wgpu.CompareFunctionLessEqual,
-// 			StencilFront: wgpu.StencilFaceState{
-// 				Compare:     wgpu.CompareFunctionAlways,
-// 				FailOp:      wgpu.StencilOperationKeep,
-// 				DepthFailOp: wgpu.StencilOperationKeep,
-// 				PassOp:      wgpu.StencilOperationKeep,
-// 			},
-// 			StencilBack: wgpu.StencilFaceState{
-// 				Compare:     wgpu.CompareFunctionAlways,
-// 				FailOp:      wgpu.StencilOperationKeep,
-// 				DepthFailOp: wgpu.StencilOperationKeep,
-// 				PassOp:      wgpu.StencilOperationKeep,
-// 			},
-// 			StencilReadMask:  0xFFFFFFFF,
-// 			StencilWriteMask: 0xFFFFFFFF,
-// 		},
-// 		Multisample: wgpu.MultisampleState{
-// 			Count:                  1,
-// 			Mask:                   0xFFFFFFFF,
-// 			AlphaToCoverageEnabled: false,
-// 		},
-// 	})
-// }
 
 func (r *Renderer) createGlobalBindGroupLayouts() {
 	r.globalBindGroupLayout = r.runtime.Device.CreateBindGroupLayout(wgpu.BindGroupLayoutDescriptor{

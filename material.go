@@ -12,7 +12,8 @@ var matID idGen
 type MaterialFlags uint32
 
 const (
-	ColorMapFlag = MaterialFlags(1 << iota)
+	ColorMapFlag  = MaterialFlags(1 << iota)
+	DoubleSidedFlag
 )
 
 var materialFlagNames = map[int]string{
