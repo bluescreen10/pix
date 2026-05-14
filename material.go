@@ -9,7 +9,7 @@ import (
 
 var matID idGen
 
-type MaterialFlags uint64
+type MaterialFlags uint32
 
 const (
 	ColorMapFlag = MaterialFlags(1 << iota)
@@ -24,7 +24,7 @@ type MaterialData struct {
 	version  int
 	shader   string
 	name     string
-	hash     uint64
+	hash     uint32
 	flags    MaterialFlags
 	textures []Ref[Texture]
 	uniforms []*Uniform
@@ -72,9 +72,9 @@ func NewMaterial(name string, shader string, uniforms []*Uniform, numTextures in
 	return &MaterialData{
 		id:       matID.Next(),
 		name:     name,
-		version:  1, // Force upload
+		version:  1,
 		shader:   shader,
-		hash:     hashShaders(shader),
+		hash:     hashShader(shader),
 		uniforms: uniforms,
 		textures: make([]Ref[Texture], numTextures),
 		isLit:    isLit,
@@ -100,8 +100,8 @@ func (m Material) Copy() Material { return Material{renderer: m.renderer, ref: m
 // Valid reports whether the underlying material resource is still alive.
 func (m Material) Valid() bool { return m.ref.Valid() }
 
-func hashShaders(a string) uint64 {
-	h := fnv.New64a()
-	h.Write(unsafe.Slice(unsafe.StringData(a), len(a)))
-	return h.Sum64()
+func hashShader(s string) uint32 {
+	h := fnv.New32a()
+	h.Write(unsafe.Slice(unsafe.StringData(s), len(s)))
+	return h.Sum32()
 }

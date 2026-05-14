@@ -8,7 +8,7 @@ import (
 	"github.com/bluescreen10/pix/glm"
 )
 
-type GeometryFlags uint64
+type GeometryFlags uint32
 
 const (
 	UsePosFlag = GeometryFlags(1 << iota)

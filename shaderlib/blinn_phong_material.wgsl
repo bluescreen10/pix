@@ -1,5 +1,7 @@
 const SHININESS: f32 = 32.0;
-override MAX_DIRECTIONAL_LIGHTS: u32 = 5;
+const MAX_DIRECTIONAL_LIGHTS: u32 = 5;
+const MAX_POINT_LIGHTS: u32 = 0;
+const MAX_SPOT_LIGHTS: u32 = 0;
 
 struct Camera {
     view_projection: mat4x4<f32>,

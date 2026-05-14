@@ -3,7 +3,7 @@ package pix
 import "github.com/bluescreen10/dawn-go/wgpu"
 
 type renderPipelineKey struct {
-	shaderHash    uint64
+	shaderHash    uint32
 	materialFlags MaterialFlags
 	geometryFlags GeometryFlags
 }
