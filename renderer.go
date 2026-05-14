@@ -58,9 +58,11 @@ var drawingsPool = sync.Pool{
 }
 
 type renderContext struct {
-	texture *wgpu.Texture
-	view    *wgpu.TextureView
-	encoder *wgpu.CommandEncoder
+	texture         *wgpu.Texture
+	view            *wgpu.TextureView
+	encoder         *wgpu.CommandEncoder
+	depthTarget     *wgpu.Texture
+	depthTargetView *wgpu.TextureView
 }
 
 type Renderer struct {
@@ -374,7 +376,9 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 				lightFrustum := NewFrustumFromViewProjection(lightSpaceMat)
 				shadowDrawings := drawingsPool.Get().([]drawing)
 				shadowDrawings = cull(lightFrustum, list.shadowCasters, shadowDrawings)
-				r.renderShadowMap(&ctx, ld.shadow.camera, r.shadowLayerViews[shadowLayerIdx], shadowDrawings)
+				ctx.depthTarget = r.shadowMap.gpuRef
+				ctx.depthTargetView = r.shadowLayerViews[shadowLayerIdx]
+				r.renderShadowMap(&ctx, ld.shadow.camera, shadowDrawings)
 				drawingsPool.Put(shadowDrawings[:0])
 				shadowLayerIdx++
 			}
@@ -390,6 +394,10 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 		r.runtime.Queue.WriteBuffer(r.lightsUniformBuffer, 0, lightsUniform.Bytes())
 	}
 
+	r.ensureDepthTextureSize(ctx.texture.GetWidth(), ctx.texture.GetHeight())
+	ctx.depthTarget = r.depthTexture
+	ctx.depthTargetView = r.depthTextureView
+
 	renderPass := r.beginRendering(&ctx, scene.background)
 
 	for _, d := range list.visible {
@@ -403,7 +411,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	r.drainDeferredFree()
 }
 
-func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, renderTarget *wgpu.TextureView, drawings []drawing) {
+func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, drawings []drawing) {
 	if len(drawings) == 0 {
 		return
 	}
@@ -416,14 +424,14 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, renderT
 
 	pass := ctx.encoder.BeginRenderPass(wgpu.RenderPassDescriptor{
 		DepthStencilAttachment: &wgpu.RenderPassDepthStencilAttachment{
-			View:            renderTarget,
+			View:            ctx.depthTargetView,
 			DepthLoadOp:     wgpu.LoadOpClear,
 			DepthStoreOp:    wgpu.StoreOpStore,
 			DepthClearValue: 1.0,
 		},
 	})
 
-	pipeline := r.getPipeline(drawings[0], nil)
+	pipeline := r.getShadowPipeline(ctx.depthTarget)
 
 	pass.SetPipeline(pipeline)
 	pass.SetBindGroup(0, r.shadowMat.BindGroup(), []uint32{})
@@ -450,7 +458,7 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, renderT
 }
 
 func (r *Renderer) renderInstance(ctx *renderContext, pass *wgpu.RenderPassEncoder, obj drawing) {
-	pipeline := r.getPipeline(obj, ctx.texture)
+	pipeline := r.getPipeline(obj, ctx.texture, ctx.depthTarget)
 	pass.SetPipeline(pipeline)
 	pass.SetBindGroup(GlobalSet, r.globalBindGroup, []uint32{})
 	pass.SetBindGroup(MaterialSet, obj.mat.gpuBindGroup, []uint32{})
@@ -484,7 +492,6 @@ func (r *Renderer) presentFrame(ctx *renderContext) {
 }
 
 func (r *Renderer) beginRendering(ctx *renderContext, bgColor glm.Color4f) *wgpu.RenderPassEncoder {
-	r.ensureDepthTextureSize(ctx.texture.GetWidth(), ctx.texture.GetHeight())
 
 	return ctx.encoder.BeginRenderPass(wgpu.RenderPassDescriptor{
 		ColorAttachments: []wgpu.RenderPassColorAttachment{{
@@ -494,7 +501,7 @@ func (r *Renderer) beginRendering(ctx *renderContext, bgColor glm.Color4f) *wgpu
 			ClearValue: wgpu.Color{R: float64(bgColor.R()), G: float64(bgColor.G()), B: float64(bgColor.B()), A: float64(bgColor.A())},
 		}},
 		DepthStencilAttachment: &wgpu.RenderPassDepthStencilAttachment{
-			View:            r.depthTextureView,
+			View:            ctx.depthTargetView,
 			DepthLoadOp:     wgpu.LoadOpClear,
 			DepthStoreOp:    wgpu.StoreOpStore,
 			DepthClearValue: 1.0,
@@ -514,35 +521,63 @@ func (r *Renderer) endRendering(ctx *renderContext, pass *wgpu.RenderPassEncoder
 	ctx.encoder = nil
 }
 
-func (r *Renderer) getPipeline(obj drawing, renderTarget *wgpu.Texture) *wgpu.RenderPipeline {
+func (r *Renderer) getPipeline(obj drawing, renderTarget, depthTarget *wgpu.Texture) *wgpu.RenderPipeline {
+	mat := obj.mat
 	key := renderPipelineKey{
-		shaderHash:    obj.mat.hash,
-		materialFlags: obj.mat.flags,
+		shaderHash:    mat.hash,
+		materialFlags: mat.flags,
 		geometryFlags: obj.geo.flags,
+		colorFormat:   renderTarget.GetFormat(),
+		depthFormat:   depthTarget.GetFormat(),
+		side:          mat.side,
+		blending:      mat.blending,
+		depthFunc:     mat.depthFunc,
+		depthWrite:    mat.depthWrite,
+		depthTest:     mat.depthTest,
+		colorWrite:    mat.colorWrite,
 	}
 	if p := r.pipelineCache.GetRenderPipeline(key); p != nil {
 		return p
 	}
-	p := r.createPipeline(obj, renderTarget)
+	p := r.createPipeline(mat, obj.geo, renderTarget, depthTarget)
 	r.pipelineCache.SetRenderPipeline(key, p)
 	return p
 }
 
-// createPipeline builds a render pipeline. When colorFormat is nil the pipeline
-// is depth-only (shadow pass); otherwise it includes a full fragment stage.
-func (r *Renderer) createPipeline(obj drawing, renderTarget *wgpu.Texture) *wgpu.RenderPipeline {
+func (r *Renderer) getShadowPipeline(depthTarget *wgpu.Texture) *wgpu.RenderPipeline {
+	mat := r.shadowMat.data()
+	key := renderPipelineKey{
+		shaderHash:  mat.hash,
+		depthFormat: depthTarget.GetFormat(),
+		side:        mat.side,
+		depthFunc:   mat.depthFunc,
+		depthWrite:  mat.depthWrite,
+		depthTest:   mat.depthTest,
+	}
+	if p := r.pipelineCache.GetRenderPipeline(key); p != nil {
+		return p
+	}
+	p := r.createPipeline(mat, nil, nil, depthTarget)
+	r.pipelineCache.SetRenderPipeline(key, p)
+	return p
+}
+
+// createPipeline builds a render pipeline from a material and optional geometry.
+// When renderTarget is nil the pipeline is depth-only (no fragment stage); geo
+// nil means position-only vertex layout for the shadow pass.
+func (r *Renderer) createPipeline(mat *MaterialData, geo *GeometryData, renderTarget, depthTarget *wgpu.Texture) *wgpu.RenderPipeline {
 	shadow := renderTarget == nil
 
 	var bindGroupLayouts []*wgpu.BindGroupLayout
 	if shadow {
 		bindGroupLayouts = []*wgpu.BindGroupLayout{
-			obj.mat.gpuBindGroupLayout,
+			mat.gpuBindGroupLayout,
 			r.instanceStorageBindGroupLayout,
 		}
 	} else {
 		bindGroupLayouts = []*wgpu.BindGroupLayout{
 			r.globalBindGroupLayout,
-			obj.mat.gpuBindGroupLayout,
+			mat.gpuBindGroupLayout,
 			r.instanceStorageBindGroupLayout,
 		}
 	}
@@ -554,36 +589,53 @@ func (r *Renderer) createPipeline(obj drawing, renderTarget *wgpu.Texture) *wgpu
 
 	var defines map[string]bool
 	if !shadow {
-		defines = buildDefines(obj.mat.flags, obj.geo.flags)
+		defines = buildDefines(mat.flags, geo.flags)
 	}
-	module := r.compileShader(r.runtime.Device, obj.mat.shader, defines)
+	module := r.compileShader(r.runtime.Device, mat.shader, defines)
 
-	vertexBuffers := obj.geo.gpuLayout
-
-	cullMode := wgpu.CullModeBack
+	var vertexBuffers []wgpu.VertexBufferLayout
 	if shadow {
-		cullMode = wgpu.CullModeFront
-	} else if obj.mat.flags&DoubleSidedFlag != 0 {
-		cullMode = wgpu.CullModeNone
+		vertexBuffers = []wgpu.VertexBufferLayout{
+			{
+				ArrayStride: uint64(Float32x3.Size()),
+				StepMode:    wgpu.VertexStepModeVertex,
+				Attributes: []wgpu.VertexAttribute{
+					{
+						Format:         wgpu.VertexFormatFloat32x3,
+						Offset:         0,
+						ShaderLocation: 0,
+					},
+				},
+			},
+		}
+	} else {
+		vertexBuffers = geo.gpuLayout
 	}
 
-	depthFormat := wgpu.TextureFormatDepth24Plus
-	depthCompare := wgpu.CompareFunctionLess
-	if shadow {
-		depthFormat = wgpu.TextureFormatDepth32Float
-		depthCompare = wgpu.CompareFunctionLessEqual
+	depthCompare := wgpu.CompareFunctionAlways
+	if mat.depthTest {
+		depthCompare = mat.depthFunc.ToWGPU()
+	}
+
+	depthWrite := wgpu.OptionalBoolFalse
+	if mat.depthWrite && mat.depthTest {
+		depthWrite = wgpu.OptionalBoolTrue
 	}
 
 	var fragment *wgpu.FragmentState
 	if !shadow {
+		writeMask := wgpu.ColorWriteMaskNone
+		if mat.colorWrite {
+			writeMask = wgpu.ColorWriteMaskAll
+		}
 		fragment = &wgpu.FragmentState{
 			Module:     module,
 			EntryPoint: "fs_main",
 			Targets: []wgpu.ColorTargetState{
 				{
 					Format:    renderTarget.GetFormat(),
-					Blend:     nil,
-					WriteMask: wgpu.ColorWriteMaskAll,
+					Blend:     mat.blending.ToWGPU(),
+					WriteMask: writeMask,
 				},
 			},
 		}
@@ -600,11 +652,11 @@ func (r *Renderer) createPipeline(obj drawing, renderTarget *wgpu.Texture) *wgpu
 		Primitive: wgpu.PrimitiveState{
 			Topology:  wgpu.PrimitiveTopologyTriangleList,
 			FrontFace: wgpu.FrontFaceCCW,
-			CullMode:  cullMode,
+			CullMode:  mat.side.ToWGPU(),
 		},
 		DepthStencil: &wgpu.DepthStencilState{
-			Format:            depthFormat,
-			DepthWriteEnabled: wgpu.OptionalBoolTrue,
+			Format:            depthTarget.GetFormat(),
+			DepthWriteEnabled: depthWrite,
 			DepthCompare:      depthCompare,
 			StencilFront: wgpu.StencilFaceState{
 				Compare:     wgpu.CompareFunctionAlways,

@@ -6,6 +6,14 @@ type renderPipelineKey struct {
 	shaderHash    uint32
 	materialFlags MaterialFlags
 	geometryFlags GeometryFlags
+	colorFormat   wgpu.TextureFormat // zero (Undefined) for depth-only passes
+	depthFormat   wgpu.TextureFormat
+	side          Side
+	blending      BlendMode
+	depthFunc     DepthFunc
+	depthWrite    bool
+	depthTest     bool
+	colorWrite    bool
 }
 
 type pipelineCache struct {

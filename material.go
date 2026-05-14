@@ -12,8 +12,7 @@ var matID idGen
 type MaterialFlags uint32
 
 const (
-	ColorMapFlag  = MaterialFlags(1 << iota)
-	DoubleSidedFlag
+	ColorMapFlag = MaterialFlags(1 << iota)
 )
 
 var materialFlagNames = map[int]string{
@@ -21,15 +20,21 @@ var materialFlagNames = map[int]string{
 }
 
 type MaterialData struct {
-	id       uint32
-	version  int
-	shader   string
-	name     string
-	hash     uint32
-	flags    MaterialFlags
-	textures []Ref[Texture]
-	uniforms []*Uniform
-	isLit    bool
+	id         uint32
+	version    int
+	shader     string
+	name       string
+	hash       uint32
+	flags      MaterialFlags
+	side       Side
+	blending   BlendMode
+	depthWrite bool
+	depthTest  bool
+	depthFunc  DepthFunc
+	colorWrite bool
+	textures   []Ref[Texture]
+	uniforms   []*Uniform
+	isLit      bool
 
 	// GPU-side resources, populated by the renderer.
 	gpuVersion         int
@@ -71,14 +76,20 @@ func (m *MaterialData) Destroy() {
 
 func NewMaterial(name string, shader string, uniforms []*Uniform, numTextures int, isLit bool) *MaterialData {
 	return &MaterialData{
-		id:       matID.Next(),
-		name:     name,
-		version:  1,
-		shader:   shader,
-		hash:     hashShader(shader),
-		uniforms: uniforms,
-		textures: make([]Ref[Texture], numTextures),
-		isLit:    isLit,
+		id:         matID.Next(),
+		name:       name,
+		version:    1,
+		shader:     shader,
+		hash:       hashShader(shader),
+		side:       SideFront,
+		blending:   BlendOpaque,
+		depthWrite: true,
+		depthTest:  true,
+		depthFunc:  DepthFuncLess,
+		colorWrite: true,
+		uniforms:   uniforms,
+		textures:   make([]Ref[Texture], numTextures),
+		isLit:      isLit,
 	}
 }
 
