@@ -1,7 +1,6 @@
 package pix
 
 import (
-	"github.com/bluescreen10/dawn-go/wgpu"
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/glm"
 )
@@ -27,5 +26,4 @@ func NewDirectionalShadow(size, near, far float32) *DirectionalShadow {
 type lightShadow struct {
 	bias    float32
 	mapSize glm.Vec2i
-	target  *wgpu.TextureView
 }

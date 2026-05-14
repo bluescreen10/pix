@@ -92,9 +92,9 @@ type Renderer struct {
 	instanceStorageCapacity        uint32
 
 	// shadow
-	shadowMap           *TextureData
-	shadowMapLayerViews [MaxDirectionalLights]*wgpu.TextureView
-	shadowMat           *ShadowMaterial
+	shadowMap        *TextureData
+	shadowLayerViews [MaxDirectionalLights]*wgpu.TextureView
+	shadowMat        *ShadowMaterial
 
 	// depth buffer
 	depthTexture     *wgpu.Texture
@@ -156,18 +156,6 @@ func (r *Renderer) Destroy() {
 		r.instanceStorageBindGroupLayout = nil
 	}
 
-	for i := range r.shadowMapLayerViews {
-		if r.shadowMapLayerViews[i] != nil {
-			r.shadowMapLayerViews[i].Release()
-			r.shadowMapLayerViews[i] = nil
-		}
-	}
-	if r.shadowMap != nil {
-		r.shadowMap.Destroy()
-		r.shadowMap = nil
-	}
-	r.shadowMat = nil // GPU resources freed by destroyResources below
-
 	if r.depthTextureView != nil {
 		r.depthTextureView.Release()
 		r.depthTexture = nil
@@ -176,6 +164,18 @@ func (r *Renderer) Destroy() {
 	if r.depthTexture != nil {
 		r.depthTexture.Destroy()
 		r.depthTexture = nil
+	}
+
+	for i, v := range r.shadowLayerViews {
+		if v != nil {
+			v.Release()
+			r.shadowLayerViews[i] = nil
+		}
+	}
+
+	if r.shadowMap != nil {
+		r.shadowMap.Destroy()
+		r.shadowMap = nil
 	}
 
 	r.destroyResources()
@@ -340,6 +340,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 		count := min(MaxDirectionalLights, len(list.directionalLights))
 		lightsUniform.DirectionalLightCount = uint32(count)
 
+		shadowLayerIdx := 0
 		for i, ld := range list.directionalLights[:count] {
 			colorRGBA := ld.color.RGBA()
 			colorRGBA[3] = ld.intensity
@@ -373,8 +374,9 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 				lightFrustum := NewFrustumFromViewProjection(lightSpaceMat)
 				shadowDrawings := drawingsPool.Get().([]drawing)
 				shadowDrawings = cull(lightFrustum, list.shadowCasters, shadowDrawings)
-				r.renderShadowMap(&ctx, ld.shadow.camera, ld.shadow.target, shadowDrawings)
+				r.renderShadowMap(&ctx, ld.shadow.camera, r.shadowLayerViews[shadowLayerIdx], shadowDrawings)
 				drawingsPool.Put(shadowDrawings[:0])
+				shadowLayerIdx++
 			}
 		}
 
@@ -647,8 +649,8 @@ func (r *Renderer) createShadowResources() {
 	})
 	r.shadowMap.gpuSampler = r.getOrCreateSampler(r.shadowMap.sampler)
 
-	for i := range r.shadowMapLayerViews {
-		r.shadowMapLayerViews[i] = r.shadowMap.gpuRef.CreateView(&wgpu.TextureViewDescriptor{
+	for i := range r.shadowLayerViews {
+		r.shadowLayerViews[i] = r.shadowMap.gpuRef.CreateView(&wgpu.TextureViewDescriptor{
 			Format:          wgpu.TextureFormatDepth32Float,
 			Dimension:       wgpu.TextureViewDimension2D,
 			BaseMipLevel:    0,
@@ -862,17 +864,10 @@ func (r *Renderer) collectRenderList(list *renderList, scene *Scene) {
 		list.visible = append(list.visible, d)
 	}
 
-	shadowLayer := 0
 	for i := range scene.dirLights {
 		ld := scene.dirLights[i]
 		if scene.flags[ld.ownerNode]&flagAlive == 0 {
 			continue
-		}
-		if ld.shadow != nil && shadowLayer < MaxDirectionalLights {
-			if ld.shadow.target == nil {
-				ld.shadow.target = r.shadowMapLayerViews[shadowLayer]
-			}
-			shadowLayer++
 		}
 		list.directionalLights = append(list.directionalLights, ld)
 	}
