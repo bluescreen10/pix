@@ -92,14 +92,9 @@ type Renderer struct {
 	instanceStorageCapacity        uint32
 
 	// shadow
-	shadowMapTexture    *wgpu.Texture
-	shadowMapView       *wgpu.TextureView
+	shadowMap           *TextureData
 	shadowMapLayerViews [MaxDirectionalLights]*wgpu.TextureView
-	shadowSampler       *wgpu.Sampler
-	shadowCamBuffer     *wgpu.Buffer
-	shadowCamBGL        *wgpu.BindGroupLayout
-	shadowCamBG         *wgpu.BindGroup
-	shadowPipeline      *wgpu.RenderPipeline
+	shadowMat           *ShadowMaterial
 
 	// depth buffer
 	depthTexture     *wgpu.Texture
@@ -167,34 +162,11 @@ func (r *Renderer) Destroy() {
 			r.shadowMapLayerViews[i] = nil
 		}
 	}
-	if r.shadowMapView != nil {
-		r.shadowMapView.Release()
-		r.shadowMapView = nil
+	if r.shadowMap != nil {
+		r.shadowMap.Destroy()
+		r.shadowMap = nil
 	}
-	if r.shadowMapTexture != nil {
-		r.shadowMapTexture.Destroy()
-		r.shadowMapTexture = nil
-	}
-	if r.shadowSampler != nil {
-		r.shadowSampler.Release()
-		r.shadowSampler = nil
-	}
-	if r.shadowCamBuffer != nil {
-		r.shadowCamBuffer.Destroy()
-		r.shadowCamBuffer = nil
-	}
-	if r.shadowCamBGL != nil {
-		r.shadowCamBGL.Release()
-		r.shadowCamBGL = nil
-	}
-	if r.shadowCamBG != nil {
-		r.shadowCamBG.Release()
-		r.shadowCamBG = nil
-	}
-	if r.shadowPipeline != nil {
-		r.shadowPipeline.Release()
-		r.shadowPipeline = nil
-	}
+	r.shadowMat = nil // GPU resources freed by destroyResources below
 
 	if r.depthTextureView != nil {
 		r.depthTextureView.Release()
@@ -304,7 +276,8 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 
 	viewProjection := camera.ViewProjection()
 	frustum := NewFrustumFromViewProjection(viewProjection)
-	r.collectRenderList(list, scene, frustum)
+	r.collectRenderList(list, scene)
+	list.visible = cull(frustum, list.visible, list.visible[:0])
 
 	instances := instancesPool.Get().(InstancesUniform)
 	defer instancesPool.Put(instances[:0])
@@ -399,11 +372,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 			if ld.shadow != nil {
 				lightFrustum := NewFrustumFromViewProjection(lightSpaceMat)
 				shadowDrawings := drawingsPool.Get().([]drawing)
-				for _, caster := range list.shadowCasters {
-					if lightFrustum.ContainsSphere(caster.bounds) {
-						shadowDrawings = append(shadowDrawings, caster)
-					}
-				}
+				shadowDrawings = cull(lightFrustum, list.shadowCasters, shadowDrawings)
 				r.renderShadowMap(&ctx, ld.shadow.camera, ld.shadow.target, shadowDrawings)
 				drawingsPool.Put(shadowDrawings[:0])
 			}
@@ -433,9 +402,11 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 }
 
 func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, renderTarget *wgpu.TextureView, drawings []drawing) {
-	vp := shadowCam.ViewProjection()
-	r.runtime.Queue.WriteBuffer(r.shadowCamBuffer, 0,
-		unsafe.Slice((*byte)(unsafe.Pointer(&vp)), unsafe.Sizeof(vp)))
+	r.shadowMat.SetViewProjection(shadowCam.ViewProjection())
+	if err := prepareMaterial(r.runtime.Device, r.shadowMat.data(), r); err != nil {
+		r.logger.Error("error preparing shadow material", slog.Any("err", err))
+		return
+	}
 
 	pass := ctx.encoder.BeginRenderPass(wgpu.RenderPassDescriptor{
 		DepthStencilAttachment: &wgpu.RenderPassDepthStencilAttachment{
@@ -446,8 +417,8 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, renderT
 		},
 	})
 
-	pass.SetPipeline(r.shadowPipeline)
-	pass.SetBindGroup(0, r.shadowCamBG, []uint32{})
+	pass.SetPipeline(r.getShadowPipeline())
+	pass.SetBindGroup(0, r.shadowMat.BindGroup(), []uint32{})
 	pass.SetBindGroup(1, r.instanceStorageBindGroup, []uint32{})
 
 	for _, d := range drawings {
@@ -635,11 +606,24 @@ func (r *Renderer) createGlobalResources() {
 	r.createGlobalBindGroupLayouts()
 	r.createGlobalBuffers()
 	r.createGlobalBindGroups()
-	r.createShadowPipeline()
 }
 
 func (r *Renderer) createShadowResources() {
-	r.shadowMapTexture = r.runtime.Device.CreateTexture(&wgpu.TextureDescriptor{
+	r.shadowMap = &TextureData{
+		format: wgpu.TextureFormatDepth32Float,
+		sampler: Sampler{
+			AddressModeU:  wgpu.AddressModeClampToEdge,
+			AddressModeV:  wgpu.AddressModeClampToEdge,
+			AddressModeW:  wgpu.AddressModeClampToEdge,
+			MagFilter:     wgpu.FilterModeNearest,
+			MinFilter:     wgpu.FilterModeNearest,
+			MipmapFilter:  wgpu.MipmapFilterModeNearest,
+			LodMaxClamp:   32,
+			Compare:       wgpu.CompareFunctionLessEqual,
+			MaxAnisotropy: 1,
+		},
+	}
+	r.shadowMap.gpuRef = r.runtime.Device.CreateTexture(&wgpu.TextureDescriptor{
 		Label:         "Shadow Map Array",
 		Usage:         wgpu.TextureUsageRenderAttachment | wgpu.TextureUsageTextureBinding,
 		Dimension:     wgpu.TextureDimension2D,
@@ -652,8 +636,7 @@ func (r *Renderer) createShadowResources() {
 			DepthOrArrayLayers: MaxDirectionalLights,
 		},
 	})
-
-	r.shadowMapView = r.shadowMapTexture.CreateView(&wgpu.TextureViewDescriptor{
+	r.shadowMap.gpuView = r.shadowMap.gpuRef.CreateView(&wgpu.TextureViewDescriptor{
 		Format:          wgpu.TextureFormatDepth32Float,
 		Dimension:       wgpu.TextureViewDimension2DArray,
 		BaseMipLevel:    0,
@@ -662,9 +645,10 @@ func (r *Renderer) createShadowResources() {
 		ArrayLayerCount: MaxDirectionalLights,
 		Aspect:          wgpu.TextureAspectDepthOnly,
 	})
+	r.shadowMap.gpuSampler = r.getOrCreateSampler(r.shadowMap.sampler)
 
 	for i := range r.shadowMapLayerViews {
-		r.shadowMapLayerViews[i] = r.shadowMapTexture.CreateView(&wgpu.TextureViewDescriptor{
+		r.shadowMapLayerViews[i] = r.shadowMap.gpuRef.CreateView(&wgpu.TextureViewDescriptor{
 			Format:          wgpu.TextureFormatDepth32Float,
 			Dimension:       wgpu.TextureViewDimension2D,
 			BaseMipLevel:    0,
@@ -675,66 +659,32 @@ func (r *Renderer) createShadowResources() {
 		})
 	}
 
-	r.shadowSampler = r.runtime.Device.CreateSampler(&wgpu.SamplerDescriptor{
-		Label:         "Shadow Comparison Sampler",
-		AddressModeU:  wgpu.AddressModeClampToEdge,
-		AddressModeV:  wgpu.AddressModeClampToEdge,
-		AddressModeW:  wgpu.AddressModeClampToEdge,
-		MagFilter:     wgpu.FilterModeNearest,
-		MinFilter:     wgpu.FilterModeNearest,
-		MipmapFilter:  wgpu.MipmapFilterModeNearest,
-		LodMaxClamp:   32,
-		Compare:       wgpu.CompareFunctionLessEqual,
-		MaxAnisotropy: 1,
-	})
-
-	r.shadowCamBuffer = r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
-		Label: "Shadow Camera Buffer",
-		Size:  uint64(unsafe.Sizeof(glm.Mat4f{})),
-		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
-	})
-
-	r.shadowCamBGL = r.runtime.Device.CreateBindGroupLayout(wgpu.BindGroupLayoutDescriptor{
-		Label: "Shadow Camera BGL",
-		Entries: []wgpu.BindGroupLayoutEntry{
-			{
-				Binding:    0,
-				Visibility: wgpu.ShaderStageVertex,
-				Buffer: wgpu.BufferBindingLayout{
-					Type:           wgpu.BufferBindingTypeUniform,
-					MinBindingSize: uint64(unsafe.Sizeof(glm.Mat4f{})),
-				},
-			},
-		},
-	})
-
-	r.shadowCamBG = r.runtime.Device.CreateBindGroup(wgpu.BindGroupDescriptor{
-		Label:  "Shadow Camera BG",
-		Layout: r.shadowCamBGL,
-		Entries: []wgpu.BindGroupEntry{
-			{
-				Binding: 0,
-				Buffer:  r.shadowCamBuffer,
-				Offset:  0,
-				Size:    wgpu.WholeSize,
-			},
-		},
-	})
+	r.shadowMat = r.NewShadowMaterial()
 }
 
-func (r *Renderer) createShadowPipeline() {
+func (r *Renderer) getShadowPipeline() *wgpu.RenderPipeline {
+	key := renderPipelineKey{shaderHash: r.shadowMat.data().hash}
+	if p := r.pipelineCache.GetRenderPipeline(key); p != nil {
+		return p
+	}
+	p := r.createShadowPipeline()
+	r.pipelineCache.SetRenderPipeline(key, p)
+	return p
+}
+
+func (r *Renderer) createShadowPipeline() *wgpu.RenderPipeline {
 	module := r.compileShader(r.runtime.Device, "shadow.wgsl", nil)
 
 	layout := r.runtime.Device.CreatePipelineLayout(wgpu.PipelineLayoutDescriptor{
 		Label: "Shadow Pipeline Layout",
 		BindGroupLayouts: []*wgpu.BindGroupLayout{
-			r.shadowCamBGL,
+			r.shadowMat.BindGroupLayout(),
 			r.instanceStorageBindGroupLayout,
 		},
 	})
 	defer layout.Release()
 
-	r.shadowPipeline = r.runtime.Device.CreateRenderPipeline(wgpu.RenderPipelineDescriptor{
+	return r.runtime.Device.CreateRenderPipeline(wgpu.RenderPipelineDescriptor{
 		Label:  "Shadow Pipeline",
 		Layout: layout,
 		Vertex: wgpu.VertexState{
@@ -878,19 +828,20 @@ func (r *Renderer) createGlobalBindGroups() {
 			},
 			{
 				Binding:     ShadowMapBinding,
-				TextureView: r.shadowMapView,
+				TextureView: r.shadowMap.gpuView,
 			},
 			{
 				Binding: ShadowSamplerBinding,
-				Sampler: r.shadowSampler,
+				Sampler: r.shadowMap.gpuSampler,
 			},
 		},
 	})
 }
 
 // collectRenderList populates list by iterating the scene's compact payload tables
-// directly, avoiding a full tree traversal.
-func (r *Renderer) collectRenderList(list *renderList, scene *Scene, frustum Frustum) {
+// directly, avoiding a full tree traversal. No frustum culling is applied here;
+// call cull separately for each frustum.
+func (r *Renderer) collectRenderList(list *renderList, scene *Scene) {
 	for _, md := range scene.meshes {
 		flags := scene.GetFlags(md.ownerNode)
 		if !flags.IsAlive() || !flags.IsVisible() {
@@ -908,9 +859,7 @@ func (r *Renderer) collectRenderList(list *renderList, scene *Scene, frustum Fru
 		if flags.CastShadow() {
 			list.shadowCasters = append(list.shadowCasters, d)
 		}
-		if frustum.ContainsSphere(d.bounds) {
-			list.visible = append(list.visible, d)
-		}
+		list.visible = append(list.visible, d)
 	}
 
 	shadowLayer := 0
@@ -936,6 +885,18 @@ func (r *Renderer) collectRenderList(list *renderList, scene *Scene, frustum Fru
 		list.ambientLight = ld
 		break
 	}
+}
+
+// cull appends drawings from src into dst, keeping only those whose bounds
+// intersect frustum. Pass dst[:0] to compact in-place or a separate slice to
+// preserve src for reuse across multiple lights.
+func cull(frustum Frustum, src []drawing, dst []drawing) []drawing {
+	for _, d := range src {
+		if frustum.ContainsSphere(d.bounds) {
+			dst = append(dst, d)
+		}
+	}
+	return dst
 }
 
 func buildDefines(matFlags MaterialFlags, geoFlags GeometryFlags) map[string]bool {

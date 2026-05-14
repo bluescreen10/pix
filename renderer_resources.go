@@ -184,27 +184,30 @@ func (r *Renderer) scheduleTexFree(id uint32) {
 	r.deferredFree = append(r.deferredFree, deferredFreeEntry{kind: deferredTex, id: id, frame: r.frameCount})
 }
 
+func (r *Renderer) getOrCreateSampler(s Sampler) *wgpu.Sampler {
+	if sampler, ok := r.samplerCache[s]; ok {
+		return sampler
+	}
+	sampler := r.runtime.Device.CreateSampler(&wgpu.SamplerDescriptor{
+		AddressModeU:  s.AddressModeU,
+		AddressModeV:  s.AddressModeV,
+		AddressModeW:  s.AddressModeW,
+		MagFilter:     s.MagFilter,
+		MinFilter:     s.MinFilter,
+		MipmapFilter:  s.MipmapFilter,
+		LodMinClamp:   s.LodMinClamp,
+		LodMaxClamp:   s.LodMaxClamp,
+		Compare:       s.Compare,
+		MaxAnisotropy: s.MaxAnisotropy,
+	})
+	r.samplerCache[s] = sampler
+	return sampler
+}
+
 func (r *Renderer) uploadTexture(id uint32) {
 	data := r.textures.get(id)
 
-	sampler, ok := r.samplerCache[data.sampler]
-	if !ok {
-		sampler = r.runtime.Device.CreateSampler(&wgpu.SamplerDescriptor{
-			AddressModeU:  data.sampler.AddressModeU,
-			AddressModeV:  data.sampler.AddressModeV,
-			AddressModeW:  data.sampler.AddressModeW,
-			MagFilter:     data.sampler.MagFilter,
-			MinFilter:     data.sampler.MinFilter,
-			MipmapFilter:  data.sampler.MipmapFilter,
-			LodMinClamp:   data.sampler.LodMinClamp,
-			LodMaxClamp:   data.sampler.LodMaxClamp,
-			Compare:       data.sampler.Compare,
-			MaxAnisotropy: data.sampler.MaxAnisotropy,
-		})
-		r.samplerCache[data.sampler] = sampler
-	}
-
-	data.gpuSampler = sampler
+	data.gpuSampler = r.getOrCreateSampler(data.sampler)
 	data.gpuVersion = data.version
 
 	if !data.hasPendingData() {

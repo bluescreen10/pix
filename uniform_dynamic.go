@@ -18,6 +18,7 @@ const (
 	UintUniformType
 	BoolUniformType
 	StructUniformType
+	Mat4UniformType
 )
 
 var uniformTypeSize = map[UniformType]int{
@@ -28,6 +29,7 @@ var uniformTypeSize = map[UniformType]int{
 	UintUniformType:   4,
 	BoolUniformType:   4,
 	StructUniformType: 0,
+	Mat4UniformType:   64,
 }
 
 var typeNames = map[UniformType]string{
@@ -38,6 +40,7 @@ var typeNames = map[UniformType]string{
 	UintUniformType:   "uint",
 	BoolUniformType:   "bool",
 	StructUniformType: "struct",
+	Mat4UniformType:   "mat4x4",
 }
 
 type uniformField struct {
@@ -77,6 +80,10 @@ func (u *Uniform) AddVec3(name string) *Uniform {
 
 func (u *Uniform) AddVec4(name string) *Uniform {
 	return u.addField(name, Vec4UniformType, nil)
+}
+
+func (u *Uniform) AddMat4(name string) *Uniform {
+	return u.addField(name, Mat4UniformType, nil)
 }
 
 func (u *Uniform) AddStruct(name string, nested *Uniform) *Uniform {
@@ -154,6 +161,24 @@ func (u *Uniform) SetVec4(name string, v glm.Vec4f) {
 	binary.LittleEndian.PutUint32(b[4:], math.Float32bits(v[1]))
 	binary.LittleEndian.PutUint32(b[8:], math.Float32bits(v[2]))
 	binary.LittleEndian.PutUint32(b[12:], math.Float32bits(v[3]))
+}
+
+func (u *Uniform) Mat4(name string) glm.Mat4f {
+	f := u.mustField(name, Mat4UniformType)
+	b := u.bufAt(f.offset)
+	var m glm.Mat4f
+	for i := range m {
+		m[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
+	}
+	return m
+}
+
+func (u *Uniform) SetMat4(name string, m glm.Mat4f) {
+	f := u.mustField(name, Mat4UniformType)
+	b := u.bufAt(f.offset)
+	for i, v := range m {
+		binary.LittleEndian.PutUint32(b[i*4:], math.Float32bits(v))
+	}
 }
 
 func (u *Uniform) Struct(name string) *Uniform {
