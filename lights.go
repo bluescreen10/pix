@@ -51,7 +51,7 @@ func (l DirectionalLight) Shadow() *DirectionalShadow {
 func (l DirectionalLight) SetCastShadow(castShadows bool) {
 	ld := l.data()
 	if castShadows {
-		ld.shadow = NewDirectionalShadow(40, 0.1, 100)
+		ld.shadow = NewDirectionalShadow(5, 0.1, 100)
 	} else {
 		ld.shadow = nil
 	}
