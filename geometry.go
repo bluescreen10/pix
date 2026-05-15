@@ -16,6 +16,11 @@ const (
 	UseNormal
 )
 
+// ShadowGeometryMask is the subset of geometry attributes consumed by the
+// shadow shader. Only these slots are included in the shadow pipeline vertex
+// layout, and only these flags contribute to the shadow pipeline cache key.
+const ShadowGeometryMask = UsePosFlag
+
 var attrNameToFlag = map[string]GeometryFlags{
 	PositionAttrName: UsePosFlag,
 	UVAttrName:       UseUVsFlag,
@@ -39,11 +44,12 @@ type GeometryData struct {
 	boundingSphere        Sphere
 
 	// GPU-side resources, populated by the renderer.
-	gpuVersion int
-	gpuIndex   *wgpu.Buffer
-	gpuBufs    []GeometryBuffer
-	gpuCount   int
-	gpuLayout  []wgpu.VertexBufferLayout
+	gpuVersion      int
+	gpuIndex        *wgpu.Buffer
+	gpuBufs         []GeometryBuffer
+	gpuCount        int
+	gpuLayout       []wgpu.VertexBufferLayout
+	gpuShadowLayout []wgpu.VertexBufferLayout
 }
 
 func (g *GeometryData) Indices() []uint32 {

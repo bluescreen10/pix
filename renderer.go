@@ -292,6 +292,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 		if d.geo.gpuVersion < d.geo.version {
 			if d.geo.gpuVersion == 0 {
 				d.geo.gpuLayout = createVertexLayout(d.geo)
+				d.geo.gpuShadowLayout = createShadowVertexLayout(d.geo)
 			}
 			r.uploadGeometry(d.geo)
 		}
@@ -317,6 +318,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 		if d.geo.gpuVersion < d.geo.version {
 			if d.geo.gpuVersion == 0 {
 				d.geo.gpuLayout = createVertexLayout(d.geo)
+				d.geo.gpuShadowLayout = createShadowVertexLayout(d.geo)
 			}
 			r.uploadGeometry(d.geo)
 		}
@@ -431,18 +433,15 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, drawing
 		},
 	})
 
-	pipeline := r.getShadowPipeline(ctx.depthTarget)
-
-	pass.SetPipeline(pipeline)
 	pass.SetBindGroup(0, r.shadowMat.BindGroup(), []uint32{})
 	pass.SetBindGroup(1, r.instanceStorageBindGroup, []uint32{})
 
 	for _, d := range drawings {
+		shadowObj := drawing{mat: r.shadowMat.data(), geo: d.geo}
+		pass.SetPipeline(r.getPipeline(shadowObj, nil, ctx.depthTarget))
+
 		for _, b := range d.geo.gpuBufs {
-			if b.loc == PositionLocation {
-				pass.SetVertexBuffer(0, b.buf, 0, wgpu.WholeSize)
-				break
-			}
+			pass.SetVertexBuffer(uint32(b.loc), b.buf, 0, wgpu.WholeSize)
 		}
 
 		if d.geo.gpuIndex != nil {
@@ -523,11 +522,22 @@ func (r *Renderer) endRendering(ctx *renderContext, pass *wgpu.RenderPassEncoder
 
 func (r *Renderer) getPipeline(obj drawing, renderTarget, depthTarget *wgpu.Texture) *wgpu.RenderPipeline {
 	mat := obj.mat
+	shadow := renderTarget == nil
+
+	geoFlags := obj.geo.flags
+	if shadow {
+		geoFlags &= ShadowGeometryMask
+	}
+
+	var colorFormat wgpu.TextureFormat
+	if !shadow {
+		colorFormat = renderTarget.GetFormat()
+	}
 	key := renderPipelineKey{
 		shaderHash:    mat.hash,
 		materialFlags: mat.flags,
-		geometryFlags: obj.geo.flags,
-		colorFormat:   renderTarget.GetFormat(),
+		geometryFlags: geoFlags,
+		colorFormat:   colorFormat,
 		depthFormat:   depthTarget.GetFormat(),
 		side:          mat.side,
 		blending:      mat.blending,
@@ -544,27 +554,8 @@ func (r *Renderer) getPipeline(obj drawing, renderTarget, depthTarget *wgpu.Text
 	return p
 }
 
-func (r *Renderer) getShadowPipeline(depthTarget *wgpu.Texture) *wgpu.RenderPipeline {
-	mat := r.shadowMat.data()
-	key := renderPipelineKey{
-		shaderHash:  mat.hash,
-		depthFormat: depthTarget.GetFormat(),
-		side:        mat.side,
-		depthFunc:   mat.depthFunc,
-		depthWrite:  mat.depthWrite,
-		depthTest:   mat.depthTest,
-	}
-	if p := r.pipelineCache.GetRenderPipeline(key); p != nil {
-		return p
-	}
-	p := r.createPipeline(mat, nil, nil, depthTarget)
-	r.pipelineCache.SetRenderPipeline(key, p)
-	return p
-}
-
-// createPipeline builds a render pipeline from a material and optional geometry.
-// When renderTarget is nil the pipeline is depth-only (no fragment stage); geo
-// nil means position-only vertex layout for the shadow pass.
+// createPipeline builds a render pipeline. When renderTarget is nil the
+// pipeline is depth-only (no fragment stage).
 func (r *Renderer) createPipeline(mat *MaterialData, geo *GeometryData, renderTarget, depthTarget *wgpu.Texture) *wgpu.RenderPipeline {
 	shadow := renderTarget == nil
 
@@ -587,30 +578,15 @@ func (r *Renderer) createPipeline(mat *MaterialData, geo *GeometryData, renderTa
 	})
 	defer layout.Release()
 
-	var defines map[string]bool
-	if !shadow {
-		defines = buildDefines(mat.flags, geo.flags)
-	}
-	module := r.compileShader(r.runtime.Device, mat.shader, defines)
-
-	var vertexBuffers []wgpu.VertexBufferLayout
+	geoFlags := geo.flags
+	vertexLayout := geo.gpuLayout
 	if shadow {
-		vertexBuffers = []wgpu.VertexBufferLayout{
-			{
-				ArrayStride: uint64(Float32x3.Size()),
-				StepMode:    wgpu.VertexStepModeVertex,
-				Attributes: []wgpu.VertexAttribute{
-					{
-						Format:         wgpu.VertexFormatFloat32x3,
-						Offset:         0,
-						ShaderLocation: 0,
-					},
-				},
-			},
-		}
-	} else {
-		vertexBuffers = geo.gpuLayout
+		geoFlags = geo.flags & ShadowGeometryMask
+		vertexLayout = geo.gpuShadowLayout
 	}
+
+	defines := buildDefines(mat.flags, geoFlags)
+	module := r.compileShader(r.runtime.Device, mat.shader, defines)
 
 	depthCompare := wgpu.CompareFunctionAlways
 	if mat.depthTest {
@@ -646,7 +622,7 @@ func (r *Renderer) createPipeline(mat *MaterialData, geo *GeometryData, renderTa
 		Vertex: wgpu.VertexState{
 			Module:     module,
 			EntryPoint: "vs_main",
-			Buffers:    vertexBuffers,
+			Buffers:    vertexLayout,
 		},
 		Fragment: fragment,
 		Primitive: wgpu.PrimitiveState{
