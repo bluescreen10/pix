@@ -16,7 +16,7 @@ import (
 const (
 	InitialStorageCapacity = 1024
 	MaxDirectionalLights   = 5
-	DefaultShadowMapSize   = 1024
+	DefaultShadowMapSize   = 2048
 )
 
 // Shader Sets
@@ -125,7 +125,9 @@ func (r *Renderer) Init(descriptor wgpu.SurfaceDescriptor) error {
 	}
 
 	r.initResources()
-	r.shaders.ParseFS(shaderlib)
+	if err := r.shaders.ParseFS(shaderlib); err != nil {
+		panic(err)
+	}
 	r.createGlobalResources()
 	return nil
 }
@@ -440,8 +442,8 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, drawing
 		return
 	}
 
-	pass.SetBindGroup(0, r.shadowMat.BindGroup(), []uint32{})
-	pass.SetBindGroup(1, r.instanceStorageBindGroup, []uint32{})
+	pass.SetBindGroup(0, r.shadowMat.BindGroup(), nil)
+	pass.SetBindGroup(1, r.instanceStorageBindGroup, nil)
 
 	for _, d := range drawings {
 		shadowObj := drawing{mat: r.shadowMat.data(), geo: d.geo}
@@ -466,9 +468,9 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, drawing
 func (r *Renderer) renderInstance(ctx *renderContext, pass *wgpu.RenderPassEncoder, obj drawing) {
 	pipeline := r.getPipeline(obj, ctx.texture, ctx.depthTarget)
 	pass.SetPipeline(pipeline)
-	pass.SetBindGroup(GlobalSet, r.globalBindGroup, []uint32{})
-	pass.SetBindGroup(MaterialSet, obj.mat.gpuBindGroup, []uint32{})
-	pass.SetBindGroup(InstanceSet, r.instanceStorageBindGroup, []uint32{})
+	pass.SetBindGroup(GlobalSet, r.globalBindGroup, nil)
+	pass.SetBindGroup(MaterialSet, obj.mat.gpuBindGroup, nil)
+	pass.SetBindGroup(InstanceSet, r.instanceStorageBindGroup, nil)
 
 	for _, b := range obj.geo.gpuBufs {
 		pass.SetVertexBuffer(uint32(b.loc), b.buf, 0, wgpu.WholeSize)
@@ -593,7 +595,16 @@ func (r *Renderer) createPipeline(mat *MaterialData, geo *GeometryData, renderTa
 	}
 
 	defines := buildDefines(mat.flags, geoFlags)
-	module := r.compileShader(r.runtime.Device, mat.shader, defines)
+
+	var vertex, fragment *wgpu.ShaderModule
+
+	if mat.vertexShader != "" {
+		vertex = r.compileShader(r.runtime.Device, mat.vertexShader, defines)
+	}
+
+	if mat.fragmentShader != "" {
+		fragment = r.compileShader(r.runtime.Device, mat.fragmentShader, defines)
+	}
 
 	depthCompare := wgpu.CompareFunctionAlways
 	if mat.depthTest {
@@ -605,15 +616,15 @@ func (r *Renderer) createPipeline(mat *MaterialData, geo *GeometryData, renderTa
 		depthWrite = wgpu.OptionalBoolTrue
 	}
 
-	var fragment *wgpu.FragmentState
+	var fragmentState *wgpu.FragmentState
 	if !shadow {
 		writeMask := wgpu.ColorWriteMaskNone
 		if mat.colorWrite {
 			writeMask = wgpu.ColorWriteMaskAll
 		}
-		fragment = &wgpu.FragmentState{
-			Module:     module,
-			EntryPoint: "fs_main",
+		fragmentState = &wgpu.FragmentState{
+			Module:     fragment,
+			EntryPoint: "main",
 			Targets: []wgpu.ColorTargetState{
 				{
 					Format:    renderTarget.GetFormat(),
@@ -627,11 +638,11 @@ func (r *Renderer) createPipeline(mat *MaterialData, geo *GeometryData, renderTa
 	return r.runtime.Device.CreateRenderPipeline(wgpu.RenderPipelineDescriptor{
 		Layout: layout,
 		Vertex: wgpu.VertexState{
-			Module:     module,
-			EntryPoint: "vs_main",
+			Module:     vertex,
+			EntryPoint: "main",
 			Buffers:    vertexLayout,
 		},
-		Fragment: fragment,
+		Fragment: fragmentState,
 		Primitive: wgpu.PrimitiveState{
 			Topology:  wgpu.PrimitiveTopologyTriangleList,
 			FrontFace: wgpu.FrontFaceCCW,
@@ -690,8 +701,8 @@ func (r *Renderer) createShadowResources() {
 			AddressModeU:  wgpu.AddressModeClampToEdge,
 			AddressModeV:  wgpu.AddressModeClampToEdge,
 			AddressModeW:  wgpu.AddressModeClampToEdge,
-			MagFilter:     wgpu.FilterModeNearest,
-			MinFilter:     wgpu.FilterModeNearest,
+			MagFilter:     wgpu.FilterModeLinear,
+			MinFilter:     wgpu.FilterModeLinear,
 			MipmapFilter:  wgpu.MipmapFilterModeNearest,
 			LodMaxClamp:   32,
 			Compare:       wgpu.CompareFunctionLessEqual,

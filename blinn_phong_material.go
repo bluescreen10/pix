@@ -54,3 +54,13 @@ func (m *BlinnPhongMaterial) Release() {
 	m.Material.Release()
 	m.Material = Material{}
 }
+
+// NewBlinnPhongMaterial creates a Blinn-Phong lit material owned by the renderer.
+func (r *Renderer) NewBlinnPhongMaterial() *BlinnPhongMaterial {
+	uniform := (&Uniform{}).AddVec3("color").Build()
+	data := NewMaterial("Blinn-Phong Material", "vertex.wesl", "blinn_phong_material.wesl", []*Uniform{uniform}, 1, true)
+	mat := r.allocMaterialSlot(data)
+	bm := &BlinnPhongMaterial{Material: mat}
+	bm.SetColor(glm.Color3f{1, 1, 1})
+	return bm
+}

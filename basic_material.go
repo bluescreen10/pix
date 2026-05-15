@@ -54,3 +54,13 @@ func (m *BasicMaterial) Release() {
 	m.Material.Release()
 	m.Material = Material{}
 }
+
+// NewBasicMaterial creates a basic (unlit) material owned by the renderer.
+func (r *Renderer) NewBasicMaterial() *BasicMaterial {
+	uniform := (&Uniform{}).AddVec3("color").Build()
+	data := NewMaterial("Basic Material", "vertex.wesl", "basic_material.wesl", []*Uniform{uniform}, 1, false)
+	mat := r.allocMaterialSlot(data)
+	bm := &BasicMaterial{Material: mat}
+	bm.SetColor(glm.Color3f{1, 1, 1})
+	return bm
+}

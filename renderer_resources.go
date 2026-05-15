@@ -2,7 +2,6 @@ package pix
 
 import (
 	"github.com/bluescreen10/dawn-go/wgpu"
-	"github.com/bluescreen10/pix/glm"
 )
 
 const (
@@ -147,26 +146,6 @@ func (r *Renderer) scheduleMatFree(id uint32) {
 	}
 	r.materials.free(id)
 	r.deferredFree = append(r.deferredFree, deferredFreeEntry{kind: deferredMat, id: id, frame: r.frameCount})
-}
-
-// NewBasicMaterial creates a basic (unlit) material owned by the renderer.
-func (r *Renderer) NewBasicMaterial() *BasicMaterial {
-	uniform := (&Uniform{}).AddVec3("color").Build()
-	data := NewMaterial("Basic Material", "basic_material.wesl", []*Uniform{uniform}, 1, false)
-	mat := r.allocMaterialSlot(data)
-	bm := &BasicMaterial{Material: mat}
-	bm.SetColor(glm.Color3f{1, 1, 1})
-	return bm
-}
-
-// NewBlinnPhongMaterial creates a Blinn-Phong lit material owned by the renderer.
-func (r *Renderer) NewBlinnPhongMaterial() *BlinnPhongMaterial {
-	uniform := (&Uniform{}).AddVec3("color").Build()
-	data := NewMaterial("Blinn-Phong Material", "blinn_phong_material.wgsl", []*Uniform{uniform}, 1, true)
-	mat := r.allocMaterialSlot(data)
-	bm := &BlinnPhongMaterial{Material: mat}
-	bm.SetColor(glm.Color3f{1, 1, 1})
-	return bm
 }
 
 // Texture

@@ -40,7 +40,7 @@ func (m *ShadowMaterial) Release() {
 
 func (r *Renderer) NewShadowMaterial() *ShadowMaterial {
 	uniform := (&Uniform{}).AddMat4("viewProjection").Build()
-	data := NewMaterial("Shadow", "shadow.wgsl", []*Uniform{uniform}, 0, false)
+	data := NewMaterial("Shadow", "shadow_vertex.wgsl", "", []*Uniform{uniform}, 0, false)
 	data.side = SideBack // cull front faces to reduce shadow acne
 	data.depthFunc = DepthFuncLessEqual
 	data.colorWrite = false

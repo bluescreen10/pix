@@ -20,21 +20,22 @@ var materialFlagNames = map[int]string{
 }
 
 type MaterialData struct {
-	id         uint32
-	version    int
-	shader     string
-	name       string
-	hash       uint32
-	flags      MaterialFlags
-	side       Side
-	blending   BlendMode
-	depthWrite bool
-	depthTest  bool
-	depthFunc  DepthFunc
-	colorWrite bool
-	textures   []Ref[Texture]
-	uniforms   []*Uniform
-	isLit      bool
+	id             uint32
+	version        int
+	vertexShader   string
+	fragmentShader string
+	name           string
+	hash           uint32
+	flags          MaterialFlags
+	side           Side
+	blending       BlendMode
+	depthWrite     bool
+	depthTest      bool
+	depthFunc      DepthFunc
+	colorWrite     bool
+	textures       []Ref[Texture]
+	uniforms       []*Uniform
+	isLit          bool
 
 	// GPU-side resources, populated by the renderer.
 	gpuVersion         int
@@ -74,22 +75,23 @@ func (m *MaterialData) Destroy() {
 	m.gpuUniformBuffers = nil
 }
 
-func NewMaterial(name string, shader string, uniforms []*Uniform, numTextures int, isLit bool) *MaterialData {
+func NewMaterial(name string, vertexShader string, fragmentShader string, uniforms []*Uniform, numTextures int, isLit bool) *MaterialData {
 	return &MaterialData{
-		id:         matID.Next(),
-		name:       name,
-		version:    1,
-		shader:     shader,
-		hash:       hashShader(shader),
-		side:       SideFront,
-		blending:   BlendOpaque,
-		depthWrite: true,
-		depthTest:  true,
-		depthFunc:  DepthFuncLess,
-		colorWrite: true,
-		uniforms:   uniforms,
-		textures:   make([]Ref[Texture], numTextures),
-		isLit:      isLit,
+		id:             matID.Next(),
+		name:           name,
+		version:        1,
+		vertexShader:   vertexShader,
+		fragmentShader: fragmentShader,
+		hash:           hashShader(vertexShader, fragmentShader),
+		side:           SideFront,
+		blending:       BlendOpaque,
+		depthWrite:     true,
+		depthTest:      true,
+		depthFunc:      DepthFuncLess,
+		colorWrite:     true,
+		uniforms:       uniforms,
+		textures:       make([]Ref[Texture], numTextures),
+		isLit:          isLit,
 	}
 }
 
@@ -112,8 +114,9 @@ func (m Material) Copy() Material { return Material{renderer: m.renderer, ref: m
 // Valid reports whether the underlying material resource is still alive.
 func (m Material) Valid() bool { return m.ref.Valid() }
 
-func hashShader(s string) uint32 {
+func hashShader(s1, s2 string) uint32 {
 	h := fnv.New32a()
-	h.Write(unsafe.Slice(unsafe.StringData(s), len(s)))
+	h.Write(unsafe.Slice(unsafe.StringData(s1), len(s1)))
+	h.Write(unsafe.Slice(unsafe.StringData(s2), len(s2)))
 	return h.Sum32()
 }

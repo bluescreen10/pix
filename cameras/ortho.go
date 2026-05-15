@@ -26,10 +26,13 @@ func NewOrthographicCamera(left, right, bottom, top, near, far float32) *Orthogr
 	}
 }
 
-func (c *OrthographicCamera) Position() glm.Vec3f     { return c.position }
-func (c *OrthographicCamera) SetPosition(p glm.Vec3f) { c.position = p }
-func (c *OrthographicCamera) SetTarget(t glm.Vec3f)   { c.target = t }
-func (c *OrthographicCamera) SetUp(up glm.Vec3f)      { c.up = up }
+func (c *OrthographicCamera) Position() glm.Vec3f                              { return c.position }
+func (c *OrthographicCamera) SetPosition(p glm.Vec3f)                          { c.position = p }
+func (c *OrthographicCamera) SetTarget(t glm.Vec3f)                            { c.target = t }
+func (c *OrthographicCamera) SetUp(up glm.Vec3f)                               { c.up = up }
+func (c *OrthographicCamera) SetFrustum(left, right, bottom, top float32)      {
+	c.left, c.right, c.bottom, c.top = left, right, bottom, top
+}
 
 func (c *OrthographicCamera) ViewProjection() glm.Mat4f {
 	view := glm.LookAtRH(c.position, c.target, c.up)
