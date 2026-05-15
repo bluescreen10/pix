@@ -414,16 +414,9 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 }
 
 func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, drawings []drawing) {
-	if len(drawings) == 0 {
-		return
-	}
-
-	r.shadowMat.SetViewProjection(shadowCam.ViewProjection())
-	if err := prepareMaterial(r.runtime.Device, r.shadowMat.data(), r); err != nil {
-		r.logger.Error("error preparing shadow material", slog.Any("err", err))
-		return
-	}
-
+	// Always begin (and end) the pass so the layer is cleared to 1.0.
+	// Without the clear, the GPU-zero-initialized texture causes every
+	// shadow comparison to fail and the whole scene appears unlit.
 	pass := ctx.encoder.BeginRenderPass(wgpu.RenderPassDescriptor{
 		DepthStencilAttachment: &wgpu.RenderPassDepthStencilAttachment{
 			View:            ctx.depthTargetView,
@@ -432,6 +425,20 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, drawing
 			DepthClearValue: 1.0,
 		},
 	})
+
+	if len(drawings) == 0 {
+		pass.End()
+		pass.Release()
+		return
+	}
+
+	r.shadowMat.SetViewProjection(shadowCam.ViewProjection())
+	if err := prepareMaterial(r.runtime.Device, r.shadowMat.data(), r); err != nil {
+		r.logger.Error("error preparing shadow material", slog.Any("err", err))
+		pass.End()
+		pass.Release()
+		return
+	}
 
 	pass.SetBindGroup(0, r.shadowMat.BindGroup(), []uint32{})
 	pass.SetBindGroup(1, r.instanceStorageBindGroup, []uint32{})
@@ -842,12 +849,18 @@ func (r *Renderer) collectRenderList(list *renderList, scene *Scene) {
 			continue
 		}
 
+		model := scene.GetWorldTransform(md.ownerNode)
+		localCenter := md.boundingSphere.Center
+		worldCenter := model.Mul4x1(glm.Vec4f{localCenter[0], localCenter[1], localCenter[2], 1})
 		d := drawing{
 			geo:      r.geometries.get(md.geometry.ref.ID()),
 			mat:      r.materials.get(md.material.ref.ID()),
-			model:    scene.GetWorldTransform(md.ownerNode),
+			model:    model,
 			modelInv: scene.GetWorldTransformInv(md.ownerNode),
-			bounds:   md.boundingSphere,
+			bounds: Sphere{
+				Center: glm.Vec3f{worldCenter[0], worldCenter[1], worldCenter[2]},
+				Radius: md.boundingSphere.Radius,
+			},
 		}
 
 		if flags.CastShadow() {
