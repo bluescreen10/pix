@@ -69,6 +69,111 @@ func (s *Scene) NewDirectionalLight(color glm.Color3f, intensity float32) Direct
 	return DirectionalLight{Node{scene: s, id: id}}
 }
 
+// SpotLight is a typed node handle for spot light nodes.
+type SpotLight struct{ Node }
+
+// spotLightData is the per-light payload stored in Scene.spotLights.
+type spotLightData struct {
+	color      glm.Color3f
+	intensity  float32
+	target     glm.Vec3f
+	innerAngle float32 // degrees
+	outerAngle float32 // degrees
+	shadow     *SpotShadow
+	ownerNode  uint32
+}
+
+func (l SpotLight) data() *spotLightData {
+	return &l.scene.spotLights[l.scene.payload[l.slot()]]
+}
+
+func (l SpotLight) Color() glm.Color3f        { return l.data().color }
+func (l SpotLight) SetColor(c glm.Color3f)    { l.data().color = c }
+func (l SpotLight) Intensity() float32        { return l.data().intensity }
+func (l SpotLight) SetIntensity(v float32)    { l.data().intensity = v }
+func (l SpotLight) Target() glm.Vec3f         { return l.data().target }
+func (l SpotLight) SetTarget(t glm.Vec3f)     { l.data().target = t }
+func (l SpotLight) Shadow() *SpotShadow       { return l.data().shadow }
+
+// SetAngles sets the inner and outer cone half-angles in degrees.
+// Objects inside inner are fully lit; between inner and outer the light
+// falls off smoothly; outside outer there is no light.
+func (l SpotLight) SetAngles(inner, outer float32) {
+	d := l.data()
+	d.innerAngle = inner
+	d.outerAngle = outer
+	if d.shadow != nil {
+		d.shadow.camera.SetFOV(glm.ToRadians(outer) * 2)
+	}
+}
+
+// SetCastShadow creates or destroys the shadow map for this spot light.
+func (l SpotLight) SetCastShadow(cast bool) {
+	d := l.data()
+	if cast {
+		d.shadow = NewSpotShadow(d.outerAngle, 0.1, 100)
+	} else {
+		d.shadow = nil
+	}
+}
+
+func (s *Scene) NewSpotLight(color glm.Color3f, intensity float32) SpotLight {
+	id := s.allocNode(KindSpotLight)
+	payloadIdx := uint32(len(s.spotLights))
+	s.spotLights = append(s.spotLights, spotLightData{
+		color:      color,
+		intensity:  intensity,
+		innerAngle: 20,
+		outerAngle: 30,
+		ownerNode:  id.index,
+	})
+	s.payload[id.index] = payloadIdx
+	return SpotLight{Node{scene: s, id: id}}
+}
+
+// PointLight is a typed node handle for point light nodes.
+type PointLight struct{ Node }
+
+// pointLightData is the per-light payload stored in Scene.pointLights.
+type pointLightData struct {
+	color     glm.Color3f
+	intensity float32
+	shadow    *PointShadow
+	ownerNode uint32
+}
+
+func (l PointLight) data() *pointLightData {
+	return &l.scene.pointLights[l.scene.payload[l.slot()]]
+}
+
+func (l PointLight) Color() glm.Color3f        { return l.data().color }
+func (l PointLight) SetColor(c glm.Color3f)    { l.data().color = c }
+func (l PointLight) Intensity() float32        { return l.data().intensity }
+func (l PointLight) SetIntensity(v float32)    { l.data().intensity = v }
+func (l PointLight) Shadow() *PointShadow      { return l.data().shadow }
+
+// SetCastShadow creates or destroys the omnidirectional shadow cube map for this light.
+func (l PointLight) SetCastShadow(cast bool) {
+	d := l.data()
+	if cast {
+		d.shadow = NewPointShadow(100)
+	} else {
+		d.shadow = nil
+	}
+}
+
+func (s *Scene) NewPointLight(color glm.Color3f, intensity float32) PointLight {
+	id := s.allocNode(KindPointLight)
+	payloadIdx := uint32(len(s.pointLights))
+	s.pointLights = append(s.pointLights, pointLightData{
+		color:     color,
+		intensity: intensity,
+		ownerNode: id.index,
+	})
+	s.payload[id.index] = payloadIdx
+	return PointLight{Node{scene: s, id: id}}
+}
+
 // AmbientLight is a typed node handle for ambient light nodes.
 type AmbientLight struct{ Node }
 

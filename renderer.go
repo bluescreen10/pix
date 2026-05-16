@@ -2,6 +2,7 @@ package pix
 
 import (
 	"log/slog"
+	"math"
 	"math/bits"
 	"os"
 	"sync"
@@ -16,6 +17,8 @@ import (
 const (
 	InitialStorageCapacity = 1024
 	MaxDirectionalLights   = 5
+	MaxSpotLights          = 5
+	MaxPointLights         = 5
 	DefaultShadowMapSize   = 2048
 )
 
@@ -32,6 +35,7 @@ const (
 	LightsBinding
 	ShadowMapBinding
 	ShadowSamplerBinding
+	PointShadowMapBinding
 )
 
 // Instance Bindings
@@ -93,10 +97,15 @@ type Renderer struct {
 	instanceStorageBindGroup       *wgpu.BindGroup
 	instanceStorageCapacity        uint32
 
-	// shadow
+	// shadow (directional + spot)
 	shadowMap        *TextureData
-	shadowLayerViews [MaxDirectionalLights]*wgpu.TextureView
+	shadowLayerViews [MaxDirectionalLights + MaxSpotLights]*wgpu.TextureView
 	shadowMat        *ShadowMaterial
+
+	// shadow (point — cube array)
+	pointShadowMap        *TextureData
+	pointShadowLayerViews [MaxPointLights * 6]*wgpu.TextureView
+	pointShadowMat        *PointShadowMaterial
 
 	// depth buffer
 	depthTexture     *wgpu.Texture
@@ -182,6 +191,18 @@ func (r *Renderer) Destroy() {
 		r.shadowMap = nil
 	}
 
+	for i, v := range r.pointShadowLayerViews {
+		if v != nil {
+			v.Release()
+			r.pointShadowLayerViews[i] = nil
+		}
+	}
+
+	if r.pointShadowMap != nil {
+		r.pointShadowMap.Destroy()
+		r.pointShadowMap = nil
+	}
+
 	r.destroyResources()
 }
 
@@ -255,6 +276,8 @@ type renderList struct {
 	shadowCasters     []drawing
 	directionalLights []directionalLightData
 	ambientLight      *ambientLightData
+	spotLights        []spotLightData
+	pointLights       []pointLightData
 }
 
 func (o *renderList) release() {
@@ -262,6 +285,8 @@ func (o *renderList) release() {
 	o.shadowCasters = o.shadowCasters[:0]
 	o.directionalLights = o.directionalLights[:0]
 	o.ambientLight = nil
+	o.spotLights = o.spotLights[:0]
+	o.pointLights = o.pointLights[:0]
 	renderListPool.Put(o)
 }
 
@@ -340,6 +365,8 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	}
 	r.runtime.Queue.WriteBuffer(r.cameraUniformBuffer, 0, cameraUniform.Bytes())
 
+	ctx.encoder = r.runtime.Device.CreateCommandEncoder(nil)
+
 	shadowLayerIdx := 0
 	if useLights {
 		var lightsUniform LightsUniform
@@ -395,8 +422,95 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 			}
 		}
 
+		spotCount := min(MaxSpotLights, len(list.spotLights))
+		lightsUniform.SpotLightCount = uint32(spotCount)
+
+		for i, ld := range list.spotLights[:spotCount] {
+			colorRGBA := ld.color.RGBA()
+			colorRGBA[3] = ld.intensity
+
+			w := scene.world[ld.ownerNode]
+			worldPos := glm.Vec3f{w[12], w[13], w[14]}
+			spotDir := ld.target.Sub(worldPos).Normalize()
+
+			var lightSpaceMat glm.Mat4f
+			var castsShadow uint32
+			var shadowBias float32
+
+			if ld.shadow != nil {
+				fwd := ld.target.Sub(worldPos).Normalize()
+				up := glm.Vec3f{0, 1, 0}
+				if fwd[1] > 0.999 || fwd[1] < -0.999 {
+					up = glm.Vec3f{0, 0, 1}
+				}
+				ld.shadow.camera.SetPosition(worldPos)
+				ld.shadow.camera.SetFwd(fwd)
+				ld.shadow.camera.SetUp(up)
+				lightSpaceMat = ld.shadow.camera.ViewProjection()
+				castsShadow = 1
+				shadowBias = ld.shadow.bias
+			}
+
+			innerCosine := float32(math.Cos(float64(ld.innerAngle) * math.Pi / 180.0))
+			outerCosine := float32(math.Cos(float64(ld.outerAngle) * math.Pi / 180.0))
+
+			lightsUniform.SpotLights[i] = SpotLightUniform{
+				color:            colorRGBA,
+				position:         glm.Vec4f{worldPos[0], worldPos[1], worldPos[2], 1},
+				direction:        glm.Vec4f{spotDir[0], spotDir[1], spotDir[2], 0},
+				lightSpaceMatrix: lightSpaceMat,
+				innerCosine:      innerCosine,
+				outerCosine:      outerCosine,
+				castsShadow:      castsShadow,
+				shadowBias:       shadowBias,
+			}
+
+			if ld.shadow != nil {
+				lightFrustum := NewFrustumFromViewProjection(lightSpaceMat)
+				shadowDrawings := drawingsPool.Get().([]drawing)
+				shadowDrawings = cull(lightFrustum, list.shadowCasters, shadowDrawings)
+				ctx.depthTarget = r.shadowMap.gpuRef
+				ctx.depthTargetView = r.shadowLayerViews[MaxDirectionalLights+i]
+				r.renderShadowMap(&ctx, ld.shadow.camera, shadowDrawings)
+				drawingsPool.Put(shadowDrawings[:0])
+			}
+		}
+
+		pointCount := min(MaxPointLights, len(list.pointLights))
+		lightsUniform.PointLightCount = uint32(pointCount)
+
+		for i, ld := range list.pointLights[:pointCount] {
+			colorRGBA := ld.color.RGBA()
+			colorRGBA[3] = ld.intensity
+
+			w := scene.world[ld.ownerNode]
+			worldPos := glm.Vec3f{w[12], w[13], w[14]}
+
+			var castsShadow uint32
+			var shadowBias float32
+			var far float32 = 100
+
+			if ld.shadow != nil {
+				castsShadow = 1
+				shadowBias = ld.shadow.bias
+				far = ld.shadow.far
+				r.renderPointShadowCube(&ctx, worldPos, ld.shadow, i, list.shadowCasters)
+			}
+
+			lightsUniform.PointLights[i] = PointLightUniform{
+				color:       colorRGBA,
+				position:    glm.Vec4f{worldPos[0], worldPos[1], worldPos[2], 1},
+				far:         far,
+				castsShadow: castsShadow,
+				shadowBias:  shadowBias,
+			}
+		}
+
 		r.runtime.Queue.WriteBuffer(r.lightsUniformBuffer, 0, lightsUniform.Bytes())
 	}
+
+	// All shadow passes have been submitted. Create the main encoder now so the
+	// shadow texture transitions from RenderAttachment to TextureBinding are complete.
 
 	r.ensureDepthTextureSize(ctx.texture.GetWidth(), ctx.texture.GetHeight())
 	ctx.depthTarget = r.depthTexture
@@ -416,6 +530,17 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 }
 
 func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, drawings []drawing) {
+	// Each shadow pass owns its encoder so the VP WriteBuffer committed to the
+	// queue before this call is the value actually used — not overwritten by the
+	// next light's WriteBuffer before the shared encoder is submitted.
+	// encoder := r.runtime.Device.CreateCommandEncoder(nil)
+	// defer func() {
+	// 	cmd := encoder.Finish(nil)
+	// 	r.runtime.Queue.Submit(cmd)
+	// 	cmd.Release()
+	// 	encoder.Release()
+	// }()
+
 	// Always begin (and end) the pass so the layer is cleared to 1.0.
 	// Without the clear, the GPU-zero-initialized texture causes every
 	// shadow comparison to fail and the whole scene appears unlit.
@@ -465,6 +590,77 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, drawing
 	pass.Release()
 }
 
+// cubeFaces defines the 6 view directions and up vectors for rendering cube shadow map faces.
+// The ordering matches WebGPU/Vulkan cube map layers: +X, -X, +Y, -Y, +Z, -Z.
+var cubeFaces = [6]struct{ fwd, up glm.Vec3f }{
+	{glm.Vec3f{1, 0, 0}, glm.Vec3f{0, -1, 0}},  // +X
+	{glm.Vec3f{-1, 0, 0}, glm.Vec3f{0, -1, 0}}, // -X
+	{glm.Vec3f{0, 1, 0}, glm.Vec3f{0, 0, 1}},   // +Y
+	{glm.Vec3f{0, -1, 0}, glm.Vec3f{0, 0, -1}}, // -Y
+	{glm.Vec3f{0, 0, 1}, glm.Vec3f{0, -1, 0}},  // +Z
+	{glm.Vec3f{0, 0, -1}, glm.Vec3f{0, -1, 0}}, // -Z
+}
+
+func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f, shadow *PointShadow, lightIdx int, casters []drawing) {
+	near := float32(0.1)
+	proj := glm.PerspectiveRH(float32(math.Pi/2), float32(1.0), near, shadow.far)
+	// Negate h (proj[5]) so rendered V matches WebGPU cube map sampling convention (tc = -ry).
+	// Without this flip the cube faces are upside-down relative to textureSampleCompare.
+	proj[5] = -proj[5]
+
+	for face, cf := range cubeFaces {
+		target := lightPos.Add(cf.fwd)
+		view := glm.LookAtRH(lightPos, target, cf.up)
+		vp := proj.Mul4x4(view)
+
+		r.pointShadowMat.SetFaceUniforms(vp, lightPos, shadow.far)
+		if err := prepareMaterial(r.runtime.Device, r.pointShadowMat.data(), r); err != nil {
+			r.logger.Error("error preparing point shadow material", slog.Any("err", err))
+			continue
+		}
+
+		layerIdx := lightIdx*6 + face
+		ctx.depthTargetView = r.pointShadowLayerViews[layerIdx]
+		ctx.depthTarget = r.pointShadowMap.gpuRef
+
+		encoder := r.runtime.Device.CreateCommandEncoder(nil)
+		pass := encoder.BeginRenderPass(wgpu.RenderPassDescriptor{
+			DepthStencilAttachment: &wgpu.RenderPassDepthStencilAttachment{
+				View:            ctx.depthTargetView,
+				DepthLoadOp:     wgpu.LoadOpClear,
+				DepthStoreOp:    wgpu.StoreOpStore,
+				DepthClearValue: 1.0,
+			},
+		})
+
+		if len(casters) > 0 {
+			pass.SetBindGroup(0, r.pointShadowMat.BindGroup(), nil)
+			pass.SetBindGroup(1, r.instanceStorageBindGroup, nil)
+
+			for _, d := range casters {
+				shadowObj := drawing{mat: r.pointShadowMat.data(), geo: d.geo}
+				pass.SetPipeline(r.getPipeline(shadowObj, nil, ctx.depthTarget))
+				for _, b := range d.geo.gpuBufs {
+					pass.SetVertexBuffer(uint32(b.loc), b.buf, 0, wgpu.WholeSize)
+				}
+				if d.geo.gpuIndex != nil {
+					pass.SetIndexBuffer(d.geo.gpuIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
+					pass.DrawIndexed(uint32(d.geo.gpuCount), 1, 0, 0, d.instanceId)
+				} else {
+					pass.Draw(uint32(d.geo.gpuCount), 1, 0, d.instanceId)
+				}
+			}
+		}
+
+		pass.End()
+		pass.Release()
+		cmd := encoder.Finish(nil)
+		r.runtime.Queue.Submit(cmd)
+		cmd.Release()
+		encoder.Release()
+	}
+}
+
 func (r *Renderer) renderInstance(ctx *renderContext, pass *wgpu.RenderPassEncoder, obj drawing) {
 	pipeline := r.getPipeline(obj, ctx.texture, ctx.depthTarget)
 	pass.SetPipeline(pipeline)
@@ -487,7 +683,8 @@ func (r *Renderer) renderInstance(ctx *renderContext, pass *wgpu.RenderPassEncod
 func (r *Renderer) acquireNextFrame(ctx *renderContext) {
 	ctx.texture = r.runtime.Surface.GetCurrentTexture()
 	ctx.view = ctx.texture.CreateView(nil)
-	ctx.encoder = r.runtime.Device.CreateCommandEncoder(nil)
+	// Main encoder is created after all shadow passes are submitted,
+	// so the shadow texture is fully written before it is bound as a sampler input.
 }
 
 func (r *Renderer) presentFrame(ctx *renderContext) {
@@ -617,21 +814,26 @@ func (r *Renderer) createPipeline(mat *MaterialData, geo *GeometryData, renderTa
 	}
 
 	var fragmentState *wgpu.FragmentState
-	if !shadow {
-		writeMask := wgpu.ColorWriteMaskNone
-		if mat.colorWrite {
-			writeMask = wgpu.ColorWriteMaskAll
+	if fragment != nil {
+		var targets []wgpu.ColorTargetState
+		if !shadow {
+			writeMask := wgpu.ColorWriteMaskNone
+			if mat.colorWrite {
+				writeMask = wgpu.ColorWriteMaskAll
+			}
+			targets = []wgpu.ColorTargetState{{
+				Format:    renderTarget.GetFormat(),
+				Blend:     mat.blending.ToWGPU(),
+				WriteMask: writeMask,
+			}}
 		}
+		// When shadow && fragment != nil: depth-only pass with a fragment shader
+		// (e.g. point shadow cube faces that write linear depth via @builtin(frag_depth)).
+		// Use empty Targets so no color attachment is required.
 		fragmentState = &wgpu.FragmentState{
 			Module:     fragment,
 			EntryPoint: "main",
-			Targets: []wgpu.ColorTargetState{
-				{
-					Format:    renderTarget.GetFormat(),
-					Blend:     mat.blending.ToWGPU(),
-					WriteMask: writeMask,
-				},
-			},
+			Targets:    targets,
 		}
 	}
 
@@ -689,6 +891,7 @@ func (r *Renderer) compileShader(device *wgpu.Device, code string, defines map[s
 
 func (r *Renderer) createGlobalResources() {
 	r.createShadowResources()
+	r.createPointShadowResources()
 	r.createGlobalBindGroupLayouts()
 	r.createGlobalBuffers()
 	r.createGlobalBindGroups()
@@ -719,7 +922,7 @@ func (r *Renderer) createShadowResources() {
 		Size: wgpu.Extent3D{
 			Width:              DefaultShadowMapSize,
 			Height:             DefaultShadowMapSize,
-			DepthOrArrayLayers: MaxDirectionalLights,
+			DepthOrArrayLayers: MaxDirectionalLights + MaxSpotLights,
 		},
 	})
 	r.shadowMap.gpuView = r.shadowMap.gpuRef.CreateView(&wgpu.TextureViewDescriptor{
@@ -728,7 +931,7 @@ func (r *Renderer) createShadowResources() {
 		BaseMipLevel:    0,
 		MipLevelCount:   1,
 		BaseArrayLayer:  0,
-		ArrayLayerCount: MaxDirectionalLights,
+		ArrayLayerCount: MaxDirectionalLights + MaxSpotLights,
 		Aspect:          wgpu.TextureAspectDepthOnly,
 	})
 	r.shadowMap.gpuSampler = r.getOrCreateSampler(r.shadowMap.sampler)
@@ -746,6 +949,60 @@ func (r *Renderer) createShadowResources() {
 	}
 
 	r.shadowMat = r.NewShadowMaterial()
+}
+
+func (r *Renderer) createPointShadowResources() {
+	r.pointShadowMap = &TextureData{
+		format: wgpu.TextureFormatDepth32Float,
+		sampler: Sampler{
+			AddressModeU:  wgpu.AddressModeClampToEdge,
+			AddressModeV:  wgpu.AddressModeClampToEdge,
+			AddressModeW:  wgpu.AddressModeClampToEdge,
+			MagFilter:     wgpu.FilterModeLinear,
+			MinFilter:     wgpu.FilterModeLinear,
+			MipmapFilter:  wgpu.MipmapFilterModeNearest,
+			LodMaxClamp:   32,
+			Compare:       wgpu.CompareFunctionLessEqual,
+			MaxAnisotropy: 1,
+		},
+	}
+	r.pointShadowMap.gpuRef = r.runtime.Device.CreateTexture(&wgpu.TextureDescriptor{
+		Label:         "Point Shadow Cube Array",
+		Usage:         wgpu.TextureUsageRenderAttachment | wgpu.TextureUsageTextureBinding,
+		Dimension:     wgpu.TextureDimension2D,
+		Format:        wgpu.TextureFormatDepth32Float,
+		MipLevelCount: 1,
+		SampleCount:   1,
+		Size: wgpu.Extent3D{
+			Width:              DefaultShadowMapSize,
+			Height:             DefaultShadowMapSize,
+			DepthOrArrayLayers: MaxPointLights * 6,
+		},
+	})
+	r.pointShadowMap.gpuView = r.pointShadowMap.gpuRef.CreateView(&wgpu.TextureViewDescriptor{
+		Format:          wgpu.TextureFormatDepth32Float,
+		Dimension:       wgpu.TextureViewDimensionCubeArray,
+		BaseMipLevel:    0,
+		MipLevelCount:   1,
+		BaseArrayLayer:  0,
+		ArrayLayerCount: MaxPointLights * 6,
+		Aspect:          wgpu.TextureAspectDepthOnly,
+	})
+	r.pointShadowMap.gpuSampler = r.getOrCreateSampler(r.pointShadowMap.sampler)
+
+	for i := range r.pointShadowLayerViews {
+		r.pointShadowLayerViews[i] = r.pointShadowMap.gpuRef.CreateView(&wgpu.TextureViewDescriptor{
+			Format:          wgpu.TextureFormatDepth32Float,
+			Dimension:       wgpu.TextureViewDimension2D,
+			BaseMipLevel:    0,
+			MipLevelCount:   1,
+			BaseArrayLayer:  uint32(i),
+			ArrayLayerCount: 1,
+			Aspect:          wgpu.TextureAspectDepthOnly,
+		})
+	}
+
+	r.pointShadowMat = r.NewPointShadowMaterial()
 }
 
 func (r *Renderer) createGlobalBindGroupLayouts() {
@@ -784,6 +1041,15 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 				Visibility: wgpu.ShaderStageFragment,
 				Sampler: wgpu.SamplerBindingLayout{
 					Type: wgpu.SamplerBindingTypeComparison,
+				},
+			},
+			{
+				Binding:    PointShadowMapBinding,
+				Visibility: wgpu.ShaderStageFragment,
+				Texture: wgpu.TextureBindingLayout{
+					SampleType:    wgpu.TextureSampleTypeDepth,
+					ViewDimension: wgpu.TextureViewDimensionCubeArray,
+					Multisampled:  false,
 				},
 			},
 		},
@@ -846,6 +1112,10 @@ func (r *Renderer) createGlobalBindGroups() {
 				Binding: ShadowSamplerBinding,
 				Sampler: r.shadowMap.gpuSampler,
 			},
+			{
+				Binding:     PointShadowMapBinding,
+				TextureView: r.pointShadowMap.gpuView,
+			},
 		},
 	})
 }
@@ -895,6 +1165,22 @@ func (r *Renderer) collectRenderList(list *renderList, scene *Scene) {
 		}
 		list.ambientLight = ld
 		break
+	}
+
+	for i := range scene.spotLights {
+		ld := scene.spotLights[i]
+		if scene.flags[ld.ownerNode]&flagAlive == 0 {
+			continue
+		}
+		list.spotLights = append(list.spotLights, ld)
+	}
+
+	for i := range scene.pointLights {
+		ld := scene.pointLights[i]
+		if scene.flags[ld.ownerNode]&flagAlive == 0 {
+			continue
+		}
+		list.pointLights = append(list.pointLights, ld)
 	}
 }
 

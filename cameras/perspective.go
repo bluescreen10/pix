@@ -54,6 +54,10 @@ func (c *PerspectiveCamera) SetUp(up glm.Vec3f) {
 	c.up = up
 }
 
+func (c *PerspectiveCamera) SetFOV(fov float32) {
+	c.fov = fov
+}
+
 func (c *PerspectiveCamera) ViewProjection() glm.Mat4f {
 	target := c.fwd.Add(c.position)
 	view := glm.LookAtRH(c.position, target, c.up)

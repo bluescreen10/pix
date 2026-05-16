@@ -12,6 +12,8 @@ const (
 	KindMesh
 	KindDirectionalLight
 	KindAmbientLight
+	KindSpotLight
+	KindPointLight
 )
 
 // Node flags packed into flags[].
@@ -91,6 +93,8 @@ type Scene struct {
 	meshes        []meshData
 	dirLights     []directionalLightData
 	ambientLights []ambientLightData
+	spotLights    []spotLightData
+	pointLights   []pointLightData
 }
 
 func NewScene() *Scene {
@@ -275,6 +279,10 @@ func (s *Scene) destroyNode(id NodeID) {
 		s.swapRemoveDirLight(s.payload[idx])
 	case KindAmbientLight:
 		s.swapRemoveAmbientLight(s.payload[idx])
+	case KindSpotLight:
+		s.swapRemoveSpotLight(s.payload[idx])
+	case KindPointLight:
+		s.swapRemovePointLight(s.payload[idx])
 	}
 
 	s.flags[idx] &^= flagAlive
@@ -313,6 +321,24 @@ func (s *Scene) swapRemoveAmbientLight(payloadIdx uint32) {
 		s.payload[s.ambientLights[payloadIdx].ownerNode] = payloadIdx
 	}
 	s.ambientLights = s.ambientLights[:last]
+}
+
+func (s *Scene) swapRemoveSpotLight(payloadIdx uint32) {
+	last := uint32(len(s.spotLights) - 1)
+	if payloadIdx < last {
+		s.spotLights[payloadIdx] = s.spotLights[last]
+		s.payload[s.spotLights[payloadIdx].ownerNode] = payloadIdx
+	}
+	s.spotLights = s.spotLights[:last]
+}
+
+func (s *Scene) swapRemovePointLight(payloadIdx uint32) {
+	last := uint32(len(s.pointLights) - 1)
+	if payloadIdx < last {
+		s.pointLights[payloadIdx] = s.pointLights[last]
+		s.payload[s.pointLights[payloadIdx].ownerNode] = payloadIdx
+	}
+	s.pointLights = s.pointLights[:last]
 }
 
 // flushTopoIfDirty rebuilds topoOrder with a BFS from root (parent-before-child).

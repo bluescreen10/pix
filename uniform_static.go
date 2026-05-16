@@ -8,12 +8,36 @@ import (
 )
 
 type LightsUniform struct {
-	DirectionalLights     [MaxDirectionalLights]DirectionalLightUniform
-	DirectionalLightCount uint32
+	DirectionalLights     [MaxDirectionalLights]DirectionalLightUniform // 560
+	DirectionalLightCount uint32                                         //   4
+	_                     [3]float32                                     //  12 pad → 576
+	AmbientLight          AmbientLightUniform                           //  32 → 608
+	SpotLights            [MaxSpotLights]SpotLightUniform               // 640 → 1248
+	SpotLightCount        uint32                                         //   4
+	_                     [3]float32                                     //  12 pad → 1264
+	PointLights           [MaxPointLights]PointLightUniform             // 240 → 1504
+	PointLightCount       uint32                                         //   4
+	_                     [3]float32                                     //  12 pad → 1520
+}
 
-	_ [3]float32 // 16-bit alignment
+type PointLightUniform struct {
+	color       glm.Color4f // 16 — w holds intensity
+	position    glm.Vec4f   // 16
+	far         float32     //  4
+	castsShadow uint32      //  4
+	shadowBias  float32     //  4
+	_           float32     //  4 pad → 48 total
+}
 
-	AmbientLight AmbientLightUniform
+type SpotLightUniform struct {
+	color            glm.Color4f // 16 — w holds intensity
+	position         glm.Vec4f   // 16
+	direction        glm.Vec4f   // 16
+	lightSpaceMatrix glm.Mat4f   // 64
+	innerCosine      float32     //  4
+	outerCosine      float32     //  4
+	castsShadow      uint32      //  4
+	shadowBias       float32     //  4 → 128 total
 }
 
 func (u *LightsUniform) Bytes() []byte {
