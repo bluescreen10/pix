@@ -19,7 +19,7 @@ const (
 	MaxDirectionalLights   = 5
 	MaxSpotLights          = 5
 	MaxPointLights         = 5
-	DefaultShadowMapSize   = 2048
+	DefaultShadowMapSize   = 512
 )
 
 // Shader Sets
@@ -97,6 +97,8 @@ type Renderer struct {
 	instanceStorageBindGroup       *wgpu.BindGroup
 	instanceStorageCapacity        uint32
 
+	//TODO: have a max number of shadow maps (i.e. 8)
+	// and let lights request (1 or multuple slots)
 	// shadow (directional + spot)
 	shadowMap        *TextureData
 	shadowLayerViews [MaxDirectionalLights + MaxSpotLights]*wgpu.TextureView
@@ -334,7 +336,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 		}
 
 		d.instanceId = uint32(len(instances))
-		instances = append(instances, InstanceUniform{d.model, d.modelInv})
+		instances = appendInstances(instances, d)
 		list.visible[validVisible] = *d
 		validVisible++
 	}
@@ -351,7 +353,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 		}
 
 		d.instanceId = uint32(len(instances))
-		instances = append(instances, InstanceUniform{d.model, d.modelInv})
+		instances = appendInstances(instances, d)
 	}
 
 	if count := len(instances); count > 0 {
@@ -580,9 +582,9 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, drawing
 
 		if d.geo.gpuIndex != nil {
 			pass.SetIndexBuffer(d.geo.gpuIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
-			pass.DrawIndexed(uint32(d.geo.gpuCount), 1, 0, 0, d.instanceId)
+			pass.DrawIndexed(uint32(d.geo.gpuCount), d.instanceCount, 0, 0, d.instanceId)
 		} else {
-			pass.Draw(uint32(d.geo.gpuCount), 1, 0, d.instanceId)
+			pass.Draw(uint32(d.geo.gpuCount), d.instanceCount, 0, d.instanceId)
 		}
 	}
 
@@ -645,9 +647,9 @@ func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f,
 				}
 				if d.geo.gpuIndex != nil {
 					pass.SetIndexBuffer(d.geo.gpuIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
-					pass.DrawIndexed(uint32(d.geo.gpuCount), 1, 0, 0, d.instanceId)
+					pass.DrawIndexed(uint32(d.geo.gpuCount), d.instanceCount, 0, 0, d.instanceId)
 				} else {
-					pass.Draw(uint32(d.geo.gpuCount), 1, 0, d.instanceId)
+					pass.Draw(uint32(d.geo.gpuCount), d.instanceCount, 0, d.instanceId)
 				}
 			}
 		}
@@ -674,9 +676,9 @@ func (r *Renderer) renderInstance(ctx *renderContext, pass *wgpu.RenderPassEncod
 
 	if obj.geo.gpuIndex != nil {
 		pass.SetIndexBuffer(obj.geo.gpuIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
-		pass.DrawIndexed(uint32(obj.geo.gpuCount), 1, 0, 0, obj.instanceId)
+		pass.DrawIndexed(uint32(obj.geo.gpuCount), obj.instanceCount, 0, 0, obj.instanceId)
 	} else {
-		pass.Draw(uint32(obj.geo.gpuCount), 1, 0, obj.instanceId)
+		pass.Draw(uint32(obj.geo.gpuCount), obj.instanceCount, 0, obj.instanceId)
 	}
 }
 
@@ -1120,6 +1122,21 @@ func (r *Renderer) createGlobalBindGroups() {
 	})
 }
 
+// appendInstances adds the InstanceUniform entries for a drawing to the slice.
+// For regular meshes (instMatrices == nil) it appends one entry; for instanced
+// meshes it appends one entry per instance (world = instWorldTransform × localMat).
+func appendInstances(instances InstancesUniform, d *drawing) InstancesUniform {
+	if d.instMatrices == nil {
+		return append(instances, InstanceUniform{d.model, d.modelInv})
+	}
+	for _, localMat := range d.instMatrices {
+		world := d.instWorldTransform.Mul4x4(localMat)
+		worldInv := world.Inv()
+		instances = append(instances, InstanceUniform{world, worldInv})
+	}
+	return instances
+}
+
 // collectRenderList populates list by iterating the scene's compact payload tables
 // directly, avoiding a full tree traversal. No frustum culling is applied here;
 // call cull separately for each frustum.
@@ -1134,14 +1151,56 @@ func (r *Renderer) collectRenderList(list *renderList, scene *Scene) {
 		localCenter := md.boundingSphere.Center
 		worldCenter := model.Mul4x1(glm.Vec4f{localCenter[0], localCenter[1], localCenter[2], 1})
 		d := drawing{
-			geo:      r.geometries.get(md.geometry.ref.ID()),
-			mat:      r.materials.get(md.material.ref.ID()),
-			model:    model,
-			modelInv: scene.GetWorldTransformInv(md.ownerNode),
+			instanceCount: 1,
+			geo:           r.geometries.get(md.geometry.ref.ID()),
+			mat:           r.materials.get(md.material.ref.ID()),
+			model:         model,
+			modelInv:      scene.GetWorldTransformInv(md.ownerNode),
 			bounds: Sphere{
 				Center: glm.Vec3f{worldCenter[0], worldCenter[1], worldCenter[2]},
 				Radius: md.boundingSphere.Radius,
 			},
+		}
+
+		if flags.CastShadow() {
+			list.shadowCasters = append(list.shadowCasters, d)
+		}
+		list.visible = append(list.visible, d)
+	}
+
+	for _, imd := range scene.instancedMeshes {
+		flags := scene.GetFlags(imd.ownerNode)
+		if !flags.IsAlive() || !flags.IsVisible() || len(imd.matrices) == 0 {
+			continue
+		}
+
+		geo := r.geometries.get(imd.geometry.ref.ID())
+		worldTransform := scene.GetWorldTransform(imd.ownerNode)
+		geoBounds := geo.BoundingSphere()
+
+		// Compute a conservative world-space bounding sphere over all instances.
+		var sumPos glm.Vec3f
+		for _, m := range imd.matrices {
+			wm := worldTransform.Mul4x4(m)
+			sumPos = sumPos.Add(glm.Vec3f{wm[12], wm[13], wm[14]})
+		}
+		center := sumPos.Scale(1.0 / float32(len(imd.matrices)))
+		var maxDist float32
+		for _, m := range imd.matrices {
+			wm := worldTransform.Mul4x4(m)
+			dist := center.Sub(glm.Vec3f{wm[12], wm[13], wm[14]}).Length()
+			if dist > maxDist {
+				maxDist = dist
+			}
+		}
+
+		d := drawing{
+			instanceCount:      uint32(len(imd.matrices)),
+			geo:                geo,
+			mat:                r.materials.get(imd.material.ref.ID()),
+			bounds:             Sphere{Center: center, Radius: maxDist + geoBounds.Radius},
+			instMatrices:       imd.matrices,
+			instWorldTransform: worldTransform,
 		}
 
 		if flags.CastShadow() {

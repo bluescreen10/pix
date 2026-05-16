@@ -10,6 +10,7 @@ type NodeKind uint8
 const (
 	KindGroup NodeKind = iota
 	KindMesh
+	KindInstancedMesh
 	KindDirectionalLight
 	KindAmbientLight
 	KindSpotLight
@@ -90,11 +91,12 @@ type Scene struct {
 	background glm.Color4f
 
 	// Kind-specific compact payload tables.
-	meshes        []meshData
-	dirLights     []directionalLightData
-	ambientLights []ambientLightData
-	spotLights    []spotLightData
-	pointLights   []pointLightData
+	meshes         []meshData
+	instancedMeshes []instancedMeshData
+	dirLights      []directionalLightData
+	ambientLights  []ambientLightData
+	spotLights     []spotLightData
+	pointLights    []pointLightData
 }
 
 func NewScene() *Scene {
@@ -275,6 +277,8 @@ func (s *Scene) destroyNode(id NodeID) {
 	switch s.kind[idx] {
 	case KindMesh:
 		s.swapRemoveMesh(s.payload[idx])
+	case KindInstancedMesh:
+		s.swapRemoveInstancedMesh(s.payload[idx])
 	case KindDirectionalLight:
 		s.swapRemoveDirLight(s.payload[idx])
 	case KindAmbientLight:
@@ -303,6 +307,17 @@ func (s *Scene) swapRemoveMesh(payloadIdx uint32) {
 		s.payload[s.meshes[payloadIdx].ownerNode] = payloadIdx
 	}
 	s.meshes = s.meshes[:last]
+}
+
+func (s *Scene) swapRemoveInstancedMesh(payloadIdx uint32) {
+	last := uint32(len(s.instancedMeshes) - 1)
+	s.instancedMeshes[payloadIdx].geometry.Release()
+	s.instancedMeshes[payloadIdx].material.Release()
+	if payloadIdx < last {
+		s.instancedMeshes[payloadIdx] = s.instancedMeshes[last]
+		s.payload[s.instancedMeshes[payloadIdx].ownerNode] = payloadIdx
+	}
+	s.instancedMeshes = s.instancedMeshes[:last]
 }
 
 func (s *Scene) swapRemoveDirLight(payloadIdx uint32) {
