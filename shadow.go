@@ -16,8 +16,9 @@ type DirectionalShadow struct {
 func NewDirectionalShadow(size, near, far float32) *DirectionalShadow {
 	return &DirectionalShadow{
 		lightShadow: lightShadow{
-			bias:    0.001,
-			mapSize: glm.Vec2i{DefaultShadowMapSize, DefaultShadowMapSize},
+			bias:       0.001,
+			mapSize:    glm.Vec2i{DefaultShadowMapSize, DefaultShadowMapSize},
+			layerIndex: -1,
 		},
 		camera: cameras.NewOrthographicCamera(-size, size, -size, size, near, far),
 	}
@@ -47,8 +48,9 @@ type SpotShadow struct {
 func NewSpotShadow(outerAngle, near, far float32) *SpotShadow {
 	return &SpotShadow{
 		lightShadow: lightShadow{
-			bias:    0.001,
-			mapSize: glm.Vec2i{DefaultShadowMapSize, DefaultShadowMapSize},
+			bias:       0.001,
+			mapSize:    glm.Vec2i{DefaultShadowMapSize, DefaultShadowMapSize},
+			layerIndex: -1,
 		},
 		camera: cameras.NewPerpectiveCamera(glm.ToRadians(outerAngle)*2, 1.0, near, far),
 	}
@@ -68,8 +70,9 @@ type PointShadow struct {
 func NewPointShadow(far float32) *PointShadow {
 	return &PointShadow{
 		lightShadow: lightShadow{
-			bias:    0.05,
-			mapSize: glm.Vec2i{DefaultShadowMapSize, DefaultShadowMapSize},
+			bias:       0.05,
+			mapSize:    glm.Vec2i{DefaultShadowMapSize, DefaultShadowMapSize},
+			layerIndex: -1,
 		},
 		far: far,
 	}
@@ -79,6 +82,7 @@ func (s *PointShadow) SetBias(bias float32) { s.bias = bias }
 func (s *PointShadow) SetFar(far float32)   { s.far = far }
 
 type lightShadow struct {
-	bias    float32
-	mapSize glm.Vec2i
+	bias       float32
+	mapSize    glm.Vec2i
+	layerIndex int // index into the renderer's TextureArray; -1 = not yet assigned
 }

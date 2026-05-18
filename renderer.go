@@ -1,10 +1,12 @@
 package pix
 
 import (
+	"cmp"
 	"log/slog"
 	"math"
 	"math/bits"
 	"os"
+	"slices"
 	"sync"
 	"time"
 	"unsafe"
@@ -40,14 +42,17 @@ const (
 
 // Instance Bindings
 const (
-	InstancesBinding = iota
+	ModelsBinding = iota
+	InvModelsBinding
 )
 
-var instancesPool = sync.Pool{
-	New: func() any {
-		return make(InstancesUniform, 0, InitialStorageCapacity)
-	},
-}
+// Pipeline type indices for per-mesh pipeline cache.
+const (
+	PipelineGeometry    = 0
+	PipelineShadow      = 1
+	PipelinePointShadow = 2
+	numPipelineTypes    = 3
+)
 
 var renderListPool = sync.Pool{
 	New: func() any {
@@ -59,6 +64,13 @@ var drawingsPool = sync.Pool{
 	New: func() any {
 		return make([]drawing, 0, 4096)
 	},
+}
+
+// instancedGPUData holds the private GPU buffers for one InstancedMesh.
+type instancedGPUData struct {
+	gpuModelBuf    *wgpu.Buffer
+	gpuInvModelBuf *wgpu.Buffer
+	gpuBindGrp     *wgpu.BindGroup
 }
 
 type renderContext struct {
@@ -91,23 +103,26 @@ type Renderer struct {
 	globalBindGroupLayout *wgpu.BindGroupLayout
 	globalBindGroup       *wgpu.BindGroup
 
-	// instance
-	instanceStorageBuffer          *wgpu.Buffer
+	// Stable per-node model/inv-model buffers — slot = scene node index.
+	modelBuf       *wgpu.Buffer
+	invModelBuf    *wgpu.Buffer
+	objectsBindGrp *wgpu.BindGroup
+	objectsCap     uint32
+
+	// Layout for the instance set (binding 0 = objects storage buffer).
+	// Used by both regular and instanced mesh draws; the bind group differs.
 	instanceStorageBindGroupLayout *wgpu.BindGroupLayout
-	instanceStorageBindGroup       *wgpu.BindGroup
-	instanceStorageCapacity        uint32
 
-	//TODO: have a max number of shadow maps (i.e. 8)
-	// and let lights request (1 or multuple slots)
-	// shadow (directional + spot)
-	shadowMap        *TextureData
-	shadowLayerViews [MaxDirectionalLights + MaxSpotLights]*wgpu.TextureView
-	shadowMat        *ShadowMaterial
+	// Per-InstancedMesh GPU resources, keyed by ownerNode.
+	instancedGPUResources map[uint32]*instancedGPUData
 
-	// shadow (point — cube array)
-	pointShadowMap        *TextureData
-	pointShadowLayerViews [MaxPointLights * 6]*wgpu.TextureView
-	pointShadowMat        *PointShadowMaterial
+	// shadow (directional + spot) — 2D depth array, one layer per shadow
+	shadowArray *TextureArray
+	shadowMat   *ShadowMaterial
+
+	// shadow (point — cube array) — 6 consecutive layers per point light
+	pointShadowArray *TextureArray
+	pointShadowMat   *PointShadowMaterial
 
 	// depth buffer
 	depthTexture     *wgpu.Texture
@@ -147,9 +162,24 @@ func (r *Renderer) Destroy() {
 	r.runtime.Destroy()
 	r.runtime = nil
 
-	if r.instanceStorageBindGroup != nil {
-		r.instanceStorageBindGroup.Release()
-		r.instanceStorageBindGroup = nil
+	for _, gpu := range r.instancedGPUResources {
+		gpu.gpuBindGrp.Release()
+		gpu.gpuModelBuf.Destroy()
+		gpu.gpuInvModelBuf.Destroy()
+	}
+	r.instancedGPUResources = nil
+
+	if r.objectsBindGrp != nil {
+		r.objectsBindGrp.Release()
+		r.objectsBindGrp = nil
+	}
+	if r.modelBuf != nil {
+		r.modelBuf.Destroy()
+		r.modelBuf = nil
+	}
+	if r.invModelBuf != nil {
+		r.invModelBuf.Destroy()
+		r.invModelBuf = nil
 	}
 
 	r.cameraUniformBuffer.Destroy()
@@ -157,11 +187,6 @@ func (r *Renderer) Destroy() {
 
 	r.lightsUniformBuffer.Destroy()
 	r.lightsUniformBuffer = nil
-
-	if r.instanceStorageBuffer != nil {
-		r.instanceStorageBuffer.Destroy()
-		r.instanceStorageBuffer = nil
-	}
 
 	r.globalBindGroupLayout.Release()
 	r.globalBindGroupLayout = nil
@@ -181,69 +206,67 @@ func (r *Renderer) Destroy() {
 		r.depthTexture = nil
 	}
 
-	for i, v := range r.shadowLayerViews {
-		if v != nil {
-			v.Release()
-			r.shadowLayerViews[i] = nil
-		}
+	if r.shadowArray != nil {
+		r.shadowArray.Destroy()
+		r.shadowArray = nil
 	}
 
-	if r.shadowMap != nil {
-		r.shadowMap.Destroy()
-		r.shadowMap = nil
-	}
-
-	for i, v := range r.pointShadowLayerViews {
-		if v != nil {
-			v.Release()
-			r.pointShadowLayerViews[i] = nil
-		}
-	}
-
-	if r.pointShadowMap != nil {
-		r.pointShadowMap.Destroy()
-		r.pointShadowMap = nil
+	if r.pointShadowArray != nil {
+		r.pointShadowArray.Destroy()
+		r.pointShadowArray = nil
 	}
 
 	r.destroyResources()
 }
 
-func (r *Renderer) ensureInstanceStorageSize(needInstances uint32) {
-	if r.instanceStorageBuffer == nil || r.instanceStorageCapacity < needInstances {
-		if r.instanceStorageBuffer != nil {
-			r.instanceStorageBuffer.Destroy()
-		}
-		if r.instanceStorageBindGroup != nil {
-			r.instanceStorageBindGroup.Release()
-		}
-
-		if r.instanceStorageCapacity == 0 {
-			r.instanceStorageCapacity = InitialStorageCapacity
-		}
-
-		for r.instanceStorageCapacity < needInstances {
-			r.instanceStorageCapacity *= 2
-		}
-
-		r.instanceStorageBuffer = r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
-			Label: "Instance storage buffer",
-			Size:  uint64(r.instanceStorageCapacity) * uint64(unsafe.Sizeof(InstanceUniform{})),
-			Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst,
-		})
-
-		r.instanceStorageBindGroup = r.runtime.Device.CreateBindGroup(wgpu.BindGroupDescriptor{
-			Label:  "Instance bind group",
-			Layout: r.instanceStorageBindGroupLayout,
-			Entries: []wgpu.BindGroupEntry{
-				{
-					Binding: InstancesBinding,
-					Buffer:  r.instanceStorageBuffer,
-					Offset:  0,
-					Size:    wgpu.WholeSize,
-				},
-			},
-		})
+// ensureObjectsCap grows the model/invModel buffers to hold at least `need` entries.
+func (r *Renderer) ensureObjectsCap(need uint32) {
+	if r.modelBuf != nil && r.objectsCap >= need {
+		return
 	}
+	if r.modelBuf != nil {
+		r.modelBuf.Destroy()
+		r.invModelBuf.Destroy()
+	}
+	if r.objectsBindGrp != nil {
+		r.objectsBindGrp.Release()
+	}
+	if r.objectsCap == 0 {
+		r.objectsCap = InitialStorageCapacity
+	}
+	for r.objectsCap < need {
+		r.objectsCap *= 2
+	}
+	matSize := uint64(r.objectsCap) * uint64(unsafe.Sizeof(glm.Mat4f{}))
+	r.modelBuf = r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
+		Label: "Model buffer",
+		Size:  matSize,
+		Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst,
+	})
+	r.invModelBuf = r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
+		Label: "InvModel buffer",
+		Size:  matSize,
+		Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst,
+	})
+	r.objectsBindGrp = r.runtime.Device.CreateBindGroup(wgpu.BindGroupDescriptor{
+		Label:  "Objects bind group",
+		Layout: r.instanceStorageBindGroupLayout,
+		Entries: []wgpu.BindGroupEntry{
+			{Binding: ModelsBinding, Buffer: r.modelBuf, Offset: 0, Size: wgpu.WholeSize},
+			{Binding: InvModelsBinding, Buffer: r.invModelBuf, Offset: 0, Size: wgpu.WholeSize},
+		},
+	})
+}
+
+func (r *Renderer) ensureGeometryReady(geo *GeometryData) {
+	if geo.gpuVersion >= geo.version {
+		return
+	}
+	if geo.gpuVersion == 0 {
+		geo.gpuLayout = createVertexLayout(geo)
+		geo.gpuShadowLayout = createShadowVertexLayout(geo)
+	}
+	r.uploadGeometry(geo)
 }
 
 func (r *Renderer) ensureDepthTextureSize(width, height uint32) {
@@ -299,7 +322,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	r.Stats.NextFrame()
 	start := time.Now()
 
-	scene.UpdateTransforms()
+	transformsDirty := scene.UpdateTransforms()
 	scene.UpdateVisibility()
 
 	list := renderListPool.Get().(*renderList)
@@ -308,57 +331,34 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	viewProjection := camera.ViewProjection()
 	frustum := NewFrustumFromViewProjection(viewProjection)
 	r.collectRenderList(list, scene)
-	list.visible = cull(frustum, list.visible, list.visible[:0])
 
-	instances := instancesPool.Get().(InstancesUniform)
-	defer instancesPool.Put(instances[:0])
+	if transformsDirty {
+		r.syncMeshInstances(scene)
+	}
+	r.syncInstancedMeshes(scene)
+
+	list.visible = cull(frustum, list.visible, list.visible[:0])
 
 	var useLights bool
 
 	validVisible := 0
 	for i := range list.visible {
 		d := &list.visible[i]
-		if d.geo.gpuVersion < d.geo.version {
-			if d.geo.gpuVersion == 0 {
-				d.geo.gpuLayout = createVertexLayout(d.geo)
-				d.geo.gpuShadowLayout = createShadowVertexLayout(d.geo)
-			}
-			r.uploadGeometry(d.geo)
-		}
-
+		r.ensureGeometryReady(d.geo)
 		if err := prepareMaterial(r.runtime.Device, d.mat, r); err != nil {
 			r.logger.Error("error preparing material", slog.Any("err", err))
 			continue
 		}
-
 		if d.mat.isLit {
 			useLights = true
 		}
-
-		d.instanceId = uint32(len(instances))
-		instances = appendInstances(instances, d)
 		list.visible[validVisible] = *d
 		validVisible++
 	}
 	list.visible = list.visible[:validVisible]
 
 	for i := range list.shadowCasters {
-		d := &list.shadowCasters[i]
-		if d.geo.gpuVersion < d.geo.version {
-			if d.geo.gpuVersion == 0 {
-				d.geo.gpuLayout = createVertexLayout(d.geo)
-				d.geo.gpuShadowLayout = createShadowVertexLayout(d.geo)
-			}
-			r.uploadGeometry(d.geo)
-		}
-
-		d.instanceId = uint32(len(instances))
-		instances = appendInstances(instances, d)
-	}
-
-	if count := len(instances); count > 0 {
-		r.ensureInstanceStorageSize(uint32(count))
-		r.runtime.Queue.WriteBuffer(r.instanceStorageBuffer, 0, instances.Bytes())
+		r.ensureGeometryReady(list.shadowCasters[i].geo)
 	}
 
 	cameraUniform := CameraUniform{
@@ -369,52 +369,33 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 
 	ctx.encoder = r.runtime.Device.CreateCommandEncoder(nil)
 
-	shadowLayerIdx := 0
 	if useLights {
 		var lightsUniform LightsUniform
 
 		count := min(MaxDirectionalLights, len(list.directionalLights))
 		lightsUniform.DirectionalLightCount = uint32(count)
-
-		for i, ld := range list.directionalLights[:count] {
-			colorRGBA := ld.color.RGBA()
-			colorRGBA[3] = ld.intensity
-
+		for i := range list.directionalLights[:count] {
+			ld := &list.directionalLights[i]
 			var lightSpaceMat glm.Mat4f
-			var castsShadow uint32
-			var shadowBias float32
-
-			if ld.shadow != nil {
-				// Sync shadow camera to the light's current world position.
-				w := scene.world[ld.ownerNode]
-				ld.shadow.camera.SetPosition(glm.Vec3f{w[12], w[13], w[14]})
-				ld.shadow.camera.SetTarget(ld.target)
-				lightSpaceMat = ld.shadow.camera.ViewProjection()
-				castsShadow = 1
-				shadowBias = ld.shadow.bias
+			if vp, ok := ld.shadowVP(scene); ok {
+				if ld.shadow.layerIndex < 0 {
+					if base, ok := r.shadowArray.AllocLayers(1); ok {
+						ld.shadow.layerIndex = int(base)
+					} else {
+						r.logger.Warn("shadow array full, directional light shadow skipped")
+					}
+				}
+				if ld.shadow.layerIndex >= 0 {
+					lightSpaceMat = vp
+					shadowDrawings := drawingsPool.Get().([]drawing)
+					shadowDrawings = cull(NewFrustumFromViewProjection(vp), list.shadowCasters, shadowDrawings)
+					ctx.depthTarget = r.shadowArray.Texture()
+					ctx.depthTargetView = r.shadowArray.LayerView(uint32(ld.shadow.layerIndex))
+					r.renderShadowMap(&ctx, ld.shadow.camera, shadowDrawings)
+					drawingsPool.Put(shadowDrawings[:0])
+				}
 			}
-
-			// Direction from world position to target.
-			w := scene.world[ld.ownerNode]
-			worldPos := glm.Vec3f{w[12], w[13], w[14]}
-			lightsUniform.DirectionalLights[i] = DirectionalLightUniform{
-				color:            colorRGBA,
-				direction:        ld.target.Sub(worldPos).Normalize().Vec4(),
-				lightSpaceMatrix: lightSpaceMat,
-				castsShadow:      castsShadow,
-				shadowBias:       shadowBias,
-			}
-
-			if ld.shadow != nil {
-				lightFrustum := NewFrustumFromViewProjection(lightSpaceMat)
-				shadowDrawings := drawingsPool.Get().([]drawing)
-				shadowDrawings = cull(lightFrustum, list.shadowCasters, shadowDrawings)
-				ctx.depthTarget = r.shadowMap.gpuRef
-				ctx.depthTargetView = r.shadowLayerViews[shadowLayerIdx]
-				r.renderShadowMap(&ctx, ld.shadow.camera, shadowDrawings)
-				drawingsPool.Put(shadowDrawings[:0])
-				shadowLayerIdx++
-			}
+			lightsUniform.DirectionalLights[i] = ld.toUniform(scene, lightSpaceMat)
 		}
 
 		if list.ambientLight != nil {
@@ -426,86 +407,47 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 
 		spotCount := min(MaxSpotLights, len(list.spotLights))
 		lightsUniform.SpotLightCount = uint32(spotCount)
-
-		for i, ld := range list.spotLights[:spotCount] {
-			colorRGBA := ld.color.RGBA()
-			colorRGBA[3] = ld.intensity
-
-			w := scene.world[ld.ownerNode]
-			worldPos := glm.Vec3f{w[12], w[13], w[14]}
-			spotDir := ld.target.Sub(worldPos).Normalize()
-
+		for i := range list.spotLights[:spotCount] {
+			ld := &list.spotLights[i]
 			var lightSpaceMat glm.Mat4f
-			var castsShadow uint32
-			var shadowBias float32
-
-			if ld.shadow != nil {
-				fwd := ld.target.Sub(worldPos).Normalize()
-				up := glm.Vec3f{0, 1, 0}
-				if fwd[1] > 0.999 || fwd[1] < -0.999 {
-					up = glm.Vec3f{0, 0, 1}
+			if vp, ok := ld.shadowVP(scene); ok {
+				if ld.shadow.layerIndex < 0 {
+					if base, ok := r.shadowArray.AllocLayers(1); ok {
+						ld.shadow.layerIndex = int(base)
+					} else {
+						r.logger.Warn("shadow array full, spot light shadow skipped")
+					}
 				}
-				ld.shadow.camera.SetPosition(worldPos)
-				ld.shadow.camera.SetFwd(fwd)
-				ld.shadow.camera.SetUp(up)
-				lightSpaceMat = ld.shadow.camera.ViewProjection()
-				castsShadow = 1
-				shadowBias = ld.shadow.bias
+				if ld.shadow.layerIndex >= 0 {
+					lightSpaceMat = vp
+					shadowDrawings := drawingsPool.Get().([]drawing)
+					shadowDrawings = cull(NewFrustumFromViewProjection(vp), list.shadowCasters, shadowDrawings)
+					ctx.depthTarget = r.shadowArray.Texture()
+					ctx.depthTargetView = r.shadowArray.LayerView(uint32(ld.shadow.layerIndex))
+					r.renderShadowMap(&ctx, ld.shadow.camera, shadowDrawings)
+					drawingsPool.Put(shadowDrawings[:0])
+				}
 			}
-
-			innerCosine := float32(math.Cos(float64(ld.innerAngle) * math.Pi / 180.0))
-			outerCosine := float32(math.Cos(float64(ld.outerAngle) * math.Pi / 180.0))
-
-			lightsUniform.SpotLights[i] = SpotLightUniform{
-				color:            colorRGBA,
-				position:         glm.Vec4f{worldPos[0], worldPos[1], worldPos[2], 1},
-				direction:        glm.Vec4f{spotDir[0], spotDir[1], spotDir[2], 0},
-				lightSpaceMatrix: lightSpaceMat,
-				innerCosine:      innerCosine,
-				outerCosine:      outerCosine,
-				castsShadow:      castsShadow,
-				shadowBias:       shadowBias,
-			}
-
-			if ld.shadow != nil {
-				lightFrustum := NewFrustumFromViewProjection(lightSpaceMat)
-				shadowDrawings := drawingsPool.Get().([]drawing)
-				shadowDrawings = cull(lightFrustum, list.shadowCasters, shadowDrawings)
-				ctx.depthTarget = r.shadowMap.gpuRef
-				ctx.depthTargetView = r.shadowLayerViews[MaxDirectionalLights+i]
-				r.renderShadowMap(&ctx, ld.shadow.camera, shadowDrawings)
-				drawingsPool.Put(shadowDrawings[:0])
-			}
+			lightsUniform.SpotLights[i] = ld.toUniform(scene, lightSpaceMat)
 		}
 
 		pointCount := min(MaxPointLights, len(list.pointLights))
 		lightsUniform.PointLightCount = uint32(pointCount)
-
-		for i, ld := range list.pointLights[:pointCount] {
-			colorRGBA := ld.color.RGBA()
-			colorRGBA[3] = ld.intensity
-
-			w := scene.world[ld.ownerNode]
-			worldPos := glm.Vec3f{w[12], w[13], w[14]}
-
-			var castsShadow uint32
-			var shadowBias float32
-			var far float32 = 100
-
+		for i := range list.pointLights[:pointCount] {
+			ld := &list.pointLights[i]
 			if ld.shadow != nil {
-				castsShadow = 1
-				shadowBias = ld.shadow.bias
-				far = ld.shadow.far
-				r.renderPointShadowCube(&ctx, worldPos, ld.shadow, i, list.shadowCasters)
+				if ld.shadow.layerIndex < 0 {
+					if base, ok := r.pointShadowArray.AllocLayers(6); ok {
+						ld.shadow.layerIndex = int(base)
+					} else {
+						r.logger.Warn("point shadow array full, point light shadow skipped")
+					}
+				}
+				if ld.shadow.layerIndex >= 0 {
+					r.renderPointShadowCube(&ctx, nodeWorldPos(scene, ld.ownerNode), ld.shadow, list.shadowCasters)
+				}
 			}
-
-			lightsUniform.PointLights[i] = PointLightUniform{
-				color:       colorRGBA,
-				position:    glm.Vec4f{worldPos[0], worldPos[1], worldPos[2], 1},
-				far:         far,
-				castsShadow: castsShadow,
-				shadowBias:  shadowBias,
-			}
+			lightsUniform.PointLights[i] = ld.toUniform(scene)
 		}
 
 		r.runtime.Queue.WriteBuffer(r.lightsUniformBuffer, 0, lightsUniform.Bytes())
@@ -518,10 +460,50 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	ctx.depthTarget = r.depthTexture
 	ctx.depthTargetView = r.depthTextureView
 
+	slices.SortFunc(list.visible, func(a, b drawing) int {
+		if c := cmp.Compare(a.mat.hash, b.mat.hash); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.mat.flags, b.mat.flags); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.geo.flags, b.geo.flags); c != 0 {
+			return c
+		}
+		// keep non-instanced draws together (they share objectsBindGrp)
+		if a.isInstanced != b.isInstanced {
+			if !a.isInstanced {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Compare(a.ownerNode, b.ownerNode)
+	})
+
 	renderPass := r.beginRendering(&ctx, scene.background)
+	renderPass.SetBindGroup(GlobalSet, r.globalBindGroup, nil)
+
+	var curPipeline *wgpu.RenderPipeline
+	var curMatBG *wgpu.BindGroup
+	var curInstBG *wgpu.BindGroup
 
 	for _, d := range list.visible {
-		r.renderInstance(&ctx, renderPass, d)
+		if d.pipelines[PipelineGeometry] == nil {
+			d.pipelines[PipelineGeometry] = r.getPipeline(d, ctx.texture, ctx.depthTarget)
+		}
+		if pipeline := d.pipelines[PipelineGeometry]; pipeline != curPipeline {
+			renderPass.SetPipeline(pipeline)
+			curPipeline = pipeline
+		}
+		if d.mat.gpuBindGroup != curMatBG {
+			renderPass.SetBindGroup(MaterialSet, d.mat.gpuBindGroup, nil)
+			curMatBG = d.mat.gpuBindGroup
+		}
+		if instBG := r.instanceBindGroupFor(d); instBG != curInstBG {
+			renderPass.SetBindGroup(InstanceSet, instBG, nil)
+			curInstBG = instBG
+		}
+		drawGeometry(renderPass, d)
 	}
 
 	r.endRendering(&ctx, renderPass)
@@ -532,17 +514,6 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 }
 
 func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, drawings []drawing) {
-	// Each shadow pass owns its encoder so the VP WriteBuffer committed to the
-	// queue before this call is the value actually used — not overwritten by the
-	// next light's WriteBuffer before the shared encoder is submitted.
-	// encoder := r.runtime.Device.CreateCommandEncoder(nil)
-	// defer func() {
-	// 	cmd := encoder.Finish(nil)
-	// 	r.runtime.Queue.Submit(cmd)
-	// 	cmd.Release()
-	// 	encoder.Release()
-	// }()
-
 	// Always begin (and end) the pass so the layer is cleared to 1.0.
 	// Without the clear, the GPU-zero-initialized texture causes every
 	// shadow comparison to fail and the whole scene appears unlit.
@@ -554,42 +525,51 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, drawing
 			DepthClearValue: 1.0,
 		},
 	})
+	defer func() { pass.End(); pass.Release() }()
 
 	if len(drawings) == 0 {
-		pass.End()
-		pass.Release()
 		return
 	}
 
 	r.shadowMat.SetViewProjection(shadowCam.ViewProjection())
 	if err := prepareMaterial(r.runtime.Device, r.shadowMat.data(), r); err != nil {
 		r.logger.Error("error preparing shadow material", slog.Any("err", err))
-		pass.End()
-		pass.Release()
 		return
 	}
 
+	slices.SortFunc(drawings, func(a, b drawing) int {
+		if c := cmp.Compare(a.geo.flags&ShadowGeometryMask, b.geo.flags&ShadowGeometryMask); c != 0 {
+			return c
+		}
+		if a.isInstanced != b.isInstanced {
+			if !a.isInstanced {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Compare(a.ownerNode, b.ownerNode)
+	})
+
 	pass.SetBindGroup(0, r.shadowMat.BindGroup(), nil)
-	pass.SetBindGroup(1, r.instanceStorageBindGroup, nil)
+
+	var curPipeline *wgpu.RenderPipeline
+	var curInstBG *wgpu.BindGroup
 
 	for _, d := range drawings {
-		shadowObj := drawing{mat: r.shadowMat.data(), geo: d.geo}
-		pass.SetPipeline(r.getPipeline(shadowObj, nil, ctx.depthTarget))
-
-		for _, b := range d.geo.gpuBufs {
-			pass.SetVertexBuffer(uint32(b.loc), b.buf, 0, wgpu.WholeSize)
+		if d.pipelines[PipelineShadow] == nil {
+			shadowObj := drawing{mat: r.shadowMat.data(), geo: d.geo}
+			d.pipelines[PipelineShadow] = r.getPipeline(shadowObj, nil, ctx.depthTarget)
 		}
-
-		if d.geo.gpuIndex != nil {
-			pass.SetIndexBuffer(d.geo.gpuIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
-			pass.DrawIndexed(uint32(d.geo.gpuCount), d.instanceCount, 0, 0, d.instanceId)
-		} else {
-			pass.Draw(uint32(d.geo.gpuCount), d.instanceCount, 0, d.instanceId)
+		if pipeline := d.pipelines[PipelineShadow]; pipeline != curPipeline {
+			pass.SetPipeline(pipeline)
+			curPipeline = pipeline
 		}
+		if instBG := r.instanceBindGroupFor(d); instBG != curInstBG {
+			pass.SetBindGroup(1, instBG, nil)
+			curInstBG = instBG
+		}
+		drawGeometry(pass, d)
 	}
-
-	pass.End()
-	pass.Release()
 }
 
 // cubeFaces defines the 6 view directions and up vectors for rendering cube shadow map faces.
@@ -603,12 +583,28 @@ var cubeFaces = [6]struct{ fwd, up glm.Vec3f }{
 	{glm.Vec3f{0, 0, -1}, glm.Vec3f{0, -1, 0}}, // -Z
 }
 
-func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f, shadow *PointShadow, lightIdx int, casters []drawing) {
+func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f, shadow *PointShadow, casters []drawing) {
 	near := float32(0.1)
 	proj := glm.PerspectiveRH(float32(math.Pi/2), float32(1.0), near, shadow.far)
 	// Negate h (proj[5]) so rendered V matches WebGPU cube map sampling convention (tc = -ry).
 	// Without this flip the cube faces are upside-down relative to textureSampleCompare.
 	proj[5] = -proj[5]
+
+	// Sort once — same casters across all 6 faces.
+	slices.SortFunc(casters, func(a, b drawing) int {
+		if c := cmp.Compare(a.geo.flags&ShadowGeometryMask, b.geo.flags&ShadowGeometryMask); c != 0 {
+			return c
+		}
+		if a.isInstanced != b.isInstanced {
+			if !a.isInstanced {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Compare(a.ownerNode, b.ownerNode)
+	})
+
+	ctx.depthTarget = r.pointShadowArray.Texture()
 
 	for face, cf := range cubeFaces {
 		target := lightPos.Add(cf.fwd)
@@ -621,9 +617,7 @@ func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f,
 			continue
 		}
 
-		layerIdx := lightIdx*6 + face
-		ctx.depthTargetView = r.pointShadowLayerViews[layerIdx]
-		ctx.depthTarget = r.pointShadowMap.gpuRef
+		ctx.depthTargetView = r.pointShadowArray.LayerView(uint32(shadow.layerIndex) + uint32(face))
 
 		encoder := r.runtime.Device.CreateCommandEncoder(nil)
 		pass := encoder.BeginRenderPass(wgpu.RenderPassDescriptor{
@@ -637,20 +631,24 @@ func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f,
 
 		if len(casters) > 0 {
 			pass.SetBindGroup(0, r.pointShadowMat.BindGroup(), nil)
-			pass.SetBindGroup(1, r.instanceStorageBindGroup, nil)
+
+			var curPipeline *wgpu.RenderPipeline
+			var curInstBG *wgpu.BindGroup
 
 			for _, d := range casters {
-				shadowObj := drawing{mat: r.pointShadowMat.data(), geo: d.geo}
-				pass.SetPipeline(r.getPipeline(shadowObj, nil, ctx.depthTarget))
-				for _, b := range d.geo.gpuBufs {
-					pass.SetVertexBuffer(uint32(b.loc), b.buf, 0, wgpu.WholeSize)
+				if d.pipelines[PipelinePointShadow] == nil {
+					shadowObj := drawing{mat: r.pointShadowMat.data(), geo: d.geo}
+					d.pipelines[PipelinePointShadow] = r.getPipeline(shadowObj, nil, ctx.depthTarget)
 				}
-				if d.geo.gpuIndex != nil {
-					pass.SetIndexBuffer(d.geo.gpuIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
-					pass.DrawIndexed(uint32(d.geo.gpuCount), d.instanceCount, 0, 0, d.instanceId)
-				} else {
-					pass.Draw(uint32(d.geo.gpuCount), d.instanceCount, 0, d.instanceId)
+				if pipeline := d.pipelines[PipelinePointShadow]; pipeline != curPipeline {
+					pass.SetPipeline(pipeline)
+					curPipeline = pipeline
 				}
+				if instBG := r.instanceBindGroupFor(d); instBG != curInstBG {
+					pass.SetBindGroup(1, instBG, nil)
+					curInstBG = instBG
+				}
+				drawGeometry(pass, d)
 			}
 		}
 
@@ -663,22 +661,16 @@ func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f,
 	}
 }
 
-func (r *Renderer) renderInstance(ctx *renderContext, pass *wgpu.RenderPassEncoder, obj drawing) {
-	pipeline := r.getPipeline(obj, ctx.texture, ctx.depthTarget)
-	pass.SetPipeline(pipeline)
-	pass.SetBindGroup(GlobalSet, r.globalBindGroup, nil)
-	pass.SetBindGroup(MaterialSet, obj.mat.gpuBindGroup, nil)
-	pass.SetBindGroup(InstanceSet, r.instanceStorageBindGroup, nil)
 
-	for _, b := range obj.geo.gpuBufs {
+func drawGeometry(pass *wgpu.RenderPassEncoder, d drawing) {
+	for _, b := range d.geo.gpuBufs {
 		pass.SetVertexBuffer(uint32(b.loc), b.buf, 0, wgpu.WholeSize)
 	}
-
-	if obj.geo.gpuIndex != nil {
-		pass.SetIndexBuffer(obj.geo.gpuIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
-		pass.DrawIndexed(uint32(obj.geo.gpuCount), obj.instanceCount, 0, 0, obj.instanceId)
+	if d.geo.gpuIndex != nil {
+		pass.SetIndexBuffer(d.geo.gpuIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
+		pass.DrawIndexed(uint32(d.geo.gpuCount), d.instanceCount, 0, 0, d.instanceId)
 	} else {
-		pass.Draw(uint32(obj.geo.gpuCount), obj.instanceCount, 0, obj.instanceId)
+		pass.Draw(uint32(d.geo.gpuCount), d.instanceCount, 0, d.instanceId)
 	}
 }
 
@@ -900,110 +892,22 @@ func (r *Renderer) createGlobalResources() {
 }
 
 func (r *Renderer) createShadowResources() {
-	r.shadowMap = &TextureData{
-		format: wgpu.TextureFormatDepth32Float,
-		sampler: Sampler{
-			AddressModeU:  wgpu.AddressModeClampToEdge,
-			AddressModeV:  wgpu.AddressModeClampToEdge,
-			AddressModeW:  wgpu.AddressModeClampToEdge,
-			MagFilter:     wgpu.FilterModeLinear,
-			MinFilter:     wgpu.FilterModeLinear,
-			MipmapFilter:  wgpu.MipmapFilterModeNearest,
-			LodMaxClamp:   32,
-			Compare:       wgpu.CompareFunctionLessEqual,
-			MaxAnisotropy: 1,
-		},
-	}
-	r.shadowMap.gpuRef = r.runtime.Device.CreateTexture(&wgpu.TextureDescriptor{
-		Label:         "Shadow Map Array",
-		Usage:         wgpu.TextureUsageRenderAttachment | wgpu.TextureUsageTextureBinding,
-		Dimension:     wgpu.TextureDimension2D,
-		Format:        wgpu.TextureFormatDepth32Float,
-		MipLevelCount: 1,
-		SampleCount:   1,
-		Size: wgpu.Extent3D{
-			Width:              DefaultShadowMapSize,
-			Height:             DefaultShadowMapSize,
-			DepthOrArrayLayers: MaxDirectionalLights + MaxSpotLights,
-		},
-	})
-	r.shadowMap.gpuView = r.shadowMap.gpuRef.CreateView(&wgpu.TextureViewDescriptor{
-		Format:          wgpu.TextureFormatDepth32Float,
-		Dimension:       wgpu.TextureViewDimension2DArray,
-		BaseMipLevel:    0,
-		MipLevelCount:   1,
-		BaseArrayLayer:  0,
-		ArrayLayerCount: MaxDirectionalLights + MaxSpotLights,
-		Aspect:          wgpu.TextureAspectDepthOnly,
-	})
-	r.shadowMap.gpuSampler = r.getOrCreateSampler(r.shadowMap.sampler)
-
-	for i := range r.shadowLayerViews {
-		r.shadowLayerViews[i] = r.shadowMap.gpuRef.CreateView(&wgpu.TextureViewDescriptor{
-			Format:          wgpu.TextureFormatDepth32Float,
-			Dimension:       wgpu.TextureViewDimension2D,
-			BaseMipLevel:    0,
-			MipLevelCount:   1,
-			BaseArrayLayer:  uint32(i),
-			ArrayLayerCount: 1,
-			Aspect:          wgpu.TextureAspectDepthOnly,
-		})
-	}
-
+	r.shadowArray = newDepthTextureArray(
+		r.runtime.Device,
+		DefaultShadowMapSize,
+		MaxDirectionalLights+MaxSpotLights,
+		wgpu.TextureViewDimension2DArray,
+	)
 	r.shadowMat = r.NewShadowMaterial()
 }
 
 func (r *Renderer) createPointShadowResources() {
-	r.pointShadowMap = &TextureData{
-		format: wgpu.TextureFormatDepth32Float,
-		sampler: Sampler{
-			AddressModeU:  wgpu.AddressModeClampToEdge,
-			AddressModeV:  wgpu.AddressModeClampToEdge,
-			AddressModeW:  wgpu.AddressModeClampToEdge,
-			MagFilter:     wgpu.FilterModeLinear,
-			MinFilter:     wgpu.FilterModeLinear,
-			MipmapFilter:  wgpu.MipmapFilterModeNearest,
-			LodMaxClamp:   32,
-			Compare:       wgpu.CompareFunctionLessEqual,
-			MaxAnisotropy: 1,
-		},
-	}
-	r.pointShadowMap.gpuRef = r.runtime.Device.CreateTexture(&wgpu.TextureDescriptor{
-		Label:         "Point Shadow Cube Array",
-		Usage:         wgpu.TextureUsageRenderAttachment | wgpu.TextureUsageTextureBinding,
-		Dimension:     wgpu.TextureDimension2D,
-		Format:        wgpu.TextureFormatDepth32Float,
-		MipLevelCount: 1,
-		SampleCount:   1,
-		Size: wgpu.Extent3D{
-			Width:              DefaultShadowMapSize,
-			Height:             DefaultShadowMapSize,
-			DepthOrArrayLayers: MaxPointLights * 6,
-		},
-	})
-	r.pointShadowMap.gpuView = r.pointShadowMap.gpuRef.CreateView(&wgpu.TextureViewDescriptor{
-		Format:          wgpu.TextureFormatDepth32Float,
-		Dimension:       wgpu.TextureViewDimensionCubeArray,
-		BaseMipLevel:    0,
-		MipLevelCount:   1,
-		BaseArrayLayer:  0,
-		ArrayLayerCount: MaxPointLights * 6,
-		Aspect:          wgpu.TextureAspectDepthOnly,
-	})
-	r.pointShadowMap.gpuSampler = r.getOrCreateSampler(r.pointShadowMap.sampler)
-
-	for i := range r.pointShadowLayerViews {
-		r.pointShadowLayerViews[i] = r.pointShadowMap.gpuRef.CreateView(&wgpu.TextureViewDescriptor{
-			Format:          wgpu.TextureFormatDepth32Float,
-			Dimension:       wgpu.TextureViewDimension2D,
-			BaseMipLevel:    0,
-			MipLevelCount:   1,
-			BaseArrayLayer:  uint32(i),
-			ArrayLayerCount: 1,
-			Aspect:          wgpu.TextureAspectDepthOnly,
-		})
-	}
-
+	r.pointShadowArray = newDepthTextureArray(
+		r.runtime.Device,
+		DefaultShadowMapSize,
+		MaxPointLights*6,
+		wgpu.TextureViewDimensionCubeArray,
+	)
 	r.pointShadowMat = r.NewPointShadowMaterial()
 }
 
@@ -1057,20 +961,129 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 		},
 	})
 
+	matSize := uint64(unsafe.Sizeof(glm.Mat4f{}))
 	r.instanceStorageBindGroupLayout = r.runtime.Device.CreateBindGroupLayout(wgpu.BindGroupLayoutDescriptor{
 		Label: "Instance/Model Bind Group Layout",
 		Entries: []wgpu.BindGroupLayoutEntry{
 			{
-				Binding:    InstancesBinding,
+				Binding:    ModelsBinding,
 				Visibility: wgpu.ShaderStageVertex | wgpu.ShaderStageFragment,
 				Buffer: wgpu.BufferBindingLayout{
 					Type:             wgpu.BufferBindingTypeReadOnlyStorage,
 					HasDynamicOffset: false,
-					MinBindingSize:   uint64(unsafe.Sizeof(InstanceUniform{})),
+					MinBindingSize:   matSize,
+				},
+			},
+			{
+				Binding:    InvModelsBinding,
+				Visibility: wgpu.ShaderStageVertex | wgpu.ShaderStageFragment,
+				Buffer: wgpu.BufferBindingLayout{
+					Type:             wgpu.BufferBindingTypeReadOnlyStorage,
+					HasDynamicOffset: false,
+					MinBindingSize:   matSize,
 				},
 			},
 		},
 	})
+}
+
+// createInstancedBindGroup creates a bind group backed by the given per-InstancedMesh buffers.
+func (r *Renderer) createInstancedBindGroup(modelBuf, invModelBuf *wgpu.Buffer) *wgpu.BindGroup {
+	return r.runtime.Device.CreateBindGroup(wgpu.BindGroupDescriptor{
+		Label:  "InstancedMesh bind group",
+		Layout: r.instanceStorageBindGroupLayout,
+		Entries: []wgpu.BindGroupEntry{
+			{Binding: ModelsBinding, Buffer: modelBuf, Offset: 0, Size: wgpu.WholeSize},
+			{Binding: InvModelsBinding, Buffer: invModelBuf, Offset: 0, Size: wgpu.WholeSize},
+		},
+	})
+}
+
+// instanceBindGroupFor returns the bind group for the instance set of the drawing:
+// the private per-mesh buffer for instanced draws, the shared objectsBuf otherwise.
+func (r *Renderer) instanceBindGroupFor(d drawing) *wgpu.BindGroup {
+	if d.isInstanced {
+		return r.instancedGPUResources[d.ownerNode].gpuBindGrp
+	}
+	return r.objectsBindGrp
+}
+
+// syncMeshInstances uploads the world/worldInv matrices for all scene nodes into
+// the shared model/invModel buffers. Called only when scene transforms are dirty.
+func (r *Renderer) syncMeshInstances(scene *Scene) {
+	need := uint32(len(scene.flags))
+	r.ensureObjectsCap(need)
+	r.runtime.Queue.WriteBuffer(r.modelBuf, 0, wgpu.ToBytes(scene.world[:need]))
+	r.runtime.Queue.WriteBuffer(r.invModelBuf, 0, wgpu.ToBytes(scene.worldInv[:need]))
+}
+
+// syncInstancedMeshes ensures each InstancedMesh has an up-to-date private GPU
+// buffer containing the combined world×local matrices for all instances.
+func (r *Renderer) syncInstancedMeshes(scene *Scene) {
+	for i := range scene.instancedMeshes {
+		imd := &scene.instancedMeshes[i]
+		nodeWorld := scene.world[imd.ownerNode]
+
+		worldChanged := nodeWorld != imd.cachedWorld
+		if worldChanged {
+			imd.cachedWorld = nodeWorld
+		}
+
+		gpu, exists := r.instancedGPUResources[imd.ownerNode]
+		count := uint32(len(imd.matrices))
+		matBufSize := uint64(count) * uint64(unsafe.Sizeof(glm.Mat4f{}))
+
+		if !exists || gpu.gpuModelBuf.GetSize() < matBufSize {
+			if exists {
+				gpu.gpuBindGrp.Release()
+				gpu.gpuModelBuf.Destroy()
+				gpu.gpuInvModelBuf.Destroy()
+			}
+			modelBuf := r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
+				Label: "InstancedMesh model buffer",
+				Size:  matBufSize,
+				Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst,
+			})
+			invModelBuf := r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
+				Label: "InstancedMesh invModel buffer",
+				Size:  matBufSize,
+				Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst,
+			})
+			gpu = &instancedGPUData{
+				gpuModelBuf:    modelBuf,
+				gpuInvModelBuf: invModelBuf,
+				gpuBindGrp:     r.createInstancedBindGroup(modelBuf, invModelBuf),
+			}
+			r.instancedGPUResources[imd.ownerNode] = gpu
+		}
+
+		if !exists || imd.dirty || worldChanged {
+			models := make([]glm.Mat4f, count)
+			invModels := make([]glm.Mat4f, count)
+			for j, localMat := range imd.matrices {
+				world := nodeWorld.Mul4x4(localMat)
+				models[j] = world
+				invModels[j] = world.Inv()
+			}
+			r.runtime.Queue.WriteBuffer(gpu.gpuModelBuf, 0, wgpu.ToBytes(models))
+			r.runtime.Queue.WriteBuffer(gpu.gpuInvModelBuf, 0, wgpu.ToBytes(invModels))
+			imd.dirty = false
+		}
+	}
+
+	// Release GPU resources for InstancedMesh nodes that have been destroyed.
+	alive := make(map[uint32]struct{}, len(scene.instancedMeshes))
+	for _, imd := range scene.instancedMeshes {
+		alive[imd.ownerNode] = struct{}{}
+	}
+	for ownerNode, gpu := range r.instancedGPUResources {
+		if _, ok := alive[ownerNode]; !ok {
+			gpu.gpuBindGrp.Release()
+			gpu.gpuModelBuf.Destroy()
+			gpu.gpuInvModelBuf.Destroy()
+			delete(r.instancedGPUResources, ownerNode)
+		}
+	}
 }
 
 func (r *Renderer) createGlobalBuffers() {
@@ -1086,7 +1099,8 @@ func (r *Renderer) createGlobalBuffers() {
 		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
 	})
 
-	r.ensureInstanceStorageSize(InitialStorageCapacity)
+	r.instancedGPUResources = make(map[uint32]*instancedGPUData)
+	r.ensureObjectsCap(InitialStorageCapacity)
 }
 
 func (r *Renderer) createGlobalBindGroups() {
@@ -1108,40 +1122,26 @@ func (r *Renderer) createGlobalBindGroups() {
 			},
 			{
 				Binding:     ShadowMapBinding,
-				TextureView: r.shadowMap.gpuView,
+				TextureView: r.shadowArray.ArrayView(),
 			},
 			{
 				Binding: ShadowSamplerBinding,
-				Sampler: r.shadowMap.gpuSampler,
+				Sampler: r.shadowArray.Sampler(),
 			},
 			{
 				Binding:     PointShadowMapBinding,
-				TextureView: r.pointShadowMap.gpuView,
+				TextureView: r.pointShadowArray.ArrayView(),
 			},
 		},
 	})
-}
-
-// appendInstances adds the InstanceUniform entries for a drawing to the slice.
-// For regular meshes (instMatrices == nil) it appends one entry; for instanced
-// meshes it appends one entry per instance (world = instWorldTransform × localMat).
-func appendInstances(instances InstancesUniform, d *drawing) InstancesUniform {
-	if d.instMatrices == nil {
-		return append(instances, InstanceUniform{d.model, d.modelInv})
-	}
-	for _, localMat := range d.instMatrices {
-		world := d.instWorldTransform.Mul4x4(localMat)
-		worldInv := world.Inv()
-		instances = append(instances, InstanceUniform{world, worldInv})
-	}
-	return instances
 }
 
 // collectRenderList populates list by iterating the scene's compact payload tables
 // directly, avoiding a full tree traversal. No frustum culling is applied here;
 // call cull separately for each frustum.
 func (r *Renderer) collectRenderList(list *renderList, scene *Scene) {
-	for _, md := range scene.meshes {
+	for i := range scene.meshes {
+		md := &scene.meshes[i]
 		flags := scene.GetFlags(md.ownerNode)
 		if !flags.IsAlive() || !flags.IsVisible() {
 			continue
@@ -1151,15 +1151,15 @@ func (r *Renderer) collectRenderList(list *renderList, scene *Scene) {
 		localCenter := md.boundingSphere.Center
 		worldCenter := model.Mul4x1(glm.Vec4f{localCenter[0], localCenter[1], localCenter[2], 1})
 		d := drawing{
+			instanceId:    md.ownerNode,
 			instanceCount: 1,
 			geo:           r.geometries.get(md.geometry.ref.ID()),
 			mat:           r.materials.get(md.material.ref.ID()),
-			model:         model,
-			modelInv:      scene.GetWorldTransformInv(md.ownerNode),
 			bounds: Sphere{
 				Center: glm.Vec3f{worldCenter[0], worldCenter[1], worldCenter[2]},
 				Radius: md.boundingSphere.Radius,
 			},
+			pipelines: &md.pipelines,
 		}
 
 		if flags.CastShadow() {
@@ -1168,7 +1168,8 @@ func (r *Renderer) collectRenderList(list *renderList, scene *Scene) {
 		list.visible = append(list.visible, d)
 	}
 
-	for _, imd := range scene.instancedMeshes {
+	for i := range scene.instancedMeshes {
+		imd := &scene.instancedMeshes[i]
 		flags := scene.GetFlags(imd.ownerNode)
 		if !flags.IsAlive() || !flags.IsVisible() || len(imd.matrices) == 0 {
 			continue
@@ -1195,12 +1196,14 @@ func (r *Renderer) collectRenderList(list *renderList, scene *Scene) {
 		}
 
 		d := drawing{
-			instanceCount:      uint32(len(imd.matrices)),
-			geo:                geo,
-			mat:                r.materials.get(imd.material.ref.ID()),
-			bounds:             Sphere{Center: center, Radius: maxDist + geoBounds.Radius},
-			instMatrices:       imd.matrices,
-			instWorldTransform: worldTransform,
+			instanceId:    0,
+			instanceCount: uint32(len(imd.matrices)),
+			geo:           geo,
+			mat:           r.materials.get(imd.material.ref.ID()),
+			bounds:        Sphere{Center: center, Radius: maxDist + geoBounds.Radius},
+			ownerNode:     imd.ownerNode,
+			isInstanced:   true,
+			pipelines:     &imd.pipelines,
 		}
 
 		if flags.CastShadow() {

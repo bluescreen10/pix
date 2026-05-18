@@ -3,7 +3,6 @@ package pix
 import (
 	"unsafe"
 
-	"github.com/bluescreen10/dawn-go/wgpu"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -66,17 +65,6 @@ type CameraUniform struct {
 
 func (u *CameraUniform) Bytes() []byte {
 	return toBytes(u)
-}
-
-type InstanceUniform struct {
-	Model    glm.Mat4f
-	InvModel glm.Mat4f
-}
-
-type InstancesUniform []InstanceUniform
-
-func (u InstancesUniform) Bytes() []byte {
-	return wgpu.ToBytes(u)
 }
 
 func toBytes[T any](v *T) []byte {

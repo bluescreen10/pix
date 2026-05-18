@@ -383,14 +383,16 @@ func (s *Scene) flushTopoIfDirty() {
 }
 
 // UpdateTransforms recomputes local and world matrices for all dirty nodes in
-// topological order. Must be called before any render pass that reads world[].
-func (s *Scene) UpdateTransforms() {
+// topological order. Returns true if any node was updated.
+func (s *Scene) UpdateTransforms() bool {
 	s.flushTopoIfDirty()
 
+	anyDirty := false
 	for _, i := range s.topoOrder {
 		if s.flags[i]&flagDirty == 0 {
 			continue
 		}
+		anyDirty = true
 
 		s.local[i] = glm.Transform(s.scales[i], s.rotations[i], s.positions[i])
 
@@ -413,6 +415,7 @@ func (s *Scene) UpdateTransforms() {
 			child = s.nextSiblings[child.index]
 		}
 	}
+	return anyDirty
 }
 
 // UpdateVisibility propagates effectiveVisible flags in topological order.

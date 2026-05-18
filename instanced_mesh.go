@@ -1,6 +1,9 @@
 package pix
 
-import "github.com/bluescreen10/pix/glm"
+import (
+	"github.com/bluescreen10/dawn-go/wgpu"
+	"github.com/bluescreen10/pix/glm"
+)
 
 // InstancedMesh is a scene node that renders N copies of the same geometry and
 // material in a single draw call. Each instance has its own local transform set
@@ -9,10 +12,13 @@ import "github.com/bluescreen10/pix/glm"
 type InstancedMesh struct{ Node }
 
 type instancedMeshData struct {
-	geometry  Geometry
-	material  Material
-	matrices  []glm.Mat4f // per-instance local transforms
-	ownerNode uint32
+	geometry    Geometry
+	material    Material
+	matrices    []glm.Mat4f // per-instance local transforms
+	ownerNode   uint32
+	cachedWorld glm.Mat4f                            // node world transform at last GPU upload
+	dirty       bool                                 // matrices changed since last upload
+	pipelines   [numPipelineTypes]*wgpu.RenderPipeline
 }
 
 func (m InstancedMesh) data() *instancedMeshData {
@@ -22,9 +28,11 @@ func (m InstancedMesh) data() *instancedMeshData {
 // Count returns the number of instances.
 func (m InstancedMesh) Count() int { return len(m.data().matrices) }
 
-// SetMatrixAt sets the local transform for instance i.
+// SetMatrixAt sets the local transform for instance i and marks the mesh dirty.
 func (m InstancedMesh) SetMatrixAt(i int, mat glm.Mat4f) {
-	m.data().matrices[i] = mat
+	d := m.data()
+	d.matrices[i] = mat
+	d.dirty = true
 }
 
 // MatrixAt returns the local transform for instance i.
@@ -46,6 +54,7 @@ func (s *Scene) NewInstancedMesh(geo Geometry, mat Material, count int) Instance
 		material:  mat.Copy(),
 		matrices:  matrices,
 		ownerNode: id.index,
+		dirty:     true,
 	})
 	s.payload[id.index] = payloadIdx
 	return InstancedMesh{Node{scene: s, id: id}}

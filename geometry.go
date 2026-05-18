@@ -14,11 +14,10 @@ const (
 	UsePosFlag = GeometryFlags(1 << iota)
 	UseUVsFlag
 	UseNormal
+	UseInstancesFlag // set per-drawing for instanced meshes; not stored on GeometryData
 )
 
-// ShadowGeometryMask is the subset of geometry attributes consumed by the
-// shadow shader. Only these slots are included in the shadow pipeline vertex
-// layout, and only these flags contribute to the shadow pipeline cache key.
+// ShadowGeometryMask is the subset of geometry flags that affect shadow pipelines.
 const ShadowGeometryMask = UsePosFlag
 
 var attrNameToFlag = map[string]GeometryFlags{
@@ -31,6 +30,7 @@ var geometryFlagNames = map[int]string{
 	0: "USE_POSITION",
 	1: "USE_UV",
 	2: "USE_NORMAL",
+	3: "USE_INSTANCES",
 }
 
 type GeometryData struct {

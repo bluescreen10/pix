@@ -1,5 +1,7 @@
 package pix
 
+import "github.com/bluescreen10/dawn-go/wgpu"
+
 // Mesh is a typed node handle for renderable mesh nodes.
 // It embeds Node so all hierarchy and transform methods are available directly.
 type Mesh struct{ Node }
@@ -10,6 +12,7 @@ type meshData struct {
 	material       Material
 	boundingSphere Sphere
 	ownerNode      uint32
+	pipelines      [numPipelineTypes]*wgpu.RenderPipeline
 }
 
 func (m Mesh) data() *meshData {
@@ -29,6 +32,7 @@ func (m Mesh) SetMaterial(mat Material) {
 	newRef := mat.Copy()
 	md.material.Release()
 	md.material = newRef
+	md.pipelines[PipelineGeometry] = nil // material changed; geometry pipeline must be rebuilt
 }
 
 // BoundingSphere returns the world-space bounding sphere from the pre-computed local bounds.
