@@ -120,7 +120,10 @@ func (r *Renderer) uploadGeometry(geo *GeometryData) {
 			Contents: a.data,
 			Usage:    wgpu.BufferUsageVertex | wgpu.BufferUsageCopyDst,
 		})
-		geo.gpuBufs[i] = GeometryBuffer{loc: a.loc, buf: buf, version: a.version}
+		// Slot must be the sequential buffer index (position in the Buffers array),
+		// not the shader @location. For non-skinned meshes loc==i, but skin
+		// attributes live at loc=5,6 while occupying pipeline buffer slots 3,4.
+		geo.gpuBufs[i] = GeometryBuffer{loc: i, buf: buf, version: a.version}
 	}
 
 	geo.gpuVersion = geo.version

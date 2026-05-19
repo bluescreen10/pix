@@ -30,6 +30,20 @@ func NewSkeleton(bones []Bone) *Skeleton {
 	}
 }
 
+// NewSkeletonWithInvBindMats creates a skeleton with pre-computed inverse bind matrices,
+// bypassing the Bind() step. Use this when loading from files (e.g. GLTF) that store
+// the matrices directly.
+func NewSkeletonWithInvBindMats(bones []Bone, invBindMats []glm.Mat4f) *Skeleton {
+	if len(invBindMats) != len(bones) {
+		panic("skeleton: bone count and inverse bind matrix count must match")
+	}
+	return &Skeleton{
+		bones:        append([]Bone(nil), bones...),
+		invBindMats:  append([]glm.Mat4f(nil), invBindMats...),
+		boneMatrices: make([]glm.Mat4f, len(bones)),
+	}
+}
+
 // Bind captures the current world transform of each bone as the bind pose.
 // Call this after positioning the skeleton in its rest pose, before any animation.
 func (sk *Skeleton) Bind(scene *Scene) {
