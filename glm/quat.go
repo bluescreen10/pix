@@ -121,6 +121,40 @@ func QuatIdentity[T number]() Quat[T] {
 	return Quat[T]{0, 0, 0, 1}
 }
 
+func (q Quat[T]) Dot(q2 Quat[T]) T {
+	return q[0]*q2[0] + q[1]*q2[1] + q[2]*q2[2] + q[3]*q2[3]
+}
+
+func (q Quat[T]) Normalize() Quat[T] {
+	switch any(q[0]).(type) {
+	case float32:
+		inv := T(1.0 / math32.Sqrt(float32(q.Dot(q))))
+		return Quat[T]{q[0] * inv, q[1] * inv, q[2] * inv, q[3] * inv}
+	default:
+		inv := T(1.0 / math.Sqrt(float64(q.Dot(q))))
+		return Quat[T]{q[0] * inv, q[1] * inv, q[2] * inv, q[3] * inv}
+	}
+}
+
+// Slerp interpolates between two unit quaternions by t ∈ [0,1].
+func Slerp(q1, q2 Quatf, t float32) Quatf {
+	cos := q1.Dot(q2)
+	if cos < 0 {
+		q2 = Quatf{-q2[0], -q2[1], -q2[2], -q2[3]}
+		cos = -cos
+	}
+	if cos > 0.9995 {
+		r := Quatf{q1[0] + t*(q2[0]-q1[0]), q1[1] + t*(q2[1]-q1[1]), q1[2] + t*(q2[2]-q1[2]), q1[3] + t*(q2[3]-q1[3])}
+		return r.Normalize()
+	}
+	theta0 := math32.Acos(cos)
+	theta := theta0 * t
+	sinT, sinT0 := math32.Sin(theta), math32.Sin(theta0)
+	s1 := math32.Cos(theta) - cos*sinT/sinT0
+	s2 := sinT / sinT0
+	return Quatf{s1*q1[0] + s2*q2[0], s1*q1[1] + s2*q2[1], s1*q1[2] + s2*q2[2], s1*q1[3] + s2*q2[3]}
+}
+
 // aliases
 type Quatf = Quat[float32]
 

@@ -96,6 +96,19 @@ func (r *Renderer) uploadGeometry(geo *GeometryData) {
 		})
 		geo.gpuCount = len(geo.indices)
 		geo.gpuIndex = buf
+
+		// Build a line-list index buffer for wireframe: each triangle emits 3 edges.
+		wireIdx := make([]uint32, 0, len(geo.indices)*2)
+		for i := 0; i+2 < len(geo.indices); i += 3 {
+			i0, i1, i2 := geo.indices[i], geo.indices[i+1], geo.indices[i+2]
+			wireIdx = append(wireIdx, i0, i1, i1, i2, i2, i0)
+		}
+		geo.gpuWireframeCount = len(wireIdx)
+		geo.gpuWireframeIndex = r.runtime.Device.CreateBufferInit(wgpu.BufferInitDescriptor{
+			Label:    "wireframe index buffer",
+			Contents: wgpu.ToBytes(wireIdx),
+			Usage:    wgpu.BufferUsageIndex | wgpu.BufferUsageCopyDst,
+		})
 	} else if len(geo.attrs) > 0 {
 		geo.gpuCount = geo.attrs[0].len
 	}

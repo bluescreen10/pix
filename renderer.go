@@ -29,6 +29,7 @@ const (
 	GlobalSet = iota
 	MaterialSet
 	InstanceSet
+	SkeletonSet // only present in skinned-mesh pipelines
 )
 
 // Global Bindings
@@ -73,6 +74,12 @@ type instancedGPUData struct {
 	gpuBindGrp     *wgpu.BindGroup
 }
 
+// skeletonGPUData holds the bone matrix buffer and bind group for one Skeleton.
+type skeletonGPUData struct {
+	gpuBuf    *wgpu.Buffer
+	bindGroup *wgpu.BindGroup
+}
+
 type renderContext struct {
 	texture         *wgpu.Texture
 	view            *wgpu.TextureView
@@ -115,6 +122,10 @@ type Renderer struct {
 
 	// Per-InstancedMesh GPU resources, keyed by ownerNode.
 	instancedGPUResources map[uint32]*instancedGPUData
+
+	// Skeleton GPU resources (bone matrix buffer + bind group), keyed by skeleton pointer.
+	skeletonBGL *wgpu.BindGroupLayout
+	skeletonGPU map[*Skeleton]*skeletonGPUData
 
 	// shadow (directional + spot) — 2D depth array, one layer per shadow
 	shadowArray *TextureArray
@@ -168,6 +179,17 @@ func (r *Renderer) Destroy() {
 		gpu.gpuInvModelBuf.Destroy()
 	}
 	r.instancedGPUResources = nil
+
+	for _, gpu := range r.skeletonGPU {
+		gpu.bindGroup.Release()
+		gpu.gpuBuf.Destroy()
+	}
+	r.skeletonGPU = nil
+
+	if r.skeletonBGL != nil {
+		r.skeletonBGL.Release()
+		r.skeletonBGL = nil
+	}
 
 	if r.objectsBindGrp != nil {
 		r.objectsBindGrp.Release()
@@ -336,6 +358,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 		r.syncMeshInstances(scene)
 	}
 	r.syncInstancedMeshes(scene)
+	r.syncSkeletons(scene)
 
 	list.visible = cull(frustum, list.visible, list.visible[:0])
 
@@ -486,6 +509,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	var curPipeline *wgpu.RenderPipeline
 	var curMatBG *wgpu.BindGroup
 	var curInstBG *wgpu.BindGroup
+	var curSkelBG *wgpu.BindGroup
 
 	for _, d := range list.visible {
 		if d.pipelines[PipelineGeometry] == nil {
@@ -502,6 +526,12 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 		if instBG := r.instanceBindGroupFor(d); instBG != curInstBG {
 			renderPass.SetBindGroup(InstanceSet, instBG, nil)
 			curInstBG = instBG
+		}
+		if d.skeleton != nil {
+			if skelBG := r.skeletonGPU[d.skeleton].bindGroup; skelBG != curSkelBG {
+				renderPass.SetBindGroup(SkeletonSet, skelBG, nil)
+				curSkelBG = skelBG
+			}
 		}
 		drawGeometry(renderPass, d)
 	}
@@ -554,6 +584,7 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, drawing
 
 	var curPipeline *wgpu.RenderPipeline
 	var curInstBG *wgpu.BindGroup
+	var curSkelBG *wgpu.BindGroup
 
 	for _, d := range drawings {
 		if d.pipelines[PipelineShadow] == nil {
@@ -567,6 +598,12 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, drawing
 		if instBG := r.instanceBindGroupFor(d); instBG != curInstBG {
 			pass.SetBindGroup(1, instBG, nil)
 			curInstBG = instBG
+		}
+		if d.skeleton != nil {
+			if skelBG := r.skeletonGPU[d.skeleton].bindGroup; skelBG != curSkelBG {
+				pass.SetBindGroup(2, skelBG, nil)
+				curSkelBG = skelBG
+			}
 		}
 		drawGeometry(pass, d)
 	}
@@ -634,6 +671,7 @@ func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f,
 
 			var curPipeline *wgpu.RenderPipeline
 			var curInstBG *wgpu.BindGroup
+			var curSkelBG *wgpu.BindGroup
 
 			for _, d := range casters {
 				if d.pipelines[PipelinePointShadow] == nil {
@@ -647,6 +685,12 @@ func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f,
 				if instBG := r.instanceBindGroupFor(d); instBG != curInstBG {
 					pass.SetBindGroup(1, instBG, nil)
 					curInstBG = instBG
+				}
+				if d.skeleton != nil {
+					if skelBG := r.skeletonGPU[d.skeleton].bindGroup; skelBG != curSkelBG {
+						pass.SetBindGroup(2, skelBG, nil)
+						curSkelBG = skelBG
+					}
 				}
 				drawGeometry(pass, d)
 			}
@@ -662,11 +706,21 @@ func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f,
 }
 
 
+func primitiveTopologyFor(mat *MaterialData) wgpu.PrimitiveTopology {
+	if mat.flags&WireframeFlag != 0 {
+		return wgpu.PrimitiveTopologyLineList
+	}
+	return wgpu.PrimitiveTopologyTriangleList
+}
+
 func drawGeometry(pass *wgpu.RenderPassEncoder, d drawing) {
 	for _, b := range d.geo.gpuBufs {
 		pass.SetVertexBuffer(uint32(b.loc), b.buf, 0, wgpu.WholeSize)
 	}
-	if d.geo.gpuIndex != nil {
+	if d.mat.flags&WireframeFlag != 0 && d.geo.gpuWireframeIndex != nil {
+		pass.SetIndexBuffer(d.geo.gpuWireframeIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
+		pass.DrawIndexed(uint32(d.geo.gpuWireframeCount), d.instanceCount, 0, 0, d.instanceId)
+	} else if d.geo.gpuIndex != nil {
 		pass.SetIndexBuffer(d.geo.gpuIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
 		pass.DrawIndexed(uint32(d.geo.gpuCount), d.instanceCount, 0, 0, d.instanceId)
 	} else {
@@ -773,17 +827,20 @@ func (r *Renderer) createPipeline(mat *MaterialData, geo *GeometryData, renderTa
 		}
 	}
 
-	layout := r.runtime.Device.CreatePipelineLayout(wgpu.PipelineLayoutDescriptor{
-		BindGroupLayouts: bindGroupLayouts,
-	})
-	defer layout.Release()
-
 	geoFlags := geo.flags
 	vertexLayout := geo.gpuLayout
 	if shadow {
 		geoFlags = geo.flags & ShadowGeometryMask
 		vertexLayout = geo.gpuShadowLayout
 	}
+	if geoFlags&UseSkinningFlag != 0 {
+		bindGroupLayouts = append(bindGroupLayouts, r.skeletonBGL)
+	}
+
+	layout := r.runtime.Device.CreatePipelineLayout(wgpu.PipelineLayoutDescriptor{
+		BindGroupLayouts: bindGroupLayouts,
+	})
+	defer layout.Release()
 
 	defines := buildDefines(mat.flags, geoFlags)
 
@@ -840,7 +897,7 @@ func (r *Renderer) createPipeline(mat *MaterialData, geo *GeometryData, renderTa
 		},
 		Fragment: fragmentState,
 		Primitive: wgpu.PrimitiveState{
-			Topology:  wgpu.PrimitiveTopologyTriangleList,
+			Topology:  primitiveTopologyFor(mat),
 			FrontFace: wgpu.FrontFaceCCW,
 			CullMode:  mat.side.ToWGPU(),
 		},
@@ -959,6 +1016,19 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 				},
 			},
 		},
+	})
+
+	r.skeletonBGL = r.runtime.Device.CreateBindGroupLayout(wgpu.BindGroupLayoutDescriptor{
+		Label: "Skeleton Bind Group Layout",
+		Entries: []wgpu.BindGroupLayoutEntry{{
+			Binding:    0,
+			Visibility: wgpu.ShaderStageVertex,
+			Buffer: wgpu.BufferBindingLayout{
+				Type:             wgpu.BufferBindingTypeReadOnlyStorage,
+				HasDynamicOffset: false,
+				MinBindingSize:   uint64(unsafe.Sizeof(glm.Mat4f{})),
+			},
+		}},
 	})
 
 	matSize := uint64(unsafe.Sizeof(glm.Mat4f{}))
@@ -1086,6 +1156,47 @@ func (r *Renderer) syncInstancedMeshes(scene *Scene) {
 	}
 }
 
+// syncSkeletons recomputes and uploads bone matrices for all skeletons referenced
+// by the scene's skinned meshes.
+func (r *Renderer) syncSkeletons(scene *Scene) {
+	seen := make(map[*Skeleton]struct{}, len(scene.skinnedMeshes))
+	for _, smd := range scene.skinnedMeshes {
+		sk := smd.skeleton
+		if sk == nil {
+			continue
+		}
+		if _, already := seen[sk]; already {
+			continue
+		}
+		seen[sk] = struct{}{}
+
+		sk.update(scene)
+		needed := uint64(len(sk.boneMatrices)) * uint64(unsafe.Sizeof(glm.Mat4f{}))
+		gpu, exists := r.skeletonGPU[sk]
+		if !exists || gpu.gpuBuf.GetSize() < needed {
+			if exists {
+				gpu.bindGroup.Release()
+				gpu.gpuBuf.Destroy()
+			}
+			buf := r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
+				Label: "Skeleton bone buffer",
+				Size:  needed,
+				Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst,
+			})
+			bg := r.runtime.Device.CreateBindGroup(wgpu.BindGroupDescriptor{
+				Label:  "Skeleton bind group",
+				Layout: r.skeletonBGL,
+				Entries: []wgpu.BindGroupEntry{{
+					Binding: 0, Buffer: buf, Offset: 0, Size: wgpu.WholeSize,
+				}},
+			})
+			gpu = &skeletonGPUData{gpuBuf: buf, bindGroup: bg}
+			r.skeletonGPU[sk] = gpu
+		}
+		r.runtime.Queue.WriteBuffer(gpu.gpuBuf, 0, wgpu.ToBytes(sk.boneMatrices))
+	}
+}
+
 func (r *Renderer) createGlobalBuffers() {
 	r.cameraUniformBuffer = r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
 		Label: "Camera uniform buffer",
@@ -1100,6 +1211,7 @@ func (r *Renderer) createGlobalBuffers() {
 	})
 
 	r.instancedGPUResources = make(map[uint32]*instancedGPUData)
+	r.skeletonGPU = make(map[*Skeleton]*skeletonGPUData)
 	r.ensureObjectsCap(InitialStorageCapacity)
 }
 
@@ -1206,6 +1318,30 @@ func (r *Renderer) collectRenderList(list *renderList, scene *Scene) {
 			pipelines:     &imd.pipelines,
 		}
 
+		if flags.CastShadow() {
+			list.shadowCasters = append(list.shadowCasters, d)
+		}
+		list.visible = append(list.visible, d)
+	}
+
+	for i := range scene.skinnedMeshes {
+		smd := &scene.skinnedMeshes[i]
+		flags := scene.GetFlags(smd.ownerNode)
+		if !flags.IsAlive() || !flags.IsVisible() {
+			continue
+		}
+		model := scene.GetWorldTransform(smd.ownerNode)
+		lc := smd.boundingSphere.Center
+		wc := model.Mul4x1(glm.Vec4f{lc[0], lc[1], lc[2], 1})
+		d := drawing{
+			instanceId:    smd.ownerNode,
+			instanceCount: 1,
+			geo:           r.geometries.get(smd.geometry.ref.ID()),
+			mat:           r.materials.get(smd.material.ref.ID()),
+			bounds:        Sphere{Center: glm.Vec3f{wc[0], wc[1], wc[2]}, Radius: smd.boundingSphere.Radius},
+			pipelines:     &smd.pipelines,
+			skeleton:      smd.skeleton,
+		}
 		if flags.CastShadow() {
 			list.shadowCasters = append(list.shadowCasters, d)
 		}

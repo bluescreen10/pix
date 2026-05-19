@@ -12,6 +12,16 @@ func (m *BlinnPhongMaterial) data() *MaterialData {
 	return m.renderer.materials.get(m.ref.ID())
 }
 
+func (m *BlinnPhongMaterial) Wireframe() bool { return m.data().flags&WireframeFlag != 0 }
+func (m *BlinnPhongMaterial) SetWireframe(v bool) {
+	d := m.data()
+	if v {
+		d.flags |= WireframeFlag
+	} else {
+		d.flags &^= WireframeFlag
+	}
+}
+
 func (m *BlinnPhongMaterial) SetColor(color glm.Color3f) {
 	data := m.data()
 	data.uniforms[0].SetVec3("color", glm.Vec3f{color[0], color[1], color[2]})

@@ -15,15 +15,18 @@ const (
 	UseUVsFlag
 	UseNormal
 	UseInstancesFlag // set per-drawing for instanced meshes; not stored on GeometryData
+	UseSkinningFlag  // geometry has JOINTS_0 and WEIGHTS_0 vertex attributes
 )
 
 // ShadowGeometryMask is the subset of geometry flags that affect shadow pipelines.
-const ShadowGeometryMask = UsePosFlag
+const ShadowGeometryMask = UsePosFlag | UseSkinningFlag
 
 var attrNameToFlag = map[string]GeometryFlags{
-	PositionAttrName: UsePosFlag,
-	UVAttrName:       UseUVsFlag,
-	NormalAttrName:   UseNormal,
+	PositionAttrName:  UsePosFlag,
+	UVAttrName:        UseUVsFlag,
+	NormalAttrName:    UseNormal,
+	SkinIndexAttrName: UseSkinningFlag,
+	SkinWeightAttrName: UseSkinningFlag,
 }
 
 var geometryFlagNames = map[int]string{
@@ -31,6 +34,7 @@ var geometryFlagNames = map[int]string{
 	1: "USE_UV",
 	2: "USE_NORMAL",
 	3: "USE_INSTANCES",
+	4: "USE_SKINNING",
 }
 
 type GeometryData struct {
@@ -44,12 +48,14 @@ type GeometryData struct {
 	boundingSphere        Sphere
 
 	// GPU-side resources, populated by the renderer.
-	gpuVersion      int
-	gpuIndex        *wgpu.Buffer
-	gpuBufs         []GeometryBuffer
-	gpuCount        int
-	gpuLayout       []wgpu.VertexBufferLayout
-	gpuShadowLayout []wgpu.VertexBufferLayout
+	gpuVersion           int
+	gpuIndex             *wgpu.Buffer
+	gpuWireframeIndex    *wgpu.Buffer // line-list index buffer derived from triangles
+	gpuBufs              []GeometryBuffer
+	gpuCount             int
+	gpuWireframeCount    int
+	gpuLayout            []wgpu.VertexBufferLayout
+	gpuShadowLayout      []wgpu.VertexBufferLayout
 }
 
 func (g *GeometryData) Indices() []uint32 {
@@ -139,6 +145,10 @@ func (g *GeometryData) Destroy() {
 	if g.gpuIndex != nil {
 		g.gpuIndex.Destroy()
 		g.gpuIndex = nil
+	}
+	if g.gpuWireframeIndex != nil {
+		g.gpuWireframeIndex.Destroy()
+		g.gpuWireframeIndex = nil
 	}
 	for _, gb := range g.gpuBufs {
 		if gb.buf != nil {

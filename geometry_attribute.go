@@ -17,6 +17,7 @@ const (
 	Float32x4
 
 	Uint32
+	Uint32x4
 )
 
 const (
@@ -25,12 +26,16 @@ const (
 	NormalLocation
 	TangentLocation
 	ColorLocation
+	SkinIndexLocation
+	SkinWeightLocation
 )
 
 const (
-	PositionAttrName = "position"
-	UVAttrName       = "uv"
-	NormalAttrName   = "normal"
+	PositionAttrName  = "position"
+	UVAttrName        = "uv"
+	NormalAttrName    = "normal"
+	SkinIndexAttrName = "JOINTS_0"
+	SkinWeightAttrName = "WEIGHTS_0"
 )
 
 var attributeTypeFor = map[AttributeType]wgpu.VertexFormat{
@@ -39,6 +44,7 @@ var attributeTypeFor = map[AttributeType]wgpu.VertexFormat{
 	Float32x3: wgpu.VertexFormatFloat32x3,
 	Float32x4: wgpu.VertexFormatFloat32x4,
 	Uint32:    wgpu.VertexFormatUint32,
+	Uint32x4:  wgpu.VertexFormatUint32x4,
 }
 
 func (t AttributeType) Size() int {
@@ -49,7 +55,7 @@ func (t AttributeType) Size() int {
 		return 8
 	case Float32x3:
 		return 12
-	case Float32x4:
+	case Float32x4, Uint32x4:
 		return 16
 	}
 	panic("attribute: unkown attribute type")

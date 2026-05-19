@@ -12,7 +12,8 @@ var matID idGen
 type MaterialFlags uint32
 
 const (
-	ColorMapFlag = MaterialFlags(1 << iota)
+	ColorMapFlag  = MaterialFlags(1 << iota)
+	WireframeFlag // changes pipeline topology to LineList; no shader define needed
 )
 
 var materialFlagNames = map[int]string{

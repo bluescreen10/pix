@@ -15,6 +15,8 @@ const (
 	KindAmbientLight
 	KindSpotLight
 	KindPointLight
+	KindBone
+	KindSkinnedMesh
 )
 
 // Node flags packed into flags[].
@@ -91,12 +93,13 @@ type Scene struct {
 	background glm.Color4f
 
 	// Kind-specific compact payload tables.
-	meshes         []meshData
+	meshes          []meshData
 	instancedMeshes []instancedMeshData
-	dirLights      []directionalLightData
-	ambientLights  []ambientLightData
-	spotLights     []spotLightData
-	pointLights    []pointLightData
+	skinnedMeshes   []skinnedMeshData
+	dirLights       []directionalLightData
+	ambientLights   []ambientLightData
+	spotLights      []spotLightData
+	pointLights     []pointLightData
 }
 
 func NewScene() *Scene {
@@ -287,6 +290,8 @@ func (s *Scene) destroyNode(id NodeID) {
 		s.swapRemoveSpotLight(s.payload[idx])
 	case KindPointLight:
 		s.swapRemovePointLight(s.payload[idx])
+	case KindSkinnedMesh:
+		s.swapRemoveSkinnedMesh(s.payload[idx])
 	}
 
 	s.flags[idx] &^= flagAlive
@@ -354,6 +359,17 @@ func (s *Scene) swapRemovePointLight(payloadIdx uint32) {
 		s.payload[s.pointLights[payloadIdx].ownerNode] = payloadIdx
 	}
 	s.pointLights = s.pointLights[:last]
+}
+
+func (s *Scene) swapRemoveSkinnedMesh(payloadIdx uint32) {
+	last := uint32(len(s.skinnedMeshes) - 1)
+	s.skinnedMeshes[payloadIdx].geometry.Release()
+	s.skinnedMeshes[payloadIdx].material.Release()
+	if payloadIdx < last {
+		s.skinnedMeshes[payloadIdx] = s.skinnedMeshes[last]
+		s.payload[s.skinnedMeshes[payloadIdx].ownerNode] = payloadIdx
+	}
+	s.skinnedMeshes = s.skinnedMeshes[:last]
 }
 
 // flushTopoIfDirty rebuilds topoOrder with a BFS from root (parent-before-child).
