@@ -2,13 +2,13 @@ package pix
 
 import (
 	"cmp"
+	"fmt"
 	"log/slog"
 	"math"
 	"math/bits"
 	"os"
 	"slices"
 	"sync"
-	"time"
 	"unsafe"
 
 	"github.com/bluescreen10/dawn-go/wgpu"
@@ -139,19 +139,26 @@ type Renderer struct {
 	depthTexture     *wgpu.Texture
 	depthTextureView *wgpu.TextureView
 
-	Stats   *RendererStats
-	shaders *wesl.Compiler
+	// debug text overlay
+	debugText      *debugTextRenderer
+	DebugTexts     []DebugText
+	DebugTextColor glm.Color4f
+
+	Stats     *RendererStats
+	showStats bool
+	shaders   *wesl.Compiler
 }
 
 func NewRenderer(width, height uint32) *Renderer {
 	return &Renderer{
-		width:         width,
-		height:        height,
-		logger:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
-		runtime:       &wgpuRuntime{},
-		Stats:         NewRendererStats(60),
-		pipelineCache: newPipelineCache(),
-		shaders:       wesl.New(),
+		width:          width,
+		height:         height,
+		logger:         slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		runtime:        &wgpuRuntime{},
+		Stats:          NewRendererStats(60),
+		pipelineCache:  newPipelineCache(),
+		shaders:        wesl.New(),
+		DebugTextColor: glm.Color4f{1, 1, 1, 1},
 	}
 }
 
@@ -166,10 +173,16 @@ func (r *Renderer) Init(descriptor wgpu.SurfaceDescriptor) error {
 		panic(err)
 	}
 	r.createGlobalResources()
+	r.initDebugText()
 	return nil
 }
 
 func (r *Renderer) Destroy() {
+	if r.debugText != nil {
+		r.debugText.destroy()
+		r.debugText = nil
+	}
+
 	r.runtime.Destroy()
 	r.runtime = nil
 
@@ -339,10 +352,13 @@ func (o *renderList) release() {
 
 func (r *Renderer) Render(scene *Scene, camera Camera) {
 	var ctx renderContext
+	r.Stats.StartFrame()
+	defer r.Stats.EndFrame()
+	if r.showStats {
+		r.DebugPrint(fmt.Sprintf("FPS %.1f", r.Stats.FPS()), glm.Vec2f{10, 10}, 32, glm.Color4f{0, 1, 0, 1})
+	}
 
 	r.acquireNextFrame(&ctx)
-	r.Stats.NextFrame()
-	start := time.Now()
 
 	transformsDirty := scene.UpdateTransforms()
 	scene.UpdateVisibility()
@@ -537,10 +553,25 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	}
 
 	r.endRendering(&ctx, renderPass)
-	r.Stats.AddFrameTime(time.Since(start).Seconds())
+
+	if r.debugText != nil && len(r.DebugTexts) > 0 {
+		r.debugText.render(r, &ctx, r.DebugTexts, r.DebugTextColor)
+	}
 
 	r.presentFrame(&ctx)
+	r.debugClear()
 	r.drainDeferredFree()
+}
+
+// DebugPrint adds a persistent text overlay at pixel position pos. Entries accumulate
+// across frames until DebugClear is called.
+func (r *Renderer) DebugPrint(text string, pos glm.Vec2f, size float32, color glm.Color4f) {
+	r.DebugTexts = append(r.DebugTexts, DebugText{Text: text, X: pos[0], Y: pos[1], Size: size, Color: color})
+}
+
+// DebugClear removes all debug text entries.
+func (r *Renderer) debugClear() {
+	r.DebugTexts = r.DebugTexts[:0]
 }
 
 func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, drawings []drawing) {
@@ -704,7 +735,6 @@ func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f,
 		encoder.Release()
 	}
 }
-
 
 func primitiveTopologyFor(mat *MaterialData) wgpu.PrimitiveTopology {
 	if mat.flags&WireframeFlag != 0 {
@@ -1170,7 +1200,7 @@ func (r *Renderer) syncSkeletons(scene *Scene) {
 		}
 		seen[sk] = struct{}{}
 
-		sk.update(scene)
+		sk.update(scene, smd.ownerNode)
 		needed := uint64(len(sk.boneMatrices)) * uint64(unsafe.Sizeof(glm.Mat4f{}))
 		gpu, exists := r.skeletonGPU[sk]
 		if !exists || gpu.gpuBuf.GetSize() < needed {
@@ -1414,4 +1444,8 @@ func buildDefines(matFlags MaterialFlags, geoFlags GeometryFlags) map[string]boo
 	}
 
 	return defines
+}
+
+func (r *Renderer) ShowFPS(bool) {
+	r.showStats = true
 }

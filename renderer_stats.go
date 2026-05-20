@@ -8,6 +8,8 @@ type RendererStats struct {
 
 	currentFrame int
 	maxSamples   int
+
+	start time.Time
 }
 
 func NewRendererStats(maxSamples int) *RendererStats {
@@ -18,16 +20,19 @@ func NewRendererStats(maxSamples int) *RendererStats {
 	}
 }
 
-func (s *RendererStats) AddFrameTime(frameTime float64) {
+func (s *RendererStats) StartFrame() {
+	s.currentFrame++
+	s.start = time.Now()
+
+}
+
+func (s *RendererStats) EndFrame() {
+	frameTime := time.Since(s.start).Seconds()
 	s.frameTimes[s.currentFrame%s.maxSamples] = frameTime
 }
 
 func (s *RendererStats) AddGPUTime(gpuTime float64) {
 	s.gpuTimes[s.currentFrame%s.maxSamples] = gpuTime
-}
-
-func (s *RendererStats) NextFrame() {
-	s.currentFrame++
 }
 
 func (s *RendererStats) FPS() float64 {

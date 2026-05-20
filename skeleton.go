@@ -1,6 +1,8 @@
 package pix
 
-import "github.com/bluescreen10/pix/glm"
+import (
+	"github.com/bluescreen10/pix/glm"
+)
 
 // Bone is a scene node that participates in skeletal animation.
 // It is a plain scene node (transforms driven by the animation system)
@@ -56,9 +58,12 @@ func (sk *Skeleton) Bind(scene *Scene) {
 func (sk *Skeleton) BoneCount() int { return len(sk.bones) }
 
 // update recomputes boneMatrices from the current bone world transforms.
-// Called by the renderer each frame before uploading to the GPU.
-func (sk *Skeleton) update(scene *Scene) {
+// meshSlot is the scene slot of the SkinnedMesh node; its inverse world matrix
+// cancels the model matrix applied by the shader so the formula
+// (boneWorld × invBind) is in mesh-local space as expected by the vertex shader.
+func (sk *Skeleton) update(scene *Scene, meshSlot uint32) {
+	meshWorldInv := scene.worldInv[meshSlot]
 	for i, b := range sk.bones {
-		sk.boneMatrices[i] = scene.world[b.slot()].Mul4x4(sk.invBindMats[i])
+		sk.boneMatrices[i] = meshWorldInv.Mul4x4(scene.world[b.slot()].Mul4x4(sk.invBindMats[i]))
 	}
 }

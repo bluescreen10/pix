@@ -408,6 +408,7 @@ type fbxBuilder struct {
 	nodeByID       map[int64]pix.Node   // populated by buildModels
 	preRotByID     map[int64]glm.Quatf  // PreRotation per node
 	postRotInvByID map[int64]glm.Quatf  // PostRotation^-1 per node
+	rotOrderByID   map[int64]int        // RotationOrder per node (0=XYZ, 4=ZXY, etc.)
 	deferredAnims  []deferredAnim       // resolved after buildModels
 }
 
@@ -417,6 +418,7 @@ func (b *fbxBuilder) build() (*FBXResult, error) {
 	b.parentToChildren = map[int64][]fbxConn{}
 	b.preRotByID = map[int64]glm.Quatf{}
 	b.postRotInvByID = map[int64]glm.Quatf{}
+	b.rotOrderByID = map[int64]int{}
 
 	b.indexObjects()
 	b.indexConnections()
@@ -540,12 +542,13 @@ func (b *fbxBuilder) buildModels(scene *pix.Scene) error {
 	// Apply transforms and store pre/post rotations for animation.
 	for _, obj := range models {
 		n := nodeByID[obj.id]
-		t, r, s, preRot, postRotInv := extractTransform(obj.rec)
+		t, r, s, preRot, postRotInv, rotOrd := extractTransform(obj.rec)
 		n.SetPosition(t)
 		n.SetRotationQuat(r)
 		n.SetScale(s)
 		b.preRotByID[obj.id] = preRot
 		b.postRotInvByID[obj.id] = postRotInv
+		b.rotOrderByID[obj.id] = rotOrd
 	}
 
 	// Wire up parent-child hierarchy.
@@ -559,48 +562,18 @@ func (b *fbxBuilder) buildModels(scene *pix.Scene) error {
 		}
 	}
 
-	// Build skeletons (one per Skin deformer).
-	skeletonByID := map[int64]*pix.Skeleton{}
+	// Build a map from bone model ID → the cluster that controls it (for TransformLink lookup).
+	// A cluster links to exactly one bone model via C: "OO", boneModelID, clusterID.
+	clusterByBoneModelID := map[int64]*fbxObject{}
 	for _, obj := range b.objects {
-		if obj.typ != "Deformer" || obj.class != "Skin" {
+		if obj.typ != "Deformer" || obj.class != "Cluster" {
 			continue
 		}
-		// Find the geometry this skin is attached to.
-		// Find the clusters.
-		clusters := b.childrenOfType(obj.id, "Deformer")
-
-		var bones []pix.Bone
-		var invBindMats []glm.Mat4f
-
-		for _, cluster := range clusters {
-			if cluster.class != "Cluster" {
-				continue
+		for _, conn := range b.parentToChildren[obj.id] {
+			if o, ok := b.objects[conn.childID]; ok && o.typ == "Model" {
+				clusterByBoneModelID[o.id] = obj
+				break
 			}
-			// Linked bone model.
-			var boneModel *fbxObject
-			for _, conn := range b.parentToChildren[cluster.id] {
-				if o, ok := b.objects[conn.childID]; ok && o.typ == "Model" {
-					boneModel = o
-					break
-				}
-			}
-			if boneModel == nil {
-				continue
-			}
-			bone, ok := boneByID[boneModel.id]
-			if !ok {
-				continue
-			}
-			bones = append(bones, bone)
-
-			// Inverse bind matrix = TransformLink.Inv()
-			ibm := extractMat4(cluster.rec, "TransformLink")
-			invBindMats = append(invBindMats, ibm.Inv())
-		}
-
-		if len(bones) > 0 {
-			sk := pix.NewSkeletonWithInvBindMats(bones, invBindMats)
-			skeletonByID[obj.id] = sk
 		}
 	}
 
@@ -636,10 +609,26 @@ func (b *fbxBuilder) buildModels(scene *pix.Scene) error {
 			}
 
 			groupNode := nodeByID[obj.id]
-			if skin != nil {
-				if sk, ok := skeletonByID[skin.id]; ok {
-					// Re-order skeleton bones to match clusterOrder if needed.
-					_ = clusterOrder
+			if skin != nil && len(clusterOrder) > 0 {
+				// Build the skeleton in the exact order clusterOrder specifies —
+				// that is the order bone indices were embedded into the vertex data.
+				var bones []pix.Bone
+				var invBindMats []glm.Mat4f
+				for _, boneModelID := range clusterOrder {
+					bone, ok := boneByID[boneModelID]
+					if !ok {
+						continue
+					}
+					cluster, ok := clusterByBoneModelID[boneModelID]
+					if !ok {
+						continue
+					}
+					ibm := extractMat4(cluster.rec, "TransformLink").Inv()
+					bones = append(bones, bone)
+					invBindMats = append(invBindMats, ibm)
+				}
+				if len(bones) > 0 {
+					sk := pix.NewSkeletonWithInvBindMats(bones, invBindMats)
 					sm := scene.NewSkinnedMesh(pixGeo, pixMat, sk)
 					groupNode.Add(sm)
 				} else {
@@ -1072,12 +1061,13 @@ func (b *fbxBuilder) resolveAnims() {
 		case strings.Contains(da.targetProp, "Rotation") || strings.Contains(da.targetProp, "R"):
 			preRot := b.preRotByID[da.targetID]
 			postRotInv := b.postRotInvByID[da.targetID]
+			rotOrd := b.rotOrderByID[da.targetID]
 			values := make([]glm.Quatf, len(da.times))
 			for i, t := range da.times {
 				rx := sampleLinear(da.xT, da.xV, t) * deg2rad
 				ry := sampleLinear(da.yT, da.yV, t) * deg2rad
 				rz := sampleLinear(da.zT, da.zV, t) * deg2rad
-				lclRot := glm.QuatFromEuler(rx, ry, rz)
+				lclRot := fbxEulerToQuat(rx, ry, rz, rotOrd)
 				values[i] = preRot.Mul(lclRot).Mul(postRotInv)
 			}
 			da.clip.Rotations = append(da.clip.Rotations, pix.RotationTrack{
@@ -1139,17 +1129,59 @@ const deg2radFBX = math.Pi / 180
 // from a node's Properties70. The returned rot already includes the pre/post bake so it
 // can be set directly as the node's bind-pose local rotation.
 // preRot and postRotInv are returned separately so animation tracks can apply the same bake.
-func extractTransform(rec *fbxRecord) (pos glm.Vec3f, rot glm.Quatf, scale glm.Vec3f, preRot, postRotInv glm.Quatf) {
+// fbxEulerToQuat converts FBX Euler angles (full angles, radians) to a quaternion
+// for OpenGL (column-vector) convention. FBX uses Maya's row-vector convention where
+// "XYZ" order means v*Rx*Ry*Rz, which in column-vector form is Rz*Ry*Rx — reversed.
+// FBX RotationOrder: 0=XYZ, 1=XZY, 2=YZX, 3=YXZ, 4=ZXY (Maya default), 5=ZYX.
+func fbxEulerToQuat(rx, ry, rz float32, order int) glm.Quatf {
+	sinX, cosX := math.Sincos(float64(rx) / 2)
+	sinY, cosY := math.Sincos(float64(ry) / 2)
+	sinZ, cosZ := math.Sincos(float64(rz) / 2)
+	qx := glm.Quatf{float32(sinX), 0, 0, float32(cosX)}
+	qy := glm.Quatf{0, float32(sinY), 0, float32(cosY)}
+	qz := glm.Quatf{0, 0, float32(sinZ), float32(cosZ)}
+	// FBX uses Maya's row-vector convention: "XYZ" means v*Rx*Ry*Rz.
+	// Converting to OpenGL column-vector (v'=M*v) reverses the order: q = qZ*qY*qX.
+	switch order {
+	case 0: // FBX "XYZ" → OpenGL q = qZ * qY * qX
+		return qz.Mul(qy).Mul(qx)
+	case 1: // FBX "XZY" → OpenGL q = qY * qZ * qX
+		return qy.Mul(qz).Mul(qx)
+	case 2: // FBX "YZX" → OpenGL q = qX * qZ * qY
+		return qx.Mul(qz).Mul(qy)
+	case 3: // FBX "YXZ" → OpenGL q = qZ * qX * qY
+		return qz.Mul(qx).Mul(qy)
+	case 4: // FBX "ZXY" (Maya default) → OpenGL q = qY * qX * qZ
+		return qy.Mul(qx).Mul(qz)
+	case 5: // FBX "ZYX" → OpenGL q = qX * qY * qZ
+		return qx.Mul(qy).Mul(qz)
+	default:
+		return qz.Mul(qy).Mul(qx)
+	}
+}
+
+func extractTransform(rec *fbxRecord) (pos glm.Vec3f, rot glm.Quatf, scale glm.Vec3f, preRot, postRotInv glm.Quatf, rotOrder int) {
 	scale = glm.Vec3f{1, 1, 1}
 	rot = glm.QuatIdentityf
 	preRot = glm.QuatIdentityf
 	postRotInv = glm.QuatIdentityf
 	var lclRot glm.Quatf = glm.QuatIdentityf
 	var postRot glm.Quatf = glm.QuatIdentityf
+	rotOrder = 0 // default XYZ
 
 	props70 := rec.child("Properties70")
 	if props70 == nil {
 		return
+	}
+	// First pass: read RotationOrder so we can apply it to Lcl Rotation
+	for _, p := range props70.children_("P") {
+		if len(p.props) < 5 {
+			continue
+		}
+		if p.props[0].String() == "RotationOrder" {
+			rotOrder = int(p.props[4].Int64())
+			break
+		}
 	}
 	for _, p := range props70.children_("P") {
 		if len(p.props) < 5 {
@@ -1167,7 +1199,7 @@ func extractTransform(rec *fbxRecord) (pos glm.Vec3f, rot glm.Quatf, scale glm.V
 			rx := float32(p.props[4].Float64()) * deg2radFBX
 			ry := float32(p.props[5].Float64()) * deg2radFBX
 			rz := float32(p.props[6].Float64()) * deg2radFBX
-			lclRot = glm.QuatFromEuler(rx, ry, rz)
+			lclRot = fbxEulerToQuat(rx, ry, rz, rotOrder)
 		case "Lcl Scaling":
 			scale = glm.Vec3f{
 				float32(p.props[4].Float64()),
@@ -1178,12 +1210,14 @@ func extractTransform(rec *fbxRecord) (pos glm.Vec3f, rot glm.Quatf, scale glm.V
 			rx := float32(p.props[4].Float64()) * deg2radFBX
 			ry := float32(p.props[5].Float64()) * deg2radFBX
 			rz := float32(p.props[6].Float64()) * deg2radFBX
-			preRot = glm.QuatFromEuler(rx, ry, rz)
+			// PreRotation always uses XYZ intrinsic regardless of RotationOrder.
+			preRot = fbxEulerToQuat(rx, ry, rz, 0)
 		case "PostRotation":
 			rx := float32(p.props[4].Float64()) * deg2radFBX
 			ry := float32(p.props[5].Float64()) * deg2radFBX
 			rz := float32(p.props[6].Float64()) * deg2radFBX
-			postRot = glm.QuatFromEuler(rx, ry, rz)
+			// PostRotation always uses XYZ intrinsic.
+			postRot = fbxEulerToQuat(rx, ry, rz, 0)
 		}
 	}
 
@@ -1206,12 +1240,10 @@ func extractMat4(rec *fbxRecord, childName string) glm.Mat4f {
 	for i := range m {
 		m[i] = float32(d[i])
 	}
-	// FBX is row-major; a direct copy into column-major puts the translation (row 3)
-	// at m[12..14] correctly by coincidence, but transposes the 3×3 rotation block.
-	// Fix: swap only the 3 off-diagonal pairs of the rotation submatrix.
-	m[1], m[4] = m[4], m[1]
-	m[2], m[8] = m[8], m[2]
-	m[6], m[9] = m[9], m[6]
+	// FBX stores matrices row-major in row-vector (Maya/DirectX) convention where
+	// R_fbx = Q^T. Copying directly into column-major gives: m[col*4+row] = d[col*4+row]
+	// = R_fbx[col][row] = Q[row][col], which is exactly the correct column-major element.
+	// No rotation swap is needed; translation ends up in column 3 (m[12..14]) correctly.
 	return m
 }
 

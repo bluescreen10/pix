@@ -455,9 +455,6 @@ func (l *gltfLoader) buildScene() (*pix.Scene, error) {
 	l.skeletons = make([]*pix.Skeleton, len(l.doc.Skins))
 	for i, skin := range l.doc.Skins {
 		bones := make([]pix.Bone, len(skin.Joints))
-		for j, ji := range skin.Joints {
-			bones[j] = l.boneByNode[ji]
-		}
 		var invBindMats []glm.Mat4f
 		if skin.InverseBindMatrices != nil {
 			invBindMats = l.readMat4(*skin.InverseBindMatrices)
@@ -466,6 +463,9 @@ func (l *gltfLoader) buildScene() (*pix.Scene, error) {
 			for k := range invBindMats {
 				invBindMats[k] = glm.Mat4fIndentity
 			}
+		}
+		for j, ji := range skin.Joints {
+			bones[j] = l.boneByNode[ji]
 		}
 		l.skeletons[i] = pix.NewSkeletonWithInvBindMats(bones, invBindMats)
 	}
