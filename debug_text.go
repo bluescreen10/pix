@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	dbgGlyphW    = 12
+	dbgGlyphW    = 16
 	dbgGlyphH    = 16
 	dbgAtlasCols = 16
 )
@@ -43,8 +43,8 @@ type debugTextRenderer struct {
 	vertexBuf    *wgpu.Buffer
 	vertexCap    int
 
-	glyphIndex map[int]int // codepoint → atlas cell index
-	glyphWidth map[int]int // codepoint → advance width in atlas pixels
+	glyphIndex     map[int]int // codepoint → atlas cell index
+	glyphWidth     map[int]int // codepoint → advance width in atlas pixels
 	atlasW, atlasH int
 }
 

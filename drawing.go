@@ -9,10 +9,8 @@ type drawing struct {
 	mat           *MaterialData
 	bounds        Sphere
 
-	// For instanced meshes: ownerNode identifies the private GPU resource and
-	// isInstanced selects the private bind group over the shared objectsBuf.
-	ownerNode   uint32
-	isInstanced bool
+	// ownerNode is used as a sort tiebreaker to batch draws by mesh.
+	ownerNode uint32
 
 	// Pointer into meshData.pipelines or instancedMeshData.pipelines.
 	// Allows render loops to cache and reuse compiled pipelines across frames

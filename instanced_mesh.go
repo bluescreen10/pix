@@ -12,13 +12,11 @@ import (
 type InstancedMesh struct{ Node }
 
 type instancedMeshData struct {
-	geometry    Geometry
-	material    Material
-	matrices    []glm.Mat4f // per-instance local transforms
-	ownerNode   uint32
-	cachedWorld glm.Mat4f                            // node world transform at last GPU upload
-	dirty       bool                                 // matrices changed since last upload
-	pipelines   [numPipelineTypes]*wgpu.RenderPipeline
+	geometry      Geometry
+	material      Material
+	ownerNode     uint32
+	instanceCount int
+	pipelines     [numPipelineTypes]*wgpu.RenderPipeline
 }
 
 func (m InstancedMesh) data() *instancedMeshData {
@@ -26,35 +24,33 @@ func (m InstancedMesh) data() *instancedMeshData {
 }
 
 // Count returns the number of instances.
-func (m InstancedMesh) Count() int { return len(m.data().matrices) }
+func (m InstancedMesh) Count() int { return m.data().instanceCount }
 
-// SetMatrixAt sets the local transform for instance i and marks the mesh dirty.
+// SetMatrixAt sets the local transform for instance i and marks it dirty.
 func (m InstancedMesh) SetMatrixAt(i int, mat glm.Mat4f) {
-	d := m.data()
-	d.matrices[i] = mat
-	d.dirty = true
+	firstChild := m.scene.firstChildren[m.slot()]
+	childIdx := firstChild.index + uint32(i)
+	m.scene.local[childIdx] = mat
+	m.scene.flags[childIdx] |= flagDirty
 }
 
 // MatrixAt returns the local transform for instance i.
 func (m InstancedMesh) MatrixAt(i int) glm.Mat4f {
-	return m.data().matrices[i]
+	firstChild := m.scene.firstChildren[m.slot()]
+	return m.scene.local[firstChild.index+uint32(i)]
 }
 
 // NewInstancedMesh creates an instanced mesh node with count instances, all
 // initially set to the identity transform.
 func (s *Scene) NewInstancedMesh(geo Geometry, mat Material, count int) InstancedMesh {
-	id := s.allocNode(KindInstancedMesh)
+	id := s.allocMultiNode(KindInstancedMesh, KindInstance, count)
 	payloadIdx := uint32(len(s.instancedMeshes))
-	matrices := make([]glm.Mat4f, count)
-	for i := range matrices {
-		matrices[i] = glm.Mat4fIndentity
-	}
+
 	s.instancedMeshes = append(s.instancedMeshes, instancedMeshData{
-		geometry:  geo.Copy(),
-		material:  mat.Copy(),
-		matrices:  matrices,
-		ownerNode: id.index,
-		dirty:     true,
+		geometry:      geo.Copy(),
+		material:      mat.Copy(),
+		ownerNode:     id.index,
+		instanceCount: count,
 	})
 	s.payload[id.index] = payloadIdx
 	return InstancedMesh{Node{scene: s, id: id}}

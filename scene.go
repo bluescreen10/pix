@@ -1,6 +1,10 @@
 package pix
 
-import "github.com/bluescreen10/pix/glm"
+import (
+	"slices"
+
+	"github.com/bluescreen10/pix/glm"
+)
 
 const invalidIdx = ^uint32(0)
 
@@ -11,12 +15,14 @@ const (
 	KindGroup NodeKind = iota
 	KindMesh
 	KindInstancedMesh
-	KindDirectionalLight
-	KindAmbientLight
-	KindSpotLight
-	KindPointLight
+	KindInstance
 	KindBone
 	KindSkinnedMesh
+
+	KindAmbientLight
+	KindDirectionalLight
+	KindSpotLight
+	KindPointLight
 )
 
 // Node flags packed into flags[].
@@ -76,6 +82,7 @@ type Scene struct {
 	scales    []glm.Vec3f
 
 	// Per-node state.
+	names      []string
 	flags      []NodeFlags
 	generation []uint32
 	kind       []NodeKind
@@ -167,6 +174,66 @@ func (s *Scene) allocNode(kind NodeKind) NodeID {
 		s.payload = append(s.payload, 0)
 	}
 	return NodeID{index: idx, gen: s.generation[idx]}
+}
+
+func (s *Scene) allocMultiNode(kind, childKind NodeKind, childCount int) NodeID {
+	parent := s.allocNode(kind)
+
+	// children
+	s.parents = slices.Grow(s.parents, childCount)
+	s.firstChildren = slices.Grow(s.firstChildren, childCount)
+	s.lastChildren = slices.Grow(s.lastChildren, childCount)
+	s.nextSiblings = slices.Grow(s.nextSiblings, childCount)
+	s.prevSiblings = slices.Grow(s.prevSiblings, childCount)
+	s.local = slices.Grow(s.local, childCount)
+	s.world = slices.Grow(s.world, childCount)
+	s.worldInv = slices.Grow(s.worldInv, childCount)
+	s.positions = slices.Grow(s.positions, childCount)
+	s.rotations = slices.Grow(s.rotations, childCount)
+	s.scales = slices.Grow(s.scales, childCount)
+	s.flags = slices.Grow(s.flags, childCount)
+	s.generation = slices.Grow(s.generation, childCount)
+	s.kind = slices.Grow(s.kind, childCount)
+	s.payload = slices.Grow(s.payload, childCount)
+
+	startIdx := uint32(len(s.parents))
+	lastIdx := startIdx + uint32(childCount) - 1
+
+	flags := flagAlive | flagLocalVisible | flagDirty | flagVisibleDirty
+
+	for i := startIdx; i <= lastIdx; i++ {
+		s.parents = append(s.parents, parent)
+		s.firstChildren = append(s.firstChildren, NodeID{})
+		s.lastChildren = append(s.lastChildren, NodeID{})
+
+		if i == lastIdx {
+			s.nextSiblings = append(s.nextSiblings, NodeID{})
+		} else {
+			s.nextSiblings = append(s.nextSiblings, NodeID{index: i + 1, gen: 1})
+		}
+
+		if i == startIdx {
+			s.prevSiblings = append(s.prevSiblings, NodeID{})
+		} else {
+			s.prevSiblings = append(s.prevSiblings, NodeID{index: i - 1, gen: 1})
+		}
+
+		s.local = append(s.local, glm.Mat4fIndentity)
+		s.world = append(s.world, glm.Mat4fIndentity)
+		s.worldInv = append(s.worldInv, glm.Mat4fIndentity)
+		s.positions = append(s.positions, glm.Vec3f{})
+		s.rotations = append(s.rotations, glm.QuatIdentityf)
+		s.scales = append(s.scales, glm.Vec3f{1, 1, 1})
+		s.flags = append(s.flags, flags)
+		s.generation = append(s.generation, 1)
+		s.kind = append(s.kind, childKind)
+		s.payload = append(s.payload, 0)
+	}
+
+	s.firstChildren[parent.index] = NodeID{index: startIdx, gen: 1}
+	s.lastChildren[parent.index] = NodeID{index: lastIdx, gen: 1}
+
+	return parent
 }
 
 // resetSlot re-initialises a recycled slot. Generation is NOT touched here;
@@ -410,7 +477,9 @@ func (s *Scene) UpdateTransforms() bool {
 		}
 		anyDirty = true
 
-		s.local[i] = glm.Transform(s.scales[i], s.rotations[i], s.positions[i])
+		if s.kind[i] != KindInstance {
+			s.local[i] = glm.Transform(s.scales[i], s.rotations[i], s.positions[i])
+		}
 
 		p := s.parents[i]
 		if !p.isValid() {

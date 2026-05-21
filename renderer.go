@@ -67,13 +67,6 @@ var drawingsPool = sync.Pool{
 	},
 }
 
-// instancedGPUData holds the private GPU buffers for one InstancedMesh.
-type instancedGPUData struct {
-	gpuModelBuf    *wgpu.Buffer
-	gpuInvModelBuf *wgpu.Buffer
-	gpuBindGrp     *wgpu.BindGroup
-}
-
 // skeletonGPUData holds the bone matrix buffer and bind group for one Skeleton.
 type skeletonGPUData struct {
 	gpuBuf    *wgpu.Buffer
@@ -119,9 +112,6 @@ type Renderer struct {
 	// Layout for the instance set (binding 0 = objects storage buffer).
 	// Used by both regular and instanced mesh draws; the bind group differs.
 	instanceStorageBindGroupLayout *wgpu.BindGroupLayout
-
-	// Per-InstancedMesh GPU resources, keyed by ownerNode.
-	instancedGPUResources map[uint32]*instancedGPUData
 
 	// Skeleton GPU resources (bone matrix buffer + bind group), keyed by skeleton pointer.
 	skeletonBGL *wgpu.BindGroupLayout
@@ -185,13 +175,6 @@ func (r *Renderer) Destroy() {
 
 	r.runtime.Destroy()
 	r.runtime = nil
-
-	for _, gpu := range r.instancedGPUResources {
-		gpu.gpuBindGrp.Release()
-		gpu.gpuModelBuf.Destroy()
-		gpu.gpuInvModelBuf.Destroy()
-	}
-	r.instancedGPUResources = nil
 
 	for _, gpu := range r.skeletonGPU {
 		gpu.bindGroup.Release()
@@ -355,7 +338,12 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	r.Stats.StartFrame()
 	defer r.Stats.EndFrame()
 	if r.showStats {
-		r.DebugPrint(fmt.Sprintf("FPS %.1f", r.Stats.FPS()), glm.Vec2f{10, 10}, 32, glm.Color4f{0, 1, 0, 1})
+		fps := r.Stats.FPS()
+		color := glm.Color4f{0, 1, 0, 1}
+		if fps < 30 {
+			color = glm.Color4f{1, 0, 0, 1}
+		}
+		r.DebugPrint(fmt.Sprintf("FPS %.1f", fps), glm.Vec2f{10, 10}, 32, color)
 	}
 
 	r.acquireNextFrame(&ctx)
@@ -373,7 +361,6 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	if transformsDirty {
 		r.syncMeshInstances(scene)
 	}
-	r.syncInstancedMeshes(scene)
 	r.syncSkeletons(scene)
 
 	list.visible = cull(frustum, list.visible, list.visible[:0])
@@ -509,13 +496,6 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 		if c := cmp.Compare(a.geo.flags, b.geo.flags); c != 0 {
 			return c
 		}
-		// keep non-instanced draws together (they share objectsBindGrp)
-		if a.isInstanced != b.isInstanced {
-			if !a.isInstanced {
-				return -1
-			}
-			return 1
-		}
 		return cmp.Compare(a.ownerNode, b.ownerNode)
 	})
 
@@ -602,12 +582,6 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, drawing
 		if c := cmp.Compare(a.geo.flags&ShadowGeometryMask, b.geo.flags&ShadowGeometryMask); c != 0 {
 			return c
 		}
-		if a.isInstanced != b.isInstanced {
-			if !a.isInstanced {
-				return -1
-			}
-			return 1
-		}
 		return cmp.Compare(a.ownerNode, b.ownerNode)
 	})
 
@@ -662,12 +636,6 @@ func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f,
 	slices.SortFunc(casters, func(a, b drawing) int {
 		if c := cmp.Compare(a.geo.flags&ShadowGeometryMask, b.geo.flags&ShadowGeometryMask); c != 0 {
 			return c
-		}
-		if a.isInstanced != b.isInstanced {
-			if !a.isInstanced {
-				return -1
-			}
-			return 1
 		}
 		return cmp.Compare(a.ownerNode, b.ownerNode)
 	})
@@ -1087,24 +1055,8 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 	})
 }
 
-// createInstancedBindGroup creates a bind group backed by the given per-InstancedMesh buffers.
-func (r *Renderer) createInstancedBindGroup(modelBuf, invModelBuf *wgpu.Buffer) *wgpu.BindGroup {
-	return r.runtime.Device.CreateBindGroup(wgpu.BindGroupDescriptor{
-		Label:  "InstancedMesh bind group",
-		Layout: r.instanceStorageBindGroupLayout,
-		Entries: []wgpu.BindGroupEntry{
-			{Binding: ModelsBinding, Buffer: modelBuf, Offset: 0, Size: wgpu.WholeSize},
-			{Binding: InvModelsBinding, Buffer: invModelBuf, Offset: 0, Size: wgpu.WholeSize},
-		},
-	})
-}
-
-// instanceBindGroupFor returns the bind group for the instance set of the drawing:
-// the private per-mesh buffer for instanced draws, the shared objectsBuf otherwise.
+// instanceBindGroupFor returns the shared objects bind group for this drawing.
 func (r *Renderer) instanceBindGroupFor(d drawing) *wgpu.BindGroup {
-	if d.isInstanced {
-		return r.instancedGPUResources[d.ownerNode].gpuBindGrp
-	}
 	return r.objectsBindGrp
 }
 
@@ -1117,74 +1069,6 @@ func (r *Renderer) syncMeshInstances(scene *Scene) {
 	r.runtime.Queue.WriteBuffer(r.invModelBuf, 0, wgpu.ToBytes(scene.worldInv[:need]))
 }
 
-// syncInstancedMeshes ensures each InstancedMesh has an up-to-date private GPU
-// buffer containing the combined world×local matrices for all instances.
-func (r *Renderer) syncInstancedMeshes(scene *Scene) {
-	for i := range scene.instancedMeshes {
-		imd := &scene.instancedMeshes[i]
-		nodeWorld := scene.world[imd.ownerNode]
-
-		worldChanged := nodeWorld != imd.cachedWorld
-		if worldChanged {
-			imd.cachedWorld = nodeWorld
-		}
-
-		gpu, exists := r.instancedGPUResources[imd.ownerNode]
-		count := uint32(len(imd.matrices))
-		matBufSize := uint64(count) * uint64(unsafe.Sizeof(glm.Mat4f{}))
-
-		if !exists || gpu.gpuModelBuf.GetSize() < matBufSize {
-			if exists {
-				gpu.gpuBindGrp.Release()
-				gpu.gpuModelBuf.Destroy()
-				gpu.gpuInvModelBuf.Destroy()
-			}
-			modelBuf := r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
-				Label: "InstancedMesh model buffer",
-				Size:  matBufSize,
-				Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst,
-			})
-			invModelBuf := r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
-				Label: "InstancedMesh invModel buffer",
-				Size:  matBufSize,
-				Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst,
-			})
-			gpu = &instancedGPUData{
-				gpuModelBuf:    modelBuf,
-				gpuInvModelBuf: invModelBuf,
-				gpuBindGrp:     r.createInstancedBindGroup(modelBuf, invModelBuf),
-			}
-			r.instancedGPUResources[imd.ownerNode] = gpu
-		}
-
-		if !exists || imd.dirty || worldChanged {
-			models := make([]glm.Mat4f, count)
-			invModels := make([]glm.Mat4f, count)
-			for j, localMat := range imd.matrices {
-				world := nodeWorld.Mul4x4(localMat)
-				models[j] = world
-				invModels[j] = world.Inv()
-			}
-			r.runtime.Queue.WriteBuffer(gpu.gpuModelBuf, 0, wgpu.ToBytes(models))
-			r.runtime.Queue.WriteBuffer(gpu.gpuInvModelBuf, 0, wgpu.ToBytes(invModels))
-			imd.dirty = false
-		}
-	}
-
-	// Release GPU resources for InstancedMesh nodes that have been destroyed.
-	alive := make(map[uint32]struct{}, len(scene.instancedMeshes))
-	for _, imd := range scene.instancedMeshes {
-		alive[imd.ownerNode] = struct{}{}
-	}
-	for ownerNode, gpu := range r.instancedGPUResources {
-		if _, ok := alive[ownerNode]; !ok {
-			gpu.gpuBindGrp.Release()
-			gpu.gpuModelBuf.Destroy()
-			gpu.gpuInvModelBuf.Destroy()
-			delete(r.instancedGPUResources, ownerNode)
-		}
-	}
-}
 
 // syncSkeletons recomputes and uploads bone matrices for all skeletons referenced
 // by the scene's skinned meshes.
@@ -1240,7 +1124,6 @@ func (r *Renderer) createGlobalBuffers() {
 		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
 	})
 
-	r.instancedGPUResources = make(map[uint32]*instancedGPUData)
 	r.skeletonGPU = make(map[*Skeleton]*skeletonGPUData)
 	r.ensureObjectsCap(InitialStorageCapacity)
 }
@@ -1313,38 +1196,37 @@ func (r *Renderer) collectRenderList(list *renderList, scene *Scene) {
 	for i := range scene.instancedMeshes {
 		imd := &scene.instancedMeshes[i]
 		flags := scene.GetFlags(imd.ownerNode)
-		if !flags.IsAlive() || !flags.IsVisible() || len(imd.matrices) == 0 {
+		if !flags.IsAlive() || !flags.IsVisible() || imd.instanceCount == 0 {
 			continue
 		}
 
 		geo := r.geometries.get(imd.geometry.ref.ID())
-		worldTransform := scene.GetWorldTransform(imd.ownerNode)
 		geoBounds := geo.BoundingSphere()
+		firstChild := scene.firstChildren[imd.ownerNode]
 
-		// Compute a conservative world-space bounding sphere over all instances.
+		// Compute a conservative world-space bounding sphere over all instance world positions.
 		var sumPos glm.Vec3f
-		for _, m := range imd.matrices {
-			wm := worldTransform.Mul4x4(m)
-			sumPos = sumPos.Add(glm.Vec3f{wm[12], wm[13], wm[14]})
+		for j := 0; j < imd.instanceCount; j++ {
+			w := scene.world[firstChild.index+uint32(j)]
+			sumPos = sumPos.Add(glm.Vec3f{w[12], w[13], w[14]})
 		}
-		center := sumPos.Scale(1.0 / float32(len(imd.matrices)))
+		center := sumPos.Scale(1.0 / float32(imd.instanceCount))
 		var maxDist float32
-		for _, m := range imd.matrices {
-			wm := worldTransform.Mul4x4(m)
-			dist := center.Sub(glm.Vec3f{wm[12], wm[13], wm[14]}).Length()
+		for j := 0; j < imd.instanceCount; j++ {
+			w := scene.world[firstChild.index+uint32(j)]
+			dist := center.Sub(glm.Vec3f{w[12], w[13], w[14]}).Length()
 			if dist > maxDist {
 				maxDist = dist
 			}
 		}
 
 		d := drawing{
-			instanceId:    0,
-			instanceCount: uint32(len(imd.matrices)),
+			instanceId:    firstChild.index,
+			instanceCount: uint32(imd.instanceCount),
 			geo:           geo,
 			mat:           r.materials.get(imd.material.ref.ID()),
 			bounds:        Sphere{Center: center, Radius: maxDist + geoBounds.Radius},
 			ownerNode:     imd.ownerNode,
-			isInstanced:   true,
 			pipelines:     &imd.pipelines,
 		}
 
