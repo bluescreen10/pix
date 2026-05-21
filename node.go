@@ -17,9 +17,8 @@ type Node struct {
 	id    NodeID
 }
 
-func (n Node) slot() uint32 {
-	return n.id.index
-}
+func (n Node) slot() uint32          { return n.id.index }
+func (n Node) transform() *Transform { return &n.scene.transforms[n.id.index] }
 
 func (n Node) ID() NodeID {
 	return n.id
@@ -83,19 +82,13 @@ func (n Node) ForEachChild(fn func(Node) bool) {
 // Transforms
 
 // WorldTransform returns the cached world-space matrix.
-func (n Node) WorldTransform() glm.Mat4f {
-	return n.scene.world[n.slot()]
-}
+func (n Node) WorldTransform() glm.Mat4f { return n.scene.world[n.slot()] }
 
 // Transform returns the local transform matrix.
-func (n Node) Transform() glm.Mat4f {
-	return n.scene.local[n.slot()]
-}
+func (n Node) Transform() glm.Mat4f { return n.scene.local[n.slot()] }
 
 // WorldTransformInv returns the cached inverse of the world-space matrix.
-func (n Node) WorldTransformInv() glm.Mat4f {
-	return n.scene.worldInv[n.slot()]
-}
+func (n Node) WorldTransformInv() glm.Mat4f { return n.scene.worldInv[n.slot()] }
 
 // Flags
 
@@ -142,52 +135,46 @@ func (n Node) Destroy() {
 
 // Position
 
-func (n Node) Position() glm.Vec3f {
-	return n.scene.positions[n.slot()]
-}
+func (n Node) Position() glm.Vec3f { return n.transform().Position }
 
 func (n Node) SetPosition(pos glm.Vec3f) {
-	n.scene.positions[n.slot()] = pos
+	n.transform().Position = pos
 	n.scene.flags[n.slot()] |= flagDirty
 }
 
-func (n Node) SetPositionXYZ(x, y, z float32) {
-	n.SetPosition(glm.Vec3f{x, y, z})
-}
+func (n Node) SetPositionXYZ(x, y, z float32) { n.SetPosition(glm.Vec3f{x, y, z}) }
 
 func (n Node) SetPositionX(x float32) {
-	p := n.scene.positions[n.slot()]
+	p := n.transform().Position
 	n.SetPosition(glm.Vec3f{x, p[1], p[2]})
 }
 
 func (n Node) SetPositionY(y float32) {
-	p := n.scene.positions[n.slot()]
+	p := n.transform().Position
 	n.SetPosition(glm.Vec3f{p[0], y, p[2]})
 }
 
 func (n Node) SetPositionZ(z float32) {
-	p := n.scene.positions[n.slot()]
+	p := n.transform().Position
 	n.SetPosition(glm.Vec3f{p[0], p[1], z})
 }
 
 func (n Node) SetPositionXY(x, y float32) {
-	p := n.scene.positions[n.slot()]
+	p := n.transform().Position
 	n.SetPosition(glm.Vec3f{x, y, p[2]})
 }
 
 func (n Node) SetPositionXZ(x, z float32) {
-	p := n.scene.positions[n.slot()]
+	p := n.transform().Position
 	n.SetPosition(glm.Vec3f{x, p[1], z})
 }
 
 func (n Node) SetPositionYZ(y, z float32) {
-	p := n.scene.positions[n.slot()]
+	p := n.transform().Position
 	n.SetPosition(glm.Vec3f{p[0], y, z})
 }
 
-func (n Node) Move(delta glm.Vec3f) {
-	n.SetPosition(n.scene.positions[n.slot()].Add(delta))
-}
+func (n Node) Move(delta glm.Vec3f) { n.SetPosition(n.transform().Position.Add(delta)) }
 
 func (n Node) MoveXYZ(x, y, z float32) {
 	n.Move(glm.Vec3f{x, y, z})
@@ -219,12 +206,10 @@ func (n Node) MoveYZ(y, z float32) {
 
 // Rotation
 
-func (n Node) RotationQuat() glm.Quatf {
-	return n.scene.rotations[n.slot()]
-}
+func (n Node) RotationQuat() glm.Quatf { return n.transform().Rotation }
 
 func (n Node) SetRotationQuat(rot glm.Quatf) {
-	n.scene.rotations[n.slot()] = rot
+	n.transform().Rotation = rot
 	n.scene.flags[n.slot()] |= flagDirty
 }
 
@@ -249,7 +234,7 @@ func (n Node) SetRotationYZ(y, z float32) {
 }
 
 func (n Node) RotateQuat(delta glm.Quatf) {
-	n.SetRotationQuat(n.scene.rotations[n.slot()].Mul(delta))
+	n.SetRotationQuat(n.transform().Rotation.Mul(delta))
 }
 
 func (n Node) Rotate(delta glm.Vec3f) {
@@ -286,52 +271,46 @@ func (n Node) RotateYZ(y, z float32) {
 
 // Scale
 
-func (n Node) Scale() glm.Vec3f {
-	return n.scene.scales[n.slot()]
-}
+func (n Node) Scale() glm.Vec3f { return n.transform().Scale }
 
 func (n Node) SetScale(scale glm.Vec3f) {
-	n.scene.scales[n.slot()] = scale
+	n.transform().Scale = scale
 	n.scene.flags[n.slot()] |= flagDirty
 }
 
-func (n Node) SetScaleXYZ(x, y, z float32) {
-	n.SetScale(glm.Vec3f{x, y, z})
-}
+func (n Node) SetScaleXYZ(x, y, z float32) { n.SetScale(glm.Vec3f{x, y, z}) }
 
 func (n Node) SetScaleX(x float32) {
-	s := n.scene.scales[n.slot()]
+	s := n.transform().Scale
 	n.SetScale(glm.Vec3f{x, s[1], s[2]})
 }
 
 func (n Node) SetScaleY(y float32) {
-	s := n.scene.scales[n.slot()]
+	s := n.transform().Scale
 	n.SetScale(glm.Vec3f{s[0], y, s[2]})
 }
 
 func (n Node) SetScaleZ(z float32) {
-	s := n.scene.scales[n.slot()]
+	s := n.transform().Scale
 	n.SetScale(glm.Vec3f{s[0], s[1], z})
 }
 
 func (n Node) SetScaleXY(x, y float32) {
-	s := n.scene.scales[n.slot()]
+	s := n.transform().Scale
 	n.SetScale(glm.Vec3f{x, y, s[2]})
 }
 
 func (n Node) SetScaleXZ(x, z float32) {
-	s := n.scene.scales[n.slot()]
+	s := n.transform().Scale
 	n.SetScale(glm.Vec3f{x, s[1], z})
 }
 
 func (n Node) SetScaleYZ(y, z float32) {
-	s := n.scene.scales[n.slot()]
+	s := n.transform().Scale
 	n.SetScale(glm.Vec3f{s[0], y, z})
 }
 
-func (n Node) Grow(delta glm.Vec3f) {
-	n.SetScale(n.scene.scales[n.slot()].Add(delta))
-}
+func (n Node) Grow(delta glm.Vec3f) { n.SetScale(n.transform().Scale.Add(delta)) }
 
 func (n Node) GrowXYZ(x, y, z float32) {
 	n.Grow(glm.Vec3f{x, y, z})

@@ -77,9 +77,7 @@ type Scene struct {
 	world    []glm.Mat4f
 	worldInv []glm.Mat4f
 
-	positions []glm.Vec3f
-	rotations []glm.Quatf
-	scales    []glm.Vec3f
+	transforms []Transform
 
 	// Per-node state.
 	names      []string
@@ -165,9 +163,7 @@ func (s *Scene) allocNode(kind NodeKind) NodeID {
 		s.local = append(s.local, glm.Mat4fIndentity)
 		s.world = append(s.world, glm.Mat4fIndentity)
 		s.worldInv = append(s.worldInv, glm.Mat4fIndentity)
-		s.positions = append(s.positions, glm.Vec3f{})
-		s.rotations = append(s.rotations, glm.QuatIdentityf)
-		s.scales = append(s.scales, glm.Vec3f{1, 1, 1})
+		s.transforms = append(s.transforms, defaultTransform)
 		s.flags = append(s.flags, flagAlive|flagLocalVisible|flagDirty|flagVisibleDirty)
 		s.generation = append(s.generation, 1)
 		s.kind = append(s.kind, kind)
@@ -188,9 +184,7 @@ func (s *Scene) allocMultiNode(kind, childKind NodeKind, childCount int) NodeID 
 	s.local = slices.Grow(s.local, childCount)
 	s.world = slices.Grow(s.world, childCount)
 	s.worldInv = slices.Grow(s.worldInv, childCount)
-	s.positions = slices.Grow(s.positions, childCount)
-	s.rotations = slices.Grow(s.rotations, childCount)
-	s.scales = slices.Grow(s.scales, childCount)
+	s.transforms = slices.Grow(s.transforms, childCount)
 	s.flags = slices.Grow(s.flags, childCount)
 	s.generation = slices.Grow(s.generation, childCount)
 	s.kind = slices.Grow(s.kind, childCount)
@@ -221,9 +215,7 @@ func (s *Scene) allocMultiNode(kind, childKind NodeKind, childCount int) NodeID 
 		s.local = append(s.local, glm.Mat4fIndentity)
 		s.world = append(s.world, glm.Mat4fIndentity)
 		s.worldInv = append(s.worldInv, glm.Mat4fIndentity)
-		s.positions = append(s.positions, glm.Vec3f{})
-		s.rotations = append(s.rotations, glm.QuatIdentityf)
-		s.scales = append(s.scales, glm.Vec3f{1, 1, 1})
+		s.transforms = append(s.transforms, defaultTransform)
 		s.flags = append(s.flags, flags)
 		s.generation = append(s.generation, 1)
 		s.kind = append(s.kind, childKind)
@@ -247,9 +239,7 @@ func (s *Scene) resetSlot(idx uint32, kind NodeKind) {
 	s.local[idx] = glm.Mat4fIndentity
 	s.world[idx] = glm.Mat4fIndentity
 	s.worldInv[idx] = glm.Mat4fIndentity
-	s.positions[idx] = glm.Vec3f{}
-	s.rotations[idx] = glm.QuatIdentityf
-	s.scales[idx] = glm.Vec3f{1, 1, 1}
+	s.transforms[idx] = defaultTransform
 	s.flags[idx] = flagAlive | flagLocalVisible | flagDirty | flagVisibleDirty
 	s.kind[idx] = kind
 	s.payload[idx] = 0
@@ -478,7 +468,7 @@ func (s *Scene) UpdateTransforms() bool {
 		anyDirty = true
 
 		if s.kind[i] != KindInstance {
-			s.local[i] = glm.Transform(s.scales[i], s.rotations[i], s.positions[i])
+			s.local[i] = s.transforms[i].Matrix()
 		}
 
 		p := s.parents[i]
