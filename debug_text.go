@@ -43,7 +43,8 @@ type debugTextRenderer struct {
 	vertexBuf    *wgpu.Buffer
 	vertexCap    int
 
-	glyphIndex     map[int]int
+	glyphIndex map[int]int // codepoint → atlas cell index
+	glyphWidth map[int]int // codepoint → advance width in atlas pixels
 	atlasW, atlasH int
 }
 
@@ -63,8 +64,10 @@ func (dt *debugTextRenderer) buildAtlas(device *wgpu.Device, queue *wgpu.Queue) 
 	sort.Ints(codepoints)
 
 	dt.glyphIndex = make(map[int]int, len(codepoints))
+	dt.glyphWidth = make(map[int]int, len(codepoints))
 	for i, cp := range codepoints {
 		dt.glyphIndex[cp] = i
+		dt.glyphWidth[cp] = font[cp].width
 	}
 
 	n := len(codepoints)
@@ -76,7 +79,7 @@ func (dt *debugTextRenderer) buildAtlas(device *wgpu.Device, queue *wgpu.Queue) 
 	for cp, idx := range dt.glyphIndex {
 		acol := idx % dbgAtlasCols
 		arow := idx / dbgAtlasCols
-		for gy, rowBits := range font[cp] {
+		for gy, rowBits := range font[cp].data {
 			for gx := 0; gx < dbgGlyphW; gx++ {
 				if (uint16(rowBits)>>uint(gx))&1 != 0 {
 					pixels[(arow*dbgGlyphH+gy)*dt.atlasW+acol*dbgGlyphW+gx] = 255
@@ -253,19 +256,22 @@ func (dt *debugTextRenderer) render(r *Renderer, ctx *renderContext, texts []Deb
 			pixH = float32(dbgGlyphH)
 		}
 		scale := pixH / float32(dbgGlyphH)
-		gw := float32(dbgGlyphW) * scale
 		gh := pixH
 		cx := t.X
 		for _, ch := range t.Text {
 			idx, ok := dt.glyphIndex[int(ch)]
 			if !ok {
-				cx += gw
+				cx += float32(dbgGlyphW) * scale
 				continue
 			}
+			w := dt.glyphWidth[int(ch)]
+			uvW := min(w, dbgGlyphW) // atlas pixels actually stored for this glyph
+			gw := float32(w) * scale
+
 			acol := idx % dbgAtlasCols
 			arow := idx / dbgAtlasCols
 			u0 := float32(acol*dbgGlyphW) / float32(dt.atlasW)
-			u1 := float32(acol*dbgGlyphW+dbgGlyphW) / float32(dt.atlasW)
+			u1 := float32(acol*dbgGlyphW+uvW) / float32(dt.atlasW)
 			v0 := float32(arow*dbgGlyphH) / float32(dt.atlasH)
 			v1 := float32(arow*dbgGlyphH+dbgGlyphH) / float32(dt.atlasH)
 			x0, y0 := cx, t.Y
