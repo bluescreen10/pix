@@ -67,12 +67,6 @@ var drawingsPool = sync.Pool{
 	},
 }
 
-// skeletonGPUData holds the bone matrix buffer and bind group for one Skeleton.
-type skeletonGPUData struct {
-	gpuBuf    *wgpu.Buffer
-	bindGroup *wgpu.BindGroup
-}
-
 type renderContext struct {
 	texture         *wgpu.Texture
 	view            *wgpu.TextureView
@@ -85,6 +79,7 @@ type Renderer struct {
 	geometries slab[GeometryData]
 	materials  slab[MaterialData]
 	textures   slab[TextureData]
+	skeletons  slab[SkeletonData]
 
 	samplerCache  map[Sampler]*wgpu.Sampler
 	defaultTexRef Ref[Texture]
@@ -113,9 +108,7 @@ type Renderer struct {
 	// Used by both regular and instanced mesh draws; the bind group differs.
 	instanceStorageBindGroupLayout *wgpu.BindGroupLayout
 
-	// Skeleton GPU resources (bone matrix buffer + bind group), keyed by skeleton pointer.
 	skeletonBGL *wgpu.BindGroupLayout
-	skeletonGPU map[*Skeleton]*skeletonGPUData
 
 	// shadow (directional + spot) — 2D depth array, one layer per shadow
 	shadowArray *TextureArray
@@ -175,12 +168,6 @@ func (r *Renderer) Destroy() {
 
 	r.runtime.Destroy()
 	r.runtime = nil
-
-	for _, gpu := range r.skeletonGPU {
-		gpu.bindGroup.Release()
-		gpu.gpuBuf.Destroy()
-	}
-	r.skeletonGPU = nil
 
 	if r.skeletonBGL != nil {
 		r.skeletonBGL.Release()
@@ -524,7 +511,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 			curInstBG = instBG
 		}
 		if d.skeleton != nil {
-			if skelBG := r.skeletonGPU[d.skeleton].bindGroup; skelBG != curSkelBG {
+			if skelBG := d.skeleton.bindGroup; skelBG != curSkelBG {
 				renderPass.SetBindGroup(SkeletonSet, skelBG, nil)
 				curSkelBG = skelBG
 			}
@@ -605,7 +592,7 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, drawing
 			curInstBG = instBG
 		}
 		if d.skeleton != nil {
-			if skelBG := r.skeletonGPU[d.skeleton].bindGroup; skelBG != curSkelBG {
+			if skelBG := d.skeleton.bindGroup; skelBG != curSkelBG {
 				pass.SetBindGroup(2, skelBG, nil)
 				curSkelBG = skelBG
 			}
@@ -686,7 +673,7 @@ func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f,
 					curInstBG = instBG
 				}
 				if d.skeleton != nil {
-					if skelBG := r.skeletonGPU[d.skeleton].bindGroup; skelBG != curSkelBG {
+					if skelBG := d.skeleton.bindGroup; skelBG != curSkelBG {
 						pass.SetBindGroup(2, skelBG, nil)
 						curSkelBG = skelBG
 					}
@@ -1069,29 +1056,27 @@ func (r *Renderer) syncMeshInstances(scene *Scene) {
 	r.runtime.Queue.WriteBuffer(r.invModelBuf, 0, wgpu.ToBytes(scene.worldInv[:need]))
 }
 
-
 // syncSkeletons recomputes and uploads bone matrices for all skeletons referenced
 // by the scene's skinned meshes.
 func (r *Renderer) syncSkeletons(scene *Scene) {
-	seen := make(map[*Skeleton]struct{}, len(scene.skinnedMeshes))
+	seen := make(map[uint32]struct{}, len(scene.skinnedMeshes))
 	for _, smd := range scene.skinnedMeshes {
-		sk := smd.skeleton
-		if sk == nil {
+		if !smd.skeleton.Valid() {
 			continue
 		}
-		if _, already := seen[sk]; already {
+		id := smd.skeleton.ref.ID()
+		if _, already := seen[id]; already {
 			continue
 		}
-		seen[sk] = struct{}{}
+		seen[id] = struct{}{}
 
-		sk.update(scene, smd.ownerNode)
-		needed := uint64(len(sk.boneMatrices)) * uint64(unsafe.Sizeof(glm.Mat4f{}))
-		gpu, exists := r.skeletonGPU[sk]
-		if !exists || gpu.gpuBuf.GetSize() < needed {
-			if exists {
-				gpu.bindGroup.Release()
-				gpu.gpuBuf.Destroy()
-			}
+		sd := r.skeletons.get(id)
+		sd.update(scene, smd.ownerNode)
+
+		needed := uint64(len(sd.boneMatrices)) * uint64(unsafe.Sizeof(glm.Mat4f{}))
+		if sd.gpuBuf == nil || sd.gpuBuf.GetSize() < needed {
+			sd.Destroy()
+			sd.bindGroup.Release()
 			buf := r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
 				Label: "Skeleton bone buffer",
 				Size:  needed,
@@ -1104,10 +1089,10 @@ func (r *Renderer) syncSkeletons(scene *Scene) {
 					Binding: 0, Buffer: buf, Offset: 0, Size: wgpu.WholeSize,
 				}},
 			})
-			gpu = &skeletonGPUData{gpuBuf: buf, bindGroup: bg}
-			r.skeletonGPU[sk] = gpu
+			sd.gpuBuf = buf
+			sd.bindGroup = bg
 		}
-		r.runtime.Queue.WriteBuffer(gpu.gpuBuf, 0, wgpu.ToBytes(sk.boneMatrices))
+		r.runtime.Queue.WriteBuffer(sd.gpuBuf, 0, wgpu.ToBytes(sd.boneMatrices))
 	}
 }
 
@@ -1124,7 +1109,6 @@ func (r *Renderer) createGlobalBuffers() {
 		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
 	})
 
-	r.skeletonGPU = make(map[*Skeleton]*skeletonGPUData)
 	r.ensureObjectsCap(InitialStorageCapacity)
 }
 
@@ -1252,7 +1236,7 @@ func (r *Renderer) collectRenderList(list *renderList, scene *Scene) {
 			mat:           r.materials.get(smd.material.ref.ID()),
 			bounds:        Sphere{Center: glm.Vec3f{wc[0], wc[1], wc[2]}, Radius: smd.boundingSphere.Radius},
 			pipelines:     &smd.pipelines,
-			skeleton:      smd.skeleton,
+			skeleton:      r.skeletons.get(smd.skeleton.ref.ID()),
 		}
 		if flags.CastShadow() {
 			list.shadowCasters = append(list.shadowCasters, d)

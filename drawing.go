@@ -17,7 +17,6 @@ type drawing struct {
 	// without recomputing the pipeline key on each draw call.
 	pipelines *[numPipelineTypes]*wgpu.RenderPipeline
 
-	// Non-nil for skinned meshes; identifies the skeleton whose bone matrices
-	// are bound at the skeleton bind group slot during rendering.
-	skeleton *Skeleton
+	// Non-nil for skinned meshes; points into the renderer's skeleton slab.
+	skeleton *SkeletonData
 }

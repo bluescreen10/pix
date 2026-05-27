@@ -1,69 +1,58 @@
 package pix
 
 import (
+	"github.com/bluescreen10/dawn-go/wgpu"
 	"github.com/bluescreen10/pix/glm"
 )
 
+//TODO: bone updates should happen via skeleton so we eliminate the need for sk.update
+
+// SkeletonData is the renderer-owned resource for one armature.
+// GPU buffer and bind group are allocated lazily by syncSkeletons.
+type SkeletonData struct {
+	bones        []Bone
+	invBindMats  []glm.Mat4f
+	boneMatrices []glm.Mat4f // scratch: meshLocalBone = meshWorldInv * boneWorld * invBind
+	gpuBuf       *wgpu.Buffer
+	bindGroup    *wgpu.BindGroup
+}
+
+func (sd *SkeletonData) BoneCount() int { return len(sd.bones) }
+
+func (sd *SkeletonData) Destroy() {
+	if sd.bindGroup != nil {
+		sd.bindGroup.Release()
+		sd.bindGroup = nil
+	}
+	if sd.gpuBuf != nil {
+		sd.gpuBuf.Destroy()
+		sd.gpuBuf = nil
+	}
+}
+
+func (sd *SkeletonData) update(scene *Scene, meshSlot uint32) {
+	meshWorldInv := scene.worldInv[meshSlot]
+	for i, b := range sd.bones {
+		sd.boneMatrices[i] = meshWorldInv.Mul4x4(scene.world[b.slot()].Mul4x4(sd.invBindMats[i]))
+	}
+}
+
+// Skeleton is the public handle for a renderer-owned skeleton resource.
+type Skeleton struct {
+	renderer *Renderer
+	ref      Ref[Skeleton]
+}
+
+func (s Skeleton) Ref() Ref[Skeleton] { return s.ref }
+func (s Skeleton) Release()           { s.ref.Release() }
+func (s Skeleton) Copy() Skeleton     { return Skeleton{renderer: s.renderer, ref: s.ref.Copy()} }
+func (s Skeleton) Valid() bool        { return s.renderer != nil && s.ref.Valid() }
+func (s Skeleton) BoneCount() int     { return s.renderer.skeletons.get(s.ref.ID()).BoneCount() }
+
 // Bone is a scene node that participates in skeletal animation.
-// It is a plain scene node (transforms driven by the animation system)
-// with no special rendering behaviour of its own.
 type Bone struct{ Node }
 
 func (s *Scene) NewBone() Bone {
 	id := s.allocNode(KindBone)
 	return Bone{Node{scene: s, id: id}}
-}
-
-// Skeleton holds the bones and inverse-bind matrices for one armature.
-// GPU resources (bone matrix buffer + bind group) are managed by the Renderer.
-type Skeleton struct {
-	bones        []Bone
-	invBindMats  []glm.Mat4f // inverse world matrix of each bone at bind time
-	boneMatrices []glm.Mat4f // scratch: world * invBind, uploaded to GPU each frame
-}
-
-// NewSkeleton creates a skeleton from an ordered list of bones.
-func NewSkeleton(bones []Bone) *Skeleton {
-	n := len(bones)
-	return &Skeleton{
-		bones:        append([]Bone(nil), bones...),
-		invBindMats:  make([]glm.Mat4f, n),
-		boneMatrices: make([]glm.Mat4f, n),
-	}
-}
-
-// NewSkeletonWithInvBindMats creates a skeleton with pre-computed inverse bind matrices,
-// bypassing the Bind() step. Use this when loading from files (e.g. GLTF) that store
-// the matrices directly.
-func NewSkeletonWithInvBindMats(bones []Bone, invBindMats []glm.Mat4f) *Skeleton {
-	if len(invBindMats) != len(bones) {
-		panic("skeleton: bone count and inverse bind matrix count must match")
-	}
-	return &Skeleton{
-		bones:        append([]Bone(nil), bones...),
-		invBindMats:  append([]glm.Mat4f(nil), invBindMats...),
-		boneMatrices: make([]glm.Mat4f, len(bones)),
-	}
-}
-
-// Bind captures the current world transform of each bone as the bind pose.
-// Call this after positioning the skeleton in its rest pose, before any animation.
-func (sk *Skeleton) Bind(scene *Scene) {
-	for i, b := range sk.bones {
-		sk.invBindMats[i] = scene.world[b.slot()].Inv()
-	}
-}
-
-// BoneCount returns the number of bones in the skeleton.
-func (sk *Skeleton) BoneCount() int { return len(sk.bones) }
-
-// update recomputes boneMatrices from the current bone world transforms.
-// meshSlot is the scene slot of the SkinnedMesh node; its inverse world matrix
-// cancels the model matrix applied by the shader so the formula
-// (boneWorld × invBind) is in mesh-local space as expected by the vertex shader.
-func (sk *Skeleton) update(scene *Scene, meshSlot uint32) {
-	meshWorldInv := scene.worldInv[meshSlot]
-	for i, b := range sk.bones {
-		sk.boneMatrices[i] = meshWorldInv.Mul4x4(scene.world[b.slot()].Mul4x4(sk.invBindMats[i]))
-	}
 }

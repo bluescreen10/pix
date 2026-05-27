@@ -255,7 +255,7 @@ type gltfLoader struct {
 	materials  []pix.Material // index 0 = default; gltf material i → index i+1
 	nodes      []pix.Node     // indexed by gltf node index
 	boneByNode map[int]pix.Bone
-	skeletons  []*pix.Skeleton // indexed by gltf skin index
+	skeletons  []pix.Skeleton // indexed by gltf skin index
 }
 
 func (l *gltfLoader) build() (*GLTFResult, error) {
@@ -452,7 +452,7 @@ func (l *gltfLoader) buildScene() (*pix.Scene, error) {
 	}
 
 	// Pass 4: build skeletons from skins (bones are now available).
-	l.skeletons = make([]*pix.Skeleton, len(l.doc.Skins))
+	l.skeletons = make([]pix.Skeleton, len(l.doc.Skins))
 	for i, skin := range l.doc.Skins {
 		bones := make([]pix.Bone, len(skin.Joints))
 		var invBindMats []glm.Mat4f
@@ -467,8 +467,13 @@ func (l *gltfLoader) buildScene() (*pix.Scene, error) {
 		for j, ji := range skin.Joints {
 			bones[j] = l.boneByNode[ji]
 		}
-		l.skeletons[i] = pix.NewSkeletonWithInvBindMats(bones, invBindMats)
+		l.skeletons[i] = l.r.NewSkeleton(bones, invBindMats)
 	}
+	defer func() {
+		for i := range l.skeletons {
+			l.skeletons[i].Release()
+		}
+	}()
 
 	// Pass 5: create Mesh / SkinnedMesh nodes and attach under their group nodes.
 	for i, gn := range l.doc.Nodes {

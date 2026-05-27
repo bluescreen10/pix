@@ -628,8 +628,9 @@ func (b *fbxBuilder) buildModels(scene *pix.Scene) error {
 					invBindMats = append(invBindMats, ibm)
 				}
 				if len(bones) > 0 {
-					sk := pix.NewSkeletonWithInvBindMats(bones, invBindMats)
+					sk := b.r.NewSkeleton(bones, invBindMats)
 					sm := scene.NewSkinnedMesh(pixGeo, pixMat, sk)
+					sk.Release()
 					groupNode.Add(sm)
 				} else {
 					m := scene.NewMesh(pixGeo, pixMat)

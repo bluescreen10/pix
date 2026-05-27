@@ -2,12 +2,14 @@ package pix
 
 import (
 	"github.com/bluescreen10/dawn-go/wgpu"
+	"github.com/bluescreen10/pix/glm"
 )
 
 const (
 	deferredGeo uint8 = iota
 	deferredMat
 	deferredTex
+	deferredSkel
 )
 
 type deferredFreeEntry struct {
@@ -33,11 +35,17 @@ type texDisposer struct{ r *Renderer }
 func (d texDisposer) dispose(id uint32)           { d.r.scheduleTexFree(id) }
 func (d texDisposer) generation(id uint32) uint32 { return d.r.textures.generation(id) }
 
+type skelDisposer struct{ r *Renderer }
+
+func (d skelDisposer) dispose(id uint32)           { d.r.scheduleSkeletonFree(id) }
+func (d skelDisposer) generation(id uint32) uint32 { return d.r.skeletons.generation(id) }
+
 // initResources initialises the resource slabs and creates the default white texture.
 func (r *Renderer) initResources() {
 	r.geometries = newSlab[GeometryData]()
 	r.materials = newSlab[MaterialData]()
 	r.textures = newSlab[TextureData]()
+	r.skeletons = newSlab[SkeletonData]()
 	r.samplerCache = make(map[Sampler]*wgpu.Sampler)
 
 	td := NewDataTexture([]byte{255, 255, 255, 255}, 1, 1, wgpu.TextureFormatRGBA8Unorm)
@@ -60,6 +68,11 @@ func (r *Renderer) destroyResources() {
 	for i := range r.textures.entries {
 		if r.textures.entries[i].alive {
 			r.textures.entries[i].val.Destroy()
+		}
+	}
+	for i := range r.skeletons.entries {
+		if r.skeletons.entries[i].alive {
+			r.skeletons.entries[i].val.Destroy()
 		}
 	}
 	for _, s := range r.samplerCache {
@@ -254,6 +267,37 @@ func (r *Renderer) NewTexture(data *TextureData) Texture {
 	return r.allocTextureSlot(data)
 }
 
+// Skeleton
+
+func (r *Renderer) allocSkeletonSlot(data SkeletonData) Skeleton {
+	rc := new(int32)
+	*rc = 1
+	idx, gen := r.skeletons.alloc(data)
+	ref := Ref[Skeleton]{id: idx, gen: gen, refCount: rc, owner: skelDisposer{r}}
+	return Skeleton{renderer: r, ref: ref}
+}
+
+func (r *Renderer) scheduleSkeletonFree(id uint32) {
+	r.skeletons.free(id)
+	r.deferredFree = append(r.deferredFree, deferredFreeEntry{kind: deferredSkel, id: id, frame: r.frameCount})
+}
+
+// NewSkeleton registers a skeleton with the renderer.
+// Pass pre-computed invBindMats (e.g. from a file), or nil to fill them via SkinnedMesh.Bind.
+func (r *Renderer) NewSkeleton(bones []Bone, invBindMats []glm.Mat4f) Skeleton {
+	n := len(bones)
+	mats := make([]glm.Mat4f, n)
+	if len(invBindMats) == n {
+		copy(mats, invBindMats)
+	}
+	data := SkeletonData{
+		bones:        append([]Bone(nil), bones...),
+		invBindMats:  mats,
+		boneMatrices: make([]glm.Mat4f, n),
+	}
+	return r.allocSkeletonSlot(data)
+}
+
 // drainDeferredFree releases GPU resources whose in-flight frames have completed.
 const framesInFlight = 2
 
@@ -276,6 +320,9 @@ func (r *Renderer) drainDeferredFree() {
 			case deferredTex:
 				r.textures.get(d.id).Destroy()
 				r.textures.reclaim(d.id)
+			case deferredSkel:
+				r.skeletons.get(d.id).Destroy()
+				r.skeletons.reclaim(d.id)
 			}
 			r.deferredFree[i] = r.deferredFree[len(r.deferredFree)-1]
 			r.deferredFree = r.deferredFree[:len(r.deferredFree)-1]

@@ -3,7 +3,7 @@ module github.com/bluescreen10/pix
 go 1.26.0
 
 require (
-	github.com/bluescreen10/dawn-go v0.0.18
+	github.com/bluescreen10/dawn-go v0.1.5
 	github.com/bluescreen10/dawn-go/wgpuglfw v0.0.2
 	github.com/bluescreen10/wesl-go v0.0.5
 	github.com/chewxy/math32 v1.11.2
