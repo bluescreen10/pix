@@ -1059,24 +1059,25 @@ func (r *Renderer) syncMeshInstances(scene *Scene) {
 // syncSkeletons recomputes and uploads bone matrices for all skeletons referenced
 // by the scene's skinned meshes.
 func (r *Renderer) syncSkeletons(scene *Scene) {
-	seen := make(map[uint32]struct{}, len(scene.skinnedMeshes))
+
 	for _, smd := range scene.skinnedMeshes {
 		if !smd.skeleton.Valid() {
 			continue
 		}
+
 		id := smd.skeleton.ref.ID()
-		if _, already := seen[id]; already {
+		sd := r.skeletons.get(id)
+
+		if sd.version == sd.gpuVersion {
 			continue
 		}
-		seen[id] = struct{}{}
 
-		sd := r.skeletons.get(id)
-		sd.update(scene, smd.ownerNode)
+		sd.update(scene.worldInv[smd.ownerNode])
 
 		needed := uint64(len(sd.boneMatrices)) * uint64(unsafe.Sizeof(glm.Mat4f{}))
 		if sd.gpuBuf == nil || sd.gpuBuf.GetSize() < needed {
 			sd.Destroy()
-			sd.bindGroup.Release()
+			//sd.bindGroup.Release()
 			buf := r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
 				Label: "Skeleton bone buffer",
 				Size:  needed,

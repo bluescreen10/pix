@@ -291,6 +291,7 @@ func (r *Renderer) NewSkeleton(bones []Bone, invBindMats []glm.Mat4f) Skeleton {
 		copy(mats, invBindMats)
 	}
 	data := SkeletonData{
+		version:      1,
 		bones:        append([]Bone(nil), bones...),
 		invBindMats:  mats,
 		boneMatrices: make([]glm.Mat4f, n),

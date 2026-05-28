@@ -158,10 +158,10 @@ type gltfPrimitive struct {
 }
 
 type gltfMaterial struct {
-	Name                 string          `json:"name"`
-	PbrMetallicRoughness *gltfPbr        `json:"pbrMetallicRoughness"`
-	DoubleSided          bool            `json:"doubleSided"`
-	AlphaMode            string          `json:"alphaMode"`
+	Name                 string   `json:"name"`
+	PbrMetallicRoughness *gltfPbr `json:"pbrMetallicRoughness"`
+	DoubleSided          bool     `json:"doubleSided"`
+	AlphaMode            string   `json:"alphaMode"`
 }
 
 type gltfPbr struct {
@@ -604,7 +604,7 @@ func (l *gltfLoader) buildAnimations() []*pix.AnimationClip {
 			}
 			samp := ga.Samplers[ch.Sampler]
 			interp := gltfInterpolation(samp.Interpolation)
-			times := pix.CastTo[float32, byte](l.accessorBytes(samp.Input))
+			times := pix.CastTo[float32](l.accessorBytes(samp.Input))
 
 			if len(times) > 0 {
 				if last := times[len(times)-1]; last > clip.Duration {

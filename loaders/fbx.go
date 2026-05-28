@@ -196,8 +196,8 @@ func (r *fbxReader) readUint16() uint16 {
 	return v
 }
 
-func (r *fbxReader) readInt32() int32  { return int32(r.readUint32()) }
-func (r *fbxReader) readInt64() int64  { return int64(r.readUint64()) }
+func (r *fbxReader) readInt32() int32 { return int32(r.readUint32()) }
+func (r *fbxReader) readInt64() int64 { return int64(r.readUint64()) }
 func (r *fbxReader) readFloat32() float32 {
 	return math.Float32frombits(r.readUint32())
 }
@@ -405,20 +405,22 @@ type fbxBuilder struct {
 	childToParents   map[int64][]fbxConn
 	parentToChildren map[int64][]fbxConn
 
-	nodeByID       map[int64]pix.Node   // populated by buildModels
-	preRotByID     map[int64]glm.Quatf  // PreRotation per node
-	postRotInvByID map[int64]glm.Quatf  // PostRotation^-1 per node
-	rotOrderByID   map[int64]int        // RotationOrder per node (0=XYZ, 4=ZXY, etc.)
-	deferredAnims  []deferredAnim       // resolved after buildModels
+	nodeByID       map[int64]pix.Node  // populated by buildModels
+	preRotByID     map[int64]glm.Quatf // PreRotation per node
+	postRotInvByID map[int64]glm.Quatf // PostRotation^-1 per node
+	rotOrderByID   map[int64]int       // RotationOrder per node (0=XYZ, 4=ZXY, etc.)
+	boneProxyByID  map[int64]*pix.BoneProxy
+	deferredAnims  []deferredAnim // resolved after buildModels
 }
 
 func (b *fbxBuilder) build() (*FBXResult, error) {
-	b.objects = map[int64]*fbxObject{}
-	b.childToParents = map[int64][]fbxConn{}
-	b.parentToChildren = map[int64][]fbxConn{}
-	b.preRotByID = map[int64]glm.Quatf{}
-	b.postRotInvByID = map[int64]glm.Quatf{}
-	b.rotOrderByID = map[int64]int{}
+	b.objects = make(map[int64]*fbxObject)
+	b.childToParents = make(map[int64][]fbxConn)
+	b.parentToChildren = make(map[int64][]fbxConn)
+	b.preRotByID = make(map[int64]glm.Quatf)
+	b.postRotInvByID = make(map[int64]glm.Quatf)
+	b.boneProxyByID = make(map[int64]*pix.BoneProxy)
+	b.rotOrderByID = make(map[int64]int)
 
 	b.indexObjects()
 	b.indexConnections()
@@ -506,6 +508,7 @@ func (b *fbxBuilder) buildModels(scene *pix.Scene) error {
 			models = append(models, obj)
 		}
 	}
+	sort.Slice(models, func(i, j int) bool { return models[i].id < models[j].id })
 
 	// Determine which models are bones (linked to a cluster).
 	boneIDs := map[int64]bool{}
@@ -562,21 +565,6 @@ func (b *fbxBuilder) buildModels(scene *pix.Scene) error {
 		}
 	}
 
-	// Build a map from bone model ID → the cluster that controls it (for TransformLink lookup).
-	// A cluster links to exactly one bone model via C: "OO", boneModelID, clusterID.
-	clusterByBoneModelID := map[int64]*fbxObject{}
-	for _, obj := range b.objects {
-		if obj.typ != "Deformer" || obj.class != "Cluster" {
-			continue
-		}
-		for _, conn := range b.parentToChildren[obj.id] {
-			if o, ok := b.objects[conn.childID]; ok && o.typ == "Model" {
-				clusterByBoneModelID[o.id] = obj
-				break
-			}
-		}
-	}
-
 	// Build meshes for each model that owns a geometry.
 	for _, obj := range models {
 		geos := b.childrenOfType(obj.id, "Geometry")
@@ -584,7 +572,7 @@ func (b *fbxBuilder) buildModels(scene *pix.Scene) error {
 			if geoObj.class != "Mesh" {
 				continue
 			}
-			gd, clusterOrder, err := b.buildGeometry(geoObj)
+			gd, clusterOrder, clusterObjects, err := b.buildGeometry(geoObj)
 			if err != nil {
 				return fmt.Errorf("fbx: geometry for model %d: %w", obj.id, err)
 			}
@@ -614,21 +602,27 @@ func (b *fbxBuilder) buildModels(scene *pix.Scene) error {
 				// that is the order bone indices were embedded into the vertex data.
 				var bones []pix.Bone
 				var invBindMats []glm.Mat4f
-				for _, boneModelID := range clusterOrder {
+				for i, boneModelID := range clusterOrder {
 					bone, ok := boneByID[boneModelID]
 					if !ok {
 						continue
 					}
-					cluster, ok := clusterByBoneModelID[boneModelID]
-					if !ok {
-						continue
-					}
-					ibm := extractMat4(cluster.rec, "TransformLink").Inv()
+					ibm := extractMat4(clusterObjects[i].rec, "TransformLink").Inv()
 					bones = append(bones, bone)
+					if _, exists := b.boneProxyByID[boneModelID]; !exists {
+						b.boneProxyByID[boneModelID] = pix.NewBoneProxy(bone)
+					}
 					invBindMats = append(invBindMats, ibm)
 				}
 				if len(bones) > 0 {
 					sk := b.r.NewSkeleton(bones, invBindMats)
+					for _, boneModelID := range clusterOrder {
+						proxy, ok := b.boneProxyByID[boneModelID]
+						if !ok {
+							continue
+						}
+						proxy.AddSkeleton(sk)
+					}
 					sm := scene.NewSkinnedMesh(pixGeo, pixMat, sk)
 					sk.Release()
 					groupNode.Add(sm)
@@ -661,13 +655,13 @@ func (b *fbxBuilder) buildModels(scene *pix.Scene) error {
 
 type fbxVertKey struct{ cp, ni, ui int32 }
 
-func (b *fbxBuilder) buildGeometry(obj *fbxObject) (gd *pix.GeometryData, clusterBoneOrder []int64, err error) {
+func (b *fbxBuilder) buildGeometry(obj *fbxObject) (gd *pix.GeometryData, clusterBoneOrder []int64, clusterObjects []*fbxObject, err error) {
 	rec := obj.rec
 
 	// Control points.
 	cpProp := childPropFloat64(rec, "Vertices")
 	if cpProp == nil {
-		return nil, nil, fmt.Errorf("no Vertices")
+		return nil, nil, nil, fmt.Errorf("no Vertices")
 	}
 	rawCP := cpProp
 	numCP := len(rawCP) / 3
@@ -679,7 +673,7 @@ func (b *fbxBuilder) buildGeometry(obj *fbxObject) (gd *pix.GeometryData, cluste
 	// Polygon vertex index.
 	pvRaw := childPropInt32(rec, "PolygonVertexIndex")
 	if pvRaw == nil {
-		return nil, nil, fmt.Errorf("no PolygonVertexIndex")
+		return nil, nil, nil, fmt.Errorf("no PolygonVertexIndex")
 	}
 
 	// Normals.
@@ -739,6 +733,7 @@ func (b *fbxBuilder) buildGeometry(obj *fbxObject) (gd *pix.GeometryData, cluste
 					}
 				}
 				clusterBoneOrder = append(clusterBoneOrder, boneModelID)
+				clusterObjects = append(clusterObjects, cluster)
 
 				idxs := childPropInt32(cluster.rec, "Indexes")
 				wgts := childPropFloat64(cluster.rec, "Weights")
@@ -912,7 +907,7 @@ func (b *fbxBuilder) buildGeometry(obj *fbxObject) (gd *pix.GeometryData, cluste
 		gd.AddAttribute(pix.NewAttribute(pix.SkinWeightAttrName, pix.SkinWeightLocation, pix.Float32x4, weights))
 	}
 
-	return gd, clusterBoneOrder, nil
+	return gd, clusterBoneOrder, clusterObjects, nil
 }
 
 // ---- Material ----
@@ -1021,9 +1016,9 @@ type deferredAnim struct {
 	targetID   int64
 	targetProp string
 	times      []float32
-	xT, xV    []float32
-	yT, yV    []float32
-	zT, zV    []float32
+	xT, xV     []float32
+	yT, yV     []float32
+	zT, zV     []float32
 }
 
 func (b *fbxBuilder) deferAnim(clip *pix.AnimationClip, targetID int64, prop string,
@@ -1031,7 +1026,7 @@ func (b *fbxBuilder) deferAnim(clip *pix.AnimationClip, targetID int64, prop str
 	b.deferredAnims = append(b.deferredAnims, deferredAnim{
 		clip: clip, targetID: targetID, targetProp: prop,
 		times: times,
-		xT: xT, xV: xV,
+		xT:    xT, xV: xV,
 		yT: yT, yV: yV,
 		zT: zT, zV: zV,
 	})
@@ -1040,10 +1035,16 @@ func (b *fbxBuilder) deferAnim(clip *pix.AnimationClip, targetID int64, prop str
 func (b *fbxBuilder) resolveAnims() {
 	const deg2rad = math.Pi / 180
 
+	var target pix.AnimationTarget
+	var ok bool
+
 	for _, da := range b.deferredAnims {
-		node, ok := b.nodeByID[da.targetID]
+		target, ok = b.boneProxyByID[da.targetID]
 		if !ok {
-			continue
+			target, ok = b.nodeByID[da.targetID]
+			if !ok {
+				continue
+			}
 		}
 
 		switch {
@@ -1057,7 +1058,7 @@ func (b *fbxBuilder) resolveAnims() {
 				}
 			}
 			da.clip.Positions = append(da.clip.Positions, pix.PositionTrack{
-				Target: node, Times: da.times, Values: values,
+				Target: target, Times: da.times, Values: values,
 			})
 		case strings.Contains(da.targetProp, "Rotation") || strings.Contains(da.targetProp, "R"):
 			preRot := b.preRotByID[da.targetID]
@@ -1072,7 +1073,7 @@ func (b *fbxBuilder) resolveAnims() {
 				values[i] = preRot.Mul(lclRot).Mul(postRotInv)
 			}
 			da.clip.Rotations = append(da.clip.Rotations, pix.RotationTrack{
-				Target: node, Times: da.times, Values: values,
+				Target: target, Times: da.times, Values: values,
 			})
 		case strings.Contains(da.targetProp, "Scaling") || strings.Contains(da.targetProp, "S"):
 			values := make([]glm.Vec3f, len(da.times))
@@ -1084,7 +1085,7 @@ func (b *fbxBuilder) resolveAnims() {
 				}
 			}
 			da.clip.Scales = append(da.clip.Scales, pix.ScaleTrack{
-				Target: node, Times: da.times, Values: values,
+				Target: target, Times: da.times, Values: values,
 			})
 		}
 	}

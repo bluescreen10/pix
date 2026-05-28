@@ -10,9 +10,15 @@ const (
 	InterpolationStep
 )
 
+type AnimationTarget interface {
+	SetPosition(glm.Vec3f)
+	SetRotationQuat(glm.Quatf)
+	SetScale(glm.Vec3f)
+}
+
 // PositionTrack animates a node's local position.
 type PositionTrack struct {
-	Target Node
+	Target AnimationTarget
 	Times  []float32
 	Values []glm.Vec3f
 	Mode   Interpolation
@@ -20,7 +26,7 @@ type PositionTrack struct {
 
 // RotationTrack animates a node's local rotation (quaternion slerp).
 type RotationTrack struct {
-	Target Node
+	Target AnimationTarget
 	Times  []float32
 	Values []glm.Quatf
 	Mode   Interpolation
@@ -28,7 +34,7 @@ type RotationTrack struct {
 
 // ScaleTrack animates a node's local scale.
 type ScaleTrack struct {
-	Target Node
+	Target AnimationTarget
 	Times  []float32
 	Values []glm.Vec3f
 	Mode   Interpolation
@@ -59,9 +65,9 @@ type AnimationAction struct {
 	TimeScale float32
 	Weight    float32 // blending weight (0–1); currently applied as a scalar on track values
 
-	time    float32
-	dir     float32 // +1 or -1 for ping-pong
-	active  bool
+	time   float32
+	dir    float32 // +1 or -1 for ping-pong
+	active bool
 }
 
 // Play starts or resumes the action. Returns itself for chaining.

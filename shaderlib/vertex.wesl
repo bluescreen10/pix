@@ -54,8 +54,6 @@ fn main(in: VertexInput, @builtin(instance_index) instance_index: u32) -> Vertex
     }
 
     @if USE_NORMAL {
-        // Rotate the normal by the upper-left 3×3 of skin_mat, then apply the
-        // inverse-transpose model matrix to bring it into world space.
         let skin3 = mat3x3f(skin_mat[0].xyz, skin_mat[1].xyz, skin_mat[2].xyz);
         let normal_matrix = transpose(
             mat3x3f(inv_model[0].xyz, inv_model[1].xyz, inv_model[2].xyz)
