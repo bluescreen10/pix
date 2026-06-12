@@ -48,9 +48,12 @@ func (r *Renderer) initResources() {
 	r.skeletons = newSlab[SkeletonData]()
 	r.samplerCache = make(map[Sampler]*wgpu.Sampler)
 
-	td := NewDataTexture([]byte{255, 255, 255, 255}, 1, 1, wgpu.TextureFormatRGBA8Unorm)
+	td := NewDataTexture([]byte{255, 255, 255, 255}, 1, 1, TextureFormatRGBA8Unorm)
 	tex := r.NewTexture(td)
 	r.defaultTexRef = tex.ref
+
+	r.halfQuad = r.NewHalfQuad()
+	r.quad = r.NewQuad()
 }
 
 // destroyResources releases all GPU memory synchronously at shutdown.
@@ -152,6 +155,10 @@ func (r *Renderer) NewBoxGeometry(width, height, depth float32) Geometry {
 	return r.allocGeometrySlot(NewBoxGeometry(width, height, depth))
 }
 
+func (r *Renderer) NewSphereGeometry(radius float32, heightSegments, widthSegments int) Geometry {
+	return r.allocGeometrySlot(NewSphereGeometry(radius, heightSegments, widthSegments))
+}
+
 // NewPlaneGeometry creates a plane geometry resource owned by the renderer.
 func (r *Renderer) NewPlaneGeometry(width, height float32, widthSegments, heightSegments int) Geometry {
 	return r.allocGeometrySlot(NewPlaneGeometry(width, height, widthSegments, heightSegments))
@@ -213,43 +220,43 @@ func (r *Renderer) getOrCreateSampler(s Sampler) *wgpu.Sampler {
 }
 
 func (r *Renderer) uploadTexture(id uint32) {
-	data := r.textures.get(id)
+	tex := r.textures.get(id)
 
-	data.gpuSampler = r.getOrCreateSampler(data.sampler)
-	data.gpuVersion = data.version
+	tex.gpuSampler = r.getOrCreateSampler(tex.sampler)
+	tex.gpuVersion = tex.version
 
-	if !data.hasPendingData() {
-		return
-	}
-
-	if data.gpuRef != nil {
-		data.gpuRef.Destroy()
-		data.gpuRef = nil
+	if tex.gpuRef != nil {
+		tex.gpuRef.Destroy()
+		tex.gpuRef = nil
 	}
 
 	gpuTex := r.runtime.Device.CreateTexture(&wgpu.TextureDescriptor{
 		Label:         "Texture",
-		Size:          wgpu.Extent3D{Width: uint32(data.width), Height: uint32(data.height), DepthOrArrayLayers: 1},
+		Size:          wgpu.Extent3D{Width: uint32(tex.width), Height: uint32(tex.height), DepthOrArrayLayers: 1},
 		MipLevelCount: 1,
 		SampleCount:   1,
 		Dimension:     wgpu.TextureDimension2D,
-		Format:        data.format,
+		Format:        tex.format.ToWGPU(),
 		Usage:         wgpu.TextureUsageCopyDst | wgpu.TextureUsageTextureBinding,
 	})
 
 	r.runtime.Device.GetQueue().WriteTexture(
 		wgpu.TexelCopyTextureInfo{Texture: gpuTex, MipLevel: 0, Origin: wgpu.Origin3D{}},
-		data.flush(),
+		tex.pixels,
 		wgpu.TexelCopyBufferLayout{
 			Offset:       0,
-			BytesPerRow:  uint32(data.width) * 4,
-			RowsPerImage: uint32(data.height),
+			BytesPerRow:  uint32(tex.width) * uint32(tex.format.Size()),
+			RowsPerImage: uint32(tex.height),
 		},
-		wgpu.Extent3D{Width: uint32(data.width), Height: uint32(data.height), DepthOrArrayLayers: 1},
+		wgpu.Extent3D{
+			Width:              uint32(tex.width),
+			Height:             uint32(tex.height),
+			DepthOrArrayLayers: uint32(tex.layers),
+		},
 	)
 
-	data.gpuView = gpuTex.CreateView(nil)
-	data.gpuRef = gpuTex
+	tex.gpuView = gpuTex.CreateView(nil)
+	tex.gpuRef = gpuTex
 }
 
 // defaultTexture returns the TextureData for the default 1×1 white texture.

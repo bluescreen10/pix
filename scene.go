@@ -61,10 +61,15 @@ func (id NodeID) isValid() bool {
 	return id.gen != 0
 }
 
+var sceneID idGen
+
 // Scene owns all node state. GPU resources are owned by the Renderer and
 // referenced here by pointer (transitional; will become IDs when Renderer
 // fully splits out resource ownership per the spec).
 type Scene struct {
+	id      uint32
+	version int
+
 	// Hierarchy — parallel arrays indexed by slot.
 	parents       []NodeID
 	firstChildren []NodeID
@@ -95,7 +100,8 @@ type Scene struct {
 
 	root NodeID
 
-	background glm.Color4f
+	background    glm.Color4f
+	backgroundMap Texture
 
 	// Kind-specific compact payload tables.
 	meshes          []meshData
@@ -108,7 +114,7 @@ type Scene struct {
 }
 
 func NewScene() *Scene {
-	s := &Scene{freeHead: invalidIdx, topoDirty: true}
+	s := &Scene{id: sceneID.next, version: 1, freeHead: invalidIdx, topoDirty: true}
 	s.root = s.allocNode(KindGroup)
 	// Root is permanently alive, visible, and effectively visible.
 	s.flags[s.root.index] = flagAlive | flagLocalVisible | flagVisible
@@ -121,6 +127,15 @@ func (s *Scene) Background() glm.Color4f {
 
 func (s *Scene) SetBackground(c glm.Color4f) {
 	s.background = c
+}
+
+func (s *Scene) BackgroundMap() Texture {
+	return s.backgroundMap
+}
+
+func (s *Scene) SetBackgroundMap(texture Texture) {
+	s.backgroundMap = texture
+	s.version++
 }
 
 // Add parents the node under the scene root.

@@ -17,7 +17,9 @@ func prepareMaterial(device *wgpu.Device, data *MaterialData, r *Renderer) error
 			return err
 		}
 		data.gpuUniformBuffers = buffers
+	}
 
+	if data.gpuBindGroupLayout == nil {
 		layout, err := createMaterialBindGroupLayout(device, data)
 		if err != nil {
 			return err

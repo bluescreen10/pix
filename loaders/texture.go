@@ -4,7 +4,6 @@ import (
 	"image"
 	"os"
 
-	"github.com/bluescreen10/dawn-go/wgpu"
 	"github.com/bluescreen10/pix"
 )
 
@@ -26,6 +25,6 @@ func LoadTexture(r *pix.Renderer, path string) (pix.Texture, error) {
 		}
 	}
 
-	td := pix.NewDataTexture(rgba.Pix, rgba.Bounds().Dx(), rgba.Bounds().Dy(), wgpu.TextureFormatRGBA8Unorm)
+	td := pix.NewDataTexture(rgba.Pix, rgba.Bounds().Dx(), rgba.Bounds().Dy(), pix.TextureFormatRGBA8Unorm)
 	return r.NewTexture(td), nil
 }

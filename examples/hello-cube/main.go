@@ -7,7 +7,6 @@ import (
 	"image"
 	_ "image/png"
 
-	"github.com/bluescreen10/dawn-go/wgpu"
 	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/controls"
@@ -46,7 +45,7 @@ func main() {
 			rgba.Set(x, y, img.At(x, y))
 		}
 	}
-	td := pix.NewDataTexture(rgba.Pix, rgba.Bounds().Dx(), rgba.Bounds().Dy(), wgpu.TextureFormatRGBA8Unorm)
+	td := pix.NewDataTexture(rgba.Pix, rgba.Bounds().Dx(), rgba.Bounds().Dy(), pix.TextureFormatRGBA8Unorm)
 	tex := renderer.NewTexture(td)
 
 	material := renderer.NewBasicMaterial()

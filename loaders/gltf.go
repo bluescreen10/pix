@@ -329,7 +329,7 @@ func (l *gltfLoader) loadTextures() error {
 		if err != nil {
 			return fmt.Errorf("gltf: texture %d: %w", i, err)
 		}
-		td := pix.NewDataTexture(pixels, w, h, wgpu.TextureFormatRGBA8Unorm)
+		td := pix.NewDataTexture(pixels, w, h, pix.TextureFormatRGBA8Unorm)
 		if gt.Sampler != nil && *gt.Sampler < len(l.doc.Samplers) {
 			s := l.doc.Samplers[*gt.Sampler]
 			td.SetMagFilter(gltfFilterMode(s.MagFilter))

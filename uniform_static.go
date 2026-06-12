@@ -8,15 +8,15 @@ import (
 
 type LightsUniform struct {
 	DirectionalLights     [MaxDirectionalLights]DirectionalLightUniform // 560
-	DirectionalLightCount uint32                                         //   4
-	_                     [3]float32                                     //  12 pad → 576
+	DirectionalLightCount uint32                                        //   4
+	_                     [3]float32                                    //  12 pad → 576
 	AmbientLight          AmbientLightUniform                           //  32 → 608
 	SpotLights            [MaxSpotLights]SpotLightUniform               // 640 → 1248
-	SpotLightCount        uint32                                         //   4
-	_                     [3]float32                                     //  12 pad → 1264
+	SpotLightCount        uint32                                        //   4
+	_                     [3]float32                                    //  12 pad → 1264
 	PointLights           [MaxPointLights]PointLightUniform             // 240 → 1504
-	PointLightCount       uint32                                         //   4
-	_                     [3]float32                                     //  12 pad → 1520
+	PointLightCount       uint32                                        //   4
+	_                     [3]float32                                    //  12 pad → 1520
 }
 
 type PointLightUniform struct {
@@ -59,8 +59,10 @@ type AmbientLightUniform struct {
 }
 
 type CameraUniform struct {
-	viewProj glm.Mat4f
-	position glm.Vec4f
+	viewProj       glm.Mat4f
+	invViewProj    glm.Mat4f
+	skyInvViewProj glm.Mat4f
+	position       glm.Vec4f
 }
 
 func (u *CameraUniform) Bytes() []byte {

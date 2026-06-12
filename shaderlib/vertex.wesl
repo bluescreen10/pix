@@ -1,6 +1,8 @@
 struct Camera {
-    view_projection: mat4x4<f32>,
-    position:        vec4<f32>,
+    view_projection:     mat4x4<f32>,
+    inv_view_projection: mat4x4<f32>,
+    sky_inv_view_proj:   mat4x4<f32>,
+    position:            vec4<f32>,
 }
 
 struct VertexInput {

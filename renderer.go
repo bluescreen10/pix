@@ -39,6 +39,8 @@ const (
 	ShadowMapBinding
 	ShadowSamplerBinding
 	PointShadowMapBinding
+	EnvironmentMapBinding
+	EnvironmentMapSamplerBinding
 )
 
 // Instance Bindings
@@ -93,10 +95,11 @@ type Renderer struct {
 	pipelineCache *pipelineCache
 
 	// global
-	cameraUniformBuffer   *wgpu.Buffer
-	lightsUniformBuffer   *wgpu.Buffer
+	sceneStates map[uint32]*sceneRenderState
+	//cameraUniformBuffer *wgpu.Buffer
+	//lightsUniformBuffer   *wgpu.Buffer
 	globalBindGroupLayout *wgpu.BindGroupLayout
-	globalBindGroup       *wgpu.BindGroup
+	//globalBindGroup       *wgpu.BindGroup
 
 	// Stable per-node model/inv-model buffers — slot = scene node index.
 	modelBuf       *wgpu.Buffer
@@ -122,6 +125,13 @@ type Renderer struct {
 	depthTexture     *wgpu.Texture
 	depthTextureView *wgpu.TextureView
 
+	// quads
+	halfQuad Geometry
+	quad     Geometry
+
+	// enviroment material
+	environmentMaterial *EquirectMaterial
+
 	// debug text overlay
 	debugText      *debugTextRenderer
 	DebugTexts     []DebugText
@@ -142,6 +152,7 @@ func NewRenderer(width, height uint32) *Renderer {
 		pipelineCache:  newPipelineCache(),
 		shaders:        wesl.New(),
 		DebugTextColor: glm.Color4f{1, 1, 1, 1},
+		sceneStates:    map[uint32]*sceneRenderState{},
 	}
 }
 
@@ -187,11 +198,10 @@ func (r *Renderer) Destroy() {
 		r.invModelBuf = nil
 	}
 
-	r.cameraUniformBuffer.Destroy()
-	r.cameraUniformBuffer = nil
-
-	r.lightsUniformBuffer.Destroy()
-	r.lightsUniformBuffer = nil
+	for _, state := range r.sceneStates {
+		state.bindGroup.Release()
+		state.bindGroup = nil
+	}
 
 	r.globalBindGroupLayout.Release()
 	r.globalBindGroupLayout = nil
@@ -374,11 +384,15 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 		r.ensureGeometryReady(list.shadowCasters[i].geo)
 	}
 
+	sceneState := r.getSceneState(scene)
+
 	cameraUniform := CameraUniform{
-		viewProj: viewProjection,
-		position: camera.Position().Vec4(),
+		viewProj:       viewProjection,
+		invViewProj:    viewProjection.Inv(),
+		skyInvViewProj: viewProjection.Mat3().Mat4().Inv(),
+		position:       camera.Position().Vec4(),
 	}
-	r.runtime.Queue.WriteBuffer(r.cameraUniformBuffer, 0, cameraUniform.Bytes())
+	r.runtime.Queue.WriteBuffer(sceneState.cameraUniform, 0, cameraUniform.Bytes())
 
 	ctx.encoder = r.runtime.Device.CreateCommandEncoder(nil)
 
@@ -463,7 +477,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 			lightsUniform.PointLights[i] = ld.toUniform(scene)
 		}
 
-		r.runtime.Queue.WriteBuffer(r.lightsUniformBuffer, 0, lightsUniform.Bytes())
+		r.runtime.Queue.WriteBuffer(sceneState.lightsUniform, 0, lightsUniform.Bytes())
 	}
 
 	// All shadow passes have been submitted. Create the main encoder now so the
@@ -487,7 +501,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	})
 
 	renderPass := r.beginRendering(&ctx, scene.background)
-	renderPass.SetBindGroup(GlobalSet, r.globalBindGroup, nil)
+	renderPass.SetBindGroup(GlobalSet, sceneState.bindGroup, nil)
 
 	var curPipeline *wgpu.RenderPipeline
 	var curMatBG *wgpu.BindGroup
@@ -517,6 +531,25 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 			}
 		}
 		drawGeometry(renderPass, d)
+	}
+
+	// has an env map
+	if scene.backgroundMap.Valid() {
+		d := drawing{
+			mat:           r.environmentMaterial.data(),
+			geo:           r.geometries.get(r.halfQuad.ref.id),
+			instanceCount: 1,
+		}
+		r.ensureGeometryReady(d.geo)
+		if err := prepareMaterial(r.runtime.Device, d.mat, r); err != nil {
+			r.logger.Error("error preparing equirect material", slog.Any("err", err))
+		} else {
+			pipeline := r.getPipeline(d, ctx.texture, ctx.depthTarget)
+			renderPass.SetPipeline(pipeline)
+			renderPass.SetBindGroup(MaterialSet, d.mat.gpuBindGroup, nil)
+			renderPass.SetBindGroup(InstanceSet, r.objectsBindGrp, nil)
+			drawGeometry(renderPass, d)
+		}
 	}
 
 	r.endRendering(&ctx, renderPass)
@@ -928,9 +961,14 @@ func (r *Renderer) compileShader(device *wgpu.Device, code string, defines map[s
 func (r *Renderer) createGlobalResources() {
 	r.createShadowResources()
 	r.createPointShadowResources()
+	r.createEnvMapResources()
 	r.createGlobalBindGroupLayouts()
 	r.createGlobalBuffers()
-	r.createGlobalBindGroups()
+	//r.createGlobalBindGroups()
+}
+
+func (r *Renderer) createEnvMapResources() {
+	r.environmentMaterial = r.NewEquirectMaterial()
 }
 
 func (r *Renderer) createShadowResources() {
@@ -998,6 +1036,22 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 					SampleType:    wgpu.TextureSampleTypeDepth,
 					ViewDimension: wgpu.TextureViewDimensionCubeArray,
 					Multisampled:  false,
+				},
+			},
+			{
+				Binding:    EnvironmentMapBinding,
+				Visibility: wgpu.ShaderStageFragment,
+				Texture: wgpu.TextureBindingLayout{
+					SampleType:    wgpu.TextureSampleTypeFloat,
+					ViewDimension: wgpu.TextureViewDimension2D,
+					Multisampled:  false,
+				},
+			},
+			{
+				Binding:    EnvironmentMapSamplerBinding,
+				Visibility: wgpu.ShaderStageFragment,
+				Sampler: wgpu.SamplerBindingLayout{
+					Type: wgpu.SamplerBindingTypeFiltering,
 				},
 			},
 		},
@@ -1098,52 +1152,7 @@ func (r *Renderer) syncSkeletons(scene *Scene) {
 }
 
 func (r *Renderer) createGlobalBuffers() {
-	r.cameraUniformBuffer = r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
-		Label: "Camera uniform buffer",
-		Size:  uint64(unsafe.Sizeof(CameraUniform{})),
-		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
-	})
-
-	r.lightsUniformBuffer = r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
-		Label: "Lights uniform buffer",
-		Size:  uint64(unsafe.Sizeof(LightsUniform{})),
-		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
-	})
-
 	r.ensureObjectsCap(InitialStorageCapacity)
-}
-
-func (r *Renderer) createGlobalBindGroups() {
-	r.globalBindGroup = r.runtime.Device.CreateBindGroup(wgpu.BindGroupDescriptor{
-		Label:  "Global bind group",
-		Layout: r.globalBindGroupLayout,
-		Entries: []wgpu.BindGroupEntry{
-			{
-				Binding: CameraBinding,
-				Buffer:  r.cameraUniformBuffer,
-				Offset:  0,
-				Size:    wgpu.WholeSize,
-			},
-			{
-				Binding: LightsBinding,
-				Buffer:  r.lightsUniformBuffer,
-				Offset:  0,
-				Size:    wgpu.WholeSize,
-			},
-			{
-				Binding:     ShadowMapBinding,
-				TextureView: r.shadowArray.ArrayView(),
-			},
-			{
-				Binding: ShadowSamplerBinding,
-				Sampler: r.shadowArray.Sampler(),
-			},
-			{
-				Binding:     PointShadowMapBinding,
-				TextureView: r.pointShadowArray.ArrayView(),
-			},
-		},
-	})
 }
 
 // collectRenderList populates list by iterating the scene's compact payload tables
@@ -1315,4 +1324,102 @@ func buildDefines(matFlags MaterialFlags, geoFlags GeometryFlags) map[string]boo
 
 func (r *Renderer) ShowFPS(bool) {
 	r.showStats = true
+}
+
+func (r *Renderer) getSceneState(scene *Scene) *sceneRenderState {
+	state, ok := r.sceneStates[scene.id]
+	if ok {
+		if scene.version != state.gpuVersion {
+			r.updateRenderState(state, scene)
+		}
+		return state
+	}
+
+	state = r.createRenderState(scene)
+	r.sceneStates[scene.id] = state
+	return state
+}
+
+func (r *Renderer) createRenderState(scene *Scene) *sceneRenderState {
+	state := &sceneRenderState{gpuVersion: scene.version}
+
+	state.cameraUniform = r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
+		Label: "Camera uniform buffer",
+		Size:  uint64(unsafe.Sizeof(CameraUniform{})),
+		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
+	})
+
+	state.lightsUniform = r.runtime.Device.CreateBuffer(wgpu.BufferDescriptor{
+		Label: "Lights uniform buffer",
+		Size:  uint64(unsafe.Sizeof(LightsUniform{})),
+		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
+	})
+
+	r.updateRenderState(state, scene)
+	return state
+}
+
+func (r *Renderer) updateRenderState(state *sceneRenderState, scene *Scene) {
+	if state.bindGroup != nil {
+		state.bindGroup.Release()
+	}
+
+	envMapRef := scene.backgroundMap.ref
+
+	if !envMapRef.Valid() {
+		envMapRef = r.defaultTexRef
+	}
+
+	envMap := r.textures.get(envMapRef.id)
+	if envMap.gpuVersion < envMap.version {
+		r.uploadTexture(envMapRef.id)
+	}
+
+	state.bindGroup = r.runtime.Device.CreateBindGroup(wgpu.BindGroupDescriptor{
+		Label:  "Global bind group",
+		Layout: r.globalBindGroupLayout,
+		Entries: []wgpu.BindGroupEntry{
+			{
+				Binding: CameraBinding,
+				Buffer:  state.cameraUniform,
+				Offset:  0,
+				Size:    wgpu.WholeSize,
+			},
+			{
+				Binding: LightsBinding,
+				Buffer:  state.lightsUniform,
+				Offset:  0,
+				Size:    wgpu.WholeSize,
+			},
+			{
+				Binding:     ShadowMapBinding,
+				TextureView: r.shadowArray.ArrayView(),
+			},
+			{
+				Binding: ShadowSamplerBinding,
+				Sampler: r.shadowArray.Sampler(),
+			},
+			{
+				Binding:     PointShadowMapBinding,
+				TextureView: r.pointShadowArray.ArrayView(),
+			},
+			{
+				Binding:     EnvironmentMapBinding,
+				TextureView: envMap.gpuView,
+			},
+			{
+				Binding: EnvironmentMapSamplerBinding,
+				Sampler: envMap.gpuSampler,
+			},
+		},
+	})
+
+	state.gpuVersion = scene.version
+}
+
+type sceneRenderState struct {
+	gpuVersion    int
+	bindGroup     *wgpu.BindGroup
+	cameraUniform *wgpu.Buffer
+	lightsUniform *wgpu.Buffer
 }

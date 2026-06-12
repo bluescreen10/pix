@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bluescreen10/dawn-go/wgpu"
 	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/glm"
 )
@@ -397,6 +396,6 @@ func loadImageFile(r *pix.Renderer, path string) (pix.Texture, error) {
 			pixels[i], pixels[i+1], pixels[i+2], pixels[i+3] = byte(rv>>8), byte(g>>8), byte(b>>8), byte(a>>8)
 		}
 	}
-	td := pix.NewDataTexture(pixels, w, h, wgpu.TextureFormatRGBA8Unorm)
+	td := pix.NewDataTexture(pixels, w, h, pix.TextureFormatRGBA8Unorm)
 	return r.NewTexture(td), nil
 }
