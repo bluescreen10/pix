@@ -105,7 +105,7 @@ func (r *Renderer) uploadGeometry(geo *GeometryData) {
 	geo.Destroy()
 
 	if len(geo.indices) > 0 {
-		buf := r.runtime.Device.CreateBufferInit(wgpu.BufferInitDescriptor{
+		buf := r.runtime.Device().CreateBufferInit(wgpu.BufferInitDescriptor{
 			Label:    "index buffer",
 			Contents: wgpu.ToBytes(geo.indices),
 			Usage:    wgpu.BufferUsageIndex | wgpu.BufferUsageCopyDst,
@@ -120,7 +120,7 @@ func (r *Renderer) uploadGeometry(geo *GeometryData) {
 			wireIdx = append(wireIdx, i0, i1, i1, i2, i2, i0)
 		}
 		geo.gpuWireframeCount = len(wireIdx)
-		geo.gpuWireframeIndex = r.runtime.Device.CreateBufferInit(wgpu.BufferInitDescriptor{
+		geo.gpuWireframeIndex = r.runtime.Device().CreateBufferInit(wgpu.BufferInitDescriptor{
 			Label:    "wireframe index buffer",
 			Contents: wgpu.ToBytes(wireIdx),
 			Usage:    wgpu.BufferUsageIndex | wgpu.BufferUsageCopyDst,
@@ -131,7 +131,7 @@ func (r *Renderer) uploadGeometry(geo *GeometryData) {
 
 	geo.gpuBufs = make([]GeometryBuffer, len(geo.attrs))
 	for i, a := range geo.attrs {
-		buf := r.runtime.Device.CreateBufferInit(wgpu.BufferInitDescriptor{
+		buf := r.runtime.Device().CreateBufferInit(wgpu.BufferInitDescriptor{
 			Label:    a.name + " buffer",
 			Contents: a.data,
 			Usage:    wgpu.BufferUsageVertex | wgpu.BufferUsageCopyDst,
@@ -203,7 +203,7 @@ func (r *Renderer) getOrCreateSampler(s Sampler) *wgpu.Sampler {
 	if sampler, ok := r.samplerCache[s]; ok {
 		return sampler
 	}
-	sampler := r.runtime.Device.CreateSampler(&wgpu.SamplerDescriptor{
+	sampler := r.runtime.CreateSampler(&wgpu.SamplerDescriptor{
 		AddressModeU:  s.AddressModeU,
 		AddressModeV:  s.AddressModeV,
 		AddressModeW:  s.AddressModeW,
@@ -230,7 +230,7 @@ func (r *Renderer) uploadTexture(id uint32) {
 		tex.gpuRef = nil
 	}
 
-	gpuTex := r.runtime.Device.CreateTexture(&wgpu.TextureDescriptor{
+	gpuTex := r.runtime.CreateTexture(&wgpu.TextureDescriptor{
 		Label:         "Texture",
 		Size:          wgpu.Extent3D{Width: uint32(tex.width), Height: uint32(tex.height), DepthOrArrayLayers: 1},
 		MipLevelCount: 1,
