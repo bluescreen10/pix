@@ -50,7 +50,7 @@ type debugTextRenderer struct {
 
 func (r *Renderer) initDebugText() {
 	dt := &debugTextRenderer{}
-	dt.buildAtlas(r.runtime.Device(), r.runtime.Queue)
+	dt.buildAtlas(r.runtime.Device(), r.runtime.Queue())
 	dt.createPipeline(r)
 	r.debugText = dt
 }

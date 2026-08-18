@@ -14,6 +14,7 @@ import (
 	"github.com/bluescreen10/dawn-go/wgpu"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
+	"github.com/bluescreen10/pix/internal/slab"
 	"github.com/bluescreen10/wesl-go"
 )
 
@@ -79,10 +80,10 @@ type renderContext struct {
 }
 
 type Renderer struct {
-	geometries slab[GeometryData]
-	materials  slab[MaterialData]
-	textures   slab[TextureData]
-	skeletons  slab[SkeletonData]
+	geometries slab.Slab[GeometryData]
+	materials  slab.Slab[MaterialData]
+	textures   slab.Slab[TextureData]
+	skeletons  slab.Slab[SkeletonData]
 
 	samplerCache  map[Sampler]*wgpu.Sampler
 	defaultTexRef Ref[Texture]
@@ -538,7 +539,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	if scene.backgroundMap.Valid() {
 		d := drawing{
 			mat:           r.environmentMaterial.data(),
-			geo:           r.geometries.get(r.halfQuad.ref.id),
+			geo:           r.geometries.Get(r.halfQuad.ref.id),
 			instanceCount: 1,
 		}
 		r.ensureGeometryReady(d.geo)
@@ -1121,7 +1122,7 @@ func (r *Renderer) syncSkeletons(scene *Scene) {
 		}
 
 		id := smd.skeleton.ref.ID()
-		sd := r.skeletons.get(id)
+		sd := r.skeletons.Get(id)
 
 		if sd.version == sd.gpuVersion {
 			continue
@@ -1173,8 +1174,8 @@ func (r *Renderer) collectRenderList(list *renderList, scene *Scene) {
 		d := drawing{
 			instanceId:    md.ownerNode,
 			instanceCount: 1,
-			geo:           r.geometries.get(md.geometry.ref.ID()),
-			mat:           r.materials.get(md.material.ref.ID()),
+			geo:           r.geometries.Get(md.geometry.ref.ID()),
+			mat:           r.materials.Get(md.material.ref.ID()),
 			bounds: Sphere{
 				Center: glm.Vec3f{worldCenter[0], worldCenter[1], worldCenter[2]},
 				Radius: md.boundingSphere.Radius,
@@ -1195,7 +1196,7 @@ func (r *Renderer) collectRenderList(list *renderList, scene *Scene) {
 			continue
 		}
 
-		geo := r.geometries.get(imd.geometry.ref.ID())
+		geo := r.geometries.Get(imd.geometry.ref.ID())
 		geoBounds := geo.BoundingSphere()
 		firstChild := scene.firstChildren[imd.ownerNode]
 
@@ -1219,7 +1220,7 @@ func (r *Renderer) collectRenderList(list *renderList, scene *Scene) {
 			instanceId:    firstChild.index,
 			instanceCount: uint32(imd.instanceCount),
 			geo:           geo,
-			mat:           r.materials.get(imd.material.ref.ID()),
+			mat:           r.materials.Get(imd.material.ref.ID()),
 			bounds:        Sphere{Center: center, Radius: maxDist + geoBounds.Radius},
 			ownerNode:     imd.ownerNode,
 			pipelines:     &imd.pipelines,
@@ -1243,11 +1244,11 @@ func (r *Renderer) collectRenderList(list *renderList, scene *Scene) {
 		d := drawing{
 			instanceId:    smd.ownerNode,
 			instanceCount: 1,
-			geo:           r.geometries.get(smd.geometry.ref.ID()),
-			mat:           r.materials.get(smd.material.ref.ID()),
+			geo:           r.geometries.Get(smd.geometry.ref.ID()),
+			mat:           r.materials.Get(smd.material.ref.ID()),
 			bounds:        Sphere{Center: glm.Vec3f{wc[0], wc[1], wc[2]}, Radius: smd.boundingSphere.Radius},
 			pipelines:     &smd.pipelines,
-			skeleton:      r.skeletons.get(smd.skeleton.ref.ID()),
+			skeleton:      r.skeletons.Get(smd.skeleton.ref.ID()),
 		}
 		if flags.CastShadow() {
 			list.shadowCasters = append(list.shadowCasters, d)
@@ -1371,7 +1372,7 @@ func (r *Renderer) updateRenderState(state *sceneRenderState, scene *Scene) {
 		envMapRef = r.defaultTexRef
 	}
 
-	envMap := r.textures.get(envMapRef.id)
+	envMap := r.textures.Get(envMapRef.id)
 	if envMap.gpuVersion < envMap.version {
 		r.uploadTexture(envMapRef.id)
 	}

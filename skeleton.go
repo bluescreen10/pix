@@ -54,9 +54,9 @@ func (s Skeleton) Ref() Ref[Skeleton] { return s.ref }
 func (s Skeleton) Release()           { s.ref.Release() }
 func (s Skeleton) Copy() Skeleton     { return Skeleton{renderer: s.renderer, ref: s.ref.Copy()} }
 func (s Skeleton) Valid() bool        { return s.renderer != nil && s.ref.Valid() }
-func (s Skeleton) BoneCount() int     { return s.renderer.skeletons.get(s.ref.ID()).BoneCount() }
+func (s Skeleton) BoneCount() int     { return s.renderer.skeletons.Get(s.ref.ID()).BoneCount() }
 func (s Skeleton) NeedsUpdate() {
-	s.renderer.skeletons.get(s.ref.ID()).NeedsUpdate()
+	s.renderer.skeletons.Get(s.ref.ID()).NeedsUpdate()
 }
 
 // Bone is a scene node that participates in skeletal animation.

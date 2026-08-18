@@ -3,6 +3,7 @@ package pix
 import (
 	"github.com/bluescreen10/dawn-go/wgpu"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/internal/slab"
 )
 
 const (
@@ -23,29 +24,29 @@ type deferredFreeEntry struct {
 type geoDisposer struct{ r *Renderer }
 
 func (d geoDisposer) dispose(id uint32)           { d.r.scheduleGeoFree(id) }
-func (d geoDisposer) generation(id uint32) uint32 { return d.r.geometries.generation(id) }
+func (d geoDisposer) generation(id uint32) uint32 { return d.r.geometries.Generation(id) }
 
 type matDisposer struct{ r *Renderer }
 
 func (d matDisposer) dispose(id uint32)           { d.r.scheduleMatFree(id) }
-func (d matDisposer) generation(id uint32) uint32 { return d.r.materials.generation(id) }
+func (d matDisposer) generation(id uint32) uint32 { return d.r.materials.Generation(id) }
 
 type texDisposer struct{ r *Renderer }
 
 func (d texDisposer) dispose(id uint32)           { d.r.scheduleTexFree(id) }
-func (d texDisposer) generation(id uint32) uint32 { return d.r.textures.generation(id) }
+func (d texDisposer) generation(id uint32) uint32 { return d.r.textures.Generation(id) }
 
 type skelDisposer struct{ r *Renderer }
 
 func (d skelDisposer) dispose(id uint32)           { d.r.scheduleSkeletonFree(id) }
-func (d skelDisposer) generation(id uint32) uint32 { return d.r.skeletons.generation(id) }
+func (d skelDisposer) generation(id uint32) uint32 { return d.r.skeletons.Generation(id) }
 
 // initResources initialises the resource slabs and creates the default white texture.
 func (r *Renderer) initResources() {
-	r.geometries = newSlab[GeometryData]()
-	r.materials = newSlab[MaterialData]()
-	r.textures = newSlab[TextureData]()
-	r.skeletons = newSlab[SkeletonData]()
+	r.geometries = slab.New[GeometryData]()
+	r.materials = slab.New[MaterialData]()
+	r.textures = slab.New[TextureData]()
+	r.skeletons = slab.New[SkeletonData]()
 	r.samplerCache = make(map[Sampler]*wgpu.Sampler)
 
 	td := NewDataTexture([]byte{255, 255, 255, 255}, 1, 1, TextureFormatRGBA8Unorm)
@@ -58,26 +59,10 @@ func (r *Renderer) initResources() {
 
 // destroyResources releases all GPU memory synchronously at shutdown.
 func (r *Renderer) destroyResources() {
-	for i := range r.geometries.entries {
-		if r.geometries.entries[i].alive {
-			r.geometries.entries[i].val.Destroy()
-		}
-	}
-	for i := range r.materials.entries {
-		if r.materials.entries[i].alive {
-			r.materials.entries[i].val.Destroy()
-		}
-	}
-	for i := range r.textures.entries {
-		if r.textures.entries[i].alive {
-			r.textures.entries[i].val.Destroy()
-		}
-	}
-	for i := range r.skeletons.entries {
-		if r.skeletons.entries[i].alive {
-			r.skeletons.entries[i].val.Destroy()
-		}
-	}
+	r.geometries.Range(func(g *GeometryData) { g.Destroy() })
+	r.materials.Range(func(m *MaterialData) { m.Destroy() })
+	r.textures.Range(func(t *TextureData) { t.Destroy() })
+	r.skeletons.Range(func(s *SkeletonData) { s.Destroy() })
 	for _, s := range r.samplerCache {
 		s.Release()
 	}
@@ -91,13 +76,13 @@ func (r *Renderer) allocGeometrySlot(data *GeometryData) Geometry {
 	rc := new(int32)
 	*rc = 1
 	//bounds := data.BoundingSphere()
-	idx, gen := r.geometries.alloc(*data)
+	idx, gen := r.geometries.Alloc(*data)
 	ref := Ref[Geometry]{id: idx, gen: gen, refCount: rc, owner: geoDisposer{r}}
 	return Geometry{renderer: r, ref: ref}
 }
 
 func (r *Renderer) scheduleGeoFree(id uint32) {
-	r.geometries.free(id)
+	r.geometries.Free(id)
 	r.deferredFree = append(r.deferredFree, deferredFreeEntry{kind: deferredGeo, id: id, frame: r.frameCount})
 }
 
@@ -169,18 +154,18 @@ func (r *Renderer) NewPlaneGeometry(width, height float32, widthSegments, height
 func (r *Renderer) allocMaterialSlot(data *MaterialData) Material {
 	rc := new(int32)
 	*rc = 1
-	idx, gen := r.materials.alloc(*data)
+	idx, gen := r.materials.Alloc(*data)
 	ref := Ref[Material]{id: idx, gen: gen, refCount: rc, owner: matDisposer{r}}
 	return Material{renderer: r, ref: ref}
 }
 
 func (r *Renderer) scheduleMatFree(id uint32) {
-	data := r.materials.get(id)
+	data := r.materials.Get(id)
 	for i := range data.textures {
 		data.textures[i].Release()
 		data.textures[i] = Ref[Texture]{}
 	}
-	r.materials.free(id)
+	r.materials.Free(id)
 	r.deferredFree = append(r.deferredFree, deferredFreeEntry{kind: deferredMat, id: id, frame: r.frameCount})
 }
 
@@ -189,13 +174,13 @@ func (r *Renderer) scheduleMatFree(id uint32) {
 func (r *Renderer) allocTextureSlot(data *TextureData) Texture {
 	rc := new(int32)
 	*rc = 1
-	idx, gen := r.textures.alloc(*data)
+	idx, gen := r.textures.Alloc(*data)
 	ref := Ref[Texture]{id: idx, gen: gen, refCount: rc, owner: texDisposer{r}}
 	return Texture{renderer: r, ref: ref}
 }
 
 func (r *Renderer) scheduleTexFree(id uint32) {
-	r.textures.free(id)
+	r.textures.Free(id)
 	r.deferredFree = append(r.deferredFree, deferredFreeEntry{kind: deferredTex, id: id, frame: r.frameCount})
 }
 
@@ -220,7 +205,7 @@ func (r *Renderer) getOrCreateSampler(s Sampler) *wgpu.Sampler {
 }
 
 func (r *Renderer) uploadTexture(id uint32) {
-	tex := r.textures.get(id)
+	tex := r.textures.Get(id)
 
 	tex.gpuSampler = r.getOrCreateSampler(tex.sampler)
 	tex.gpuVersion = tex.version
@@ -240,7 +225,7 @@ func (r *Renderer) uploadTexture(id uint32) {
 		Usage:         wgpu.TextureUsageCopyDst | wgpu.TextureUsageTextureBinding,
 	})
 
-	r.runtime.Device.GetQueue().WriteTexture(
+	r.runtime.Queue().WriteTexture(
 		wgpu.TexelCopyTextureInfo{Texture: gpuTex, MipLevel: 0, Origin: wgpu.Origin3D{}},
 		tex.pixels,
 		wgpu.TexelCopyBufferLayout{
@@ -262,7 +247,7 @@ func (r *Renderer) uploadTexture(id uint32) {
 // defaultTexture returns the TextureData for the default 1×1 white texture.
 func (r *Renderer) defaultTexture() *TextureData {
 	id := r.defaultTexRef.ID()
-	td := r.textures.get(id)
+	td := r.textures.Get(id)
 	if td.gpuVersion < td.version {
 		r.uploadTexture(id)
 	}
@@ -279,13 +264,13 @@ func (r *Renderer) NewTexture(data *TextureData) Texture {
 func (r *Renderer) allocSkeletonSlot(data SkeletonData) Skeleton {
 	rc := new(int32)
 	*rc = 1
-	idx, gen := r.skeletons.alloc(data)
+	idx, gen := r.skeletons.Alloc(data)
 	ref := Ref[Skeleton]{id: idx, gen: gen, refCount: rc, owner: skelDisposer{r}}
 	return Skeleton{renderer: r, ref: ref}
 }
 
 func (r *Renderer) scheduleSkeletonFree(id uint32) {
-	r.skeletons.free(id)
+	r.skeletons.Free(id)
 	r.deferredFree = append(r.deferredFree, deferredFreeEntry{kind: deferredSkel, id: id, frame: r.frameCount})
 }
 
@@ -320,17 +305,17 @@ func (r *Renderer) drainDeferredFree() {
 		if d.frame <= safe {
 			switch d.kind {
 			case deferredGeo:
-				r.geometries.get(d.id).Destroy()
-				r.geometries.reclaim(d.id)
+				r.geometries.Get(d.id).Destroy()
+				r.geometries.Reclaim(d.id)
 			case deferredMat:
-				r.materials.get(d.id).Destroy()
-				r.materials.reclaim(d.id)
+				r.materials.Get(d.id).Destroy()
+				r.materials.Reclaim(d.id)
 			case deferredTex:
-				r.textures.get(d.id).Destroy()
-				r.textures.reclaim(d.id)
+				r.textures.Get(d.id).Destroy()
+				r.textures.Reclaim(d.id)
 			case deferredSkel:
-				r.skeletons.get(d.id).Destroy()
-				r.skeletons.reclaim(d.id)
+				r.skeletons.Get(d.id).Destroy()
+				r.skeletons.Reclaim(d.id)
 			}
 			r.deferredFree[i] = r.deferredFree[len(r.deferredFree)-1]
 			r.deferredFree = r.deferredFree[:len(r.deferredFree)-1]

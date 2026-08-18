@@ -121,7 +121,7 @@ func createMaterialBindGroup(device *wgpu.Device, data *MaterialData, r *Rendere
 		var td *TextureData
 		if texRef.Valid() {
 			id := texRef.ID()
-			td = r.textures.get(id)
+			td = r.textures.Get(id)
 			if td.gpuVersion < td.version {
 				r.uploadTexture(id)
 			}

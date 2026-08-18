@@ -26,7 +26,7 @@ func (m SkinnedMesh) Skeleton() Skeleton { return m.data().skeleton }
 // Bind captures the current world transform of each bone as the bind pose.
 // Call after positioning the skeleton in its rest pose, before any animation.
 func (m SkinnedMesh) Bind(scene *Scene) {
-	sd := m.data().skeleton.renderer.skeletons.get(m.data().skeleton.ref.ID())
+	sd := m.data().skeleton.renderer.skeletons.Get(m.data().skeleton.ref.ID())
 	for i, b := range sd.bones {
 		sd.invBindMats[i] = scene.world[b.slot()].Inv()
 	}

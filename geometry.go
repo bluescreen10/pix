@@ -22,10 +22,10 @@ const (
 const ShadowGeometryMask = UsePosFlag | UseSkinningFlag
 
 var attrNameToFlag = map[string]GeometryFlags{
-	PositionAttrName:  UsePosFlag,
-	UVAttrName:        UseUVsFlag,
-	NormalAttrName:    UseNormal,
-	SkinIndexAttrName: UseSkinningFlag,
+	PositionAttrName:   UsePosFlag,
+	UVAttrName:         UseUVsFlag,
+	NormalAttrName:     UseNormal,
+	SkinIndexAttrName:  UseSkinningFlag,
 	SkinWeightAttrName: UseSkinningFlag,
 }
 
@@ -48,14 +48,14 @@ type GeometryData struct {
 	boundingSphere        Sphere
 
 	// GPU-side resources, populated by the renderer.
-	gpuVersion           int
-	gpuIndex             *wgpu.Buffer
-	gpuWireframeIndex    *wgpu.Buffer // line-list index buffer derived from triangles
-	gpuBufs              []GeometryBuffer
-	gpuCount             int
-	gpuWireframeCount    int
-	gpuLayout            []wgpu.VertexBufferLayout
-	gpuShadowLayout      []wgpu.VertexBufferLayout
+	gpuVersion        int
+	gpuIndex          *wgpu.Buffer
+	gpuWireframeIndex *wgpu.Buffer // line-list index buffer derived from triangles
+	gpuBufs           []GeometryBuffer
+	gpuCount          int
+	gpuWireframeCount int
+	gpuLayout         []wgpu.VertexBufferLayout
+	gpuShadowLayout   []wgpu.VertexBufferLayout
 }
 
 func (g *GeometryData) Indices() []uint32 {
@@ -182,5 +182,5 @@ func (g Geometry) Copy() Geometry { return Geometry{renderer: g.renderer, ref: g
 func (g Geometry) Valid() bool { return g.ref.Valid() }
 
 func (g Geometry) BoundingSphere() Sphere {
-	return g.renderer.geometries.get(g.ref.ID()).BoundingSphere()
+	return g.renderer.geometries.Get(g.ref.ID()).BoundingSphere()
 }

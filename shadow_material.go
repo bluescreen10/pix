@@ -12,7 +12,7 @@ type ShadowMaterial struct {
 }
 
 func (m *ShadowMaterial) data() *MaterialData {
-	return m.renderer.materials.get(m.ref.ID())
+	return m.renderer.materials.Get(m.ref.ID())
 }
 
 func (m *ShadowMaterial) SetViewProjection(vp glm.Mat4f) {
@@ -54,7 +54,7 @@ type PointShadowMaterial struct {
 }
 
 func (m *PointShadowMaterial) data() *MaterialData {
-	return m.renderer.materials.get(m.ref.ID())
+	return m.renderer.materials.Get(m.ref.ID())
 }
 
 func (m *PointShadowMaterial) SetFaceUniforms(vp glm.Mat4f, lightPos glm.Vec3f, far float32) {

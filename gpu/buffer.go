@@ -1,6 +1,8 @@
 package gpu
 
-import "github.com/bluescreen10/dawn-go/wgpu"
+import (
+	"github.com/bluescreen10/dawn-go/wgpu"
+)
 
 // BufferUsage mirrors the underlying buffer usage flags. Re-exported so callers
 // depend on the gpu package rather than importing wgpu directly.
@@ -16,31 +18,25 @@ const (
 	BufferUsageIndirect = wgpu.BufferUsageIndirect
 )
 
-// Buffer is an opaque handle to a GPU buffer. It hides the graphics API so the
-// engine can hold buffers without knowing about wgpu.
+// Buffer is an opaque, copyable handle to a GPU buffer — or, once the arena
+// lands, to a sub-range of one. It carries no data; the backing info lives in
+// the Instance's registry, keyed by this handle. The zero value is invalid.
 type Buffer struct {
-	raw   *wgpu.Buffer
-	size  uint64
-	usage BufferUsage
+	idx uint32
+	gen uint32
 }
 
-// Size returns the buffer's capacity in bytes.
-func (b *Buffer) Size() uint64 { return b.size }
+// Valid reports whether the handle refers to a live buffer.
+func (b Buffer) Valid() bool { return b.gen != 0 }
 
-// Usage returns the buffer's usage flags.
-func (b *Buffer) Usage() BufferUsage { return b.usage }
-
-// Raw exposes the underlying wgpu buffer. Transitional: call sites that still
-// build bind groups or set vertex/index buffers with wgpu need this until those
-// paths also move into the gpu package. New code should avoid it.
-func (b *Buffer) Raw() *wgpu.Buffer { return b.raw }
-
-// Destroy frees the GPU allocation.
-func (b *Buffer) Destroy() {
-	if b.raw != nil {
-		b.raw.Destroy()
-		b.raw = nil
-	}
+// bufferData is the registry entry behind a Buffer handle. offset is 0 for a
+// dedicated buffer; sub-allocations set it (and an arena back-reference) once
+// the suballocator is in place.
+type bufferData struct {
+	raw    *wgpu.Buffer
+	offset uint64
+	size   uint64
+	usage  BufferUsage
 }
 
 // BufferDescriptor describes a buffer to allocate.
@@ -50,14 +46,15 @@ type BufferDescriptor struct {
 	Usage BufferUsage
 }
 
-// CreateBuffer allocates an uninitialized buffer.
-func (i *Instance) CreateBuffer(desc BufferDescriptor) *Buffer {
+// CreateBuffer allocates a dedicated, uninitialized buffer and returns a handle.
+func (i *Instance) CreateBuffer(desc BufferDescriptor) Buffer {
 	raw := i.device.CreateBuffer(wgpu.BufferDescriptor{
 		Label: desc.Label,
 		Size:  desc.Size,
 		Usage: desc.Usage,
 	})
-	return &Buffer{raw: raw, size: desc.Size, usage: desc.Usage}
+	idx, gen := i.buffers.Alloc(bufferData{raw: raw, offset: 0, size: desc.Size, usage: desc.Usage})
+	return Buffer{idx: idx, gen: gen}
 }
 
 // BufferInitDescriptor describes a buffer allocated with initial contents.
@@ -67,17 +64,65 @@ type BufferInitDescriptor struct {
 	Usage    BufferUsage
 }
 
-// CreateBufferInit allocates a buffer and uploads initial contents.
-func (i *Instance) CreateBufferInit(desc BufferInitDescriptor) *Buffer {
+// CreateBufferInit allocates a dedicated buffer, uploads initial contents, and
+// returns a handle.
+func (i *Instance) CreateBufferInit(desc BufferInitDescriptor) Buffer {
 	raw := i.device.CreateBufferInit(wgpu.BufferInitDescriptor{
 		Label:    desc.Label,
 		Contents: desc.Contents,
 		Usage:    desc.Usage,
 	})
-	return &Buffer{raw: raw, size: uint64(len(desc.Contents)), usage: desc.Usage}
+	idx, gen := i.buffers.Alloc(bufferData{raw: raw, offset: 0, size: uint64(len(desc.Contents)), usage: desc.Usage})
+	return Buffer{idx: idx, gen: gen}
 }
 
-// Write uploads data into the buffer at the given byte offset via the queue.
-func (i *Instance) Write(b *Buffer, offset uint64, data []byte) {
-	i.queue.WriteBuffer(b.raw, offset, data)
+// WriteBuffer uploads data into the buffer at the given byte offset (relative to
+// the handle's own range). No-op if the handle is stale.
+func (i *Instance) WriteBuffer(b Buffer, offset uint64, data []byte) {
+	if !i.buffers.Valid(b.idx, b.gen) {
+		return
+	}
+	e := i.buffers.Get(b.idx)
+	i.queue.WriteBuffer(e.raw, e.offset+offset, data)
+}
+
+// ReleaseBuffer frees the buffer. For a dedicated buffer this destroys the GPU
+// allocation; for a sub-allocation (once arenas land) it returns the range to
+// the arena. No-op if the handle is stale.
+func (i *Instance) ReleaseBuffer(b Buffer) {
+	if !i.buffers.Valid(b.idx, b.gen) {
+		return
+	}
+	e := i.buffers.Get(b.idx)
+	e.raw.Destroy()
+	// GPU handle is destroyed synchronously here, so Free recycles the slot.
+	i.buffers.Free(b.idx)
+}
+
+// BufferOffset returns the handle's byte offset into its underlying buffer
+// (0 for a dedicated buffer). Used to fill descriptors for manual pulling.
+func (i *Instance) BufferOffset(b Buffer) uint64 {
+	if !i.buffers.Valid(b.idx, b.gen) {
+		return 0
+	}
+	return i.buffers.Get(b.idx).offset
+}
+
+// BufferSize returns the handle's size in bytes.
+func (i *Instance) BufferSize(b Buffer) uint64 {
+	if !i.buffers.Valid(b.idx, b.gen) {
+		return 0
+	}
+	return i.buffers.Get(b.idx).size
+}
+
+// resolveBuffer returns the underlying wgpu buffer and the handle's range, for
+// the pass/bind wrappers as they move into the gpu package. Returns nil when the
+// handle is stale.
+func (i *Instance) resolveBuffer(b Buffer) (raw *wgpu.Buffer, offset, size uint64) {
+	if !i.buffers.Valid(b.idx, b.gen) {
+		return nil, 0, 0
+	}
+	e := i.buffers.Get(b.idx)
+	return e.raw, e.offset, e.size
 }

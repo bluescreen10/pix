@@ -9,7 +9,7 @@ type BlinnPhongMaterial struct {
 }
 
 func (m *BlinnPhongMaterial) data() *MaterialData {
-	return m.renderer.materials.get(m.ref.ID())
+	return m.renderer.materials.Get(m.ref.ID())
 }
 
 func (m *BlinnPhongMaterial) Wireframe() bool { return m.data().flags&WireframeFlag != 0 }

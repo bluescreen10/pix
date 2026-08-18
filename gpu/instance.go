@@ -11,6 +11,7 @@ import (
 	"os"
 
 	"github.com/bluescreen10/dawn-go/wgpu"
+	islab "github.com/bluescreen10/pix/internal/slab"
 )
 
 // Instance owns the device, queue, surface and their configuration. All fields
@@ -24,6 +25,9 @@ type Instance struct {
 	queue    *wgpu.Queue
 	surface  *wgpu.Surface
 	features map[wgpu.FeatureName]bool
+
+	// buffers is the registry behind Buffer handles.
+	buffers islab.Slab[bufferData]
 }
 
 var forceFallbackAdapter = os.Getenv("WGPU_FORCE_FALLBACK_ADAPTER") == "1"
@@ -31,6 +35,8 @@ var forceFallbackAdapter = os.Getenv("WGPU_FORCE_FALLBACK_ADAPTER") == "1"
 // Init creates the instance, surface, adapter, device and queue, and configures
 // the surface for the given size.
 func (i *Instance) Init(width, height uint32, descriptor wgpu.SurfaceDescriptor) error {
+	i.buffers = islab.New[bufferData]()
+
 	instance := wgpu.CreateInstance(nil)
 	defer instance.Release()
 
@@ -96,6 +102,9 @@ func (i *Instance) Destroy() {
 	i.adapter = nil
 	i.config = wgpu.SurfaceConfiguration{}
 	i.features = make(map[wgpu.FeatureName]bool)
+
+	// Destroy all live buffers.
+	i.buffers.Range(func(b *bufferData) { b.raw.Destroy() })
 }
 
 // --- Resource creation ------------------------------------------------------

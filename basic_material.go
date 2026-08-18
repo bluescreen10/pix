@@ -9,7 +9,7 @@ type BasicMaterial struct {
 }
 
 func (m *BasicMaterial) data() *MaterialData {
-	return m.renderer.materials.get(m.ref.ID())
+	return m.renderer.materials.Get(m.ref.ID())
 }
 
 func (m *BasicMaterial) Wireframe() bool { return m.data().flags&WireframeFlag != 0 }
