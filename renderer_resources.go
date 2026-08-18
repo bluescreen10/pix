@@ -6,17 +6,12 @@ import (
 	"github.com/bluescreen10/pix/internal/slab"
 )
 
-const (
-	deferredGeo uint8 = iota
-	deferredMat
-	deferredTex
-	deferredSkel
-)
-
 type deferredFreeEntry struct {
-	kind  uint8
-	id    uint32
-	frame uint32
+	// destroy releases the GPU resource captured at schedule time. The slot is
+	// recycled immediately by Free, so we can't look the resource up by id at
+	// drain time — we hold onto its destructor instead.
+	destroy func()
+	frame   uint32
 }
 
 // Disposer implementations — one per resource kind.
@@ -82,8 +77,9 @@ func (r *Renderer) allocGeometrySlot(data *GeometryData) Geometry {
 }
 
 func (r *Renderer) scheduleGeoFree(id uint32) {
+	res := *r.geometries.Get(id) // copy GPU handles out before the slot is recycled
 	r.geometries.Free(id)
-	r.deferredFree = append(r.deferredFree, deferredFreeEntry{kind: deferredGeo, id: id, frame: r.frameCount})
+	r.deferredFree = append(r.deferredFree, deferredFreeEntry{destroy: res.Destroy, frame: r.frameCount})
 }
 
 func (r *Renderer) uploadGeometry(geo *GeometryData) {
@@ -165,8 +161,9 @@ func (r *Renderer) scheduleMatFree(id uint32) {
 		data.textures[i].Release()
 		data.textures[i] = Ref[Texture]{}
 	}
+	res := *data // copy before the slot is recycled
 	r.materials.Free(id)
-	r.deferredFree = append(r.deferredFree, deferredFreeEntry{kind: deferredMat, id: id, frame: r.frameCount})
+	r.deferredFree = append(r.deferredFree, deferredFreeEntry{destroy: res.Destroy, frame: r.frameCount})
 }
 
 // Texture
@@ -180,8 +177,9 @@ func (r *Renderer) allocTextureSlot(data *TextureData) Texture {
 }
 
 func (r *Renderer) scheduleTexFree(id uint32) {
+	res := *r.textures.Get(id)
 	r.textures.Free(id)
-	r.deferredFree = append(r.deferredFree, deferredFreeEntry{kind: deferredTex, id: id, frame: r.frameCount})
+	r.deferredFree = append(r.deferredFree, deferredFreeEntry{destroy: res.Destroy, frame: r.frameCount})
 }
 
 func (r *Renderer) getOrCreateSampler(s Sampler) *wgpu.Sampler {
@@ -270,8 +268,9 @@ func (r *Renderer) allocSkeletonSlot(data SkeletonData) Skeleton {
 }
 
 func (r *Renderer) scheduleSkeletonFree(id uint32) {
+	res := *r.skeletons.Get(id)
 	r.skeletons.Free(id)
-	r.deferredFree = append(r.deferredFree, deferredFreeEntry{kind: deferredSkel, id: id, frame: r.frameCount})
+	r.deferredFree = append(r.deferredFree, deferredFreeEntry{destroy: res.Destroy, frame: r.frameCount})
 }
 
 // NewSkeleton registers a skeleton with the renderer.
@@ -303,20 +302,7 @@ func (r *Renderer) drainDeferredFree() {
 	for i < len(r.deferredFree) {
 		d := r.deferredFree[i]
 		if d.frame <= safe {
-			switch d.kind {
-			case deferredGeo:
-				r.geometries.Get(d.id).Destroy()
-				r.geometries.Reclaim(d.id)
-			case deferredMat:
-				r.materials.Get(d.id).Destroy()
-				r.materials.Reclaim(d.id)
-			case deferredTex:
-				r.textures.Get(d.id).Destroy()
-				r.textures.Reclaim(d.id)
-			case deferredSkel:
-				r.skeletons.Get(d.id).Destroy()
-				r.skeletons.Reclaim(d.id)
-			}
+			d.destroy()
 			r.deferredFree[i] = r.deferredFree[len(r.deferredFree)-1]
 			r.deferredFree = r.deferredFree[:len(r.deferredFree)-1]
 		} else {
