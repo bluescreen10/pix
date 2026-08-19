@@ -11,7 +11,7 @@ import (
 	"os"
 
 	"github.com/bluescreen10/dawn-go/wgpu"
-	islab "github.com/bluescreen10/pix/internal/slab"
+	"github.com/bluescreen10/pix/internal/mem"
 )
 
 // Instance owns the device, queue, surface and their configuration. All fields
@@ -27,7 +27,11 @@ type Instance struct {
 	features map[wgpu.FeatureName]bool
 
 	// buffers is the registry behind Buffer handles.
-	buffers islab.Slab[bufferData]
+	buffers mem.Slab[bufferData]
+
+	// arenas are the GPU-backed sub-allocators; their backing buffers are
+	// destroyed on shutdown.
+	arenas []*OffsetAllocator
 }
 
 var forceFallbackAdapter = os.Getenv("WGPU_FORCE_FALLBACK_ADAPTER") == "1"
@@ -35,7 +39,7 @@ var forceFallbackAdapter = os.Getenv("WGPU_FORCE_FALLBACK_ADAPTER") == "1"
 // Init creates the instance, surface, adapter, device and queue, and configures
 // the surface for the given size.
 func (i *Instance) Init(width, height uint32, descriptor wgpu.SurfaceDescriptor) error {
-	i.buffers = islab.New[bufferData]()
+	i.buffers = mem.NewSlab[bufferData]()
 
 	instance := wgpu.CreateInstance(nil)
 	defer instance.Release()
@@ -103,8 +107,18 @@ func (i *Instance) Destroy() {
 	i.config = wgpu.SurfaceConfiguration{}
 	i.features = make(map[wgpu.FeatureName]bool)
 
-	// Destroy all live buffers.
-	i.buffers.Range(func(b *bufferData) { b.raw.Destroy() })
+	// Destroy dedicated buffers. Sub-allocations share their arena's backing
+	// buffer, which is destroyed once per arena below — destroying b.raw here
+	// would double-free it.
+	i.buffers.Range(func(b *bufferData) {
+		if b.arena == nil {
+			b.raw.Destroy()
+		}
+	})
+	for _, a := range i.arenas {
+		a.rawBuffer.Destroy()
+	}
+	i.arenas = nil
 }
 
 // --- Resource creation ------------------------------------------------------

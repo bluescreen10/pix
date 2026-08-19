@@ -3,7 +3,7 @@ package pix
 import (
 	"github.com/bluescreen10/dawn-go/wgpu"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/internal/slab"
+	"github.com/bluescreen10/pix/internal/mem"
 )
 
 type deferredFreeEntry struct {
@@ -38,10 +38,10 @@ func (d skelDisposer) generation(id uint32) uint32 { return d.r.skeletons.Genera
 
 // initResources initialises the resource slabs and creates the default white texture.
 func (r *Renderer) initResources() {
-	r.geometries = slab.New[GeometryData]()
-	r.materials = slab.New[MaterialData]()
-	r.textures = slab.New[TextureData]()
-	r.skeletons = slab.New[SkeletonData]()
+	r.geometries = mem.NewSlab[GeometryData]()
+	r.materials = mem.NewSlab[MaterialData]()
+	r.textures = mem.NewSlab[TextureData]()
+	r.skeletons = mem.NewSlab[SkeletonData]()
 	r.samplerCache = make(map[Sampler]*wgpu.Sampler)
 
 	td := NewDataTexture([]byte{255, 255, 255, 255}, 1, 1, TextureFormatRGBA8Unorm)

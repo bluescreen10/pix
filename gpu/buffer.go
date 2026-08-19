@@ -37,6 +37,9 @@ type bufferData struct {
 	offset uint64
 	size   uint64
 	usage  BufferUsage
+
+	arena    Arena
+	arenaIdx int
 }
 
 // BufferDescriptor describes a buffer to allocate.
@@ -94,8 +97,14 @@ func (i *Instance) ReleaseBuffer(b Buffer) {
 		return
 	}
 	e := i.buffers.Get(b.idx)
-	e.raw.Destroy()
-	// GPU handle is destroyed synchronously here, so Free recycles the slot.
+	if e.arena != nil {
+		// Sub-allocation: return the range to its arena. The shared backing
+		// buffer stays alive for the other sub-allocations. arena.Free reads the
+		// registry entry, so it must run before we recycle the slot below.
+		e.arena.Free(b)
+	} else {
+		e.raw.Destroy()
+	}
 	i.buffers.Free(b.idx)
 }
 

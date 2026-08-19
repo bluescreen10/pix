@@ -1,7 +1,7 @@
 // Package slab is a slot-stable, generation-counted free list shared by the
-// engine and the gpu layer. Slots are recycled on Reclaim; the generation
+// engine and the gpu layer. Slots are recycled on Free; the generation
 // counter prevents stale-handle (ABA) aliasing.
-package slab
+package mem
 
 const invalidIdx = ^uint32(0)
 
@@ -20,7 +20,7 @@ type Slab[T any] struct {
 }
 
 // New returns an empty slab.
-func New[T any]() Slab[T] {
+func NewSlab[T any]() Slab[T] {
 	return Slab[T]{freeHead: invalidIdx}
 }
 
