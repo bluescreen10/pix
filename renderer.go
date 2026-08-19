@@ -14,7 +14,7 @@ import (
 	"github.com/bluescreen10/dawn-go/wgpu"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
-	"github.com/bluescreen10/pix/internal/slab"
+	"github.com/bluescreen10/pix/internal/mem"
 	"github.com/bluescreen10/wesl-go"
 )
 
@@ -80,10 +80,10 @@ type renderContext struct {
 }
 
 type Renderer struct {
-	geometries slab.Slab[GeometryData]
-	materials  slab.Slab[MaterialData]
-	textures   slab.Slab[TextureData]
-	skeletons  slab.Slab[SkeletonData]
+	geometries mem.Slab[GeometryData]
+	materials  mem.Slab[MaterialData]
+	textures   mem.Slab[TextureData]
+	skeletons  mem.Slab[SkeletonData]
 
 	samplerCache  map[Sampler]*wgpu.Sampler
 	defaultTexRef Ref[Texture]

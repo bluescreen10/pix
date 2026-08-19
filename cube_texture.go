@@ -26,7 +26,7 @@ func (r *Renderer) NewCubeTexture(imgs []Image) Texture {
 		}
 
 		if img.Format != format {
-			panic(fmt.Sprintf("invalid width %s expected %s", img.Format, format))
+			panic(fmt.Sprintf("invalid format %v expected %v", img.Format, format))
 		}
 
 		pixels = append(pixels, img.Pixels...)

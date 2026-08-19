@@ -28,10 +28,6 @@ type Instance struct {
 
 	// buffers is the registry behind Buffer handles.
 	buffers mem.Slab[bufferData]
-
-	// arenas are the GPU-backed sub-allocators; their backing buffers are
-	// destroyed on shutdown.
-	arenas []*OffsetAllocator
 }
 
 var forceFallbackAdapter = os.Getenv("WGPU_FORCE_FALLBACK_ADAPTER") == "1"
@@ -110,15 +106,9 @@ func (i *Instance) Destroy() {
 	// Destroy dedicated buffers. Sub-allocations share their arena's backing
 	// buffer, which is destroyed once per arena below — destroying b.raw here
 	// would double-free it.
-	i.buffers.Range(func(b *bufferData) {
-		if b.arena == nil {
-			b.raw.Destroy()
-		}
-	})
-	for _, a := range i.arenas {
-		a.rawBuffer.Destroy()
+	for b := range i.buffers.Items() {
+		b.raw.Destroy()
 	}
-	i.arenas = nil
 }
 
 // --- Resource creation ------------------------------------------------------

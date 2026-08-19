@@ -3,6 +3,8 @@
 // counter prevents stale-handle (ABA) aliasing.
 package mem
 
+import "iter"
+
 const invalidIdx = ^uint32(0)
 
 // entry wraps a value with free-list bookkeeping.
@@ -63,10 +65,16 @@ func (s *Slab[T]) Valid(idx, gen uint32) bool {
 }
 
 // Range calls fn for each live value.
-func (s *Slab[T]) Range(fn func(v *T)) {
-	for i := range s.entries {
-		if s.entries[i].alive {
-			fn(&s.entries[i].val)
+func (s *Slab[T]) Items() iter.Seq[T] {
+	return func(yield func(T) bool) {
+		for _, e := range s.entries {
+			if !e.alive {
+				continue
+			}
+
+			if !yield(e.val) {
+				break
+			}
 		}
 	}
 }

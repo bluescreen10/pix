@@ -54,10 +54,18 @@ func (r *Renderer) initResources() {
 
 // destroyResources releases all GPU memory synchronously at shutdown.
 func (r *Renderer) destroyResources() {
-	r.geometries.Range(func(g *GeometryData) { g.Destroy() })
-	r.materials.Range(func(m *MaterialData) { m.Destroy() })
-	r.textures.Range(func(t *TextureData) { t.Destroy() })
-	r.skeletons.Range(func(s *SkeletonData) { s.Destroy() })
+	for g := range r.geometries.Items() {
+		g.Destroy()
+	}
+	for m := range r.materials.Items() {
+		m.Destroy()
+	}
+	for t := range r.textures.Items() {
+		t.Destroy()
+	}
+	for s := range r.skeletons.Items() {
+		s.Destroy()
+	}
 	for _, s := range r.samplerCache {
 		s.Release()
 	}
