@@ -50,7 +50,7 @@ type debugTextRenderer struct {
 
 func (r *Renderer) initDebugText() {
 	dt := &debugTextRenderer{}
-	dt.buildAtlas(r.runtime.Device(), r.runtime.Queue())
+	dt.buildAtlas(r.gpu.Device(), r.gpu.Queue())
 	dt.createPipeline(r)
 	r.debugText = dt
 }
@@ -118,7 +118,7 @@ func (dt *debugTextRenderer) buildAtlas(device *wgpu.Device, queue *wgpu.Queue) 
 }
 
 func (dt *debugTextRenderer) createPipeline(r *Renderer) {
-	device := r.runtime.Device()
+	device := r.gpu.Device()
 
 	uniformSize := uint64(unsafe.Sizeof(dbgUniforms{}))
 	dt.bgl = device.CreateBindGroupLayout(wgpu.BindGroupLayoutDescriptor{
@@ -195,7 +195,7 @@ func (dt *debugTextRenderer) createPipeline(r *Renderer) {
 			Module:     frag,
 			EntryPoint: "main",
 			Targets: []wgpu.ColorTargetState{{
-				Format: r.runtime.Format(),
+				Format: r.gpu.Format(),
 				Blend: &wgpu.BlendState{
 					Color: wgpu.BlendComponent{
 						Operation: wgpu.BlendOperationAdd,
@@ -291,14 +291,14 @@ func (dt *debugTextRenderer) render(r *Renderer, ctx *renderContext, texts []Deb
 		return
 	}
 
-	dt.ensureVertexCap(r.runtime.Device(), len(verts))
-	queue := r.runtime.Queue()
+	dt.ensureVertexCap(r.gpu.Device(), len(verts))
+	queue := r.gpu.Queue()
 
 	u := dbgUniforms{viewport: [2]float32{float32(r.width), float32(r.height)}}
 	queue.WriteBuffer(dt.uniformBuf, 0, wgpu.ToBytes([]dbgUniforms{u}))
 	queue.WriteBuffer(dt.vertexBuf, 0, wgpu.ToBytes(verts))
 
-	encoder := r.runtime.CreateCommandEncoder(nil)
+	encoder := r.gpu.CreateCommandEncoder(nil)
 	pass := encoder.BeginRenderPass(wgpu.RenderPassDescriptor{
 		ColorAttachments: []wgpu.RenderPassColorAttachment{{
 			View:    ctx.view,

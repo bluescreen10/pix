@@ -114,6 +114,16 @@ func (i *Instance) BufferSize(b Buffer) uint64 {
 	return i.buffers.Get(b.idx).size
 }
 
+// RawBuffer returns the underlying wgpu buffer for a handle, for call sites that
+// still build wgpu bind groups and descriptors directly. Transitional — it will
+// be removed as those sites move onto the typed API. Returns nil if stale.
+func (i *Instance) RawBuffer(b Buffer) *wgpu.Buffer {
+	if !i.buffers.Valid(b.idx, b.gen) {
+		return nil
+	}
+	return i.buffers.Get(b.idx).raw
+}
+
 // resolveBuffer returns the underlying wgpu buffer and the handle's range, for
 // the pass/bind wrappers as they move into the gpu package. Returns nil when the
 // handle is stale.

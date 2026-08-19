@@ -3,6 +3,7 @@ package pix
 import (
 	"github.com/bluescreen10/dawn-go/wgpu"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/gpu"
 )
 
 //TODO: bone updates should happen via skeleton so we eliminate the need for sk.update
@@ -13,7 +14,7 @@ type SkeletonData struct {
 	bones        []Bone
 	invBindMats  []glm.Mat4f
 	boneMatrices []glm.Mat4f // scratch: meshLocalBone = meshWorldInv * boneWorld * invBind
-	gpuBuf       *wgpu.Buffer
+	gpuBuf       gpu.Buffer
 	bindGroup    *wgpu.BindGroup
 
 	version    int
@@ -22,14 +23,13 @@ type SkeletonData struct {
 
 func (sd *SkeletonData) BoneCount() int { return len(sd.bones) }
 
+// Destroy releases the bind group. The bone buffer is a gpu.Buffer handle, which
+// only the Instance can release, so the renderer frees it separately (it holds
+// r.gpu); see scheduleSkeletonFree, syncSkeletons and destroyResources.
 func (sd *SkeletonData) Destroy() {
 	if sd.bindGroup != nil {
 		sd.bindGroup.Release()
 		sd.bindGroup = nil
-	}
-	if sd.gpuBuf != nil {
-		sd.gpuBuf.Destroy()
-		sd.gpuBuf = nil
 	}
 }
 

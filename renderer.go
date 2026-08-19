@@ -89,7 +89,7 @@ type Renderer struct {
 	defaultTexRef Ref[Texture]
 	deferredFree  []deferredFreeEntry
 
-	runtime       *gpu.Instance
+	gpu           *gpu.Instance
 	width, height uint32
 	frameCount    uint32
 	logger        *slog.Logger
@@ -104,8 +104,8 @@ type Renderer struct {
 	//globalBindGroup       *wgpu.BindGroup
 
 	// Stable per-node model/inv-model buffers — slot = scene node index.
-	modelBuf       *wgpu.Buffer
-	invModelBuf    *wgpu.Buffer
+	modelBuf       gpu.Buffer
+	invModelBuf    gpu.Buffer
 	objectsBindGrp *wgpu.BindGroup
 	objectsCap     uint32
 
@@ -149,7 +149,7 @@ func NewRenderer(width, height uint32) *Renderer {
 		width:          width,
 		height:         height,
 		logger:         slog.New(slog.NewTextHandler(os.Stderr, nil)),
-		runtime:        &gpu.Instance{},
+		gpu:            &gpu.Instance{},
 		Stats:          NewRendererStats(60),
 		pipelineCache:  newPipelineCache(),
 		shaders:        wesl.New(),
@@ -159,8 +159,8 @@ func NewRenderer(width, height uint32) *Renderer {
 }
 
 func (r *Renderer) Init(descriptor wgpu.SurfaceDescriptor) error {
-	if err := r.runtime.Init(r.width, r.height, descriptor); err != nil {
-		slog.Error("error creating runtime", slog.Any("err", err))
+	if err := r.gpu.Init(r.width, r.height, descriptor); err != nil {
+		slog.Error("error creating gpu", slog.Any("err", err))
 		return err
 	}
 
@@ -179,8 +179,8 @@ func (r *Renderer) Destroy() {
 		r.debugText = nil
 	}
 
-	r.runtime.Destroy()
-	r.runtime = nil
+	r.gpu.Destroy()
+	r.gpu = nil
 
 	if r.skeletonBGL != nil {
 		r.skeletonBGL.Release()
@@ -190,14 +190,6 @@ func (r *Renderer) Destroy() {
 	if r.objectsBindGrp != nil {
 		r.objectsBindGrp.Release()
 		r.objectsBindGrp = nil
-	}
-	if r.modelBuf != nil {
-		r.modelBuf.Destroy()
-		r.modelBuf = nil
-	}
-	if r.invModelBuf != nil {
-		r.invModelBuf.Destroy()
-		r.invModelBuf = nil
 	}
 
 	for _, state := range r.sceneStates {
@@ -238,12 +230,12 @@ func (r *Renderer) Destroy() {
 
 // ensureObjectsCap grows the model/invModel buffers to hold at least `need` entries.
 func (r *Renderer) ensureObjectsCap(need uint32) {
-	if r.modelBuf != nil && r.objectsCap >= need {
+	if r.modelBuf.Valid() && r.objectsCap >= need {
 		return
 	}
-	if r.modelBuf != nil {
-		r.modelBuf.Destroy()
-		r.invModelBuf.Destroy()
+	if r.modelBuf.Valid() {
+		r.gpu.ReleaseBuffer(r.modelBuf)
+		r.gpu.ReleaseBuffer(r.invModelBuf)
 	}
 	if r.objectsBindGrp != nil {
 		r.objectsBindGrp.Release()
@@ -255,22 +247,22 @@ func (r *Renderer) ensureObjectsCap(need uint32) {
 		r.objectsCap *= 2
 	}
 	matSize := uint64(r.objectsCap) * uint64(unsafe.Sizeof(glm.Mat4f{}))
-	r.modelBuf = r.runtime.Device().CreateBuffer(wgpu.BufferDescriptor{
+	r.modelBuf = r.gpu.CreateBuffer(gpu.BufferDescriptor{
 		Label: "Model buffer",
 		Size:  matSize,
-		Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst,
+		Usage: gpu.BufferUsageStorage | gpu.BufferUsageCopyDst,
 	})
-	r.invModelBuf = r.runtime.Device().CreateBuffer(wgpu.BufferDescriptor{
+	r.invModelBuf = r.gpu.CreateBuffer(gpu.BufferDescriptor{
 		Label: "InvModel buffer",
 		Size:  matSize,
-		Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst,
+		Usage: gpu.BufferUsageStorage | gpu.BufferUsageCopyDst,
 	})
-	r.objectsBindGrp = r.runtime.CreateBindGroup(wgpu.BindGroupDescriptor{
+	r.objectsBindGrp = r.gpu.CreateBindGroup(wgpu.BindGroupDescriptor{
 		Label:  "Objects bind group",
 		Layout: r.instanceStorageBindGroupLayout,
 		Entries: []wgpu.BindGroupEntry{
-			{Binding: ModelsBinding, Buffer: r.modelBuf, Offset: 0, Size: wgpu.WholeSize},
-			{Binding: InvModelsBinding, Buffer: r.invModelBuf, Offset: 0, Size: wgpu.WholeSize},
+			{Binding: ModelsBinding, Buffer: r.gpu.RawBuffer(r.modelBuf), Offset: 0, Size: wgpu.WholeSize},
+			{Binding: InvModelsBinding, Buffer: r.gpu.RawBuffer(r.invModelBuf), Offset: 0, Size: wgpu.WholeSize},
 		},
 	})
 }
@@ -296,7 +288,7 @@ func (r *Renderer) ensureDepthTextureSize(width, height uint32) {
 		r.depthTexture.Destroy()
 	}
 
-	r.depthTexture = r.runtime.CreateTexture(&wgpu.TextureDescriptor{
+	r.depthTexture = r.gpu.CreateTexture(&wgpu.TextureDescriptor{
 		Label:         "Depth Texture",
 		Usage:         wgpu.TextureUsageRenderAttachment,
 		Dimension:     wgpu.TextureDimension2D,
@@ -370,7 +362,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	for i := range list.visible {
 		d := &list.visible[i]
 		r.ensureGeometryReady(d.geo)
-		if err := prepareMaterial(r.runtime.Device(), d.mat, r); err != nil {
+		if err := prepareMaterial(r.gpu.Device(), d.mat, r); err != nil {
 			r.logger.Error("error preparing material", slog.Any("err", err))
 			continue
 		}
@@ -389,14 +381,13 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	sceneState := r.getSceneState(scene)
 
 	cameraUniform := CameraUniform{
-		viewProj:       viewProjection,
-		invViewProj:    viewProjection.Inv(),
-		skyInvViewProj: viewProjection.Mat3().Mat4().Inv(),
-		position:       camera.Position().Vec4(),
+		viewProj:    viewProjection,
+		invViewProj: viewProjection.Mat3().Mat4().Inv(),
+		position:    camera.Position().Vec4(),
 	}
-	r.runtime.Queue().WriteBuffer(sceneState.cameraUniform, 0, cameraUniform.Bytes())
+	r.gpu.WriteBuffer(sceneState.cameraUniform, 0, cameraUniform.Bytes())
 
-	ctx.encoder = r.runtime.CreateCommandEncoder(nil)
+	ctx.encoder = r.gpu.CreateCommandEncoder(nil)
 
 	if useLights {
 		var lightsUniform LightsUniform
@@ -479,7 +470,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 			lightsUniform.PointLights[i] = ld.toUniform(scene)
 		}
 
-		r.runtime.Queue().WriteBuffer(sceneState.lightsUniform, 0, lightsUniform.Bytes())
+		r.gpu.WriteBuffer(sceneState.lightsUniform, 0, lightsUniform.Bytes())
 	}
 
 	// All shadow passes have been submitted. Create the main encoder now so the
@@ -543,7 +534,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 			instanceCount: 1,
 		}
 		r.ensureGeometryReady(d.geo)
-		if err := prepareMaterial(r.runtime.Device(), d.mat, r); err != nil {
+		if err := prepareMaterial(r.gpu.Device(), d.mat, r); err != nil {
 			r.logger.Error("error preparing equirect material", slog.Any("err", err))
 		} else {
 			pipeline := r.getPipeline(d, ctx.texture, ctx.depthTarget)
@@ -595,7 +586,7 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, drawing
 	}
 
 	r.shadowMat.SetViewProjection(shadowCam.ViewProjection())
-	if err := prepareMaterial(r.runtime.Device(), r.shadowMat.data(), r); err != nil {
+	if err := prepareMaterial(r.gpu.Device(), r.shadowMat.data(), r); err != nil {
 		r.logger.Error("error preparing shadow material", slog.Any("err", err))
 		return
 	}
@@ -670,14 +661,14 @@ func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f,
 		vp := proj.Mul4x4(view)
 
 		r.pointShadowMat.SetFaceUniforms(vp, lightPos, shadow.far)
-		if err := prepareMaterial(r.runtime.Device(), r.pointShadowMat.data(), r); err != nil {
+		if err := prepareMaterial(r.gpu.Device(), r.pointShadowMat.data(), r); err != nil {
 			r.logger.Error("error preparing point shadow material", slog.Any("err", err))
 			continue
 		}
 
 		ctx.depthTargetView = r.pointShadowArray.LayerView(uint32(shadow.layerIndex) + uint32(face))
 
-		encoder := r.runtime.CreateCommandEncoder(nil)
+		encoder := r.gpu.CreateCommandEncoder(nil)
 		pass := encoder.BeginRenderPass(wgpu.RenderPassDescriptor{
 			DepthStencilAttachment: &wgpu.RenderPassDepthStencilAttachment{
 				View:            ctx.depthTargetView,
@@ -720,7 +711,7 @@ func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f,
 		pass.End()
 		pass.Release()
 		cmd := encoder.Finish(nil)
-		r.runtime.Queue().Submit(cmd)
+		r.gpu.Queue().Submit(cmd)
 		cmd.Release()
 		encoder.Release()
 	}
@@ -749,14 +740,14 @@ func drawGeometry(pass *wgpu.RenderPassEncoder, d drawing) {
 }
 
 func (r *Renderer) acquireNextFrame(ctx *renderContext) {
-	ctx.texture = r.runtime.Surface().GetCurrentTexture()
+	ctx.texture = r.gpu.Surface().GetCurrentTexture()
 	ctx.view = ctx.texture.CreateView(nil)
 	// Main encoder is created after all shadow passes are submitted,
 	// so the shadow texture is fully written before it is bound as a sampler input.
 }
 
 func (r *Renderer) presentFrame(ctx *renderContext) {
-	r.runtime.Surface().Present()
+	r.gpu.Surface().Present()
 	ctx.view.Release()
 	ctx.view = nil
 
@@ -787,7 +778,7 @@ func (r *Renderer) endRendering(ctx *renderContext, pass *wgpu.RenderPassEncoder
 	pass.Release()
 
 	cmdBuf := ctx.encoder.Finish(nil)
-	r.runtime.Queue().Submit(cmdBuf)
+	r.gpu.Queue().Submit(cmdBuf)
 
 	cmdBuf.Release()
 	ctx.encoder.Release()
@@ -857,7 +848,7 @@ func (r *Renderer) createPipeline(mat *MaterialData, geo *GeometryData, renderTa
 		bindGroupLayouts = append(bindGroupLayouts, r.skeletonBGL)
 	}
 
-	layout := r.runtime.CreatePipelineLayout(wgpu.PipelineLayoutDescriptor{
+	layout := r.gpu.CreatePipelineLayout(wgpu.PipelineLayoutDescriptor{
 		BindGroupLayouts: bindGroupLayouts,
 	})
 	defer layout.Release()
@@ -867,11 +858,11 @@ func (r *Renderer) createPipeline(mat *MaterialData, geo *GeometryData, renderTa
 	var vertex, fragment *wgpu.ShaderModule
 
 	if mat.vertexShader != "" {
-		vertex = r.compileShader(r.runtime.Device(), mat.vertexShader, defines)
+		vertex = r.compileShader(r.gpu.Device(), mat.vertexShader, defines)
 	}
 
 	if mat.fragmentShader != "" {
-		fragment = r.compileShader(r.runtime.Device(), mat.fragmentShader, defines)
+		fragment = r.compileShader(r.gpu.Device(), mat.fragmentShader, defines)
 	}
 
 	depthCompare := wgpu.CompareFunctionAlways
@@ -908,7 +899,7 @@ func (r *Renderer) createPipeline(mat *MaterialData, geo *GeometryData, renderTa
 		}
 	}
 
-	return r.runtime.CreateRenderPipeline(wgpu.RenderPipelineDescriptor{
+	return r.gpu.CreateRenderPipeline(wgpu.RenderPipelineDescriptor{
 		Layout: layout,
 		Vertex: wgpu.VertexState{
 			Module:     vertex,
@@ -975,7 +966,7 @@ func (r *Renderer) createEnvMapResources() {
 
 func (r *Renderer) createShadowResources() {
 	r.shadowArray = newDepthTextureArray(
-		r.runtime.Device(),
+		r.gpu.Device(),
 		DefaultShadowMapSize,
 		MaxDirectionalLights+MaxSpotLights,
 		wgpu.TextureViewDimension2DArray,
@@ -985,7 +976,7 @@ func (r *Renderer) createShadowResources() {
 
 func (r *Renderer) createPointShadowResources() {
 	r.pointShadowArray = newDepthTextureArray(
-		r.runtime.Device(),
+		r.gpu.Device(),
 		DefaultShadowMapSize,
 		MaxPointLights*6,
 		wgpu.TextureViewDimensionCubeArray,
@@ -994,7 +985,7 @@ func (r *Renderer) createPointShadowResources() {
 }
 
 func (r *Renderer) createGlobalBindGroupLayouts() {
-	r.globalBindGroupLayout = r.runtime.CreateBindGroupLayout(wgpu.BindGroupLayoutDescriptor{
+	r.globalBindGroupLayout = r.gpu.CreateBindGroupLayout(wgpu.BindGroupLayoutDescriptor{
 		Label: "Global Bind Group Layout",
 		Entries: []wgpu.BindGroupLayoutEntry{
 			{
@@ -1059,7 +1050,7 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 		},
 	})
 
-	r.skeletonBGL = r.runtime.CreateBindGroupLayout(wgpu.BindGroupLayoutDescriptor{
+	r.skeletonBGL = r.gpu.CreateBindGroupLayout(wgpu.BindGroupLayoutDescriptor{
 		Label: "Skeleton Bind Group Layout",
 		Entries: []wgpu.BindGroupLayoutEntry{{
 			Binding:    0,
@@ -1073,7 +1064,7 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 	})
 
 	matSize := uint64(unsafe.Sizeof(glm.Mat4f{}))
-	r.instanceStorageBindGroupLayout = r.runtime.CreateBindGroupLayout(wgpu.BindGroupLayoutDescriptor{
+	r.instanceStorageBindGroupLayout = r.gpu.CreateBindGroupLayout(wgpu.BindGroupLayoutDescriptor{
 		Label: "Instance/Model Bind Group Layout",
 		Entries: []wgpu.BindGroupLayoutEntry{
 			{
@@ -1108,8 +1099,8 @@ func (r *Renderer) instanceBindGroupFor(d drawing) *wgpu.BindGroup {
 func (r *Renderer) syncMeshInstances(scene *Scene) {
 	need := uint32(len(scene.flags))
 	r.ensureObjectsCap(need)
-	r.runtime.Queue().WriteBuffer(r.modelBuf, 0, wgpu.ToBytes(scene.world[:need]))
-	r.runtime.Queue().WriteBuffer(r.invModelBuf, 0, wgpu.ToBytes(scene.worldInv[:need]))
+	r.gpu.WriteBuffer(r.modelBuf, 0, wgpu.ToBytes(scene.world[:need]))
+	r.gpu.WriteBuffer(r.invModelBuf, 0, wgpu.ToBytes(scene.worldInv[:need]))
 }
 
 // syncSkeletons recomputes and uploads bone matrices for all skeletons referenced
@@ -1131,25 +1122,25 @@ func (r *Renderer) syncSkeletons(scene *Scene) {
 		sd.update(scene.worldInv[smd.ownerNode])
 
 		needed := uint64(len(sd.boneMatrices)) * uint64(unsafe.Sizeof(glm.Mat4f{}))
-		if sd.gpuBuf == nil || sd.gpuBuf.GetSize() < needed {
+		if !sd.gpuBuf.Valid() || r.gpu.BufferSize(sd.gpuBuf) < needed {
 			sd.Destroy()
-			//sd.bindGroup.Release()
-			buf := r.runtime.Device().CreateBuffer(wgpu.BufferDescriptor{
+			r.gpu.ReleaseBuffer(sd.gpuBuf)
+			buf := r.gpu.CreateBuffer(gpu.BufferDescriptor{
 				Label: "Skeleton bone buffer",
 				Size:  needed,
-				Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst,
+				Usage: gpu.BufferUsageStorage | gpu.BufferUsageCopyDst,
 			})
-			bg := r.runtime.CreateBindGroup(wgpu.BindGroupDescriptor{
+			bg := r.gpu.CreateBindGroup(wgpu.BindGroupDescriptor{
 				Label:  "Skeleton bind group",
 				Layout: r.skeletonBGL,
 				Entries: []wgpu.BindGroupEntry{{
-					Binding: 0, Buffer: buf, Offset: 0, Size: wgpu.WholeSize,
+					Binding: 0, Buffer: r.gpu.RawBuffer(buf), Offset: 0, Size: wgpu.WholeSize,
 				}},
 			})
 			sd.gpuBuf = buf
 			sd.bindGroup = bg
 		}
-		r.runtime.Queue().WriteBuffer(sd.gpuBuf, 0, wgpu.ToBytes(sd.boneMatrices))
+		r.gpu.WriteBuffer(sd.gpuBuf, 0, wgpu.ToBytes(sd.boneMatrices))
 	}
 }
 
@@ -1345,13 +1336,13 @@ func (r *Renderer) getSceneState(scene *Scene) *sceneRenderState {
 func (r *Renderer) createRenderState(scene *Scene) *sceneRenderState {
 	state := &sceneRenderState{gpuVersion: scene.version}
 
-	state.cameraUniform = r.runtime.Device().CreateBuffer(wgpu.BufferDescriptor{
+	state.cameraUniform = r.gpu.CreateBuffer(gpu.BufferDescriptor{
 		Label: "Camera uniform buffer",
 		Size:  uint64(unsafe.Sizeof(CameraUniform{})),
 		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
 	})
 
-	state.lightsUniform = r.runtime.Device().CreateBuffer(wgpu.BufferDescriptor{
+	state.lightsUniform = r.gpu.CreateBuffer(gpu.BufferDescriptor{
 		Label: "Lights uniform buffer",
 		Size:  uint64(unsafe.Sizeof(LightsUniform{})),
 		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
@@ -1377,19 +1368,19 @@ func (r *Renderer) updateRenderState(state *sceneRenderState, scene *Scene) {
 		r.uploadTexture(envMapRef.id)
 	}
 
-	state.bindGroup = r.runtime.CreateBindGroup(wgpu.BindGroupDescriptor{
+	state.bindGroup = r.gpu.CreateBindGroup(wgpu.BindGroupDescriptor{
 		Label:  "Global bind group",
 		Layout: r.globalBindGroupLayout,
 		Entries: []wgpu.BindGroupEntry{
 			{
 				Binding: CameraBinding,
-				Buffer:  state.cameraUniform,
+				Buffer:  r.gpu.RawBuffer(state.cameraUniform),
 				Offset:  0,
 				Size:    wgpu.WholeSize,
 			},
 			{
 				Binding: LightsBinding,
-				Buffer:  state.lightsUniform,
+				Buffer:  r.gpu.RawBuffer(state.lightsUniform),
 				Offset:  0,
 				Size:    wgpu.WholeSize,
 			},
@@ -1422,6 +1413,6 @@ func (r *Renderer) updateRenderState(state *sceneRenderState, scene *Scene) {
 type sceneRenderState struct {
 	gpuVersion    int
 	bindGroup     *wgpu.BindGroup
-	cameraUniform *wgpu.Buffer
-	lightsUniform *wgpu.Buffer
+	cameraUniform gpu.Buffer
+	lightsUniform gpu.Buffer
 }

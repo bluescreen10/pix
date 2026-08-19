@@ -65,6 +65,7 @@ func (r *Renderer) destroyResources() {
 	}
 	for s := range r.skeletons.Items() {
 		s.Destroy()
+		r.gpu.ReleaseBuffer(s.gpuBuf)
 	}
 	for _, s := range r.samplerCache {
 		s.Release()
@@ -94,7 +95,7 @@ func (r *Renderer) uploadGeometry(geo *GeometryData) {
 	geo.Destroy()
 
 	if len(geo.indices) > 0 {
-		buf := r.runtime.Device().CreateBufferInit(wgpu.BufferInitDescriptor{
+		buf := r.gpu.Device().CreateBufferInit(wgpu.BufferInitDescriptor{
 			Label:    "index buffer",
 			Contents: wgpu.ToBytes(geo.indices),
 			Usage:    wgpu.BufferUsageIndex | wgpu.BufferUsageCopyDst,
@@ -109,7 +110,7 @@ func (r *Renderer) uploadGeometry(geo *GeometryData) {
 			wireIdx = append(wireIdx, i0, i1, i1, i2, i2, i0)
 		}
 		geo.gpuWireframeCount = len(wireIdx)
-		geo.gpuWireframeIndex = r.runtime.Device().CreateBufferInit(wgpu.BufferInitDescriptor{
+		geo.gpuWireframeIndex = r.gpu.Device().CreateBufferInit(wgpu.BufferInitDescriptor{
 			Label:    "wireframe index buffer",
 			Contents: wgpu.ToBytes(wireIdx),
 			Usage:    wgpu.BufferUsageIndex | wgpu.BufferUsageCopyDst,
@@ -120,7 +121,7 @@ func (r *Renderer) uploadGeometry(geo *GeometryData) {
 
 	geo.gpuBufs = make([]GeometryBuffer, len(geo.attrs))
 	for i, a := range geo.attrs {
-		buf := r.runtime.Device().CreateBufferInit(wgpu.BufferInitDescriptor{
+		buf := r.gpu.Device().CreateBufferInit(wgpu.BufferInitDescriptor{
 			Label:    a.name + " buffer",
 			Contents: a.data,
 			Usage:    wgpu.BufferUsageVertex | wgpu.BufferUsageCopyDst,
@@ -194,7 +195,7 @@ func (r *Renderer) getOrCreateSampler(s Sampler) *wgpu.Sampler {
 	if sampler, ok := r.samplerCache[s]; ok {
 		return sampler
 	}
-	sampler := r.runtime.CreateSampler(&wgpu.SamplerDescriptor{
+	sampler := r.gpu.CreateSampler(&wgpu.SamplerDescriptor{
 		AddressModeU:  s.AddressModeU,
 		AddressModeV:  s.AddressModeV,
 		AddressModeW:  s.AddressModeW,
@@ -221,7 +222,7 @@ func (r *Renderer) uploadTexture(id uint32) {
 		tex.gpuRef = nil
 	}
 
-	gpuTex := r.runtime.CreateTexture(&wgpu.TextureDescriptor{
+	gpuTex := r.gpu.CreateTexture(&wgpu.TextureDescriptor{
 		Label:         "Texture",
 		Size:          wgpu.Extent3D{Width: uint32(tex.width), Height: uint32(tex.height), DepthOrArrayLayers: 1},
 		MipLevelCount: 1,
@@ -231,7 +232,7 @@ func (r *Renderer) uploadTexture(id uint32) {
 		Usage:         wgpu.TextureUsageCopyDst | wgpu.TextureUsageTextureBinding,
 	})
 
-	r.runtime.Queue().WriteTexture(
+	r.gpu.Queue().WriteTexture(
 		wgpu.TexelCopyTextureInfo{Texture: gpuTex, MipLevel: 0, Origin: wgpu.Origin3D{}},
 		tex.pixels,
 		wgpu.TexelCopyBufferLayout{
@@ -278,7 +279,11 @@ func (r *Renderer) allocSkeletonSlot(data SkeletonData) Skeleton {
 func (r *Renderer) scheduleSkeletonFree(id uint32) {
 	res := *r.skeletons.Get(id)
 	r.skeletons.Free(id)
-	r.deferredFree = append(r.deferredFree, deferredFreeEntry{destroy: res.Destroy, frame: r.frameCount})
+	destroy := func() {
+		res.Destroy()
+		r.gpu.ReleaseBuffer(res.gpuBuf)
+	}
+	r.deferredFree = append(r.deferredFree, deferredFreeEntry{destroy: destroy, frame: r.frameCount})
 }
 
 // NewSkeleton registers a skeleton with the renderer.
