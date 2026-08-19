@@ -3,9 +3,22 @@ struct PointShadowUniforms {
     light_pos_and_far: vec4<f32>,
 }
 
+struct Drawable {
+    bounds:       vec4<f32>,
+    instance:     u32,
+    transform_id: u32,
+    geometry_id:  u32,
+    material_id:  u32,
+    skeleton_id:  u32,
+    owner_node:   u32,
+    flags:        u32,
+    _pad:         u32,
+}
+
 @group(0) @binding(0) var<uniform>       shadow:     PointShadowUniforms;
 @group(1) @binding(0) var<storage, read> models:     array<mat4x4<f32>>;
 @group(1) @binding(1) var<storage, read> inv_models: array<mat4x4<f32>>;
+@group(1) @binding(2) var<storage, read> drawables:  array<Drawable>;
 @if(USE_SKINNING) @group(2) @binding(0) var<storage, read> bone_matrices: array<mat4x4f>;
 
 struct VertexInput {
@@ -34,7 +47,8 @@ fn main(in: VertexInput, @builtin(instance_index) ii: u32) -> VertexOutput {
             in.skin_weight.z * bone_matrices[in.skin_index.z] +
             in.skin_weight.w * bone_matrices[in.skin_index.w];
     }
-    let world_pos = (models[ii] * skin_mat * vec4f(in.position, 1.0)).xyz;
+    let transform_id = drawables[ii].transform_id;
+    let world_pos = (models[transform_id] * skin_mat * vec4f(in.position, 1.0)).xyz;
     var out: VertexOutput;
     out.clip_position = shadow.view_projection * vec4f(world_pos, 1.0);
     out.world_pos = world_pos;

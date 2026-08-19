@@ -49,6 +49,7 @@ const (
 const (
 	ModelsBinding = iota
 	InvModelsBinding
+	DrawablesBinding
 )
 
 // Pipeline type indices for per-mesh pipeline cache.
@@ -67,7 +68,7 @@ var renderListPool = sync.Pool{
 
 var drawingsPool = sync.Pool{
 	New: func() any {
-		return make([]drawing, 0, 4096)
+		return make([]drawable, 0, 4096)
 	},
 }
 
@@ -109,9 +110,15 @@ type Renderer struct {
 	objectsBindGrp *wgpu.BindGroup
 	objectsCap     uint32
 
-	// Flattened drawable table, mirroring scene.drawables. Re-uploaded only on
-	// structural change; not yet consumed by any pass.
-	drawableBuf gpu.Buffer
+	// Flattened drawable table, mirroring scene.drawables. Uploaded verbatim and
+	// bound in the instance set; the vertex shaders index it by drawable id to
+	// resolve the transform.
+	drawableBuf  gpu.Buffer
+	drawablesCap uint32
+
+	// objectsBindGrp is rebuilt whenever any of its backing buffers (model,
+	// invModel, drawables) is reallocated, tracked by this flag.
+	objectsBindGrpDirty bool
 
 	// Layout for the instance set (binding 0 = objects storage buffer).
 	// Used by both regular and instanced mesh draws; the bind group differs.
@@ -241,9 +248,6 @@ func (r *Renderer) ensureObjectsCap(need uint32) {
 		r.gpu.ReleaseBuffer(r.modelBuf)
 		r.gpu.ReleaseBuffer(r.invModelBuf)
 	}
-	if r.objectsBindGrp != nil {
-		r.objectsBindGrp.Release()
-	}
 	if r.objectsCap == 0 {
 		r.objectsCap = InitialStorageCapacity
 	}
@@ -261,14 +265,51 @@ func (r *Renderer) ensureObjectsCap(need uint32) {
 		Size:  matSize,
 		Usage: gpu.BufferUsageStorage | gpu.BufferUsageCopyDst,
 	})
+	r.objectsBindGrpDirty = true
+}
+
+// ensureDrawablesCap grows the drawables buffer to hold at least `need` entries.
+func (r *Renderer) ensureDrawablesCap(need uint32) {
+	if r.drawableBuf.Valid() && r.drawablesCap >= need {
+		return
+	}
+	if r.drawableBuf.Valid() {
+		r.gpu.ReleaseBuffer(r.drawableBuf)
+	}
+	if r.drawablesCap == 0 {
+		r.drawablesCap = InitialStorageCapacity
+	}
+	for r.drawablesCap < need {
+		r.drawablesCap *= 2
+	}
+	size := uint64(r.drawablesCap) * uint64(unsafe.Sizeof(drawable{}))
+	r.drawableBuf = r.gpu.CreateBuffer(gpu.BufferDescriptor{
+		Label: "Drawables buffer",
+		Size:  size,
+		Usage: gpu.BufferUsageStorage | gpu.BufferUsageCopyDst,
+	})
+	r.objectsBindGrpDirty = true
+}
+
+// ensureObjectsBindGroup rebuilds the shared instance-set bind group when any of
+// its backing buffers has been reallocated.
+func (r *Renderer) ensureObjectsBindGroup() {
+	if !r.objectsBindGrpDirty && r.objectsBindGrp != nil {
+		return
+	}
+	if r.objectsBindGrp != nil {
+		r.objectsBindGrp.Release()
+	}
 	r.objectsBindGrp = r.gpu.CreateBindGroup(wgpu.BindGroupDescriptor{
 		Label:  "Objects bind group",
 		Layout: r.instanceStorageBindGroupLayout,
 		Entries: []wgpu.BindGroupEntry{
 			{Binding: ModelsBinding, Buffer: r.gpu.RawBuffer(r.modelBuf), Offset: 0, Size: wgpu.WholeSize},
 			{Binding: InvModelsBinding, Buffer: r.gpu.RawBuffer(r.invModelBuf), Offset: 0, Size: wgpu.WholeSize},
+			{Binding: DrawablesBinding, Buffer: r.gpu.RawBuffer(r.drawableBuf), Offset: 0, Size: wgpu.WholeSize},
 		},
 	})
+	r.objectsBindGrpDirty = false
 }
 
 func (r *Renderer) ensureGeometryReady(geo *GeometryData) {
@@ -310,8 +351,8 @@ func (r *Renderer) ensureDepthTextureSize(width, height uint32) {
 }
 
 type renderList struct {
-	visible           []drawing
-	shadowCasters     []drawing
+	visible           []drawable
+	shadowCasters     []drawable
 	directionalLights []directionalLightData
 	ambientLight      *ambientLightData
 	spotLights        []spotLightData
@@ -358,12 +399,9 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	if transformsDirty {
 		r.syncMeshInstances(scene)
 	}
-
-	if drawablesDirty {
-		r.syncDrawables(scene)
-	}
+	r.syncDrawables(scene, drawablesDirty)
 	r.syncSkeletons(scene)
-	r.syncDrawables(scene)
+	r.ensureObjectsBindGroup()
 
 	list.visible = cull(frustum, list.visible, list.visible[:0])
 
@@ -372,12 +410,13 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	validVisible := 0
 	for i := range list.visible {
 		d := &list.visible[i]
-		r.ensureGeometryReady(d.geo)
-		if err := prepareMaterial(r.gpu.Device(), d.mat, r); err != nil {
+		mat := r.materials.Get(d.materialID)
+		r.ensureGeometryReady(r.geometries.Get(d.geometryID))
+		if err := prepareMaterial(r.gpu.Device(), mat, r); err != nil {
 			r.logger.Error("error preparing material", slog.Any("err", err))
 			continue
 		}
-		if d.mat.isLit {
+		if mat.isLit {
 			useLights = true
 		}
 		list.visible[validVisible] = *d
@@ -386,7 +425,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	list.visible = list.visible[:validVisible]
 
 	for i := range list.shadowCasters {
-		r.ensureGeometryReady(list.shadowCasters[i].geo)
+		r.ensureGeometryReady(r.geometries.Get(list.shadowCasters[i].geometryID))
 	}
 
 	sceneState := r.getSceneState(scene)
@@ -418,7 +457,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 				}
 				if ld.shadow.layerIndex >= 0 {
 					lightSpaceMat = vp
-					shadowDrawings := drawingsPool.Get().([]drawing)
+					shadowDrawings := drawingsPool.Get().([]drawable)
 					shadowDrawings = cull(NewFrustumFromViewProjection(vp), list.shadowCasters, shadowDrawings)
 					ctx.depthTarget = r.shadowArray.Texture()
 					ctx.depthTargetView = r.shadowArray.LayerView(uint32(ld.shadow.layerIndex))
@@ -451,7 +490,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 				}
 				if ld.shadow.layerIndex >= 0 {
 					lightSpaceMat = vp
-					shadowDrawings := drawingsPool.Get().([]drawing)
+					shadowDrawings := drawingsPool.Get().([]drawable)
 					shadowDrawings = cull(NewFrustumFromViewProjection(vp), list.shadowCasters, shadowDrawings)
 					ctx.depthTarget = r.shadowArray.Texture()
 					ctx.depthTargetView = r.shadowArray.LayerView(uint32(ld.shadow.layerIndex))
@@ -491,14 +530,16 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	ctx.depthTarget = r.depthTexture
 	ctx.depthTargetView = r.depthTextureView
 
-	slices.SortFunc(list.visible, func(a, b drawing) int {
-		if c := cmp.Compare(a.mat.hash, b.mat.hash); c != 0 {
+	slices.SortFunc(list.visible, func(a, b drawable) int {
+		ma, mb := r.materials.Get(a.materialID), r.materials.Get(b.materialID)
+		if c := cmp.Compare(ma.hash, mb.hash); c != 0 {
 			return c
 		}
-		if c := cmp.Compare(a.mat.flags, b.mat.flags); c != 0 {
+		if c := cmp.Compare(ma.flags, mb.flags); c != 0 {
 			return c
 		}
-		if c := cmp.Compare(a.geo.flags, b.geo.flags); c != 0 {
+		ga, gb := r.geometries.Get(a.geometryID), r.geometries.Get(b.geometryID)
+		if c := cmp.Compare(ga.flags, gb.flags); c != 0 {
 			return c
 		}
 		return cmp.Compare(a.ownerNode, b.ownerNode)
@@ -506,53 +547,46 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 
 	renderPass := r.beginRendering(&ctx, scene.background)
 	renderPass.SetBindGroup(GlobalSet, sceneState.bindGroup, nil)
+	renderPass.SetBindGroup(InstanceSet, r.objectsBindGrp, nil)
 
 	var curPipeline *wgpu.RenderPipeline
 	var curMatBG *wgpu.BindGroup
-	var curInstBG *wgpu.BindGroup
 	var curSkelBG *wgpu.BindGroup
 
 	for _, d := range list.visible {
-		if d.pipelines[PipelineGeometry] == nil {
-			d.pipelines[PipelineGeometry] = r.getPipeline(d, ctx.texture, ctx.depthTarget)
-		}
-		if pipeline := d.pipelines[PipelineGeometry]; pipeline != curPipeline {
+		geo := r.geometries.Get(d.geometryID)
+		mat := r.materials.Get(d.materialID)
+
+		if pipeline := r.getPipeline(mat, geo, ctx.texture, ctx.depthTarget); pipeline != curPipeline {
 			renderPass.SetPipeline(pipeline)
 			curPipeline = pipeline
 		}
-		if d.mat.gpuBindGroup != curMatBG {
-			renderPass.SetBindGroup(MaterialSet, d.mat.gpuBindGroup, nil)
-			curMatBG = d.mat.gpuBindGroup
+		if mat.gpuBindGroup != curMatBG {
+			renderPass.SetBindGroup(MaterialSet, mat.gpuBindGroup, nil)
+			curMatBG = mat.gpuBindGroup
 		}
-		if instBG := r.instanceBindGroupFor(d); instBG != curInstBG {
-			renderPass.SetBindGroup(InstanceSet, instBG, nil)
-			curInstBG = instBG
-		}
-		if d.skeleton != nil {
-			if skelBG := d.skeleton.bindGroup; skelBG != curSkelBG {
+		if d.skeletonID != noSkeleton {
+			if skelBG := r.skeletons.Get(d.skeletonID).bindGroup; skelBG != curSkelBG {
 				renderPass.SetBindGroup(SkeletonSet, skelBG, nil)
 				curSkelBG = skelBG
 			}
 		}
-		drawGeometry(renderPass, d)
+		drawGeometry(renderPass, geo, mat, d.instance, 1)
 	}
 
 	// has an env map
 	if scene.backgroundMap.Valid() {
-		d := drawing{
-			mat:           r.environmentMaterial.data(),
-			geo:           r.geometries.Get(r.halfQuad.ref.id),
-			instanceCount: 1,
-		}
-		r.ensureGeometryReady(d.geo)
-		if err := prepareMaterial(r.gpu.Device(), d.mat, r); err != nil {
+		geo := r.geometries.Get(r.halfQuad.ref.id)
+		mat := r.environmentMaterial.data()
+		r.ensureGeometryReady(geo)
+		if err := prepareMaterial(r.gpu.Device(), mat, r); err != nil {
 			r.logger.Error("error preparing equirect material", slog.Any("err", err))
 		} else {
-			pipeline := r.getPipeline(d, ctx.texture, ctx.depthTarget)
+			pipeline := r.getPipeline(mat, geo, ctx.texture, ctx.depthTarget)
 			renderPass.SetPipeline(pipeline)
-			renderPass.SetBindGroup(MaterialSet, d.mat.gpuBindGroup, nil)
+			renderPass.SetBindGroup(MaterialSet, mat.gpuBindGroup, nil)
 			renderPass.SetBindGroup(InstanceSet, r.objectsBindGrp, nil)
-			drawGeometry(renderPass, d)
+			drawGeometry(renderPass, geo, mat, 0, 1)
 		}
 	}
 
@@ -578,7 +612,7 @@ func (r *Renderer) debugClear() {
 	r.DebugTexts = r.DebugTexts[:0]
 }
 
-func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, drawings []drawing) {
+func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, casters []drawable) {
 	// Always begin (and end) the pass so the layer is cleared to 1.0.
 	// Without the clear, the GPU-zero-initialized texture causes every
 	// shadow comparison to fail and the whole scene appears unlit.
@@ -592,7 +626,7 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, drawing
 	})
 	defer func() { pass.End(); pass.Release() }()
 
-	if len(drawings) == 0 {
+	if len(casters) == 0 {
 		return
 	}
 
@@ -602,39 +636,35 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, drawing
 		return
 	}
 
-	slices.SortFunc(drawings, func(a, b drawing) int {
-		if c := cmp.Compare(a.geo.flags&ShadowGeometryMask, b.geo.flags&ShadowGeometryMask); c != 0 {
+	slices.SortFunc(casters, func(a, b drawable) int {
+		ga, gb := r.geometries.Get(a.geometryID), r.geometries.Get(b.geometryID)
+		if c := cmp.Compare(ga.flags&ShadowGeometryMask, gb.flags&ShadowGeometryMask); c != 0 {
 			return c
 		}
 		return cmp.Compare(a.ownerNode, b.ownerNode)
 	})
 
 	pass.SetBindGroup(0, r.shadowMat.BindGroup(), nil)
+	pass.SetBindGroup(1, r.objectsBindGrp, nil)
 
 	var curPipeline *wgpu.RenderPipeline
-	var curInstBG *wgpu.BindGroup
 	var curSkelBG *wgpu.BindGroup
 
-	for _, d := range drawings {
-		if d.pipelines[PipelineShadow] == nil {
-			shadowObj := drawing{mat: r.shadowMat.data(), geo: d.geo}
-			d.pipelines[PipelineShadow] = r.getPipeline(shadowObj, nil, ctx.depthTarget)
-		}
-		if pipeline := d.pipelines[PipelineShadow]; pipeline != curPipeline {
+	for _, d := range casters {
+		geo := r.geometries.Get(d.geometryID)
+		mat := r.materials.Get(d.materialID)
+
+		if pipeline := r.getPipeline(r.shadowMat.data(), geo, nil, ctx.depthTarget); pipeline != curPipeline {
 			pass.SetPipeline(pipeline)
 			curPipeline = pipeline
 		}
-		if instBG := r.instanceBindGroupFor(d); instBG != curInstBG {
-			pass.SetBindGroup(1, instBG, nil)
-			curInstBG = instBG
-		}
-		if d.skeleton != nil {
-			if skelBG := d.skeleton.bindGroup; skelBG != curSkelBG {
+		if d.skeletonID != noSkeleton {
+			if skelBG := r.skeletons.Get(d.skeletonID).bindGroup; skelBG != curSkelBG {
 				pass.SetBindGroup(2, skelBG, nil)
 				curSkelBG = skelBG
 			}
 		}
-		drawGeometry(pass, d)
+		drawGeometry(pass, geo, mat, d.instance, 1)
 	}
 }
 
@@ -649,7 +679,7 @@ var cubeFaces = [6]struct{ fwd, up glm.Vec3f }{
 	{glm.Vec3f{0, 0, -1}, glm.Vec3f{0, -1, 0}}, // -Z
 }
 
-func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f, shadow *PointShadow, casters []drawing) {
+func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f, shadow *PointShadow, casters []drawable) {
 	near := float32(0.1)
 	proj := glm.PerspectiveRH(float32(math.Pi/2), float32(1.0), near, shadow.far)
 	// Negate h (proj[5]) so rendered V matches WebGPU cube map sampling convention (tc = -ry).
@@ -657,8 +687,9 @@ func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f,
 	proj[5] = -proj[5]
 
 	// Sort once — same casters across all 6 faces.
-	slices.SortFunc(casters, func(a, b drawing) int {
-		if c := cmp.Compare(a.geo.flags&ShadowGeometryMask, b.geo.flags&ShadowGeometryMask); c != 0 {
+	slices.SortFunc(casters, func(a, b drawable) int {
+		ga, gb := r.geometries.Get(a.geometryID), r.geometries.Get(b.geometryID)
+		if c := cmp.Compare(ga.flags&ShadowGeometryMask, gb.flags&ShadowGeometryMask); c != 0 {
 			return c
 		}
 		return cmp.Compare(a.ownerNode, b.ownerNode)
@@ -691,31 +722,26 @@ func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f,
 
 		if len(casters) > 0 {
 			pass.SetBindGroup(0, r.pointShadowMat.BindGroup(), nil)
+			pass.SetBindGroup(1, r.objectsBindGrp, nil)
 
 			var curPipeline *wgpu.RenderPipeline
-			var curInstBG *wgpu.BindGroup
 			var curSkelBG *wgpu.BindGroup
 
 			for _, d := range casters {
-				if d.pipelines[PipelinePointShadow] == nil {
-					shadowObj := drawing{mat: r.pointShadowMat.data(), geo: d.geo}
-					d.pipelines[PipelinePointShadow] = r.getPipeline(shadowObj, nil, ctx.depthTarget)
-				}
-				if pipeline := d.pipelines[PipelinePointShadow]; pipeline != curPipeline {
+				geo := r.geometries.Get(d.geometryID)
+				mat := r.materials.Get(d.materialID)
+
+				if pipeline := r.getPipeline(r.pointShadowMat.data(), geo, nil, ctx.depthTarget); pipeline != curPipeline {
 					pass.SetPipeline(pipeline)
 					curPipeline = pipeline
 				}
-				if instBG := r.instanceBindGroupFor(d); instBG != curInstBG {
-					pass.SetBindGroup(1, instBG, nil)
-					curInstBG = instBG
-				}
-				if d.skeleton != nil {
-					if skelBG := d.skeleton.bindGroup; skelBG != curSkelBG {
+				if d.skeletonID != noSkeleton {
+					if skelBG := r.skeletons.Get(d.skeletonID).bindGroup; skelBG != curSkelBG {
 						pass.SetBindGroup(2, skelBG, nil)
 						curSkelBG = skelBG
 					}
 				}
-				drawGeometry(pass, d)
+				drawGeometry(pass, geo, mat, d.instance, 1)
 			}
 		}
 
@@ -735,18 +761,18 @@ func primitiveTopologyFor(mat *MaterialData) wgpu.PrimitiveTopology {
 	return wgpu.PrimitiveTopologyTriangleList
 }
 
-func drawGeometry(pass *wgpu.RenderPassEncoder, d drawing) {
-	for _, b := range d.geo.gpuBufs {
+func drawGeometry(pass *wgpu.RenderPassEncoder, geo *GeometryData, mat *MaterialData, instanceId, instanceCount uint32) {
+	for _, b := range geo.gpuBufs {
 		pass.SetVertexBuffer(uint32(b.loc), b.buf, 0, wgpu.WholeSize)
 	}
-	if d.mat.flags&WireframeFlag != 0 && d.geo.gpuWireframeIndex != nil {
-		pass.SetIndexBuffer(d.geo.gpuWireframeIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
-		pass.DrawIndexed(uint32(d.geo.gpuWireframeCount), d.instanceCount, 0, 0, d.instanceId)
-	} else if d.geo.gpuIndex != nil {
-		pass.SetIndexBuffer(d.geo.gpuIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
-		pass.DrawIndexed(uint32(d.geo.gpuCount), d.instanceCount, 0, 0, d.instanceId)
+	if mat.flags&WireframeFlag != 0 && geo.gpuWireframeIndex != nil {
+		pass.SetIndexBuffer(geo.gpuWireframeIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
+		pass.DrawIndexed(uint32(geo.gpuWireframeCount), instanceCount, 0, 0, instanceId)
+	} else if geo.gpuIndex != nil {
+		pass.SetIndexBuffer(geo.gpuIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
+		pass.DrawIndexed(uint32(geo.gpuCount), instanceCount, 0, 0, instanceId)
 	} else {
-		pass.Draw(uint32(d.geo.gpuCount), d.instanceCount, 0, d.instanceId)
+		pass.Draw(uint32(geo.gpuCount), instanceCount, 0, instanceId)
 	}
 }
 
@@ -796,11 +822,10 @@ func (r *Renderer) endRendering(ctx *renderContext, pass *wgpu.RenderPassEncoder
 	ctx.encoder = nil
 }
 
-func (r *Renderer) getPipeline(obj drawing, renderTarget, depthTarget *wgpu.Texture) *wgpu.RenderPipeline {
-	mat := obj.mat
+func (r *Renderer) getPipeline(mat *MaterialData, geo *GeometryData, renderTarget, depthTarget *wgpu.Texture) *wgpu.RenderPipeline {
 	shadow := renderTarget == nil
 
-	geoFlags := obj.geo.flags
+	geoFlags := geo.flags
 	if shadow {
 		geoFlags &= ShadowGeometryMask
 	}
@@ -825,7 +850,7 @@ func (r *Renderer) getPipeline(obj drawing, renderTarget, depthTarget *wgpu.Text
 	if p := r.pipelineCache.GetRenderPipeline(key); p != nil {
 		return p
 	}
-	p := r.createPipeline(mat, obj.geo, renderTarget, depthTarget)
+	p := r.createPipeline(mat, geo, renderTarget, depthTarget)
 	r.pipelineCache.SetRenderPipeline(key, p)
 	return p
 }
@@ -1096,13 +1121,17 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 					MinBindingSize:   matSize,
 				},
 			},
+			{
+				Binding:    DrawablesBinding,
+				Visibility: wgpu.ShaderStageVertex,
+				Buffer: wgpu.BufferBindingLayout{
+					Type:             wgpu.BufferBindingTypeReadOnlyStorage,
+					HasDynamicOffset: false,
+					MinBindingSize:   uint64(unsafe.Sizeof(drawable{})),
+				},
+			},
 		},
 	})
-}
-
-// instanceBindGroupFor returns the shared objects bind group for this drawing.
-func (r *Renderer) instanceBindGroupFor(d drawing) *wgpu.BindGroup {
-	return r.objectsBindGrp
 }
 
 // syncMeshInstances uploads the world/worldInv matrices for all scene nodes into
@@ -1114,28 +1143,16 @@ func (r *Renderer) syncMeshInstances(scene *Scene) {
 	r.gpu.WriteBuffer(r.invModelBuf, 0, wgpu.ToBytes(scene.worldInv[:need]))
 }
 
-// syncDrawables (re)uploads the scene's drawable table into the GPU-side
-// storage buffer, but only when the table actually changed (dirty) or the
-// buffer had to grow. The buffer is not yet consumed by any pass — it is the
-// foundation for GPU-driven culling and vertex pulling.
-func (r *Renderer) syncDrawables(scene *Scene) {
-	dr := scene.drawables // rebuilds if dirty, clears the flag
-
-	size := uint64(len(dr)) * uint64(unsafe.Sizeof(drawable{}))
-	grow := !r.drawableBuf.Valid() || r.gpu.BufferSize(r.drawableBuf) < size
-
-	if grow {
-		if r.drawableBuf.Valid() {
-			r.gpu.ReleaseBuffer(r.drawableBuf)
-		}
-		r.drawableBuf = r.gpu.CreateBuffer(gpu.BufferDescriptor{
-			Label: "Drawables buffer",
-			Size:  size,
-			Usage: gpu.BufferUsageStorage | gpu.BufferUsageCopyDst,
-		})
+// syncDrawables grows the drawables buffer as needed and, when the table changed,
+// re-uploads it verbatim. The rows hold local bounds, so they're structural and
+// only change on add/remove; the buffer is indexed by drawable id (the draw
+// call's instance id) to resolve each instance's transform.
+func (r *Renderer) syncDrawables(scene *Scene, dirty bool) {
+	n := uint32(len(scene.drawables))
+	r.ensureDrawablesCap(n)
+	if dirty && n > 0 {
+		r.gpu.WriteBuffer(r.drawableBuf, 0, wgpu.ToBytes(scene.drawables))
 	}
-
-	r.gpu.WriteBuffer(r.drawableBuf, 0, wgpu.ToBytes(dr))
 }
 
 // syncSkeletons recomputes and uploads bone matrices for all skeletons referenced
@@ -1181,105 +1198,34 @@ func (r *Renderer) syncSkeletons(scene *Scene) {
 
 func (r *Renderer) createGlobalBuffers() {
 	r.ensureObjectsCap(InitialStorageCapacity)
+	r.ensureDrawablesCap(InitialStorageCapacity)
+	r.ensureObjectsBindGroup()
 }
 
 // collectRenderList populates list by iterating the scene's compact payload tables
 // directly, avoiding a full tree traversal. No frustum culling is applied here;
 // call cull separately for each frustum.
 func (r *Renderer) collectRenderList(list *renderList, scene *Scene) {
-	for i := range scene.meshes {
-		md := &scene.meshes[i]
-		flags := scene.GetFlags(md.ownerNode)
+	// One pass over the flattened drawable table. Each drawable is gated by its
+	// owner node's flags. d.bounds is local; transform it into a world-space
+	// sphere for CPU culling in the copy, leaving the stored structural bounds
+	// untouched (they're uploaded to the GPU as-is).
+	for i := range scene.drawables {
+		d := &scene.drawables[i]
+		flags := scene.GetFlags(d.ownerNode)
 		if !flags.IsAlive() || !flags.IsVisible() {
 			continue
 		}
 
-		model := scene.GetWorldTransform(md.ownerNode)
-		localCenter := md.boundingSphere.Center
-		worldCenter := model.Mul4x1(glm.Vec4f{localCenter[0], localCenter[1], localCenter[2], 1})
-		d := drawing{
-			instanceId:    md.ownerNode,
-			instanceCount: 1,
-			geo:           r.geometries.Get(md.geometry.ref.ID()),
-			mat:           r.materials.Get(md.material.ref.ID()),
-			bounds: Sphere{
-				Center: glm.Vec3f{worldCenter[0], worldCenter[1], worldCenter[2]},
-				Radius: md.boundingSphere.Radius,
-			},
-			pipelines: &md.pipelines,
-		}
+		world := scene.world[d.transformID]
+		wc := world.Mul4x1(glm.Vec4f{d.bounds.Center[0], d.bounds.Center[1], d.bounds.Center[2], 1})
+		entry := *d
+		entry.bounds = Sphere{Center: glm.Vec3f{wc[0], wc[1], wc[2]}, Radius: d.bounds.Radius}
 
 		if flags.CastShadow() {
-			list.shadowCasters = append(list.shadowCasters, d)
+			list.shadowCasters = append(list.shadowCasters, entry)
 		}
-		list.visible = append(list.visible, d)
-	}
-
-	for i := range scene.instancedMeshes {
-		imd := &scene.instancedMeshes[i]
-		flags := scene.GetFlags(imd.ownerNode)
-		if !flags.IsAlive() || !flags.IsVisible() || imd.instanceCount == 0 {
-			continue
-		}
-
-		geo := r.geometries.Get(imd.geometry.ref.ID())
-		geoBounds := geo.BoundingSphere()
-		firstChild := scene.firstChildren[imd.ownerNode]
-
-		// Compute a conservative world-space bounding sphere over all instance world positions.
-		var sumPos glm.Vec3f
-		for j := 0; j < imd.instanceCount; j++ {
-			w := scene.world[firstChild.index+uint32(j)]
-			sumPos = sumPos.Add(glm.Vec3f{w[12], w[13], w[14]})
-		}
-		center := sumPos.Scale(1.0 / float32(imd.instanceCount))
-		var maxDist float32
-		for j := 0; j < imd.instanceCount; j++ {
-			w := scene.world[firstChild.index+uint32(j)]
-			dist := center.Sub(glm.Vec3f{w[12], w[13], w[14]}).Length()
-			if dist > maxDist {
-				maxDist = dist
-			}
-		}
-
-		d := drawing{
-			instanceId:    firstChild.index,
-			instanceCount: uint32(imd.instanceCount),
-			geo:           geo,
-			mat:           r.materials.Get(imd.material.ref.ID()),
-			bounds:        Sphere{Center: center, Radius: maxDist + geoBounds.Radius},
-			ownerNode:     imd.ownerNode,
-			pipelines:     &imd.pipelines,
-		}
-
-		if flags.CastShadow() {
-			list.shadowCasters = append(list.shadowCasters, d)
-		}
-		list.visible = append(list.visible, d)
-	}
-
-	for i := range scene.skinnedMeshes {
-		smd := &scene.skinnedMeshes[i]
-		flags := scene.GetFlags(smd.ownerNode)
-		if !flags.IsAlive() || !flags.IsVisible() {
-			continue
-		}
-		model := scene.GetWorldTransform(smd.ownerNode)
-		lc := smd.boundingSphere.Center
-		wc := model.Mul4x1(glm.Vec4f{lc[0], lc[1], lc[2], 1})
-		d := drawing{
-			instanceId:    smd.ownerNode,
-			instanceCount: 1,
-			geo:           r.geometries.Get(smd.geometry.ref.ID()),
-			mat:           r.materials.Get(smd.material.ref.ID()),
-			bounds:        Sphere{Center: glm.Vec3f{wc[0], wc[1], wc[2]}, Radius: smd.boundingSphere.Radius},
-			pipelines:     &smd.pipelines,
-			skeleton:      r.skeletons.Get(smd.skeleton.ref.ID()),
-		}
-		if flags.CastShadow() {
-			list.shadowCasters = append(list.shadowCasters, d)
-		}
-		list.visible = append(list.visible, d)
+		list.visible = append(list.visible, entry)
 	}
 
 	for i := range scene.dirLights {
@@ -1319,7 +1265,7 @@ func (r *Renderer) collectRenderList(list *renderList, scene *Scene) {
 // cull appends drawings from src into dst, keeping only those whose bounds
 // intersect frustum. Pass dst[:0] to compact in-place or a separate slice to
 // preserve src for reuse across multiple lights.
-func cull(frustum Frustum, src []drawing, dst []drawing) []drawing {
+func cull(frustum Frustum, src []drawable, dst []drawable) []drawable {
 	for _, d := range src {
 		if frustum.ContainsSphere(d.bounds) {
 			dst = append(dst, d)

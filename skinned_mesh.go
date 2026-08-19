@@ -37,7 +37,7 @@ func (m SkinnedMesh) SetMaterial(mat Material) {
 	newRef := mat.Copy()
 	md.material.Release()
 	md.material = newRef
-	md.pipelines[PipelineGeometry] = nil
+	m.scene.drawableDirty = true // materialID cached in the drawable is now stale
 }
 
 func (s *Scene) NewSkinnedMesh(geo Geometry, mat Material, skeleton Skeleton) SkinnedMesh {

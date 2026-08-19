@@ -32,7 +32,7 @@ func (m Mesh) SetMaterial(mat Material) {
 	newRef := mat.Copy()
 	md.material.Release()
 	md.material = newRef
-	md.pipelines[PipelineGeometry] = nil // material changed; geometry pipeline must be rebuilt
+	m.scene.drawableDirty = true // materialID cached in the drawable is now stale
 }
 
 // BoundingSphere returns the world-space bounding sphere from the pre-computed local bounds.

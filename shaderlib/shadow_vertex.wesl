@@ -1,6 +1,19 @@
+struct Drawable {
+    bounds:       vec4<f32>,
+    instance:     u32,
+    transform_id: u32,
+    geometry_id:  u32,
+    material_id:  u32,
+    skeleton_id:  u32,
+    owner_node:   u32,
+    flags:        u32,
+    _pad:         u32,
+}
+
 @group(0) @binding(0) var<uniform>       light_vp:     mat4x4<f32>;
 @group(1) @binding(0) var<storage, read> models:       array<mat4x4<f32>>;
 @group(1) @binding(1) var<storage, read> inv_models:   array<mat4x4<f32>>;
+@group(1) @binding(2) var<storage, read> drawables:    array<Drawable>;
 @if(USE_SKINNING) @group(2) @binding(0) var<storage, read> bone_matrices: array<mat4x4f>;
 
 struct ShadowVertexInput {
@@ -24,5 +37,6 @@ fn main(in: ShadowVertexInput, @builtin(instance_index) instance_index: u32) -> 
             in.skin_weight.z * bone_matrices[in.skin_index.z] +
             in.skin_weight.w * bone_matrices[in.skin_index.w];
     }
-    return light_vp * models[instance_index] * skin_mat * vec4f(in.position, 1.0);
+    let transform_id = drawables[instance_index].transform_id;
+    return light_vp * models[transform_id] * skin_mat * vec4f(in.position, 1.0);
 }
