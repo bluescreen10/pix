@@ -50,5 +50,6 @@ func (s *Scene) NewMesh(geo Geometry, mat Material) Mesh {
 		ownerNode:      id.index,
 	})
 	s.payload[id.index] = payloadIdx
+	s.drawableDirty = true
 	return Mesh{Node{scene: s, id: id}}
 }

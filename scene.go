@@ -111,6 +111,12 @@ type Scene struct {
 	ambientLights   []ambientLightData
 	spotLights      []spotLightData
 	pointLights     []pointLightData
+
+	// Flattened, GPU-facing draw list — one entry per plain/skinned mesh and one
+	// per instance of an instanced mesh. Rebuilt lazily when drawableDirty is set
+	// by a structural change (mesh add/remove), never per frame.
+	drawables     []drawable
+	drawableDirty bool
 }
 
 func NewScene() *Scene {
@@ -384,6 +390,7 @@ func (s *Scene) swapRemoveMesh(payloadIdx uint32) {
 		s.payload[s.meshes[payloadIdx].ownerNode] = payloadIdx
 	}
 	s.meshes = s.meshes[:last]
+	s.drawableDirty = true
 }
 
 func (s *Scene) swapRemoveInstancedMesh(payloadIdx uint32) {
@@ -395,6 +402,7 @@ func (s *Scene) swapRemoveInstancedMesh(payloadIdx uint32) {
 		s.payload[s.instancedMeshes[payloadIdx].ownerNode] = payloadIdx
 	}
 	s.instancedMeshes = s.instancedMeshes[:last]
+	s.drawableDirty = true
 }
 
 func (s *Scene) swapRemoveDirLight(payloadIdx uint32) {
@@ -442,6 +450,7 @@ func (s *Scene) swapRemoveSkinnedMesh(payloadIdx uint32) {
 		s.payload[s.skinnedMeshes[payloadIdx].ownerNode] = payloadIdx
 	}
 	s.skinnedMeshes = s.skinnedMeshes[:last]
+	s.drawableDirty = true
 }
 
 // flushTopoIfDirty rebuilds topoOrder with a BFS from root (parent-before-child).

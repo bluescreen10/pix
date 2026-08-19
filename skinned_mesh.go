@@ -51,5 +51,6 @@ func (s *Scene) NewSkinnedMesh(geo Geometry, mat Material, skeleton Skeleton) Sk
 		skeleton:       skeleton.Copy(),
 	})
 	s.payload[id.index] = payloadIdx
+	s.drawableDirty = true
 	return SkinnedMesh{Node{scene: s, id: id}}
 }

@@ -53,5 +53,6 @@ func (s *Scene) NewInstancedMesh(geo Geometry, mat Material, count int) Instance
 		instanceCount: count,
 	})
 	s.payload[id.index] = payloadIdx
+	s.drawableDirty = true
 	return InstancedMesh{Node{scene: s, id: id}}
 }

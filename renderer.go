@@ -109,6 +109,10 @@ type Renderer struct {
 	objectsBindGrp *wgpu.BindGroup
 	objectsCap     uint32
 
+	// Flattened drawable table, mirroring scene.drawables. Re-uploaded only on
+	// structural change; not yet consumed by any pass.
+	drawableBuf gpu.Buffer
+
 	// Layout for the instance set (binding 0 = objects storage buffer).
 	// Used by both regular and instanced mesh draws; the bind group differs.
 	instanceStorageBindGroupLayout *wgpu.BindGroupLayout
@@ -342,6 +346,8 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	transformsDirty := scene.UpdateTransforms()
 	scene.UpdateVisibility()
 
+	drawablesDirty := scene.UpdateDrawables()
+
 	list := renderListPool.Get().(*renderList)
 	defer list.release()
 
@@ -352,7 +358,12 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	if transformsDirty {
 		r.syncMeshInstances(scene)
 	}
+
+	if drawablesDirty {
+		r.syncDrawables(scene)
+	}
 	r.syncSkeletons(scene)
+	r.syncDrawables(scene)
 
 	list.visible = cull(frustum, list.visible, list.visible[:0])
 
@@ -1101,6 +1112,30 @@ func (r *Renderer) syncMeshInstances(scene *Scene) {
 	r.ensureObjectsCap(need)
 	r.gpu.WriteBuffer(r.modelBuf, 0, wgpu.ToBytes(scene.world[:need]))
 	r.gpu.WriteBuffer(r.invModelBuf, 0, wgpu.ToBytes(scene.worldInv[:need]))
+}
+
+// syncDrawables (re)uploads the scene's drawable table into the GPU-side
+// storage buffer, but only when the table actually changed (dirty) or the
+// buffer had to grow. The buffer is not yet consumed by any pass — it is the
+// foundation for GPU-driven culling and vertex pulling.
+func (r *Renderer) syncDrawables(scene *Scene) {
+	dr := scene.drawables // rebuilds if dirty, clears the flag
+
+	size := uint64(len(dr)) * uint64(unsafe.Sizeof(drawable{}))
+	grow := !r.drawableBuf.Valid() || r.gpu.BufferSize(r.drawableBuf) < size
+
+	if grow {
+		if r.drawableBuf.Valid() {
+			r.gpu.ReleaseBuffer(r.drawableBuf)
+		}
+		r.drawableBuf = r.gpu.CreateBuffer(gpu.BufferDescriptor{
+			Label: "Drawables buffer",
+			Size:  size,
+			Usage: gpu.BufferUsageStorage | gpu.BufferUsageCopyDst,
+		})
+	}
+
+	r.gpu.WriteBuffer(r.drawableBuf, 0, wgpu.ToBytes(dr))
 }
 
 // syncSkeletons recomputes and uploads bone matrices for all skeletons referenced
