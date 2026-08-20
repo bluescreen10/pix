@@ -11,9 +11,8 @@ struct Drawable {
 }
 
 @group(0) @binding(0) var<uniform>       light_vp:     mat4x4<f32>;
-@group(1) @binding(0) var<storage, read> models:       array<mat4x4<f32>>;
-@group(1) @binding(1) var<storage, read> inv_models:   array<mat4x4<f32>>;
-@group(1) @binding(2) var<storage, read> drawables:    array<Drawable>;
+@group(1) @binding(0) var<storage, read> models:    array<mat4x4<f32>>;
+@group(1) @binding(1) var<storage, read> drawables: array<Drawable>;
 @if(USE_SKINNING) @group(2) @binding(0) var<storage, read> bone_matrices: array<mat4x4f>;
 
 struct ShadowVertexInput {

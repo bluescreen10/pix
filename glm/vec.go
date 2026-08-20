@@ -101,6 +101,13 @@ func (v Vec3[T]) Rotate(angle T, v2 Vec3[T]) Vec3[T] {
 	return rot.Mul3x1(v).Mul(conj).Vec3()
 }
 
+func (v Vec3[T]) RGB10A2() RGB10A2 {
+	x := uint32(float32(Clamp(v[0], 0, 1)) * 1023.0)
+	y := uint32(float32(Clamp(v[1], 0, 1)) * 1023.0)
+	z := uint32(float32(Clamp(v[2], 0, 1)) * 1023.0)
+	return RGB10A2(x | y<<10 | z<<20)
+}
+
 func (v Vec3[T]) Vec4() Vec4[T] {
 	return Vec4[T]{v[0], v[1], v[2]}
 }
@@ -144,6 +151,15 @@ func (v Vec4[T]) Normalize() Vec4[T] {
 
 func (v Vec4[T]) Vec3() Vec3[T] {
 	return Vec3[T]{v[0], v[1], v[2]}
+}
+
+// PackRGBA8 packs a linear RGBA color, clamping each channel to [0,1].
+func (c Vec4[T]) RGBA8() RGBA8 {
+	r := uint32(float32(Clamp(c[0], 0, 1)) * 255.0)
+	g := uint32(float32(Clamp(c[1], 0, 1)) * 255.0)
+	b := uint32(float32(Clamp(c[2], 0, 1)) * 255.0)
+	a := uint32(float32(Clamp(c[3], 0, 1)) * 255.0)
+	return RGBA8(r | g<<8 | b<<16 | a<<24)
 }
 
 // aliases

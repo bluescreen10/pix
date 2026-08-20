@@ -38,6 +38,7 @@ func (d skelDisposer) generation(id uint32) uint32 { return d.r.skeletons.Genera
 
 // initResources initialises the resource slabs and creates the default white texture.
 func (r *Renderer) initResources() {
+	r.geometry = NewGeometrySystem(r.gpu)
 	r.geometries = mem.NewSlab[GeometryData]()
 	r.materials = mem.NewSlab[MaterialData]()
 	r.textures = mem.NewSlab[TextureData]()
@@ -79,8 +80,10 @@ func (r *Renderer) destroyResources() {
 func (r *Renderer) allocGeometrySlot(data *GeometryData) Geometry {
 	rc := new(int32)
 	*rc = 1
-	//bounds := data.BoundingSphere()
 	idx, gen := r.geometries.Alloc(*data)
+	// Register the attribute data with the GeometrySystem under the same id, so
+	// drawable.geometryID resolves both the CPU GeometryData and the GPU pull data.
+	r.geometry.Create(idx, geometryConfigFromData(data))
 	ref := Ref[Geometry]{id: idx, gen: gen, refCount: rc, owner: geoDisposer{r}}
 	return Geometry{renderer: r, ref: ref}
 }
@@ -88,6 +91,9 @@ func (r *Renderer) allocGeometrySlot(data *GeometryData) Geometry {
 func (r *Renderer) scheduleGeoFree(id uint32) {
 	res := *r.geometries.Get(id) // copy GPU handles out before the slot is recycled
 	r.geometries.Free(id)
+	// Release the attribute suballocations now (keyed by the slab id, which the
+	// slab has just freed); the GPU buffers are destroyed on the deferred pass.
+	r.geometry.Free(id)
 	r.deferredFree = append(r.deferredFree, deferredFreeEntry{destroy: res.Destroy, frame: r.frameCount})
 }
 

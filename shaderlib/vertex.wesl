@@ -5,21 +5,7 @@ struct Camera {
     position:            vec4<f32>,
 }
 
-struct VertexInput {
-    @location(0) position:    vec3<f32>,
-    @if(USE_UV) @location(1) uv: vec2<f32>,
-    @if(USE_NORMAL) @location(2) normal: vec3<f32>,
-    @if(USE_SKINNING) @location(5) skin_index:  vec4<u32>,
-    @if(USE_SKINNING) @location(6) skin_weight: vec4<f32>,
-}
-
-struct VertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
-    @location(0) v_world_pos: vec3<f32>,
-    @if(USE_UV) @location(1) v_uv: vec2<f32>,
-    @if(USE_NORMAL) @location(2) v_normal: vec3<f32>,
-}
-
+// Must match the Go drawable struct (48 bytes).
 struct Drawable {
     bounds:       vec4<f32>,
     instance:     u32,
@@ -32,50 +18,88 @@ struct Drawable {
     _pad:         u32,
 }
 
+struct GeometryDesc {
+    position_base:  u32,
+    attribute_base: u32,
+    index_base:     u32,
+    index_count:    u32,
+    flags:          u32,
+    _pad:           u32,
+}
+
+// Interleaved per-vertex attributes (normal/color/uv). Must match Go's
+// vertexAttributes (16 bytes).
+struct VertexAttributes {
+    normal: u32,        // 10-10-10-2, components mapped [-1,1] -> [0,1]
+    color:  u32,        // RGBA8
+    uv:     vec2<f32>,
+}
+
+fn unpack_normal(p: u32) -> vec3<f32> {
+    let x = f32((p >>  0u) & 0x3FFu) / 1023.0 * 2.0 - 1.0;
+    let y = f32((p >> 10u) & 0x3FFu) / 1023.0 * 2.0 - 1.0;
+    let z = f32((p >> 20u) & 0x3FFu) / 1023.0 * 2.0 - 1.0;
+    return vec3<f32>(x, y, z);
+}
+
+fn unpack_position(vertex_index: u32) -> vec3<f32> {
+    let x = positions[vertex_index];
+    let y = positions[vertex_index+1u];
+    let z = positions[vertex_index+2u];
+    return vec3<f32>(x,y,z);
+}
+
+// normal_matrix builds the inverse-transpose of the model's upper-left 3x3 from
+// its column cofactors (cross products), avoiding a separate inv-model buffer.
+// It's correct up to a positive scale, which the caller's normalize() removes.
+fn normal_matrix(m: mat4x4<f32>) -> mat3x3<f32> {
+    let c0 = m[0].xyz;
+    let c1 = m[1].xyz;
+    let c2 = m[2].xyz;
+    return mat3x3<f32>(cross(c1, c2), cross(c2, c0), cross(c0, c1));
+}
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) v_world_pos: vec3<f32>,
+    @location(1) v_uv: vec2<f32>,
+    @location(2) v_normal: vec3<f32>,
+}
+
 @group(0) @binding(0) var<uniform>       camera:     Camera;
-@group(2) @binding(0) var<storage, read> models:     array<mat4x4<f32>>;
-@group(2) @binding(1) var<storage, read> inv_models: array<mat4x4<f32>>;
-@group(2) @binding(2) var<storage, read> drawables:  array<Drawable>;
-@if(USE_SKINNING) @group(3) @binding(0) var<storage, read> bone_matrices: array<mat4x4f>;
+
+@group(2) @binding(0) var<storage, read> models:    array<mat4x4<f32>>;
+@group(2) @binding(1) var<storage, read> drawables: array<Drawable>;
+
+// Geometry set: position stream + packed attribute stream + indices + descriptors.
+@group(3) @binding(0) var<storage, read> positions:  array<f32>;
+@group(3) @binding(1) var<storage, read> attributes: array<VertexAttributes>;
+@group(3) @binding(2) var<storage, read> indices:    array<u32>;
+@group(3) @binding(3) var<storage, read> geometries: array<GeometryDesc>;
 
 @vertex
-fn main(in: VertexInput, @builtin(instance_index) instance_index: u32) -> VertexOutput {
+fn main(@builtin(instance_index) instance_index: u32,
+        @builtin(vertex_index)   vertex_index: u32) -> VertexOutput {
     var out: VertexOutput;
 
-    let transform_id = drawables[instance_index].transform_id;
-    let model     = models[transform_id];
-    let inv_model = inv_models[transform_id];
+    let d   = drawables[instance_index];
+    let geo = geometries[d.geometry_id];
 
-    // Skinning: blend bone matrices by weights (identity when USE_SKINNING is off).
-    var skin_mat = mat4x4f(
-        vec4f(1.0, 0.0, 0.0, 0.0),
-        vec4f(0.0, 1.0, 0.0, 0.0),
-        vec4f(0.0, 0.0, 1.0, 0.0),
-        vec4f(0.0, 0.0, 0.0, 1.0),
-    );
-    @if USE_SKINNING {
-        skin_mat =
-            in.skin_weight.x * bone_matrices[in.skin_index.x] +
-            in.skin_weight.y * bone_matrices[in.skin_index.y] +
-            in.skin_weight.z * bone_matrices[in.skin_index.z] +
-            in.skin_weight.w * bone_matrices[in.skin_index.w];
-    }
+    // Software index fetch, then pull the vertex's attributes from the streams.
+    let vi = indices[geo.index_base + vertex_index];
 
-    let world_pos = model * skin_mat * vec4f(in.position, 1.0);
+    let pb = geo.position_base + vi * 3u;
+    let position = unpack_position(pb);
+
+    let model = models[d.transform_id];
+
+    let world_pos = model * vec4<f32>(position, 1.0);
     out.v_world_pos   = world_pos.xyz;
     out.clip_position = camera.view_projection * world_pos;
-
-    @if USE_UV {
-        out.v_uv = in.uv;
-    }
-
-    @if USE_NORMAL {
-        let skin3 = mat3x3f(skin_mat[0].xyz, skin_mat[1].xyz, skin_mat[2].xyz);
-        let normal_matrix = transpose(
-            mat3x3f(inv_model[0].xyz, inv_model[1].xyz, inv_model[2].xyz)
-        );
-        out.v_normal = normalize(normal_matrix * skin3 * in.normal);
-    }
+    out.v_uv = attributes[geo.attribute_base + vi].uv;
+    
+    let normal = unpack_normal(attributes[geo.attribute_base + vi].normal);
+    out.v_normal = normalize(normal_matrix(model) * normal);
 
     return out;
 }

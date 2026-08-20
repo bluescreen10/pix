@@ -34,6 +34,15 @@ const (
 	SkeletonSet // only present in skinned-mesh pipelines
 )
 
+// GeometrySet holds the vertex-pulling attribute streams. It occupies the same
+// slot as SkeletonSet because a pipeline is either pulling (non-skinned) or
+// skinning (fetch), never both.
+const GeometrySet = SkeletonSet
+
+// geometryVertexShader is the color-pass vertex shader that pulls its attributes
+// from the GeometrySystem SSBOs. Materials using it get the geometry set bound.
+const geometryVertexShader = "vertex.wesl"
+
 // Global Bindings
 const (
 	CameraBinding = iota
@@ -48,7 +57,6 @@ const (
 // Instance Bindings
 const (
 	ModelsBinding = iota
-	InvModelsBinding
 	DrawablesBinding
 )
 
@@ -97,6 +105,9 @@ type Renderer struct {
 
 	pipelineCache *pipelineCache
 
+	// geometry attribute storage for GPU-driven vertex pulling.
+	geometry *GeometrySystem
+
 	// global
 	sceneStates map[uint32]*sceneRenderState
 	//cameraUniformBuffer *wgpu.Buffer
@@ -104,9 +115,9 @@ type Renderer struct {
 	globalBindGroupLayout *wgpu.BindGroupLayout
 	//globalBindGroup       *wgpu.BindGroup
 
-	// Stable per-node model/inv-model buffers — slot = scene node index.
+	// Stable per-node model buffer — slot = scene node index. The normal matrix
+	// is derived from model in-shader, so no inverse-model buffer is kept.
 	modelBuf       gpu.Buffer
-	invModelBuf    gpu.Buffer
 	objectsBindGrp *wgpu.BindGroup
 	objectsCap     uint32
 
@@ -117,7 +128,7 @@ type Renderer struct {
 	drawablesCap uint32
 
 	// objectsBindGrp is rebuilt whenever any of its backing buffers (model,
-	// invModel, drawables) is reallocated, tracked by this flag.
+	// drawables) is reallocated, tracked by this flag.
 	objectsBindGrpDirty bool
 
 	// Layout for the instance set (binding 0 = objects storage buffer).
@@ -190,6 +201,11 @@ func (r *Renderer) Destroy() {
 		r.debugText = nil
 	}
 
+	if r.geometry != nil {
+		r.geometry.Destroy()
+		r.geometry = nil
+	}
+
 	r.gpu.Destroy()
 	r.gpu = nil
 
@@ -239,14 +255,13 @@ func (r *Renderer) Destroy() {
 	r.destroyResources()
 }
 
-// ensureObjectsCap grows the model/invModel buffers to hold at least `need` entries.
+// ensureObjectsCap grows the model buffer to hold at least `need` entries.
 func (r *Renderer) ensureObjectsCap(need uint32) {
 	if r.modelBuf.Valid() && r.objectsCap >= need {
 		return
 	}
 	if r.modelBuf.Valid() {
 		r.gpu.ReleaseBuffer(r.modelBuf)
-		r.gpu.ReleaseBuffer(r.invModelBuf)
 	}
 	if r.objectsCap == 0 {
 		r.objectsCap = InitialStorageCapacity
@@ -257,11 +272,6 @@ func (r *Renderer) ensureObjectsCap(need uint32) {
 	matSize := uint64(r.objectsCap) * uint64(unsafe.Sizeof(glm.Mat4f{}))
 	r.modelBuf = r.gpu.CreateBuffer(gpu.BufferDescriptor{
 		Label: "Model buffer",
-		Size:  matSize,
-		Usage: gpu.BufferUsageStorage | gpu.BufferUsageCopyDst,
-	})
-	r.invModelBuf = r.gpu.CreateBuffer(gpu.BufferDescriptor{
-		Label: "InvModel buffer",
 		Size:  matSize,
 		Usage: gpu.BufferUsageStorage | gpu.BufferUsageCopyDst,
 	})
@@ -305,7 +315,6 @@ func (r *Renderer) ensureObjectsBindGroup() {
 		Layout: r.instanceStorageBindGroupLayout,
 		Entries: []wgpu.BindGroupEntry{
 			{Binding: ModelsBinding, Buffer: r.gpu.RawBuffer(r.modelBuf), Offset: 0, Size: wgpu.WholeSize},
-			{Binding: InvModelsBinding, Buffer: r.gpu.RawBuffer(r.invModelBuf), Offset: 0, Size: wgpu.WholeSize},
 			{Binding: DrawablesBinding, Buffer: r.gpu.RawBuffer(r.drawableBuf), Offset: 0, Size: wgpu.WholeSize},
 		},
 	})
@@ -401,6 +410,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	}
 	r.syncDrawables(scene, drawablesDirty)
 	r.syncSkeletons(scene)
+	r.geometry.sync()
 	r.ensureObjectsBindGroup()
 
 	list.visible = cull(frustum, list.visible, list.visible[:0])
@@ -548,10 +558,12 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	renderPass := r.beginRendering(&ctx, scene.background)
 	renderPass.SetBindGroup(GlobalSet, sceneState.bindGroup, nil)
 	renderPass.SetBindGroup(InstanceSet, r.objectsBindGrp, nil)
+	// The geometry set (attribute streams) is shared by all pull draws. It sits at
+	// the same slot as the skeleton set, which pull pipelines don't use.
+	renderPass.SetBindGroup(GeometrySet, r.geometry.BindGroup(), nil)
 
 	var curPipeline *wgpu.RenderPipeline
 	var curMatBG *wgpu.BindGroup
-	var curSkelBG *wgpu.BindGroup
 
 	for _, d := range list.visible {
 		geo := r.geometries.Get(d.geometryID)
@@ -565,13 +577,13 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 			renderPass.SetBindGroup(MaterialSet, mat.gpuBindGroup, nil)
 			curMatBG = mat.gpuBindGroup
 		}
-		if d.skeletonID != noSkeleton {
-			if skelBG := r.skeletons.Get(d.skeletonID).bindGroup; skelBG != curSkelBG {
-				renderPass.SetBindGroup(SkeletonSet, skelBG, nil)
-				curSkelBG = skelBG
-			}
+		// Pull materials draw straight from the geometry SSBOs (no vertex buffers);
+		// anything else (e.g. an env-map quad) still fetches vertex buffers.
+		if mat.usesPull() {
+			renderPass.Draw(uint32(geo.gpuCount), 1, 0, d.instance)
+		} else {
+			drawGeometry(renderPass, geo, mat, d.instance, 1)
 		}
-		drawGeometry(renderPass, geo, mat, d.instance, 1)
 	}
 
 	// has an env map
@@ -860,6 +872,8 @@ func (r *Renderer) getPipeline(mat *MaterialData, geo *GeometryData, renderTarge
 func (r *Renderer) createPipeline(mat *MaterialData, geo *GeometryData, renderTarget, depthTarget *wgpu.Texture) *wgpu.RenderPipeline {
 	shadow := renderTarget == nil
 
+	pull := !shadow && mat.usesPull()
+
 	var bindGroupLayouts []*wgpu.BindGroupLayout
 	if shadow {
 		bindGroupLayouts = []*wgpu.BindGroupLayout{
@@ -872,6 +886,9 @@ func (r *Renderer) createPipeline(mat *MaterialData, geo *GeometryData, renderTa
 			mat.gpuBindGroupLayout,
 			r.instanceStorageBindGroupLayout,
 		}
+		if pull {
+			bindGroupLayouts = append(bindGroupLayouts, r.geometry.BindGroupLayout())
+		}
 	}
 
 	geoFlags := geo.flags
@@ -880,7 +897,11 @@ func (r *Renderer) createPipeline(mat *MaterialData, geo *GeometryData, renderTa
 		geoFlags = geo.flags & ShadowGeometryMask
 		vertexLayout = geo.gpuShadowLayout
 	}
-	if geoFlags&UseSkinningFlag != 0 {
+	if pull {
+		vertexLayout = nil // attributes are pulled from the geometry SSBOs
+	}
+	// Skinning uses vertex-buffer fetch, so it only applies on non-pull pipelines.
+	if geoFlags&UseSkinningFlag != 0 && !pull {
 		bindGroupLayouts = append(bindGroupLayouts, r.skeletonBGL)
 	}
 
@@ -1113,15 +1134,6 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 				},
 			},
 			{
-				Binding:    InvModelsBinding,
-				Visibility: wgpu.ShaderStageVertex | wgpu.ShaderStageFragment,
-				Buffer: wgpu.BufferBindingLayout{
-					Type:             wgpu.BufferBindingTypeReadOnlyStorage,
-					HasDynamicOffset: false,
-					MinBindingSize:   matSize,
-				},
-			},
-			{
 				Binding:    DrawablesBinding,
 				Visibility: wgpu.ShaderStageVertex,
 				Buffer: wgpu.BufferBindingLayout{
@@ -1134,13 +1146,13 @@ func (r *Renderer) createGlobalBindGroupLayouts() {
 	})
 }
 
-// syncMeshInstances uploads the world/worldInv matrices for all scene nodes into
-// the shared model/invModel buffers. Called only when scene transforms are dirty.
+// syncMeshInstances uploads the world matrices for all scene nodes into the
+// shared model buffer. Called only when scene transforms are dirty. worldInv is
+// kept CPU-side (used for skinning) but no longer uploaded.
 func (r *Renderer) syncMeshInstances(scene *Scene) {
 	need := uint32(len(scene.flags))
 	r.ensureObjectsCap(need)
 	r.gpu.WriteBuffer(r.modelBuf, 0, wgpu.ToBytes(scene.world[:need]))
-	r.gpu.WriteBuffer(r.invModelBuf, 0, wgpu.ToBytes(scene.worldInv[:need]))
 }
 
 // syncDrawables grows the drawables buffer as needed and, when the table changed,
