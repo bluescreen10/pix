@@ -22,7 +22,11 @@ var materialFlagNames = map[int]string{
 
 // usesPull reports whether this material's vertex stage pulls its attributes
 // from the GeometrySystem SSBOs (vs. classic vertex-buffer fetch).
-func (m *MaterialData) usesPull() bool { return m.vertexShader == geometryVertexShader }
+func (m *MaterialData) usesPull() bool {
+	return m.vertexShader == geometryVertexShader ||
+		m.vertexShader == shadowVertexShader ||
+		m.vertexShader == pointShadowVertexShader
+}
 
 type MaterialData struct {
 	id             uint32

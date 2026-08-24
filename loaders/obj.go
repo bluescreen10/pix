@@ -223,7 +223,7 @@ func (p *objParser) buildScene() (*pix.Scene, error) {
 			continue
 		}
 
-		geo := &pix.GeometryData{}
+		geo := &pix.GeometryConfig{}
 		geo.SetIndices(g.idx)
 		geo.AddAttribute(pix.NewAttribute(pix.PositionAttrName, pix.PositionLocation, pix.Float32x3, g.pos))
 		geo.AddAttribute(pix.NewAttribute(pix.NormalAttrName, pix.NormalLocation, pix.Float32x3, g.nor))

@@ -1,14 +1,13 @@
 package pix
 
 import (
-	"cmp"
 	"fmt"
 	"log/slog"
 	"math"
 	"math/bits"
 	"os"
-	"slices"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/bluescreen10/dawn-go/wgpu"
@@ -39,9 +38,14 @@ const (
 // skinning (fetch), never both.
 const GeometrySet = SkeletonSet
 
-// geometryVertexShader is the color-pass vertex shader that pulls its attributes
-// from the GeometrySystem SSBOs. Materials using it get the geometry set bound.
-const geometryVertexShader = "vertex.wesl"
+// Vertex shaders that pull geometry from the GeometrySystem SSBOs (no vertex
+// buffers, drawable resolved through the culler's visible buffer). Directional
+// and spot shadows pull position only; point shadows stay on vertex fetch.
+const (
+	geometryVertexShader    = "vertex.wesl"
+	shadowVertexShader      = "shadow_vertex.wgsl"
+	pointShadowVertexShader = "point_shadow_vertex.wgsl"
+)
 
 // Global Bindings
 const (
@@ -74,12 +78,6 @@ var renderListPool = sync.Pool{
 	},
 }
 
-var drawingsPool = sync.Pool{
-	New: func() any {
-		return make([]drawable, 0, 4096)
-	},
-}
-
 type renderContext struct {
 	texture         *wgpu.Texture
 	view            *wgpu.TextureView
@@ -89,10 +87,9 @@ type renderContext struct {
 }
 
 type Renderer struct {
-	geometries mem.Slab[GeometryData]
-	materials  mem.Slab[MaterialData]
-	textures   mem.Slab[TextureData]
-	skeletons  mem.Slab[SkeletonData]
+	materials mem.Slab[MaterialData]
+	textures  mem.Slab[TextureData]
+	skeletons mem.Slab[SkeletonData]
 
 	samplerCache  map[Sampler]*wgpu.Sampler
 	defaultTexRef Ref[Texture]
@@ -106,7 +103,13 @@ type Renderer struct {
 	pipelineCache *pipelineCache
 
 	// geometry attribute storage for GPU-driven vertex pulling.
-	geometry *GeometrySystem
+	geometries *GeometrySystem
+
+	// GPU frustum culling + indirect drawing for the main pass.
+	culler *gpuCuller
+
+	// Optional GPU timing (timestamp queries); nil if unsupported.
+	gpuTimer *gpuTimer
 
 	// global
 	sceneStates map[uint32]*sceneRenderState
@@ -148,10 +151,6 @@ type Renderer struct {
 	// depth buffer
 	depthTexture     *wgpu.Texture
 	depthTextureView *wgpu.TextureView
-
-	// quads
-	halfQuad Geometry
-	quad     Geometry
 
 	// enviroment material
 	environmentMaterial *EquirectMaterial
@@ -201,9 +200,19 @@ func (r *Renderer) Destroy() {
 		r.debugText = nil
 	}
 
-	if r.geometry != nil {
-		r.geometry.Destroy()
-		r.geometry = nil
+	if r.gpuTimer != nil {
+		r.gpuTimer.Destroy()
+		r.gpuTimer = nil
+	}
+
+	if r.culler != nil {
+		r.culler.Destroy()
+		r.culler = nil
+	}
+
+	if r.geometries != nil {
+		r.geometries.Destroy()
+		r.geometries = nil
 	}
 
 	r.gpu.Destroy()
@@ -276,6 +285,9 @@ func (r *Renderer) ensureObjectsCap(need uint32) {
 		Usage: gpu.BufferUsageStorage | gpu.BufferUsageCopyDst,
 	})
 	r.objectsBindGrpDirty = true
+	if r.culler != nil {
+		r.culler.dirty = true // batch/cull bind groups reference modelBuf
+	}
 }
 
 // ensureDrawablesCap grows the drawables buffer to hold at least `need` entries.
@@ -299,6 +311,9 @@ func (r *Renderer) ensureDrawablesCap(need uint32) {
 		Usage: gpu.BufferUsageStorage | gpu.BufferUsageCopyDst,
 	})
 	r.objectsBindGrpDirty = true
+	if r.culler != nil {
+		r.culler.dirty = true // batch/cull bind groups reference drawableBuf
+	}
 }
 
 // ensureObjectsBindGroup rebuilds the shared instance-set bind group when any of
@@ -319,17 +334,6 @@ func (r *Renderer) ensureObjectsBindGroup() {
 		},
 	})
 	r.objectsBindGrpDirty = false
-}
-
-func (r *Renderer) ensureGeometryReady(geo *GeometryData) {
-	if geo.gpuVersion >= geo.version {
-		return
-	}
-	if geo.gpuVersion == 0 {
-		geo.gpuLayout = createVertexLayout(geo)
-		geo.gpuShadowLayout = createShadowVertexLayout(geo)
-	}
-	r.uploadGeometry(geo)
 }
 
 func (r *Renderer) ensureDepthTextureSize(width, height uint32) {
@@ -382,6 +386,9 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	var ctx renderContext
 	r.Stats.StartFrame()
 	defer r.Stats.EndFrame()
+	// Deliver async callbacks (e.g. GPU-timing buffer maps) completed since the
+	// last frame, so the stats below reflect them.
+	r.gpu.ProcessEvents()
 	if r.showStats {
 		fps := r.Stats.FPS()
 		color := glm.Color4f{0, 1, 0, 1}
@@ -389,14 +396,26 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 			color = glm.Color4f{1, 0, 0, 1}
 		}
 		r.DebugPrint(fmt.Sprintf("FPS %.1f", fps), glm.Vec2f{10, 10}, 32, color)
+		r.DebugPrint(fmt.Sprintf("CPU %.2f ms", float64(r.Stats.AvgCPUTime().Microseconds())/1000), glm.Vec2f{10, 44}, 32, color)
+		if r.gpuTimer != nil {
+			r.DebugPrint(fmt.Sprintf("GPU %.2f ms", float64(r.Stats.AvgGPUTime().Microseconds())/1000), glm.Vec2f{10, 78}, 32, color)
+		}
 	}
 
 	r.acquireNextFrame(&ctx)
+	// CPU rendering cost: list building, culling, encoding and submit — measured
+	// after the (possibly blocking) acquire and stopped before the vsync present.
+	cpuStart := time.Now()
 
 	transformsDirty := scene.UpdateTransforms()
 	scene.UpdateVisibility()
 
 	drawablesDirty := scene.UpdateDrawables()
+	if drawablesDirty {
+		// Assigns each drawable its (material, geometry) batchID and lays out the
+		// per-batch visible regions; must run before drawables are uploaded.
+		r.culler.rebuildBatches(scene)
+	}
 
 	list := renderListPool.Get().(*renderList)
 	defer list.release()
@@ -410,8 +429,9 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	}
 	r.syncDrawables(scene, drawablesDirty)
 	r.syncSkeletons(scene)
-	r.geometry.sync()
+	r.geometries.sync()
 	r.ensureObjectsBindGroup()
+	r.culler.prep()
 
 	list.visible = cull(frustum, list.visible, list.visible[:0])
 
@@ -421,7 +441,6 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	for i := range list.visible {
 		d := &list.visible[i]
 		mat := r.materials.Get(d.materialID)
-		r.ensureGeometryReady(r.geometries.Get(d.geometryID))
 		if err := prepareMaterial(r.gpu.Device(), mat, r); err != nil {
 			r.logger.Error("error preparing material", slog.Any("err", err))
 			continue
@@ -434,10 +453,6 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	}
 	list.visible = list.visible[:validVisible]
 
-	for i := range list.shadowCasters {
-		r.ensureGeometryReady(r.geometries.Get(list.shadowCasters[i].geometryID))
-	}
-
 	sceneState := r.getSceneState(scene)
 
 	cameraUniform := CameraUniform{
@@ -448,6 +463,10 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	r.gpu.WriteBuffer(sceneState.cameraUniform, 0, cameraUniform.Bytes())
 
 	ctx.encoder = r.gpu.CreateCommandEncoder(nil)
+
+	// GPU cull views: view 0 is the camera; each dir/spot shadow gets the next.
+	drawableCount := uint32(len(scene.drawables))
+	shadowView := mainView + 1
 
 	if useLights {
 		var lightsUniform LightsUniform
@@ -467,12 +486,12 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 				}
 				if ld.shadow.layerIndex >= 0 {
 					lightSpaceMat = vp
-					shadowDrawings := drawingsPool.Get().([]drawable)
-					shadowDrawings = cull(NewFrustumFromViewProjection(vp), list.shadowCasters, shadowDrawings)
+					viewIdx := shadowView
+					shadowView++
+					r.culler.cullView(ctx.encoder, viewIdx, NewFrustumFromViewProjection(vp), true, drawableCount)
 					ctx.depthTarget = r.shadowArray.Texture()
 					ctx.depthTargetView = r.shadowArray.LayerView(uint32(ld.shadow.layerIndex))
-					r.renderShadowMap(&ctx, ld.shadow.camera, shadowDrawings)
-					drawingsPool.Put(shadowDrawings[:0])
+					r.renderShadowMap(&ctx, vp, viewIdx)
 				}
 			}
 			lightsUniform.DirectionalLights[i] = ld.toUniform(scene, lightSpaceMat)
@@ -500,12 +519,12 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 				}
 				if ld.shadow.layerIndex >= 0 {
 					lightSpaceMat = vp
-					shadowDrawings := drawingsPool.Get().([]drawable)
-					shadowDrawings = cull(NewFrustumFromViewProjection(vp), list.shadowCasters, shadowDrawings)
+					viewIdx := shadowView
+					shadowView++
+					r.culler.cullView(ctx.encoder, viewIdx, NewFrustumFromViewProjection(vp), true, drawableCount)
 					ctx.depthTarget = r.shadowArray.Texture()
 					ctx.depthTargetView = r.shadowArray.LayerView(uint32(ld.shadow.layerIndex))
-					r.renderShadowMap(&ctx, ld.shadow.camera, shadowDrawings)
-					drawingsPool.Put(shadowDrawings[:0])
+					r.renderShadowMap(&ctx, vp, viewIdx)
 				}
 			}
 			lightsUniform.SpotLights[i] = ld.toUniform(scene, lightSpaceMat)
@@ -524,7 +543,7 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 					}
 				}
 				if ld.shadow.layerIndex >= 0 {
-					r.renderPointShadowCube(&ctx, nodeWorldPos(scene, ld.ownerNode), ld.shadow, list.shadowCasters)
+					r.renderPointShadowCube(&ctx, nodeWorldPos(scene, ld.ownerNode), ld.shadow, drawableCount)
 				}
 			}
 			lightsUniform.PointLights[i] = ld.toUniform(scene)
@@ -540,74 +559,46 @@ func (r *Renderer) Render(scene *Scene, camera Camera) {
 	ctx.depthTarget = r.depthTexture
 	ctx.depthTargetView = r.depthTextureView
 
-	slices.SortFunc(list.visible, func(a, b drawable) int {
-		ma, mb := r.materials.Get(a.materialID), r.materials.Get(b.materialID)
-		if c := cmp.Compare(ma.hash, mb.hash); c != 0 {
-			return c
-		}
-		if c := cmp.Compare(ma.flags, mb.flags); c != 0 {
-			return c
-		}
-		ga, gb := r.geometries.Get(a.geometryID), r.geometries.Get(b.geometryID)
-		if c := cmp.Compare(ga.flags, gb.flags); c != 0 {
-			return c
-		}
-		return cmp.Compare(a.ownerNode, b.ownerNode)
-	})
+	// GPU frustum cull → per-batch indirect args + compacted visible buffer.
+	// Encoded before the main pass on the same encoder, so its writes are visible.
+	r.culler.cullView(ctx.encoder, mainView, frustum, false, uint32(len(scene.drawables)))
 
 	renderPass := r.beginRendering(&ctx, scene.background)
 	renderPass.SetBindGroup(GlobalSet, sceneState.bindGroup, nil)
-	renderPass.SetBindGroup(InstanceSet, r.objectsBindGrp, nil)
 	// The geometry set (attribute streams) is shared by all pull draws. It sits at
 	// the same slot as the skeleton set, which pull pipelines don't use.
-	renderPass.SetBindGroup(GeometrySet, r.geometry.BindGroup(), nil)
+	renderPass.SetBindGroup(GeometrySet, r.geometries.BindGroup(), nil)
 
-	var curPipeline *wgpu.RenderPipeline
-	var curMatBG *wgpu.BindGroup
+	// Main pass: one indirect draw per (material, geometry) batch; the cull pass
+	// filled each batch's instance count and compacted visible list. The instance
+	// set (models, drawables, visible@region) is bound per batch inside draw.
+	r.culler.drawMain(renderPass, ctx.texture, ctx.depthTarget)
 
-	for _, d := range list.visible {
-		geo := r.geometries.Get(d.geometryID)
-		mat := r.materials.Get(d.materialID)
-
-		if pipeline := r.getPipeline(mat, geo, ctx.texture, ctx.depthTarget); pipeline != curPipeline {
-			renderPass.SetPipeline(pipeline)
-			curPipeline = pipeline
-		}
-		if mat.gpuBindGroup != curMatBG {
-			renderPass.SetBindGroup(MaterialSet, mat.gpuBindGroup, nil)
-			curMatBG = mat.gpuBindGroup
-		}
-		// Pull materials draw straight from the geometry SSBOs (no vertex buffers);
-		// anything else (e.g. an env-map quad) still fetches vertex buffers.
-		if mat.usesPull() {
-			renderPass.Draw(uint32(geo.gpuCount), 1, 0, d.instance)
-		} else {
-			drawGeometry(renderPass, geo, mat, d.instance, 1)
-		}
-	}
-
-	// has an env map
+	// has an env map — drawn as a procedural fullscreen triangle (no geometry).
 	if scene.backgroundMap.Valid() {
-		geo := r.geometries.Get(r.halfQuad.ref.id)
 		mat := r.environmentMaterial.data()
-		r.ensureGeometryReady(geo)
 		if err := prepareMaterial(r.gpu.Device(), mat, r); err != nil {
 			r.logger.Error("error preparing equirect material", slog.Any("err", err))
 		} else {
-			pipeline := r.getPipeline(mat, geo, ctx.texture, ctx.depthTarget)
+			pipeline := r.getPipeline(mat, nil, ctx.texture, ctx.depthTarget)
 			renderPass.SetPipeline(pipeline)
 			renderPass.SetBindGroup(MaterialSet, mat.gpuBindGroup, nil)
 			renderPass.SetBindGroup(InstanceSet, r.objectsBindGrp, nil)
-			drawGeometry(renderPass, geo, mat, 0, 1)
+			renderPass.Draw(3, 1, 0, 0)
 		}
 	}
 
 	r.endRendering(&ctx, renderPass)
 
+	if r.gpuTimer != nil {
+		r.gpuTimer.readback() // map the just-submitted timestamps (async)
+	}
+
 	if r.debugText != nil && len(r.DebugTexts) > 0 {
 		r.debugText.render(r, &ctx, r.DebugTexts, r.DebugTextColor)
 	}
 
+	r.Stats.AddCPUTime(time.Since(cpuStart))
 	r.presentFrame(&ctx)
 	r.debugClear()
 	r.drainDeferredFree()
@@ -624,7 +615,9 @@ func (r *Renderer) debugClear() {
 	r.DebugTexts = r.DebugTexts[:0]
 }
 
-func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, casters []drawable) {
+// renderShadowMap renders a directional/spot shadow map via GPU cull view viewIdx
+// (already dispatched on ctx.encoder) using indirect, position-only pull draws.
+func (r *Renderer) renderShadowMap(ctx *renderContext, vp glm.Mat4f, viewIdx int) {
 	// Always begin (and end) the pass so the layer is cleared to 1.0.
 	// Without the clear, the GPU-zero-initialized texture causes every
 	// shadow comparison to fail and the whole scene appears unlit.
@@ -638,46 +631,15 @@ func (r *Renderer) renderShadowMap(ctx *renderContext, shadowCam Camera, casters
 	})
 	defer func() { pass.End(); pass.Release() }()
 
-	if len(casters) == 0 {
-		return
-	}
-
-	r.shadowMat.SetViewProjection(shadowCam.ViewProjection())
+	r.shadowMat.SetViewProjection(vp)
 	if err := prepareMaterial(r.gpu.Device(), r.shadowMat.data(), r); err != nil {
 		r.logger.Error("error preparing shadow material", slog.Any("err", err))
 		return
 	}
 
-	slices.SortFunc(casters, func(a, b drawable) int {
-		ga, gb := r.geometries.Get(a.geometryID), r.geometries.Get(b.geometryID)
-		if c := cmp.Compare(ga.flags&ShadowGeometryMask, gb.flags&ShadowGeometryMask); c != 0 {
-			return c
-		}
-		return cmp.Compare(a.ownerNode, b.ownerNode)
-	})
-
 	pass.SetBindGroup(0, r.shadowMat.BindGroup(), nil)
-	pass.SetBindGroup(1, r.objectsBindGrp, nil)
-
-	var curPipeline *wgpu.RenderPipeline
-	var curSkelBG *wgpu.BindGroup
-
-	for _, d := range casters {
-		geo := r.geometries.Get(d.geometryID)
-		mat := r.materials.Get(d.materialID)
-
-		if pipeline := r.getPipeline(r.shadowMat.data(), geo, nil, ctx.depthTarget); pipeline != curPipeline {
-			pass.SetPipeline(pipeline)
-			curPipeline = pipeline
-		}
-		if d.skeletonID != noSkeleton {
-			if skelBG := r.skeletons.Get(d.skeletonID).bindGroup; skelBG != curSkelBG {
-				pass.SetBindGroup(2, skelBG, nil)
-				curSkelBG = skelBG
-			}
-		}
-		drawGeometry(pass, geo, mat, d.instance, 1)
-	}
+	pass.SetBindGroup(2, r.geometries.BindGroup(), nil) // geometry set (pull)
+	r.culler.drawShadow(pass, viewIdx, r.shadowMat.data(), ctx.depthTarget)
 }
 
 // cubeFaces defines the 6 view directions and up vectors for rendering cube shadow map faces.
@@ -691,27 +653,23 @@ var cubeFaces = [6]struct{ fwd, up glm.Vec3f }{
 	{glm.Vec3f{0, 0, -1}, glm.Vec3f{0, -1, 0}}, // -Z
 }
 
-func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f, shadow *PointShadow, casters []drawable) {
+// renderPointShadowCube renders the 6 cube faces of a point light's shadow map.
+// Each face is an independent GPU-cull + indirect, position-only pull pass on its
+// own encoder: the per-face view-projection is written to the shared point-shadow
+// material uniform, so the faces must not share an encoder (queue writes to one
+// uniform buffer would alias). The single reused cull view (pointShadowView) is
+// safe for the same reason — each face is fully submitted before the next.
+func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f, shadow *PointShadow, drawableCount uint32) {
 	near := float32(0.1)
 	proj := glm.PerspectiveRH(float32(math.Pi/2), float32(1.0), near, shadow.far)
 	// Negate h (proj[5]) so rendered V matches WebGPU cube map sampling convention (tc = -ry).
 	// Without this flip the cube faces are upside-down relative to textureSampleCompare.
 	proj[5] = -proj[5]
 
-	// Sort once — same casters across all 6 faces.
-	slices.SortFunc(casters, func(a, b drawable) int {
-		ga, gb := r.geometries.Get(a.geometryID), r.geometries.Get(b.geometryID)
-		if c := cmp.Compare(ga.flags&ShadowGeometryMask, gb.flags&ShadowGeometryMask); c != 0 {
-			return c
-		}
-		return cmp.Compare(a.ownerNode, b.ownerNode)
-	})
-
 	ctx.depthTarget = r.pointShadowArray.Texture()
 
 	for face, cf := range cubeFaces {
-		target := lightPos.Add(cf.fwd)
-		view := glm.LookAtRH(lightPos, target, cf.up)
+		view := glm.LookAtRH(lightPos, lightPos.Add(cf.fwd), cf.up)
 		vp := proj.Mul4x4(view)
 
 		r.pointShadowMat.SetFaceUniforms(vp, lightPos, shadow.far)
@@ -723,6 +681,10 @@ func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f,
 		ctx.depthTargetView = r.pointShadowArray.LayerView(uint32(shadow.layerIndex) + uint32(face))
 
 		encoder := r.gpu.CreateCommandEncoder(nil)
+		// Cull this face's frustum on the same encoder so its indirect args are
+		// written before the render pass reads them.
+		r.culler.cullView(encoder, pointShadowView, NewFrustumFromViewProjection(vp), true, drawableCount)
+
 		pass := encoder.BeginRenderPass(wgpu.RenderPassDescriptor{
 			DepthStencilAttachment: &wgpu.RenderPassDepthStencilAttachment{
 				View:            ctx.depthTargetView,
@@ -731,34 +693,12 @@ func (r *Renderer) renderPointShadowCube(ctx *renderContext, lightPos glm.Vec3f,
 				DepthClearValue: 1.0,
 			},
 		})
-
-		if len(casters) > 0 {
-			pass.SetBindGroup(0, r.pointShadowMat.BindGroup(), nil)
-			pass.SetBindGroup(1, r.objectsBindGrp, nil)
-
-			var curPipeline *wgpu.RenderPipeline
-			var curSkelBG *wgpu.BindGroup
-
-			for _, d := range casters {
-				geo := r.geometries.Get(d.geometryID)
-				mat := r.materials.Get(d.materialID)
-
-				if pipeline := r.getPipeline(r.pointShadowMat.data(), geo, nil, ctx.depthTarget); pipeline != curPipeline {
-					pass.SetPipeline(pipeline)
-					curPipeline = pipeline
-				}
-				if d.skeletonID != noSkeleton {
-					if skelBG := r.skeletons.Get(d.skeletonID).bindGroup; skelBG != curSkelBG {
-						pass.SetBindGroup(2, skelBG, nil)
-						curSkelBG = skelBG
-					}
-				}
-				drawGeometry(pass, geo, mat, d.instance, 1)
-			}
-		}
-
+		pass.SetBindGroup(0, r.pointShadowMat.BindGroup(), nil)
+		pass.SetBindGroup(2, r.geometries.BindGroup(), nil) // geometry set (pull)
+		r.culler.drawShadow(pass, pointShadowView, r.pointShadowMat.data(), ctx.depthTarget)
 		pass.End()
 		pass.Release()
+
 		cmd := encoder.Finish(nil)
 		r.gpu.Queue().Submit(cmd)
 		cmd.Release()
@@ -771,21 +711,6 @@ func primitiveTopologyFor(mat *MaterialData) wgpu.PrimitiveTopology {
 		return wgpu.PrimitiveTopologyLineList
 	}
 	return wgpu.PrimitiveTopologyTriangleList
-}
-
-func drawGeometry(pass *wgpu.RenderPassEncoder, geo *GeometryData, mat *MaterialData, instanceId, instanceCount uint32) {
-	for _, b := range geo.gpuBufs {
-		pass.SetVertexBuffer(uint32(b.loc), b.buf, 0, wgpu.WholeSize)
-	}
-	if mat.flags&WireframeFlag != 0 && geo.gpuWireframeIndex != nil {
-		pass.SetIndexBuffer(geo.gpuWireframeIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
-		pass.DrawIndexed(uint32(geo.gpuWireframeCount), instanceCount, 0, 0, instanceId)
-	} else if geo.gpuIndex != nil {
-		pass.SetIndexBuffer(geo.gpuIndex, wgpu.IndexFormatUint32, 0, wgpu.WholeSize)
-		pass.DrawIndexed(uint32(geo.gpuCount), instanceCount, 0, 0, instanceId)
-	} else {
-		pass.Draw(uint32(geo.gpuCount), instanceCount, 0, instanceId)
-	}
 }
 
 func (r *Renderer) acquireNextFrame(ctx *renderContext) {
@@ -805,8 +730,7 @@ func (r *Renderer) presentFrame(ctx *renderContext) {
 }
 
 func (r *Renderer) beginRendering(ctx *renderContext, bgColor glm.Color4f) *wgpu.RenderPassEncoder {
-
-	return ctx.encoder.BeginRenderPass(wgpu.RenderPassDescriptor{
+	desc := wgpu.RenderPassDescriptor{
 		ColorAttachments: []wgpu.RenderPassColorAttachment{{
 			View:       ctx.view,
 			LoadOp:     wgpu.LoadOpClear,
@@ -819,12 +743,20 @@ func (r *Renderer) beginRendering(ctx *renderContext, bgColor glm.Color4f) *wgpu
 			DepthStoreOp:    wgpu.StoreOpStore,
 			DepthClearValue: 1.0,
 		},
-	})
+	}
+	if r.gpuTimer != nil {
+		desc.TimestampWrites = r.gpuTimer.passWrites()
+	}
+	return ctx.encoder.BeginRenderPass(desc)
 }
 
 func (r *Renderer) endRendering(ctx *renderContext, pass *wgpu.RenderPassEncoder) {
 	pass.End()
 	pass.Release()
+
+	if r.gpuTimer != nil {
+		r.gpuTimer.end(ctx.encoder)
+	}
 
 	cmdBuf := ctx.encoder.Finish(nil)
 	r.gpu.Queue().Submit(cmdBuf)
@@ -834,10 +766,13 @@ func (r *Renderer) endRendering(ctx *renderContext, pass *wgpu.RenderPassEncoder
 	ctx.encoder = nil
 }
 
-func (r *Renderer) getPipeline(mat *MaterialData, geo *GeometryData, renderTarget, depthTarget *wgpu.Texture) *wgpu.RenderPipeline {
+func (r *Renderer) getPipeline(mat *MaterialData, geo *geometryEntry, renderTarget, depthTarget *wgpu.Texture) *wgpu.RenderPipeline {
 	shadow := renderTarget == nil
 
-	geoFlags := geo.flags
+	var geoFlags GeometryFlags
+	if geo != nil {
+		geoFlags = geo.flags
+	}
 	if shadow {
 		geoFlags &= ShadowGeometryMask
 	}
@@ -869,40 +804,35 @@ func (r *Renderer) getPipeline(mat *MaterialData, geo *GeometryData, renderTarge
 
 // createPipeline builds a render pipeline. When renderTarget is nil the
 // pipeline is depth-only (no fragment stage).
-func (r *Renderer) createPipeline(mat *MaterialData, geo *GeometryData, renderTarget, depthTarget *wgpu.Texture) *wgpu.RenderPipeline {
+func (r *Renderer) createPipeline(mat *MaterialData, geo *geometryEntry, renderTarget, depthTarget *wgpu.Texture) *wgpu.RenderPipeline {
 	shadow := renderTarget == nil
 
-	pull := !shadow && mat.usesPull()
+	// Pull pipelines (main pass + all shadows) resolve the drawable through the
+	// culler's compacted visible buffer and pull geometry from the SSBOs, so they
+	// use the culler's instance layout + the geometry set. Non-pull pipelines (the
+	// env map) draw procedurally and bind neither. Nothing uses vertex buffers.
+	pull := mat.usesPull()
+	instanceLayout := r.instanceStorageBindGroupLayout
+	if pull {
+		instanceLayout = r.culler.instanceLayout
+	}
 
 	var bindGroupLayouts []*wgpu.BindGroupLayout
 	if shadow {
-		bindGroupLayouts = []*wgpu.BindGroupLayout{
-			mat.gpuBindGroupLayout,
-			r.instanceStorageBindGroupLayout,
-		}
+		bindGroupLayouts = []*wgpu.BindGroupLayout{mat.gpuBindGroupLayout, instanceLayout}
 	} else {
-		bindGroupLayouts = []*wgpu.BindGroupLayout{
-			r.globalBindGroupLayout,
-			mat.gpuBindGroupLayout,
-			r.instanceStorageBindGroupLayout,
-		}
-		if pull {
-			bindGroupLayouts = append(bindGroupLayouts, r.geometry.BindGroupLayout())
-		}
-	}
-
-	geoFlags := geo.flags
-	vertexLayout := geo.gpuLayout
-	if shadow {
-		geoFlags = geo.flags & ShadowGeometryMask
-		vertexLayout = geo.gpuShadowLayout
+		bindGroupLayouts = []*wgpu.BindGroupLayout{r.globalBindGroupLayout, mat.gpuBindGroupLayout, instanceLayout}
 	}
 	if pull {
-		vertexLayout = nil // attributes are pulled from the geometry SSBOs
+		bindGroupLayouts = append(bindGroupLayouts, r.geometries.BindGroupLayout())
 	}
-	// Skinning uses vertex-buffer fetch, so it only applies on non-pull pipelines.
-	if geoFlags&UseSkinningFlag != 0 && !pull {
-		bindGroupLayouts = append(bindGroupLayouts, r.skeletonBGL)
+
+	var geoFlags GeometryFlags
+	if geo != nil {
+		geoFlags = geo.flags
+	}
+	if shadow {
+		geoFlags &= ShadowGeometryMask
 	}
 
 	layout := r.gpu.CreatePipelineLayout(wgpu.PipelineLayoutDescriptor{
@@ -961,7 +891,6 @@ func (r *Renderer) createPipeline(mat *MaterialData, geo *GeometryData, renderTa
 		Vertex: wgpu.VertexState{
 			Module:     vertex,
 			EntryPoint: "main",
-			Buffers:    vertexLayout,
 		},
 		Fragment: fragmentState,
 		Primitive: wgpu.PrimitiveState{
@@ -1014,6 +943,10 @@ func (r *Renderer) createGlobalResources() {
 	r.createEnvMapResources()
 	r.createGlobalBindGroupLayouts()
 	r.createGlobalBuffers()
+	r.culler = newGPUCuller(r) // after shaders are parsed; compiles cull.wesl
+	if r.gpu.HasTimestampQuery() {
+		r.gpuTimer = newGPUTimer(r)
+	}
 	//r.createGlobalBindGroups()
 }
 

@@ -655,7 +655,7 @@ func (b *fbxBuilder) buildModels(scene *pix.Scene) error {
 
 type fbxVertKey struct{ cp, ni, ui int32 }
 
-func (b *fbxBuilder) buildGeometry(obj *fbxObject) (gd *pix.GeometryData, clusterBoneOrder []int64, clusterObjects []*fbxObject, err error) {
+func (b *fbxBuilder) buildGeometry(obj *fbxObject) (gd *pix.GeometryConfig, clusterBoneOrder []int64, clusterObjects []*fbxObject, err error) {
 	rec := obj.rec
 
 	// Control points.
@@ -880,7 +880,7 @@ func (b *fbxBuilder) buildGeometry(obj *fbxObject) (gd *pix.GeometryData, cluste
 	_ = cpForVert
 
 	// Build GeometryData.
-	gd = &pix.GeometryData{}
+	gd = &pix.GeometryConfig{}
 	gd.SetIndices(finalIdx)
 
 	positions := make([]glm.Vec3f, len(finalVerts))

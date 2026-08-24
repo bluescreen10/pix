@@ -3,12 +3,21 @@ package pix
 // noSkeleton is the skeletonID sentinel for drawables that are not skinned.
 const noSkeleton uint32 = 0xFFFFFFFF
 
-// Drawable flag bits. Visibility is reserved for the culling pass to write —
-// on the CPU today it drives nothing (the visible list is built separately);
-// once culling moves to the GPU the compute pass sets it here per frame.
+// Drawable flag bits. castsShadow is structural (stamped from the owner node when
+// the drawable is built) so the GPU cull can filter shadow casters per light.
 const (
-	drawableVisible uint32 = 1 << 0
+	drawableVisible     uint32 = 1 << 0
+	drawableCastsShadow uint32 = 1 << 1
 )
+
+// drawableFlags derives a drawable's static flags from its owner node.
+func drawableFlags(s *Scene, owner uint32) uint32 {
+	var f uint32
+	if s.flags[owner].CastShadow() {
+		f |= drawableCastsShadow
+	}
+	return f
+}
 
 // drawable is one draw-instance and the single unit the render list is built
 // from: one per plain and skinned mesh, and one per instance of an instanced
@@ -37,7 +46,7 @@ type drawable struct {
 	skeletonID  uint32
 	ownerNode   uint32
 	flags       uint32
-	_           uint32 // pad to a 48-byte, 16-aligned array stride
+	batchID     uint32 // (material, geometry) batch, assigned by the renderer's culler
 }
 
 // UpdateDrawables flattens the mesh payload tables into the dense drawables
@@ -62,6 +71,7 @@ func (s *Scene) UpdateDrawables() bool {
 			materialID:  md.material.ref.ID(),
 			skeletonID:  noSkeleton,
 			ownerNode:   md.ownerNode,
+			flags:       drawableFlags(s, md.ownerNode),
 		})
 	}
 
@@ -75,6 +85,7 @@ func (s *Scene) UpdateDrawables() bool {
 			materialID:  smd.material.ref.ID(),
 			skeletonID:  smd.skeleton.ref.ID(),
 			ownerNode:   smd.ownerNode,
+			flags:       drawableFlags(s, smd.ownerNode),
 		})
 	}
 
@@ -87,6 +98,7 @@ func (s *Scene) UpdateDrawables() bool {
 		base := s.firstChildren[imd.ownerNode].index
 		gid := imd.geometry.ref.ID()
 		mid := imd.material.ref.ID()
+		flags := drawableFlags(s, imd.ownerNode)
 		localBounds := imd.geometry.BoundingSphere()
 		for j := 0; j < imd.instanceCount; j++ {
 			s.drawables = append(s.drawables, drawable{
@@ -97,6 +109,7 @@ func (s *Scene) UpdateDrawables() bool {
 				materialID:  mid,
 				skeletonID:  noSkeleton,
 				ownerNode:   imd.ownerNode,
+				flags:       flags,
 			})
 		}
 	}

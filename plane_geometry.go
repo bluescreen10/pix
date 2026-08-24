@@ -2,7 +2,7 @@ package pix
 
 import "github.com/bluescreen10/pix/glm"
 
-func NewPlaneGeometry(width, height float32, widthSegments, heightSegments int) *GeometryData {
+func NewPlaneGeometry(width, height float32, widthSegments, heightSegments int) *GeometryConfig {
 	cols := widthSegments + 1
 	rows := heightSegments + 1
 	hw, hh := width/2, height/2
@@ -34,7 +34,7 @@ func NewPlaneGeometry(width, height float32, widthSegments, heightSegments int) 
 		}
 	}
 
-	return (&GeometryData{}).
+	return (&GeometryConfig{}).
 		AddAttribute(NewAttribute(PositionAttrName, PositionLocation, Float32x3, pos)).
 		AddAttribute(NewAttribute(UVAttrName, UVLocation, Float32x2, uvs)).
 		AddAttribute(NewAttribute(NormalAttrName, NormalLocation, Float32x3, normals)).

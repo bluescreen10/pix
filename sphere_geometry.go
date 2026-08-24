@@ -5,7 +5,7 @@ import (
 	"github.com/chewxy/math32"
 )
 
-func NewSphereGeometry(radius float32, widthSegments, heightSegments int) *GeometryData {
+func NewSphereGeometry(radius float32, widthSegments, heightSegments int) *GeometryConfig {
 
 	vertexCount := (widthSegments + 1) * (heightSegments + 1)
 
@@ -75,7 +75,7 @@ func NewSphereGeometry(radius float32, widthSegments, heightSegments int) *Geome
 		maxY = max(maxY, p[1])
 	}
 
-	return (&GeometryData{}).
+	return (&GeometryConfig{}).
 		AddAttribute(NewAttribute(PositionAttrName, PositionLocation, Float32x3, pos)).
 		AddAttribute(NewAttribute(UVAttrName, UVLocation, Float32x2, uvs)).
 		AddAttribute(NewAttribute(NormalAttrName, NormalLocation, Float32x3, normals)).

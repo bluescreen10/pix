@@ -1,3 +1,7 @@
+// Directional/spot shadow vertex shader — pulls position only, resolving the
+// drawable through the cull view's compacted visible buffer. No vertex buffers,
+// no skinning (skinned meshes cast their bind pose, matching the main pass).
+
 struct Drawable {
     bounds:       vec4<f32>,
     instance:     u32,
@@ -7,35 +11,36 @@ struct Drawable {
     skeleton_id:  u32,
     owner_node:   u32,
     flags:        u32,
-    _pad:         u32,
+    batch_id:     u32,
 }
 
-@group(0) @binding(0) var<uniform>       light_vp:     mat4x4<f32>;
+struct GeometryDesc {
+    position_base:  u32,
+    attribute_base: u32,
+    index_base:     u32,
+    index_count:    u32,
+    flags:          u32,
+    _pad:           u32,
+}
+
+@group(0) @binding(0) var<uniform>       light_vp:  mat4x4<f32>;
+
 @group(1) @binding(0) var<storage, read> models:    array<mat4x4<f32>>;
 @group(1) @binding(1) var<storage, read> drawables: array<Drawable>;
-@if(USE_SKINNING) @group(2) @binding(0) var<storage, read> bone_matrices: array<mat4x4f>;
+@group(1) @binding(2) var<storage, read> visible:   array<u32>;
 
-struct ShadowVertexInput {
-    @location(0) position: vec3<f32>,
-    @if(USE_SKINNING) @location(5) skin_index:  vec4<u32>,
-    @if(USE_SKINNING) @location(6) skin_weight: vec4<f32>,
-}
+@group(2) @binding(0) var<storage, read> positions:  array<f32>;
+@group(2) @binding(2) var<storage, read> geometries: array<GeometryDesc>;
 
 @vertex
-fn main(in: ShadowVertexInput, @builtin(instance_index) instance_index: u32) -> @builtin(position) vec4<f32> {
-    var skin_mat = mat4x4f(
-        vec4f(1.0, 0.0, 0.0, 0.0),
-        vec4f(0.0, 1.0, 0.0, 0.0),
-        vec4f(0.0, 0.0, 1.0, 0.0),
-        vec4f(0.0, 0.0, 0.0, 1.0),
-    );
-    @if USE_SKINNING {
-        skin_mat =
-            in.skin_weight.x * bone_matrices[in.skin_index.x] +
-            in.skin_weight.y * bone_matrices[in.skin_index.y] +
-            in.skin_weight.z * bone_matrices[in.skin_index.z] +
-            in.skin_weight.w * bone_matrices[in.skin_index.w];
-    }
-    let transform_id = drawables[instance_index].transform_id;
-    return light_vp * models[transform_id] * skin_mat * vec4f(in.position, 1.0);
+fn main(@builtin(instance_index) ii: u32,
+        @builtin(vertex_index)   vi: u32) -> @builtin(position) vec4<f32> {
+    let d   = drawables[visible[ii]];
+    let geo = geometries[d.geometry_id];
+
+    // vi is the local index (hardware index fetch, baseVertex 0).
+    let pb = geo.position_base + vi * 3u;
+    let position = vec3<f32>(positions[pb], positions[pb + 1u], positions[pb + 2u]);
+
+    return light_vp * models[d.transform_id] * vec4<f32>(position, 1.0);
 }

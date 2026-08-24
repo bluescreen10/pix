@@ -4,6 +4,8 @@ bluescreen10.com/wgpu-linux v0.0.13/go.mod h1:2H6dgArKlaVpIdS/wbNJl9X2q/JUi1hY2j
 bluescreen10.com/wgpu-windows v0.0.13/go.mod h1:x74d7b4BoXfdVN9gllt/ByohtOJU+gcvXHTv3Cl2d2Y=
 github.com/bluescreen10/dawn-go v0.2.0 h1:ZGeQbjMzS1xg844GvPAxBDolAXohF4FBg5V6QrGVPxE=
 github.com/bluescreen10/dawn-go v0.2.0/go.mod h1:1Vb8gWp9O6TYZlv6f2I4DU5Bpt+2a1m/uXAQjIgvp2A=
+github.com/bluescreen10/dawn-go v0.2.1 h1:JiVfeyknDo8znnkWYsOXpBg7lq4rTSazk/jMERnkPLE=
+github.com/bluescreen10/dawn-go v0.2.1/go.mod h1:1Vb8gWp9O6TYZlv6f2I4DU5Bpt+2a1m/uXAQjIgvp2A=
 github.com/bluescreen10/dawn-go/wgpuglfw v0.0.2 h1:Ginc7gCsms5djG1DRK561SrId2mm0uEDXtJ7Ss6jFC4=
 github.com/bluescreen10/dawn-go/wgpuglfw v0.0.2/go.mod h1:appK5DVSBF1nyzFqhfoEVIu7t0Uf87cuyJB3Yi4UzNA=
 github.com/bluescreen10/wesl-go v0.0.6 h1:KisXd5kHnOVx4WAZ7VIOd6LoAl35SbaQUWHOTiQciVM=
@@ -15,6 +17,8 @@ github.com/go-gl/glfw/v3.3/glfw v0.0.0-20260802143932-8fa725040a18/go.mod h1:SyR
 github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
 golang.org/x/exp v0.0.0-20260813180055-c1d0aacb2297 h1:YXnL44eJ77R+ji4/ooy8UsXIhz+lbi2Qgdlc8iRN0gY=
 golang.org/x/exp v0.0.0-20260813180055-c1d0aacb2297/go.mod h1:Mkmymgv+uMpSQ/XxJ/7GpdrdYoqm3u72jEbpCLiJmNk=
+golang.org/x/exp v0.0.0-20260820142414-ca536658362e h1:01Ju2A/fZKkci4zqx0eZxw//DnRYOnBiGJG14hFBhO8=
+golang.org/x/exp v0.0.0-20260820142414-ca536658362e/go.mod h1:zeBbvyFKDaLwa7CH/zI8KXt7gTl14SF7sO08Pl5jBCM=
 golang.org/x/mod v0.39.0/go.mod h1:bvIbwjQ0HUFFf5AKukeeYQG4ZBUG9yxQbR9aEweIwYY=
 golang.org/x/sync v0.22.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
 golang.org/x/tools v0.49.0/go.mod h1:SJNXV9DBKT0UbdttsQjbfJlAE/q+y36++zo3uL3N0Oo=

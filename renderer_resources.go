@@ -38,8 +38,7 @@ func (d skelDisposer) generation(id uint32) uint32 { return d.r.skeletons.Genera
 
 // initResources initialises the resource slabs and creates the default white texture.
 func (r *Renderer) initResources() {
-	r.geometry = NewGeometrySystem(r.gpu)
-	r.geometries = mem.NewSlab[GeometryData]()
+	r.geometries = NewGeometrySystem(r.gpu)
 	r.materials = mem.NewSlab[MaterialData]()
 	r.textures = mem.NewSlab[TextureData]()
 	r.skeletons = mem.NewSlab[SkeletonData]()
@@ -48,16 +47,12 @@ func (r *Renderer) initResources() {
 	td := NewDataTexture([]byte{255, 255, 255, 255}, 1, 1, TextureFormatRGBA8Unorm)
 	tex := r.NewTexture(td)
 	r.defaultTexRef = tex.ref
-
-	r.halfQuad = r.NewHalfQuad()
-	r.quad = r.NewQuad()
 }
 
 // destroyResources releases all GPU memory synchronously at shutdown.
 func (r *Renderer) destroyResources() {
-	for g := range r.geometries.Items() {
-		g.Destroy()
-	}
+	// Geometry GPU memory is the GeometrySystem's shared streams, released by its
+	// own Destroy (called from Renderer.Destroy); nothing per-geometry to free.
 	for m := range r.materials.Items() {
 		m.Destroy()
 	}
@@ -77,73 +72,26 @@ func (r *Renderer) destroyResources() {
 
 // Geometry
 
-func (r *Renderer) allocGeometrySlot(data *GeometryData) Geometry {
+func (r *Renderer) allocGeometrySlot(cfg *GeometryConfig) Geometry {
 	rc := new(int32)
 	*rc = 1
-	idx, gen := r.geometries.Alloc(*data)
-	// Register the attribute data with the GeometrySystem under the same id, so
-	// drawable.geometryID resolves both the CPU GeometryData and the GPU pull data.
-	r.geometry.Create(idx, geometryConfigFromData(data))
+	idx, gen := r.geometries.Create(cfg)
 	ref := Ref[Geometry]{id: idx, gen: gen, refCount: rc, owner: geoDisposer{r}}
-	return Geometry{renderer: r, ref: ref}
+	return Geometry{owner: r.geometries, ref: ref}
 }
 
 func (r *Renderer) scheduleGeoFree(id uint32) {
-	res := *r.geometries.Get(id) // copy GPU handles out before the slot is recycled
-	r.geometries.Free(id)
-	// Release the attribute suballocations now (keyed by the slab id, which the
-	// slab has just freed); the GPU buffers are destroyed on the deferred pass.
-	r.geometry.Free(id)
-	r.deferredFree = append(r.deferredFree, deferredFreeEntry{destroy: res.Destroy, frame: r.frameCount})
+	// Defer the suballocation free by a frame so an in-flight frame that still
+	// references the geometry's stream ranges finishes reading them first.
+	r.deferredFree = append(r.deferredFree, deferredFreeEntry{
+		destroy: func() { r.geometries.Free(id) },
+		frame:   r.frameCount,
+	})
 }
 
-func (r *Renderer) uploadGeometry(geo *GeometryData) {
-	geo.Destroy()
-
-	if len(geo.indices) > 0 {
-		buf := r.gpu.Device().CreateBufferInit(wgpu.BufferInitDescriptor{
-			Label:    "index buffer",
-			Contents: wgpu.ToBytes(geo.indices),
-			Usage:    wgpu.BufferUsageIndex | wgpu.BufferUsageCopyDst,
-		})
-		geo.gpuCount = len(geo.indices)
-		geo.gpuIndex = buf
-
-		// Build a line-list index buffer for wireframe: each triangle emits 3 edges.
-		wireIdx := make([]uint32, 0, len(geo.indices)*2)
-		for i := 0; i+2 < len(geo.indices); i += 3 {
-			i0, i1, i2 := geo.indices[i], geo.indices[i+1], geo.indices[i+2]
-			wireIdx = append(wireIdx, i0, i1, i1, i2, i2, i0)
-		}
-		geo.gpuWireframeCount = len(wireIdx)
-		geo.gpuWireframeIndex = r.gpu.Device().CreateBufferInit(wgpu.BufferInitDescriptor{
-			Label:    "wireframe index buffer",
-			Contents: wgpu.ToBytes(wireIdx),
-			Usage:    wgpu.BufferUsageIndex | wgpu.BufferUsageCopyDst,
-		})
-	} else if len(geo.attrs) > 0 {
-		geo.gpuCount = geo.attrs[0].len
-	}
-
-	geo.gpuBufs = make([]GeometryBuffer, len(geo.attrs))
-	for i, a := range geo.attrs {
-		buf := r.gpu.Device().CreateBufferInit(wgpu.BufferInitDescriptor{
-			Label:    a.name + " buffer",
-			Contents: a.data,
-			Usage:    wgpu.BufferUsageVertex | wgpu.BufferUsageCopyDst,
-		})
-		// Slot must be the sequential buffer index (position in the Buffers array),
-		// not the shader @location. For non-skinned meshes loc==i, but skin
-		// attributes live at loc=5,6 while occupying pipeline buffer slots 3,4.
-		geo.gpuBufs[i] = GeometryBuffer{loc: i, buf: buf, version: a.version}
-	}
-
-	geo.gpuVersion = geo.version
-}
-
-// NewGeometry registers geometry data with the renderer and returns a Geometry handle.
-func (r *Renderer) NewGeometry(data *GeometryData) Geometry {
-	return r.allocGeometrySlot(data)
+// NewGeometry registers a geometry config with the renderer and returns a handle.
+func (r *Renderer) NewGeometry(cfg *GeometryConfig) Geometry {
+	return r.allocGeometrySlot(cfg)
 }
 
 // NewBoxGeometry creates a box geometry resource owned by the renderer.

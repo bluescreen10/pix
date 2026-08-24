@@ -18,6 +18,7 @@ import (
 // are private; callers go through the creation methods below (and, during the
 // migration, the transitional Device/Queue/Surface accessors).
 type Instance struct {
+	instance *wgpu.Instance
 	adapter  *wgpu.Adapter
 	config   wgpu.SurfaceConfiguration
 	device   *wgpu.Device
@@ -37,12 +38,13 @@ var forceFallbackAdapter = os.Getenv("WGPU_FORCE_FALLBACK_ADAPTER") == "1"
 func (i *Instance) Init(width, height uint32, descriptor wgpu.SurfaceDescriptor) error {
 	i.buffers = mem.NewSlab[bufferData]()
 
-	instance := wgpu.CreateInstance(nil)
-	defer instance.Release()
+	// Retained (not released here) so ProcessEvents can pump async callbacks
+	// such as buffer-map completions (used by GPU timing readback).
+	i.instance = wgpu.CreateInstance(nil)
 
-	i.surface = instance.CreateSurface(descriptor)
+	i.surface = i.instance.CreateSurface(descriptor)
 
-	adapter, err := instance.RequestAdapter(&wgpu.RequestAdapterOptions{
+	adapter, err := i.instance.RequestAdapter(&wgpu.RequestAdapterOptions{
 		ForceFallbackAdapter: forceFallbackAdapter,
 		CompatibleSurface:    i.surface,
 	})
@@ -95,11 +97,13 @@ func (i *Instance) Destroy() {
 	i.queue.Release()
 	i.device.Release()
 	i.adapter.Release()
+	i.instance.Release()
 
 	i.surface = nil
 	i.queue = nil
 	i.device = nil
 	i.adapter = nil
+	i.instance = nil
 	i.config = wgpu.SurfaceConfiguration{}
 	i.features = make(map[wgpu.FeatureName]bool)
 
@@ -154,6 +158,13 @@ func (i *Instance) CreateCommandEncoder(desc *wgpu.CommandEncoderDescriptor) *wg
 // --- Transitional accessors -------------------------------------------------
 // These expose the raw device/queue/surface so call sites that haven't moved to
 // the typed API yet keep working. They'll be removed as those sites migrate.
+
+// HasTimestampQuery reports whether the device was created with timestamp queries.
+func (i *Instance) HasTimestampQuery() bool { return i.features[wgpu.FeatureNameTimestampQuery] }
+
+// ProcessEvents pumps the instance's event loop, delivering async callbacks
+// (e.g. buffer-map completions). Call once per frame.
+func (i *Instance) ProcessEvents() { i.instance.ProcessEvents() }
 
 func (i *Instance) Device() *wgpu.Device       { return i.device }
 func (i *Instance) Queue() *wgpu.Queue         { return i.queue }

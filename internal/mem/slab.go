@@ -27,41 +27,65 @@ func NewSlab[T any]() Slab[T] {
 }
 
 // Alloc claims a slot and returns its (index, generation).
-func (s *Slab[T]) Alloc(val T) (idx, gen uint32) {
+func (s *Slab[T]) Alloc(val T) (id, gen uint32) {
 	if s.freeHead != invalidIdx {
-		idx = s.freeHead
-		s.freeHead = s.entries[idx].freeNext
-		s.entries[idx].val = val
-		s.entries[idx].alive = true
-		return idx, s.entries[idx].gen
+		id = s.freeHead
+		s.freeHead = s.entries[id].freeNext
+		s.entries[id].val = val
+		s.entries[id].alive = true
+		return id, s.entries[id].gen
 	}
-	idx = uint32(len(s.entries))
+	id = uint32(len(s.entries))
 	s.entries = append(s.entries, entry[T]{val: val, gen: 1, alive: true})
-	return idx, 1
+	return id, 1
 }
 
 // Free marks a slot dead, bumps its generation (so existing handles become
 // detectably stale), and returns it to the pool for reuse.
-func (s *Slab[T]) Free(idx uint32) {
-	s.entries[idx].gen++
-	s.entries[idx].alive = false
-	s.entries[idx].freeNext = s.freeHead
-	s.freeHead = idx
+func (s *Slab[T]) Free(id uint32) {
+	s.entries[id].gen++
+	s.entries[id].alive = false
+	s.entries[id].freeNext = s.freeHead
+	s.freeHead = id
 }
 
 // Get returns a pointer to a slot's value. Only valid while the slot is alive.
-func (s *Slab[T]) Get(idx uint32) *T {
-	return &s.entries[idx].val
+func (s *Slab[T]) Get(id uint32) *T {
+	return &s.entries[id].val
 }
 
 // Generation returns the current generation of a slot.
-func (s *Slab[T]) Generation(idx uint32) uint32 {
-	return s.entries[idx].gen
+func (s *Slab[T]) Generation(id uint32) uint32 {
+	return s.entries[id].gen
 }
 
-// Valid reports whether (idx, gen) refers to a live slot.
-func (s *Slab[T]) Valid(idx, gen uint32) bool {
-	return idx < uint32(len(s.entries)) && s.entries[idx].alive && s.entries[idx].gen == gen
+// Valid reports whether (id, gen) refers to a live slot.
+func (s *Slab[T]) Valid(id, gen uint32) bool {
+	return id < uint32(len(s.entries)) && s.entries[id].alive && s.entries[id].gen == gen
+}
+
+// Alive reports whether id refers to a live slot (regardless of generation).
+func (s *Slab[T]) Alive(id uint32) bool {
+	return id < uint32(len(s.entries)) && s.entries[id].alive
+}
+
+// Len returns the number of slots ever allocated (including freed ones), i.e. one
+// past the largest index handed out. Parallel arrays keyed by index size to this.
+func (s *Slab[T]) Len() int { return len(s.entries) }
+
+// All iterates live slots, yielding each slot's index and a pointer to its value
+// (so callers can mutate in place). Unlike Items, which yields value copies.
+func (s *Slab[T]) All() iter.Seq2[uint32, *T] {
+	return func(yield func(uint32, *T) bool) {
+		for i := range s.entries {
+			if !s.entries[i].alive {
+				continue
+			}
+			if !yield(uint32(i), &s.entries[i].val) {
+				break
+			}
+		}
+	}
 }
 
 // Range calls fn for each live value.

@@ -6,8 +6,14 @@ struct VertexOutput {
 }
 
 @vertex
-fn main(@location(0) position: vec3<f32>) -> VertexOutput {
-    let clip = vec4<f32>(position, 1.0);
+fn main(@builtin(vertex_index) vi: u32) -> VertexOutput {
+    // Fullscreen triangle (covers the viewport with 3 vertices).
+    var corners = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(-1.0,  3.0),
+        vec2<f32>( 3.0, -1.0),
+    );
+    let clip = vec4<f32>(corners[vi], 0.999, 1.0);
     let dir  = camera.sky_inv_view_proj * clip;
 
     var out: VertexOutput;

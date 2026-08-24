@@ -1,21 +1,14 @@
 package pix
 
-import (
-	"fmt"
-	"math"
-
-	"github.com/bluescreen10/dawn-go/wgpu"
-	"github.com/bluescreen10/pix/glm"
-)
-
 type GeometryFlags uint32
 
 const (
 	UsePosFlag = GeometryFlags(1 << iota)
 	UseUVsFlag
 	UseNormal
-	UseInstancesFlag // set per-drawing for instanced meshes; not stored on GeometryData
+	UseInstancesFlag // set per-drawing for instanced meshes; not stored on GeometryConfig
 	UseSkinningFlag  // geometry has JOINTS_0 and WEIGHTS_0 vertex attributes
+	StaticFlag       // geometry is immutable; SetAttribute panics
 )
 
 // ShadowGeometryMask is the subset of geometry flags that affect shadow pipelines.
@@ -29,6 +22,8 @@ var attrNameToFlag = map[string]GeometryFlags{
 	SkinWeightAttrName: UseSkinningFlag,
 }
 
+// geometryFlagNames maps a flag bit index to its shader define. StaticFlag has no
+// define (it's a CPU-side hint), so it is intentionally absent.
 var geometryFlagNames = map[int]string{
 	0: "USE_POSITION",
 	1: "USE_UV",
@@ -37,137 +32,53 @@ var geometryFlagNames = map[int]string{
 	4: "USE_SKINNING",
 }
 
-type GeometryData struct {
-	// CPU-side mesh data.
-	version int
-	indices []uint32
+// GeometryConfig is the input description for a geometry: a set of named vertex
+// attributes plus an optional index buffer. It is consumed by
+// GeometrySystem.Create, which packs it into the shared attribute streams. The
+// zero value is an empty config; build it fluently with the setters.
+type GeometryConfig struct {
 	attrs   []*Attribute
+	indices []uint32
 	flags   GeometryFlags
-
-	isBoundingSphereValid bool
-	boundingSphere        Sphere
-
-	// GPU-side resources, populated by the renderer.
-	gpuVersion        int
-	gpuIndex          *wgpu.Buffer
-	gpuWireframeIndex *wgpu.Buffer // line-list index buffer derived from triangles
-	gpuBufs           []GeometryBuffer
-	gpuCount          int
-	gpuWireframeCount int
-	gpuLayout         []wgpu.VertexBufferLayout
-	gpuShadowLayout   []wgpu.VertexBufferLayout
 }
 
-func (g *GeometryData) Indices() []uint32 {
-	return g.indices
+// AddAttribute appends a named vertex attribute (position, uv, normal, ...) and
+// records its presence flag.
+func (c *GeometryConfig) AddAttribute(attr *Attribute) *GeometryConfig {
+	c.flags |= attrNameToFlag[attr.name]
+	c.attrs = append(c.attrs, attr)
+	return c
 }
 
-func (g *GeometryData) SetIndices(indices []uint32) *GeometryData {
-	g.indices = indices
-	g.version++
-	return g
+// SetIndices sets the (optional) index buffer. When absent, Create generates a
+// trivial 0..n-1 index list.
+func (c *GeometryConfig) SetIndices(indices []uint32) *GeometryConfig {
+	c.indices = indices
+	return c
 }
 
-func (g *GeometryData) AddAttribute(attr *Attribute) *GeometryData {
-	flag, _ := attrNameToFlag[attr.name]
-	g.flags |= flag
-	g.attrs = append(g.attrs, attr)
-	g.version++
-	return g
+// Static marks the geometry immutable: SetAttribute will panic on the resulting
+// Geometry. Use it as a hint for geometry that never changes after upload.
+func (c *GeometryConfig) Static() *GeometryConfig {
+	c.flags |= StaticFlag
+	return c
 }
 
-func (g *GeometryData) AttributeData(name string) []byte {
-	for _, a := range g.attrs {
+// attribute returns the named attribute, or nil if absent.
+func (c *GeometryConfig) attribute(name string) *Attribute {
+	for _, a := range c.attrs {
 		if a.name == name {
-			return a.data
+			return a
 		}
 	}
-	panic(fmt.Sprintf("geometry: attribute %q not found", name))
+	return nil
 }
 
-func (g *GeometryData) SetAttributeData(name string, data []byte) {
-	for _, a := range g.attrs {
-		if a.name == name {
-			a.SetBytes(data)
-		}
-
-		if a.name == PositionAttrName {
-			g.isBoundingSphereValid = false
-		}
-	}
-	panic(fmt.Sprintf("geometry: attribute %q not found", name))
-}
-
-func (g *GeometryData) BoundingSphere() Sphere {
-	if !g.isBoundingSphereValid {
-		g.isBoundingSphereValid = true
-		g.calcBoundingSphere()
-	}
-
-	return g.boundingSphere
-}
-
-func (g *GeometryData) calcBoundingSphere() {
-	points := CastTo[glm.Vec3f](g.AttributeData(PositionAttrName))
-
-	g.boundingSphere.Center = glm.Vec3f{0, 0, 0}
-	g.boundingSphere.Radius = 0
-
-	if len(points) == 0 {
-		return
-	}
-
-	for _, p := range points {
-		g.boundingSphere.Center[0] += p[0]
-		g.boundingSphere.Center[1] += p[1]
-		g.boundingSphere.Center[2] += p[2]
-	}
-
-	inv := 1.0 / float32(len(points))
-	g.boundingSphere.Center[0] *= inv
-	g.boundingSphere.Center[1] *= inv
-	g.boundingSphere.Center[2] *= inv
-
-	var maxDistSq float32
-	for _, p := range points {
-		d := p.Sub(g.boundingSphere.Center)
-		dSq := d[0]*d[0] + d[1]*d[1] + d[2]*d[2]
-		if dSq > maxDistSq {
-			maxDistSq = dSq
-		}
-	}
-
-	g.boundingSphere.Radius = float32(math.Sqrt(float64(maxDistSq)))
-}
-
-// Destroy releases the GPU buffers held by this geometry.
-func (g *GeometryData) Destroy() {
-	if g.gpuIndex != nil {
-		g.gpuIndex.Destroy()
-		g.gpuIndex = nil
-	}
-	if g.gpuWireframeIndex != nil {
-		g.gpuWireframeIndex.Destroy()
-		g.gpuWireframeIndex = nil
-	}
-	for _, gb := range g.gpuBufs {
-		if gb.buf != nil {
-			gb.buf.Destroy()
-		}
-	}
-	g.gpuBufs = nil
-}
-
-type GeometryBuffer struct {
-	version int
-	loc     int
-	buf     *wgpu.Buffer
-}
-
-// Geometry is the public handle for a renderer-owned geometry resource.
+// Geometry is the public handle for a renderer-owned geometry resource. It embeds
+// a reference count, so it can be Copy()'d, Release()'d and garbage collected.
 type Geometry struct {
-	renderer *Renderer
-	ref      Ref[Geometry]
+	owner *GeometrySystem
+	ref   Ref[Geometry]
 }
 
 func (g Geometry) Ref() Ref[Geometry] { return g.ref }
@@ -176,11 +87,23 @@ func (g Geometry) Ref() Ref[Geometry] { return g.ref }
 func (g Geometry) Release() { g.ref.Release() }
 
 // Copy increments the reference count and returns an additional Geometry handle.
-func (g Geometry) Copy() Geometry { return Geometry{renderer: g.renderer, ref: g.ref.Copy()} }
+func (g Geometry) Copy() Geometry { return Geometry{owner: g.owner, ref: g.ref.Copy()} }
 
 // Valid reports whether the underlying geometry resource is still alive.
 func (g Geometry) Valid() bool { return g.ref.Valid() }
 
+// BoundingSphere returns the geometry's local-space bounding sphere.
 func (g Geometry) BoundingSphere() Sphere {
-	return g.renderer.geometries.Get(g.ref.ID()).BoundingSphere()
+	return g.owner.Get(g.ref.ID()).bounds
+}
+
+// GetAttribute returns the raw bytes of a named vertex attribute.
+func (g Geometry) GetAttribute(name string) []byte {
+	return g.owner.GetAttribute(g.ref.ID(), name)
+}
+
+// SetAttribute replaces a named vertex attribute's data and re-uploads the
+// affected stream. Panics if the geometry was created Static.
+func (g Geometry) SetAttribute(name string, data []byte) {
+	g.owner.SetAttribute(g.ref.ID(), name, data)
 }

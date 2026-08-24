@@ -31,10 +31,11 @@ const (
 )
 
 const (
-	PositionAttrName  = "position"
-	UVAttrName        = "uv"
-	NormalAttrName    = "normal"
-	SkinIndexAttrName = "JOINTS_0"
+	PositionAttrName   = "position"
+	UVAttrName         = "uv"
+	NormalAttrName     = "normal"
+	ColorAttrName      = "color"
+	SkinIndexAttrName  = "JOINTS_0"
 	SkinWeightAttrName = "WEIGHTS_0"
 )
 

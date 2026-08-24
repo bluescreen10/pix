@@ -2,7 +2,7 @@ package pix
 
 import "github.com/bluescreen10/pix/glm"
 
-func NewBoxGeometry(width, height, depth float32) *GeometryData {
+func NewBoxGeometry(width, height, depth float32) *GeometryConfig {
 	hw, hh, hd := width/2, height/2, depth/2
 
 	pos := []glm.Vec3f{
@@ -95,7 +95,7 @@ func NewBoxGeometry(width, height, depth float32) *GeometryData {
 	}
 
 	//FIXME: provide a constructor
-	return (&GeometryData{}).
+	return (&GeometryConfig{}).
 		AddAttribute(NewAttribute(PositionAttrName, PositionLocation, Float32x3, pos)).
 		AddAttribute(NewAttribute(UVAttrName, UVLocation, Float32x2, uvs)).
 		AddAttribute(NewAttribute(NormalAttrName, NormalLocation, Float32x3, normals)).

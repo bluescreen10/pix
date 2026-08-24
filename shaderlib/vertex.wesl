@@ -70,23 +70,26 @@ struct VertexOutput {
 
 @group(2) @binding(0) var<storage, read> models:    array<mat4x4<f32>>;
 @group(2) @binding(1) var<storage, read> drawables: array<Drawable>;
+// Compacted survivors from the cull pass; bound per batch at its region, so
+// instance_index is 0-based within the batch.
+@group(2) @binding(2) var<storage, read> visible:   array<u32>;
 
-// Geometry set: position stream + packed attribute stream + indices + descriptors.
+// Geometry set: position stream + packed attribute stream + descriptors.
+// Indices are a hardware index buffer, so vertex_index is already the local index.
 @group(3) @binding(0) var<storage, read> positions:  array<f32>;
 @group(3) @binding(1) var<storage, read> attributes: array<VertexAttributes>;
-@group(3) @binding(2) var<storage, read> indices:    array<u32>;
-@group(3) @binding(3) var<storage, read> geometries: array<GeometryDesc>;
+@group(3) @binding(2) var<storage, read> geometries: array<GeometryDesc>;
 
 @vertex
 fn main(@builtin(instance_index) instance_index: u32,
         @builtin(vertex_index)   vertex_index: u32) -> VertexOutput {
     var out: VertexOutput;
 
-    let d   = drawables[instance_index];
+    let d   = drawables[visible[instance_index]];
     let geo = geometries[d.geometry_id];
 
-    // Software index fetch, then pull the vertex's attributes from the streams.
-    let vi = indices[geo.index_base + vertex_index];
+    // vertex_index is the local index (hardware index fetch, baseVertex 0).
+    let vi = vertex_index;
 
     let pb = geo.position_base + vi * 3u;
     let position = unpack_position(pb);

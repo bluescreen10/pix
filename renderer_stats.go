@@ -4,7 +4,8 @@ import "time"
 
 type RendererStats struct {
 	frameTimes []float64
-	gpuTimes   []float64
+	cpuTimes   []float64
+	gpuEMA     float64 // GPU time (seconds), smoothed — readback is sparse/async
 
 	currentFrame int
 	maxSamples   int
@@ -15,7 +16,7 @@ type RendererStats struct {
 func NewRendererStats(maxSamples int) *RendererStats {
 	return &RendererStats{
 		frameTimes: make([]float64, maxSamples),
-		gpuTimes:   make([]float64, maxSamples),
+		cpuTimes:   make([]float64, maxSamples),
 		maxSamples: maxSamples,
 	}
 }
@@ -31,8 +32,29 @@ func (s *RendererStats) EndFrame() {
 	s.frameTimes[s.currentFrame%s.maxSamples] = frameTime
 }
 
+// AddGPUTime records a GPU frame time (seconds) from the async timestamp
+// readback, smoothed into an EMA because samples arrive sparsely.
 func (s *RendererStats) AddGPUTime(gpuTime float64) {
-	s.gpuTimes[s.currentFrame%s.maxSamples] = gpuTime
+	if s.gpuEMA == 0 {
+		s.gpuEMA = gpuTime
+	} else {
+		s.gpuEMA = s.gpuEMA*0.9 + gpuTime*0.1
+	}
+}
+
+// AddCPUTime records the CPU time spent producing this frame (list building,
+// culling, command encoding and submit) — excluding the vsync-blocking present.
+func (s *RendererStats) AddCPUTime(d time.Duration) {
+	s.cpuTimes[s.currentFrame%s.maxSamples] = d.Seconds()
+}
+
+// AvgCPUTime is the rolling average CPU frame cost.
+func (s *RendererStats) AvgCPUTime() time.Duration {
+	var total float64
+	for _, t := range s.cpuTimes {
+		total += t
+	}
+	return time.Duration(total / float64(s.maxSamples) * float64(time.Second))
 }
 
 func (s *RendererStats) FPS() float64 {
@@ -50,11 +72,5 @@ func (s *RendererStats) AvgFrameTime() time.Duration {
 }
 
 func (s *RendererStats) AvgGPUTime() time.Duration {
-	var total float64
-
-	for _, gt := range s.gpuTimes {
-		total += gt
-	}
-
-	return time.Duration(total / float64(s.maxSamples) * float64(time.Second))
+	return time.Duration(s.gpuEMA * float64(time.Second))
 }

@@ -49,8 +49,8 @@ func (a Allocation) Size() uint32 {
 }
 
 type TLSF struct {
-	maxSize    uint32
-	freeSize   uint32
+	capacity   uint32
+	freeSpace  uint32
 	freeOffset uint32
 
 	usedTopBins uint32
@@ -102,7 +102,7 @@ func (t *TLSF) Alloc(size uint32) (Allocation, error) {
 		t.nodes[nodeBinNext].binPrev = unusedNode
 	}
 
-	t.freeSize -= nodeTotalSize
+	t.freeSpace -= nodeTotalSize
 
 	if t.bins[binIndex] == unusedNode {
 		t.usedBins[topBinIndex] &^= (1 << leafBinIndex)
@@ -173,6 +173,14 @@ func (t *TLSF) Free(alloc Allocation) error {
 	return nil
 }
 
+func (t *TLSF) Capacity() uint32 {
+	return t.capacity
+}
+
+func (t *TLSF) FreeSpace() uint32 {
+	return t.freeSpace
+}
+
 func (t *TLSF) findLowestSetBitAfter(mask uint32, start uint32) nodeId {
 	maskBeforeStart := uint32(1<<start) - 1
 	maskAfterStart := ^maskBeforeStart
@@ -188,7 +196,7 @@ func (t *TLSF) findLowestSetBitAfter(mask uint32, start uint32) nodeId {
 func (t *TLSF) reset() {
 	t.usedTopBins = 0
 	t.freeOffset = 0
-	t.freeSize = 0
+	t.freeSpace = 0
 
 	for i := range len(t.usedBins) {
 		t.usedBins[i] = 0
@@ -201,7 +209,7 @@ func (t *TLSF) reset() {
 	t.nodes = t.nodes[0:0]
 	t.freeNodes = t.freeNodes[0:0]
 
-	t.insertNode(t.maxSize, 0)
+	t.insertNode(t.capacity, 0)
 }
 
 func (t *TLSF) insertNode(size uint32, dataOffset uint32) nodeId {
@@ -227,7 +235,7 @@ func (t *TLSF) insertNode(size uint32, dataOffset uint32) nodeId {
 	}
 
 	t.bins[index] = nodeIndex
-	t.freeSize += size
+	t.freeSpace += size
 	return nodeIndex
 }
 
@@ -261,7 +269,7 @@ func (t *TLSF) removeNode(nodeIndex nodeId) {
 	}
 
 	t.freeNodes = append(t.freeNodes, nodeIndex)
-	t.freeSize -= node.size
+	t.freeSpace -= node.size
 }
 
 func (t *TLSF) getFreeNodeIndex() nodeId {
@@ -340,7 +348,7 @@ func (t *TLSF) floatToUint(floatValue uint32) uint32 {
 // StorageReport returns the total free space and the size of the largest free
 // region (a lower bound taken from the highest non-empty bin).
 func (t *TLSF) StorageReport() (totalFreeSpace, largestFreeRegion uint32) {
-	totalFreeSpace = t.freeSize
+	totalFreeSpace = t.freeSpace
 	if t.usedTopBins != 0 {
 		topBinIndex := uint32(31 - bits.LeadingZeros32(t.usedTopBins))
 		leafBinIndex := uint32(31 - bits.LeadingZeros32(t.usedBins[topBinIndex]))
@@ -350,7 +358,7 @@ func (t *TLSF) StorageReport() (totalFreeSpace, largestFreeRegion uint32) {
 }
 
 func NewTLSF(size uint32) *TLSF {
-	t := &TLSF{maxSize: size}
+	t := &TLSF{capacity: size}
 	t.reset()
 	return t
 }

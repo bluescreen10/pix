@@ -550,8 +550,8 @@ func applyNodeTransform(n pix.Node, gn gltfNode) {
 
 // ---- Geometry building ----
 
-func (l *gltfLoader) buildGeometry(prim gltfPrimitive) (*pix.GeometryData, error) {
-	geo := &pix.GeometryData{}
+func (l *gltfLoader) buildGeometry(prim gltfPrimitive) (*pix.GeometryConfig, error) {
+	geo := &pix.GeometryConfig{}
 
 	if prim.Indices != nil {
 		geo.SetIndices(l.readIndices(*prim.Indices))
