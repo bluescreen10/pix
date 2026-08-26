@@ -1,0 +1,46 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+
+// GPU-driven frustum cull (pix's cull.wesl): one thread per drawable. Transform
+// the local bounding sphere to world space, test it against 6 frustum planes,
+// and for survivors append the index to visible[] and bump instanceCount.
+struct DrawIndexedIndirect { uint indexCount, instanceCount, firstIndex; int vertexOffset; uint firstInstance; };
+struct Drawable { vec4 bounds; uint transformID; }; // bounds.xyz = local center, .w = radius
+
+layout(buffer_reference, scalar) readonly buffer DrawableBuf { Drawable items[]; };
+layout(buffer_reference, scalar) readonly buffer ModelBuf    { mat4 models[]; };
+layout(buffer_reference, scalar)          buffer IndirectBuf { DrawIndexedIndirect cmd; };
+layout(buffer_reference, scalar)          buffer VisibleBuf  { uint items[]; };
+
+layout(buffer_reference, scalar) readonly buffer CullRoot {
+    DrawableBuf drawables;
+    ModelBuf    models;
+    IndirectBuf indirect;
+    VisibleBuf  visible;
+    uint        count;
+    vec4        planes[6]; // inward-pointing, normalized
+};
+
+layout(push_constant) uniform P { CullRoot root; } pc;
+
+layout(local_size_x = 64) in;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.root.count) return;
+
+    Drawable d = pc.root.drawables.items[i];
+    mat4 m = pc.root.models.models[d.transformID];
+    vec3 center = (m * vec4(d.bounds.xyz, 1.0)).xyz;
+    float scale = max(length(m[0].xyz), max(length(m[1].xyz), length(m[2].xyz)));
+    float radius = d.bounds.w * scale;
+
+    for (int p = 0; p < 6; p++) {
+        vec4 pl = pc.root.planes[p];
+        if (dot(pl.xyz, center) + pl.w < -radius) return; // fully outside this plane
+    }
+
+    uint slot = atomicAdd(pc.root.indirect.cmd.instanceCount, 1u);
+    pc.root.visible.items[slot] = i;
+}

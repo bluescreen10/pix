@@ -12,10 +12,13 @@ func PerspectiveRH[T number](fovYrad, aspectRatio, zNear, zFar T) Mat4[T] {
 	w := h / aspectRatio
 	r := zFar / (zNear - zFar)
 
+	// -1 as a runtime value: the untyped constant -1 is rejected because the number
+	// constraint includes unsigned types (perspective is only used with floats).
+	one := T(1)
 	return Mat4[T]{
 		w, 0, 0, 0,
 		0, h, 0, 0,
-		0, 0, r, -1,
+		0, 0, r, -one,
 		0, 0, r * zNear, 0,
 	}
 }

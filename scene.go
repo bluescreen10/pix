@@ -1,14 +1,15 @@
 package pix
 
 import (
-	"slices"
+	"math"
 
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/gpu"
 )
 
 const invalidIdx = ^uint32(0)
 
-// NodeKind identifies what type of data lives in the payload table.
+// NodeKind tags a node's payload table.
 type NodeKind uint8
 
 const (
@@ -18,30 +19,17 @@ const (
 	KindInstance
 	KindBone
 	KindSkinnedMesh
-
 	KindAmbientLight
 	KindDirectionalLight
 	KindSpotLight
 	KindPointLight
 )
 
-// Node flags packed into flags[].
+// NodeFlags is the per-node flag bitset.
 type NodeFlags uint32
 
-func (f NodeFlags) IsVisible() bool {
-	return f&flagVisible != 0
-}
-
-func (f NodeFlags) CastShadow() bool {
-	return f&flagCastShadow != 0
-}
-
-func (f NodeFlags) IsAlive() bool {
-	return f&flagAlive != 0
-}
-
 const (
-	flagAlive = NodeFlags(1 << iota)
+	flagAlive NodeFlags = 1 << iota
 	flagCastShadow
 	flagReceiveShadow
 	flagDirty
@@ -57,122 +45,85 @@ type NodeID struct {
 	gen   uint32
 }
 
-func (id NodeID) isValid() bool {
-	return id.gen != 0
-}
+func (id NodeID) isValid() bool { return id.gen != 0 }
 
-var sceneID idGen
-
-// Scene owns all node state. GPU resources are owned by the Renderer and
-// referenced here by pointer (transitional; will become IDs when Renderer
-// fully splits out resource ownership per the spec).
+// Scene owns the node scene graph (flat parallel arrays, linked-list hierarchy),
+// the per-node transforms, the mesh payloads (which hold ref-counted handles to
+// renderer-owned geometry/materials), the scene lights, and its own per-scene GPU
+// buffers (world matrices, drawables, cull state). It is decoupled from the concrete
+// Renderer — it depends only on gpu.Backend (obtained via Renderer.NewScene).
 type Scene struct {
-	id      uint32
-	version int
+	backend gpu.Backend
 
-	// Hierarchy — parallel arrays indexed by slot.
 	parents       []NodeID
 	firstChildren []NodeID
 	lastChildren  []NodeID
 	nextSiblings  []NodeID
 	prevSiblings  []NodeID
 
-	// Transforms — also parallel arrays.
 	local    []glm.Mat4f
 	world    []glm.Mat4f
 	worldInv []glm.Mat4f
 
 	transforms []Transform
 
-	// Per-node state.
-	names      []string
 	flags      []NodeFlags
 	generation []uint32
 	kind       []NodeKind
 	payload    []uint32
 
-	// Allocator: free list threaded through parents[] of dead slots.
 	freeHead uint32
 
-	// Topological order (parent-before-child); rebuilt when topoDirty is set.
 	topoOrder []uint32
 	topoDirty bool
+	root      NodeID
 
-	root NodeID
+	meshes []meshData
+	lights *Lights
 
-	background    glm.Color4f
-	backgroundMap Texture
-
-	// Kind-specific compact payload tables.
-	meshes          []meshData
-	instancedMeshes []instancedMeshData
-	skinnedMeshes   []skinnedMeshData
-	dirLights       []directionalLightData
-	ambientLights   []ambientLightData
-	spotLights      []spotLightData
-	pointLights     []pointLightData
-
-	// Flattened, GPU-facing draw list — one entry per plain/skinned mesh and one
-	// per instance of an instanced mesh. Rebuilt lazily when drawableDirty is set
-	// by a structural change (mesh add/remove), never per frame.
-	drawables     []drawable
 	drawableDirty bool
+	dl            *drawList
 }
 
-func NewScene() *Scene {
-	s := &Scene{id: sceneID.next, version: 1, freeHead: invalidIdx, topoDirty: true}
+// NewScene creates an empty scene bound to a backend (usually via Renderer.NewScene).
+func NewScene(backend gpu.Backend) *Scene {
+	s := &Scene{backend: backend, freeHead: invalidIdx, topoDirty: true}
+	s.lights = NewLights(backend)
+	s.dl = newDrawList(backend)
 	s.root = s.allocNode(KindGroup)
-	// Root is permanently alive, visible, and effectively visible.
 	s.flags[s.root.index] = flagAlive | flagLocalVisible | flagVisible
 	return s
 }
 
-func (s *Scene) Background() glm.Color4f {
-	return s.background
-}
+// Root returns the scene's root node.
+func (s *Scene) Root() Node { return Node{scene: s, id: s.root} }
 
-func (s *Scene) SetBackground(c glm.Color4f) {
-	s.background = c
-}
+// Add parents a node under the scene root.
+func (s *Scene) Add(n SceneNode) { s.reparent(n.ID(), s.root) }
 
-func (s *Scene) BackgroundMap() Texture {
-	return s.backgroundMap
-}
-
-func (s *Scene) SetBackgroundMap(texture Texture) {
-	s.backgroundMap = texture
-	s.version++
-}
-
-// Add parents the node under the scene root.
-// Accepts any typed handle (Mesh, Group, DirectionalLight, …).
-func (s *Scene) Add(n SceneNode) {
-	s.reparent(n.ID(), s.root)
-}
-
+// NewGroup creates an empty group node (hierarchy only).
 func (s *Scene) NewGroup() Group {
-	id := s.allocNode(KindGroup)
-	return Group{Node{scene: s, id: id}}
+	return Group{Node{scene: s, id: s.allocNode(KindGroup)}}
 }
 
-func (s *Scene) GetFlags(id uint32) NodeFlags {
-	return s.flags[id]
+// SetAmbient sets the ambient light term.
+func (s *Scene) SetAmbient(c glm.Vec3f) { s.lights.SetAmbient(c) }
+
+// AddDirectionalLight adds a directional light (dir = travel direction).
+func (s *Scene) AddDirectionalLight(dir, color glm.Vec3f, intensity float32) {
+	s.lights.AddDirectional(dir, color, intensity)
 }
 
-func (s *Scene) GetWorldTransform(id uint32) glm.Mat4f {
-	return s.world[id]
+// AddPointLight adds a point light at pos with linear falloff to zero at rng.
+func (s *Scene) AddPointLight(pos, color glm.Vec3f, intensity, rng float32) {
+	s.lights.AddPoint(pos, color, intensity, rng)
 }
 
-func (s *Scene) GetWorldTransformInv(id uint32) glm.Mat4f {
-	return s.worldInv[id]
-}
-
-// allocNode claims a slot (reusing a freed one when available) and returns its NodeID.
 func (s *Scene) allocNode(kind NodeKind) NodeID {
 	var idx uint32
 	if s.freeHead != invalidIdx {
 		idx = s.freeHead
-		s.freeHead = s.parents[idx].index // advance free list
+		s.freeHead = s.parents[idx].index
 		s.resetSlot(idx, kind)
 	} else {
 		idx = uint32(len(s.parents))
@@ -193,64 +144,6 @@ func (s *Scene) allocNode(kind NodeKind) NodeID {
 	return NodeID{index: idx, gen: s.generation[idx]}
 }
 
-func (s *Scene) allocMultiNode(kind, childKind NodeKind, childCount int) NodeID {
-	parent := s.allocNode(kind)
-
-	// children
-	s.parents = slices.Grow(s.parents, childCount)
-	s.firstChildren = slices.Grow(s.firstChildren, childCount)
-	s.lastChildren = slices.Grow(s.lastChildren, childCount)
-	s.nextSiblings = slices.Grow(s.nextSiblings, childCount)
-	s.prevSiblings = slices.Grow(s.prevSiblings, childCount)
-	s.local = slices.Grow(s.local, childCount)
-	s.world = slices.Grow(s.world, childCount)
-	s.worldInv = slices.Grow(s.worldInv, childCount)
-	s.transforms = slices.Grow(s.transforms, childCount)
-	s.flags = slices.Grow(s.flags, childCount)
-	s.generation = slices.Grow(s.generation, childCount)
-	s.kind = slices.Grow(s.kind, childCount)
-	s.payload = slices.Grow(s.payload, childCount)
-
-	startIdx := uint32(len(s.parents))
-	lastIdx := startIdx + uint32(childCount) - 1
-
-	flags := flagAlive | flagLocalVisible | flagDirty | flagVisibleDirty
-
-	for i := startIdx; i <= lastIdx; i++ {
-		s.parents = append(s.parents, parent)
-		s.firstChildren = append(s.firstChildren, NodeID{})
-		s.lastChildren = append(s.lastChildren, NodeID{})
-
-		if i == lastIdx {
-			s.nextSiblings = append(s.nextSiblings, NodeID{})
-		} else {
-			s.nextSiblings = append(s.nextSiblings, NodeID{index: i + 1, gen: 1})
-		}
-
-		if i == startIdx {
-			s.prevSiblings = append(s.prevSiblings, NodeID{})
-		} else {
-			s.prevSiblings = append(s.prevSiblings, NodeID{index: i - 1, gen: 1})
-		}
-
-		s.local = append(s.local, glm.Mat4fIndentity)
-		s.world = append(s.world, glm.Mat4fIndentity)
-		s.worldInv = append(s.worldInv, glm.Mat4fIndentity)
-		s.transforms = append(s.transforms, defaultTransform)
-		s.flags = append(s.flags, flags)
-		s.generation = append(s.generation, 1)
-		s.kind = append(s.kind, childKind)
-		s.payload = append(s.payload, 0)
-	}
-
-	s.firstChildren[parent.index] = NodeID{index: startIdx, gen: 1}
-	s.lastChildren[parent.index] = NodeID{index: lastIdx, gen: 1}
-
-	return parent
-}
-
-// resetSlot re-initialises a recycled slot. Generation is NOT touched here;
-// destroyNode already bumped it so the new node gets the incremented value.
 func (s *Scene) resetSlot(idx uint32, kind NodeKind) {
 	s.parents[idx] = NodeID{}
 	s.firstChildren[idx] = NodeID{}
@@ -285,8 +178,6 @@ func (s *Scene) reparent(child, newParent NodeID) {
 		panic("scene: reparent would create a cycle")
 	}
 	s.detachFromParent(child)
-
-	// O(1) append at tail of newParent's child list.
 	s.parents[child.index] = newParent
 	last := s.lastChildren[newParent.index]
 	if !last.isValid() {
@@ -296,7 +187,6 @@ func (s *Scene) reparent(child, newParent NodeID) {
 		s.prevSiblings[child.index] = last
 	}
 	s.lastChildren[newParent.index] = child
-
 	s.flags[child.index] |= flagDirty
 	s.topoDirty = true
 }
@@ -306,22 +196,18 @@ func (s *Scene) detachFromParent(child NodeID) {
 	if !p.isValid() {
 		return
 	}
-
 	prev := s.prevSiblings[child.index]
 	next := s.nextSiblings[child.index]
-
 	if prev.isValid() {
 		s.nextSiblings[prev.index] = next
 	} else {
 		s.firstChildren[p.index] = next
 	}
-
 	if next.isValid() {
 		s.prevSiblings[next.index] = prev
 	} else {
 		s.lastChildren[p.index] = prev
 	}
-
 	s.parents[child.index] = NodeID{}
 	s.prevSiblings[child.index] = NodeID{}
 	s.nextSiblings[child.index] = NodeID{}
@@ -339,14 +225,18 @@ func (s *Scene) wouldCycle(child, newParent NodeID) bool {
 	return false
 }
 
-// destroySubtree destroys the node and its entire subtree (post-order).
 func (s *Scene) destroySubtree(id NodeID) {
-	s.validate(id)
-	child := s.firstChildren[id.index]
-	for child.isValid() {
-		next := s.nextSiblings[child.index]
-		s.destroySubtree(child)
-		child = next
+	if !id.isValid() || s.flags[id.index]&flagAlive == 0 {
+		return
+	}
+	var kids []NodeID
+	c := s.firstChildren[id.index]
+	for c.isValid() {
+		kids = append(kids, c)
+		c = s.nextSiblings[c.index]
+	}
+	for _, k := range kids {
+		s.destroySubtree(k)
 	}
 	s.destroyNode(id)
 }
@@ -354,122 +244,42 @@ func (s *Scene) destroySubtree(id NodeID) {
 func (s *Scene) destroyNode(id NodeID) {
 	idx := id.index
 	s.detachFromParent(id)
-
-	switch s.kind[idx] {
-	case KindMesh:
+	if s.kind[idx] == KindMesh {
 		s.swapRemoveMesh(s.payload[idx])
-	case KindInstancedMesh:
-		s.swapRemoveInstancedMesh(s.payload[idx])
-	case KindDirectionalLight:
-		s.swapRemoveDirLight(s.payload[idx])
-	case KindAmbientLight:
-		s.swapRemoveAmbientLight(s.payload[idx])
-	case KindSpotLight:
-		s.swapRemoveSpotLight(s.payload[idx])
-	case KindPointLight:
-		s.swapRemovePointLight(s.payload[idx])
-	case KindSkinnedMesh:
-		s.swapRemoveSkinnedMesh(s.payload[idx])
 	}
-
 	s.flags[idx] &^= flagAlive
 	s.generation[idx]++
-	// Thread this slot onto the free list via parents[].
 	s.parents[idx] = NodeID{index: s.freeHead}
 	s.freeHead = idx
+	s.drawableDirty = true
 	s.topoDirty = true
 }
 
 func (s *Scene) swapRemoveMesh(payloadIdx uint32) {
+	md := &s.meshes[payloadIdx]
+	md.geometry.Release()
+	md.material.Release()
 	last := uint32(len(s.meshes) - 1)
-	// Release refs owned by the destroyed mesh payload.
-	s.meshes[payloadIdx].geometry.Release()
-	s.meshes[payloadIdx].material.Release()
-	if payloadIdx < last {
+	if payloadIdx != last {
 		s.meshes[payloadIdx] = s.meshes[last]
 		s.payload[s.meshes[payloadIdx].ownerNode] = payloadIdx
 	}
 	s.meshes = s.meshes[:last]
-	s.drawableDirty = true
 }
 
-func (s *Scene) swapRemoveInstancedMesh(payloadIdx uint32) {
-	last := uint32(len(s.instancedMeshes) - 1)
-	s.instancedMeshes[payloadIdx].geometry.Release()
-	s.instancedMeshes[payloadIdx].material.Release()
-	if payloadIdx < last {
-		s.instancedMeshes[payloadIdx] = s.instancedMeshes[last]
-		s.payload[s.instancedMeshes[payloadIdx].ownerNode] = payloadIdx
-	}
-	s.instancedMeshes = s.instancedMeshes[:last]
-	s.drawableDirty = true
-}
-
-func (s *Scene) swapRemoveDirLight(payloadIdx uint32) {
-	last := uint32(len(s.dirLights) - 1)
-	if payloadIdx < last {
-		s.dirLights[payloadIdx] = s.dirLights[last]
-		s.payload[s.dirLights[payloadIdx].ownerNode] = payloadIdx
-	}
-	s.dirLights = s.dirLights[:last]
-}
-
-func (s *Scene) swapRemoveAmbientLight(payloadIdx uint32) {
-	last := uint32(len(s.ambientLights) - 1)
-	if payloadIdx < last {
-		s.ambientLights[payloadIdx] = s.ambientLights[last]
-		s.payload[s.ambientLights[payloadIdx].ownerNode] = payloadIdx
-	}
-	s.ambientLights = s.ambientLights[:last]
-}
-
-func (s *Scene) swapRemoveSpotLight(payloadIdx uint32) {
-	last := uint32(len(s.spotLights) - 1)
-	if payloadIdx < last {
-		s.spotLights[payloadIdx] = s.spotLights[last]
-		s.payload[s.spotLights[payloadIdx].ownerNode] = payloadIdx
-	}
-	s.spotLights = s.spotLights[:last]
-}
-
-func (s *Scene) swapRemovePointLight(payloadIdx uint32) {
-	last := uint32(len(s.pointLights) - 1)
-	if payloadIdx < last {
-		s.pointLights[payloadIdx] = s.pointLights[last]
-		s.payload[s.pointLights[payloadIdx].ownerNode] = payloadIdx
-	}
-	s.pointLights = s.pointLights[:last]
-}
-
-func (s *Scene) swapRemoveSkinnedMesh(payloadIdx uint32) {
-	last := uint32(len(s.skinnedMeshes) - 1)
-	s.skinnedMeshes[payloadIdx].geometry.Release()
-	s.skinnedMeshes[payloadIdx].material.Release()
-	if payloadIdx < last {
-		s.skinnedMeshes[payloadIdx] = s.skinnedMeshes[last]
-		s.payload[s.skinnedMeshes[payloadIdx].ownerNode] = payloadIdx
-	}
-	s.skinnedMeshes = s.skinnedMeshes[:last]
-	s.drawableDirty = true
-}
-
-// flushTopoIfDirty rebuilds topoOrder with a BFS from root (parent-before-child).
 func (s *Scene) flushTopoIfDirty() {
 	if !s.topoDirty {
 		return
 	}
 	s.topoOrder = s.topoOrder[:0]
-
 	queue := []uint32{s.root.index}
 	for len(queue) > 0 {
 		idx := queue[0]
 		queue = queue[1:]
-
 		if s.flags[idx]&flagAlive == 0 {
 			continue
 		}
 		s.topoOrder = append(s.topoOrder, idx)
-
 		child := s.firstChildren[idx]
 		for child.isValid() {
 			queue = append(queue, child.index)
@@ -479,22 +289,17 @@ func (s *Scene) flushTopoIfDirty() {
 	s.topoDirty = false
 }
 
-// UpdateTransforms recomputes local and world matrices for all dirty nodes in
-// topological order. Returns true if any node was updated.
+// UpdateTransforms recomputes local + world matrices for dirty nodes in topological
+// (parent-before-child) order. Returns true if anything changed.
 func (s *Scene) UpdateTransforms() bool {
 	s.flushTopoIfDirty()
-
 	anyDirty := false
 	for _, i := range s.topoOrder {
 		if s.flags[i]&flagDirty == 0 {
 			continue
 		}
 		anyDirty = true
-
-		if s.kind[i] != KindInstance {
-			s.local[i] = s.transforms[i].Matrix()
-		}
-
+		s.local[i] = s.transforms[i].Matrix()
 		p := s.parents[i]
 		if !p.isValid() {
 			s.world[i] = s.local[i]
@@ -502,12 +307,7 @@ func (s *Scene) UpdateTransforms() bool {
 			s.world[i] = s.world[p.index].Mul4x4(s.local[i])
 		}
 		s.worldInv[i] = s.world[i].Inv()
-
 		s.flags[i] &^= flagDirty
-
-		// Propagate dirty to direct children. Because topoOrder is parent-before-child,
-		// children have not been visited yet and will see the flag in this same pass.
-		// This makes the pass self-correct even if a child wasn't pre-marked dirty.
 		child := s.firstChildren[i]
 		for child.isValid() {
 			s.flags[child.index] |= flagDirty
@@ -517,33 +317,122 @@ func (s *Scene) UpdateTransforms() bool {
 	return anyDirty
 }
 
-// UpdateVisibility propagates effectiveVisible flags in topological order.
-func (s *Scene) UpdateVisibility() {
-	for _, i := range s.topoOrder {
-		if s.flags[i]&flagVisibleDirty == 0 {
-			continue
+// collectDrawables builds the GPU drawable table from the mesh payloads.
+func (s *Scene) collectDrawables() []gpuDrawable {
+	out := make([]gpuDrawable, 0, len(s.meshes))
+	for i := range s.meshes {
+		md := &s.meshes[i]
+		var flags uint32
+		if s.flags[md.ownerNode]&flagCastShadow != 0 {
+			flags |= DrawableCastsShadow
 		}
+		out = append(out, gpuDrawable{
+			bounds:      [4]float32{md.bounds.Center[0], md.bounds.Center[1], md.bounds.Center[2], md.bounds.Radius},
+			transformID: md.ownerNode,
+			geometryID:  md.geometry.id(),
+			materialID:  md.material.id(),
+			flags:       flags,
+		})
+	}
+	return out
+}
 
-		localVisible := s.flags[i]&flagLocalVisible != 0
-		p := s.parents[i]
+// MeshCount returns the number of mesh nodes in the scene.
+func (s *Scene) MeshCount() int { return len(s.meshes) }
 
-		var parentVisible bool
-		if !p.isValid() {
-			parentVisible = true
-		} else {
-			parentVisible = s.flags[p.index]&flagVisible != 0
-		}
-
-		if localVisible && parentVisible {
-			s.flags[i] |= flagVisible
-		} else {
-			s.flags[i] &^= flagVisible
-		}
-
-		child := s.firstChildren[i]
-		for child.isValid() {
-			s.flags[child.index] |= flagVisibleDirty
-			child = s.nextSiblings[child.index]
+// FrameSphere returns a robust center + radius for the mesh nodes' world-space
+// bounds (median center, percentile-of-center-distances). Run UpdateTransforms first.
+func (s *Scene) FrameSphere(pct float32) (center glm.Vec3f, radius float32) {
+	n := len(s.meshes)
+	if n == 0 {
+		return glm.Vec3f{}, 1
+	}
+	centers := make([]glm.Vec3f, n)
+	for i := range s.meshes {
+		md := &s.meshes[i]
+		m := s.world[md.ownerNode]
+		c := md.bounds.Center
+		centers[i] = glm.Vec3f{
+			m[0]*c[0] + m[4]*c[1] + m[8]*c[2] + m[12],
+			m[1]*c[0] + m[5]*c[1] + m[9]*c[2] + m[13],
+			m[2]*c[0] + m[6]*c[1] + m[10]*c[2] + m[14],
 		}
 	}
+	median := func(axis int) float32 {
+		v := make([]float32, n)
+		for i, c := range centers {
+			v[i] = c[axis]
+		}
+		sortFloat32(v)
+		return v[n/2]
+	}
+	center = glm.Vec3f{median(0), median(1), median(2)}
+	dists := make([]float32, n)
+	for i, c := range centers {
+		dx, dy, dz := c[0]-center[0], c[1]-center[1], c[2]-center[2]
+		dists[i] = float32(math.Sqrt(float64(dx*dx + dy*dy + dz*dz)))
+	}
+	sortFloat32(dists)
+	k := int(float32(n-1) * clamp01(pct))
+	radius = dists[k]
+	if radius <= 0 {
+		radius = 1
+	}
+	return center, radius
+}
+
+func clamp01(x float32) float32 {
+	if x < 0 {
+		return 0
+	}
+	if x > 1 {
+		return 1
+	}
+	return x
+}
+
+func sortFloat32(v []float32) {
+	for i := 1; i < len(v); i++ {
+		x := v[i]
+		j := i - 1
+		for j >= 0 && v[j] > x {
+			v[j+1] = v[j]
+			j--
+		}
+		v[j+1] = x
+	}
+}
+
+// Destroy releases the scene's GPU buffers, lights and mesh resource references.
+func (s *Scene) Destroy() {
+	for i := range s.meshes {
+		s.meshes[i].geometry.Release()
+		s.meshes[i].material.Release()
+	}
+	s.meshes = nil
+	if s.dl != nil {
+		s.dl.destroy()
+	}
+	if s.lights != nil {
+		s.lights.Destroy()
+	}
+}
+
+// FrustumPlanes extracts the 6 normalized inward frustum planes (Gribb-Hartmann;
+// near = row2 for Vulkan/glm 0..1 clip depth) from a column-major view-projection.
+func FrustumPlanes(vp glm.Mat4f) [6][4]float32 {
+	row := func(i int) [4]float32 { return [4]float32{vp[i], vp[4+i], vp[8+i], vp[12+i]} }
+	r0, r1, r2, r3 := row(0), row(1), row(2), row(3)
+	comb := func(a, b [4]float32, sgn float32) [4]float32 {
+		return [4]float32{a[0] + sgn*b[0], a[1] + sgn*b[1], a[2] + sgn*b[2], a[3] + sgn*b[3]}
+	}
+	pl := [6][4]float32{comb(r3, r0, 1), comb(r3, r0, -1), comb(r3, r1, 1), comb(r3, r1, -1), r2, comb(r3, r2, -1)}
+	for i := range pl {
+		p := pl[i]
+		l := float32(math.Sqrt(float64(p[0]*p[0] + p[1]*p[1] + p[2]*p[2])))
+		if l > 0 {
+			pl[i] = [4]float32{p[0] / l, p[1] / l, p[2] / l, p[3] / l}
+		}
+	}
+	return pl
 }

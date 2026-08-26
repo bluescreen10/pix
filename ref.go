@@ -11,7 +11,7 @@ type Disposer interface {
 
 // Ref is a reference-counted, generation-stamped handle to a renderer resource.
 // The zero value is invalid. Clone with Copy(); surrender ownership with Release().
-type Ref[T any] struct {
+type Ref struct {
 	id       uint32
 	gen      uint32
 	refCount *int32
@@ -19,7 +19,7 @@ type Ref[T any] struct {
 }
 
 // Copy increments the reference count and returns an additional Ref to the same resource.
-func (r Ref[T]) Copy() Ref[T] {
+func (r Ref) Copy() Ref {
 	if r.refCount != nil {
 		atomic.AddInt32(r.refCount, 1)
 	}
@@ -27,7 +27,7 @@ func (r Ref[T]) Copy() Ref[T] {
 }
 
 // Release decrements the reference count. When it reaches zero the resource is disposed.
-func (r Ref[T]) Release() {
+func (r Ref) Release() {
 	if r.refCount == nil {
 		return
 	}
@@ -37,9 +37,9 @@ func (r Ref[T]) Release() {
 }
 
 // Valid reports whether the underlying resource is still alive (not disposed and slot not reused).
-func (r Ref[T]) Valid() bool {
+func (r Ref) Valid() bool {
 	return r.owner != nil && r.owner.generation(r.id) == r.gen
 }
 
 // ID returns the slot index into the owning resource table.
-func (r Ref[T]) ID() uint32 { return r.id }
+func (r Ref) ID() uint32 { return r.id }

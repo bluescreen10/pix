@@ -1,217 +1,115 @@
 package pix
 
-import "github.com/bluescreen10/pix/glm"
+import (
+	"unsafe"
 
-// DirectionalLight is a typed node handle for directional light nodes.
-type DirectionalLight struct{ Node }
+	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/gpu"
+)
 
-// DirectionalLightData is the per-light payload stored in Scene.dirLights.
-type directionalLightData struct {
-	color     glm.Color3f
-	intensity float32
-	target    glm.Vec3f
-	shadow    *DirectionalShadow
-	ownerNode uint32
+// Light-count limits (mirror scene_lit.frag).
+const (
+	MaxDirLights   = 4
+	MaxPointLights = 16
+)
+
+type gpuDirLight struct {
+	dir   [4]float32 // xyz = travel direction; w unused
+	color [4]float32 // rgb; w = intensity
 }
 
-func (l DirectionalLight) data() *directionalLightData {
-	return &l.scene.dirLights[l.scene.payload[l.slot()]]
+type gpuPointLight struct {
+	pos   [4]float32 // xyz world; w = range
+	color [4]float32 // rgb; w = intensity
 }
 
-func (l DirectionalLight) Color() glm.Color3f {
-	return l.data().color
+// gpuLights is the whole light table (scalar; matches LightBuf in scene_lit.frag).
+type gpuLights struct {
+	ambient    [4]float32
+	numDir     uint32
+	numPoint   uint32
+	pad0, pad1 uint32
+	dirs       [MaxDirLights]gpuDirLight
+	points     [MaxPointLights]gpuPointLight
 }
 
-func (l DirectionalLight) SetColor(c glm.Color3f) {
-	l.data().color = c
+var lightsSize = uint64(unsafe.Sizeof(gpuLights{}))
+
+// Lights is the scene light table: ambient + directional + point lights in one
+// fixed-size BDA buffer the lit fragment shader reads through the draw root.
+type Lights struct {
+	backend gpu.Backend
+	data    gpuLights
+	buf     gpu.Buffer
+	dirty   bool
 }
 
-func (l DirectionalLight) Intensity() float32 {
-	return l.data().intensity
+// NewLights creates the table. ambient defaults to a low neutral fill so an
+// unlit-looking scene still shows geometry; call SetAmbient to change it.
+func NewLights(b gpu.Backend) *Lights {
+	l := &Lights{backend: b}
+	l.data.ambient = [4]float32{0.08, 0.08, 0.08, 0}
+	l.buf = b.Alloc(lightsSize, gpu.MemoryHost, "Lights")
+	l.dirty = true
+	return l
 }
 
-func (l DirectionalLight) SetIntensity(v float32) {
-	l.data().intensity = v
+// SetAmbient sets the constant ambient term.
+func (l *Lights) SetAmbient(c glm.Vec3f) {
+	l.data.ambient = [4]float32{c[0], c[1], c[2], 0}
+	l.dirty = true
 }
 
-func (l DirectionalLight) Target() glm.Vec3f {
-	return l.data().target
-}
-func (l DirectionalLight) SetTarget(t glm.Vec3f) {
-	l.data().target = t
-}
-
-func (l DirectionalLight) Shadow() *DirectionalShadow {
-	return l.data().shadow
-}
-
-// SetCastShadow creates or destroys the shadow map for this light.
-// For directional lights, "cast shadow" means the light has a shadow map;
-// it does not use the generic node flagCastShadow.
-func (l DirectionalLight) SetCastShadow(castShadows bool) {
-	ld := l.data()
-	if castShadows {
-		ld.shadow = NewDirectionalShadow(5, 0.1, 100)
-	} else {
-		ld.shadow = nil
+// AddDirectional adds a directional light. dir is the direction the light travels
+// (e.g. {0,-1,0} for a downward sun); color is linear RGB, intensity scales it.
+func (l *Lights) AddDirectional(dir, color glm.Vec3f, intensity float32) {
+	if l.data.numDir >= MaxDirLights {
+		return
 	}
-}
-
-func (s *Scene) NewDirectionalLight(color glm.Color3f, intensity float32) DirectionalLight {
-	id := s.allocNode(KindDirectionalLight)
-	payloadIdx := uint32(len(s.dirLights))
-	s.dirLights = append(s.dirLights, directionalLightData{
-		color:     color,
-		intensity: intensity,
-		ownerNode: id.index,
-	})
-	s.payload[id.index] = payloadIdx
-	return DirectionalLight{Node{scene: s, id: id}}
-}
-
-// SpotLight is a typed node handle for spot light nodes.
-type SpotLight struct{ Node }
-
-// spotLightData is the per-light payload stored in Scene.spotLights.
-type spotLightData struct {
-	color      glm.Color3f
-	intensity  float32
-	target     glm.Vec3f
-	innerAngle float32 // degrees
-	outerAngle float32 // degrees
-	shadow     *SpotShadow
-	ownerNode  uint32
-}
-
-func (l SpotLight) data() *spotLightData {
-	return &l.scene.spotLights[l.scene.payload[l.slot()]]
-}
-
-func (l SpotLight) Color() glm.Color3f        { return l.data().color }
-func (l SpotLight) SetColor(c glm.Color3f)    { l.data().color = c }
-func (l SpotLight) Intensity() float32        { return l.data().intensity }
-func (l SpotLight) SetIntensity(v float32)    { l.data().intensity = v }
-func (l SpotLight) Target() glm.Vec3f         { return l.data().target }
-func (l SpotLight) SetTarget(t glm.Vec3f)     { l.data().target = t }
-func (l SpotLight) Shadow() *SpotShadow       { return l.data().shadow }
-
-// SetAngles sets the inner and outer cone half-angles in degrees.
-// Objects inside inner are fully lit; between inner and outer the light
-// falls off smoothly; outside outer there is no light.
-func (l SpotLight) SetAngles(inner, outer float32) {
-	d := l.data()
-	d.innerAngle = inner
-	d.outerAngle = outer
-	if d.shadow != nil {
-		d.shadow.camera.SetFOV(glm.ToRadians(outer) * 2)
+	d := dir.Normalize()
+	l.data.dirs[l.data.numDir] = gpuDirLight{
+		dir:   [4]float32{d[0], d[1], d[2], 0},
+		color: [4]float32{color[0], color[1], color[2], intensity},
 	}
+	l.data.numDir++
+	l.dirty = true
 }
 
-// SetCastShadow creates or destroys the shadow map for this spot light.
-func (l SpotLight) SetCastShadow(cast bool) {
-	d := l.data()
-	if cast {
-		d.shadow = NewSpotShadow(d.outerAngle, 0.1, 100)
-	} else {
-		d.shadow = nil
+// AddPoint adds a point light at pos with a linear falloff to zero at rng.
+func (l *Lights) AddPoint(pos, color glm.Vec3f, intensity, rng float32) {
+	if l.data.numPoint >= MaxPointLights {
+		return
 	}
-}
-
-func (s *Scene) NewSpotLight(color glm.Color3f, intensity float32) SpotLight {
-	id := s.allocNode(KindSpotLight)
-	payloadIdx := uint32(len(s.spotLights))
-	s.spotLights = append(s.spotLights, spotLightData{
-		color:      color,
-		intensity:  intensity,
-		innerAngle: 20,
-		outerAngle: 30,
-		ownerNode:  id.index,
-	})
-	s.payload[id.index] = payloadIdx
-	return SpotLight{Node{scene: s, id: id}}
-}
-
-// PointLight is a typed node handle for point light nodes.
-type PointLight struct{ Node }
-
-// pointLightData is the per-light payload stored in Scene.pointLights.
-type pointLightData struct {
-	color     glm.Color3f
-	intensity float32
-	shadow    *PointShadow
-	ownerNode uint32
-}
-
-func (l PointLight) data() *pointLightData {
-	return &l.scene.pointLights[l.scene.payload[l.slot()]]
-}
-
-func (l PointLight) Color() glm.Color3f        { return l.data().color }
-func (l PointLight) SetColor(c glm.Color3f)    { l.data().color = c }
-func (l PointLight) Intensity() float32        { return l.data().intensity }
-func (l PointLight) SetIntensity(v float32)    { l.data().intensity = v }
-func (l PointLight) Shadow() *PointShadow      { return l.data().shadow }
-
-// SetCastShadow creates or destroys the omnidirectional shadow cube map for this light.
-func (l PointLight) SetCastShadow(cast bool) {
-	d := l.data()
-	if cast {
-		d.shadow = NewPointShadow(100)
-	} else {
-		d.shadow = nil
+	l.data.points[l.data.numPoint] = gpuPointLight{
+		pos:   [4]float32{pos[0], pos[1], pos[2], rng},
+		color: [4]float32{color[0], color[1], color[2], intensity},
 	}
+	l.data.numPoint++
+	l.dirty = true
 }
 
-func (s *Scene) NewPointLight(color glm.Color3f, intensity float32) PointLight {
-	id := s.allocNode(KindPointLight)
-	payloadIdx := uint32(len(s.pointLights))
-	s.pointLights = append(s.pointLights, pointLightData{
-		color:     color,
-		intensity: intensity,
-		ownerNode: id.index,
-	})
-	s.payload[id.index] = payloadIdx
-	return PointLight{Node{scene: s, id: id}}
+// Clear removes all lights (keeps ambient).
+func (l *Lights) Clear() {
+	l.data.numDir, l.data.numPoint = 0, 0
+	l.dirty = true
 }
 
-// AmbientLight is a typed node handle for ambient light nodes.
-type AmbientLight struct{ Node }
+// Addr returns the table's device address.
+func (l *Lights) Addr() uint64 { return l.buf.Addr }
 
-// AmbientLightData is the per-light payload stored in Scene.ambientLights.
-type ambientLightData struct {
-	color     glm.Color3f
-	intensity float32
-	ownerNode uint32
+// Sync uploads the table when it changed.
+func (l *Lights) Sync() {
+	if !l.dirty {
+		return
+	}
+	*(*gpuLights)(l.buf.Ptr) = l.data
+	l.dirty = false
 }
 
-func (l AmbientLight) data() *ambientLightData {
-	return &l.scene.ambientLights[l.scene.payload[l.slot()]]
-}
-
-func (l AmbientLight) Color() glm.Color3f {
-	return l.data().color
-}
-
-func (l AmbientLight) SetColor(c glm.Color3f) {
-	l.data().color = c
-}
-
-func (l AmbientLight) Intensity() float32 {
-	return l.data().intensity
-}
-
-func (l AmbientLight) SetIntensity(v float32) {
-	l.data().intensity = v
-}
-
-func (s *Scene) NewAmbientLight(intensity float32) AmbientLight {
-	id := s.allocNode(KindAmbientLight)
-	payloadIdx := uint32(len(s.ambientLights))
-	s.ambientLights = append(s.ambientLights, ambientLightData{
-		color:     glm.Color3f{1, 1, 1},
-		intensity: intensity,
-		ownerNode: id.index,
-	})
-	s.payload[id.index] = payloadIdx
-	return AmbientLight{Node{scene: s, id: id}}
+// Destroy releases the table buffer.
+func (l *Lights) Destroy() {
+	if l.buf.Valid() {
+		l.backend.Free(l.buf)
+		l.buf = gpu.Buffer{}
+	}
 }

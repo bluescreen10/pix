@@ -1,53 +1,51 @@
 package pix
 
-import "github.com/bluescreen10/dawn-go/wgpu"
-
-// Mesh is a typed node handle for renderable mesh nodes.
-// It embeds Node so all hierarchy and transform methods are available directly.
+// Mesh is a typed node handle for a renderable mesh (geometry + material at a node).
+// It embeds Node, so all hierarchy and transform methods are available directly.
 type Mesh struct{ Node }
 
-// meshData is the per-mesh payload stored in Scene.meshes.
+// meshData is the per-mesh payload stored in Scene.meshes. It holds ref-counted
+// handles to renderer-owned resources plus the cached local bounds.
 type meshData struct {
-	geometry       Geometry
-	material       Material
-	boundingSphere Sphere
-	ownerNode      uint32
-	pipelines      [numPipelineTypes]*wgpu.RenderPipeline
+	geometry  Geometry
+	material  Material
+	bounds    Sphere
+	ownerNode uint32
 }
 
 func (m Mesh) data() *meshData {
 	return &m.scene.meshes[m.scene.payload[m.slot()]]
 }
 
-func (m Mesh) Geometry() Geometry {
-	return m.data().geometry
-}
+// Geometry returns the mesh's geometry handle.
+func (m Mesh) Geometry() Geometry { return m.data().geometry }
 
-func (m Mesh) Material() Material {
-	return m.data().material
-}
+// Material returns the mesh's material handle.
+func (m Mesh) Material() Material { return m.data().material }
 
+// SetMaterial swaps the mesh's material (the cached materialID changes, so the
+// scene's drawables are rebuilt).
 func (m Mesh) SetMaterial(mat Material) {
 	md := m.data()
 	newRef := mat.Copy()
 	md.material.Release()
 	md.material = newRef
-	m.scene.drawableDirty = true // materialID cached in the drawable is now stale
+	m.scene.drawableDirty = true
 }
 
-// BoundingSphere returns the world-space bounding sphere from the pre-computed local bounds.
-func (m Mesh) BoundingSphere() Sphere {
-	return m.data().geometry.BoundingSphere()
-}
+// BoundingSphere returns the mesh's local bounding sphere.
+func (m Mesh) BoundingSphere() Sphere { return m.data().bounds }
 
+// NewMesh creates a mesh node from a geometry + material (both renderer-owned). The
+// scene takes its own references (Copy), so the caller may Release theirs.
 func (s *Scene) NewMesh(geo Geometry, mat Material) Mesh {
 	id := s.allocNode(KindMesh)
 	payloadIdx := uint32(len(s.meshes))
 	s.meshes = append(s.meshes, meshData{
-		geometry:       geo.Copy(),
-		material:       mat.Copy(),
-		boundingSphere: geo.BoundingSphere(),
-		ownerNode:      id.index,
+		geometry:  geo.Copy(),
+		material:  mat.Copy(),
+		bounds:    geo.BoundingSphere(),
+		ownerNode: id.index,
 	})
 	s.payload[id.index] = payloadIdx
 	s.drawableDirty = true

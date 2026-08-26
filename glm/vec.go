@@ -8,7 +8,7 @@ import (
 )
 
 type number interface {
-	constraints.Float | constraints.Signed
+	constraints.Float | constraints.Signed | constraints.Unsigned
 }
 
 // Vec2
@@ -155,11 +155,11 @@ func (v Vec4[T]) Vec3() Vec3[T] {
 
 // PackRGBA8 packs a linear RGBA color, clamping each channel to [0,1].
 func (c Vec4[T]) RGBA8() RGBA8 {
-	r := uint32(float32(Clamp(c[0], 0, 1)) * 255.0)
-	g := uint32(float32(Clamp(c[1], 0, 1)) * 255.0)
-	b := uint32(float32(Clamp(c[2], 0, 1)) * 255.0)
-	a := uint32(float32(Clamp(c[3], 0, 1)) * 255.0)
-	return RGBA8(r | g<<8 | b<<16 | a<<24)
+	r := uint8(float32(Clamp(c[0], 0, 1)) * 255.0)
+	g := uint8(float32(Clamp(c[1], 0, 1)) * 255.0)
+	b := uint8(float32(Clamp(c[2], 0, 1)) * 255.0)
+	a := uint8(float32(Clamp(c[3], 0, 1)) * 255.0)
+	return RGBA8{r, g, b, a}
 }
 
 // aliases

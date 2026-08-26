@@ -1,131 +1,137 @@
 package pix
 
 import (
-	"hash/fnv"
 	"unsafe"
 
-	"github.com/bluescreen10/dawn-go/wgpu"
+	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/gpu"
 )
 
-var matID idGen
+// NoTexture is the colorMap value for a material with no bound texture.
+const NoTexture uint32 = 0xFFFFFFFF
 
-type MaterialFlags uint32
-
+// Material flag bits (mirror scene_material.frag).
 const (
-	ColorMapFlag  = MaterialFlags(1 << iota)
-	WireframeFlag // changes pipeline topology to LineList; no shader define needed
+	MatColorMap uint32 = 1 << 0
 )
 
-var materialFlagNames = map[int]string{
-	0: "USE_MAP",
+// MaterialDesc describes a material. Textures are bindless heap indices
+// (Texture.Index / Sampler.Index), not bindings.
+type MaterialDesc struct {
+	BaseColor glm.Vec4f
+	ColorMap  uint32 // heap sampled-image index, or NoTexture
+	Sampler   uint32 // heap sampler index
 }
 
-// usesPull reports whether this material's vertex stage pulls its attributes
-// from the GeometrySystem SSBOs (vs. classic vertex-buffer fetch).
-func (m *MaterialData) usesPull() bool {
-	return m.vertexShader == geometryVertexShader ||
-		m.vertexShader == shadowVertexShader ||
-		m.vertexShader == pointShadowVertexShader
+// gpuMaterial is one row of the material table (scalar, 32 bytes); matches the
+// GLSL Material struct.
+type gpuMaterial struct {
+	baseColor [4]float32
+	colorMap  uint32
+	sampler   uint32
+	flags     uint32
+	_         uint32
 }
 
-type MaterialData struct {
-	id             uint32
-	version        int
-	vertexShader   string
-	fragmentShader string
-	name           string
-	hash           uint32
-	flags          MaterialFlags
-	side           Side
-	blending       BlendMode
-	depthWrite     bool
-	depthTest      bool
-	depthFunc      DepthFunc
-	colorWrite     bool
-	textures       []Ref[Texture]
-	uniforms       []*Uniform
-	isLit          bool
+var materialSize = uint32(unsafe.Sizeof(gpuMaterial{}))
 
-	// GPU-side resources, populated by the renderer.
-	gpuVersion         int
-	gpuBindGroup       *wgpu.BindGroup
-	gpuBindGroupLayout *wgpu.BindGroupLayout
-	gpuUniformBuffers  []*wgpu.Buffer
+// materialSystem is the renderer-owned material table: a growable BDA buffer of
+// material records indexed by materialID. No bind groups — the draw shader reads
+// materials[materialID] through the address in its root struct and samples heap
+// textures by the stored index. Freed slots are recycled (generation-stamped).
+type materialSystem struct {
+	backend gpu.Backend
+	records []gpuMaterial
+	gens    []uint32
+	free    []uint32
+	buf     gpu.Buffer
+	cap     uint32
+	dirty   bool
 }
 
-func (m *MaterialData) Texture(id int) Ref[Texture] {
-	return m.textures[id]
+func newMaterialSystem(b gpu.Backend) *materialSystem {
+	m := &materialSystem{backend: b, cap: 1}
+	m.buf = b.Alloc(uint64(materialSize), gpu.MemoryHost, "Materials")
+	return m
 }
 
-func (m *MaterialData) SetTexture(id int, texture Texture) {
-	old := m.textures[id]
-	m.textures[id] = texture.ref.Copy()
-	old.Release()
-	m.version++
-}
-
-func (m *MaterialData) Uniforms() []*Uniform {
-	return m.uniforms
-}
-
-// Destroy releases the GPU resources held by this material.
-func (m *MaterialData) Destroy() {
-	if m.gpuBindGroup != nil {
-		m.gpuBindGroup.Release()
-		m.gpuBindGroup = nil
+// create records a material and returns its slot id.
+func (m *materialSystem) create(desc MaterialDesc) uint32 {
+	var flags uint32
+	if desc.ColorMap != NoTexture {
+		flags |= MatColorMap
 	}
-	if m.gpuBindGroupLayout != nil {
-		m.gpuBindGroupLayout.Release()
-		m.gpuBindGroupLayout = nil
+	rec := gpuMaterial{
+		baseColor: [4]float32{desc.BaseColor[0], desc.BaseColor[1], desc.BaseColor[2], desc.BaseColor[3]},
+		colorMap:  desc.ColorMap,
+		sampler:   desc.Sampler,
+		flags:     flags,
 	}
-	for _, b := range m.gpuUniformBuffers {
-		b.Destroy()
+	m.dirty = true
+	if n := len(m.free); n > 0 {
+		id := m.free[n-1]
+		m.free = m.free[:n-1]
+		m.records[id] = rec
+		return id
 	}
-	m.gpuUniformBuffers = nil
+	id := uint32(len(m.records))
+	m.records = append(m.records, rec)
+	m.gens = append(m.gens, 1)
+	return id
 }
 
-func NewMaterial(name string, vertexShader string, fragmentShader string, uniforms []*Uniform, numTextures int, isLit bool) *MaterialData {
-	return &MaterialData{
-		id:             matID.Next(),
-		name:           name,
-		version:        1,
-		vertexShader:   vertexShader,
-		fragmentShader: fragmentShader,
-		hash:           hashShader(vertexShader, fragmentShader),
-		side:           SideFront,
-		blending:       BlendOpaque,
-		depthWrite:     true,
-		depthTest:      true,
-		depthFunc:      DepthFuncLess,
-		colorWrite:     true,
-		uniforms:       uniforms,
-		textures:       make([]Ref[Texture], numTextures),
-		isLit:          isLit,
+// Addr returns the material table's device address (re-read after Sync).
+func (m *materialSystem) Addr() uint64 { return m.buf.Addr }
+
+// Sync uploads the table when it changed, growing the buffer as needed.
+func (m *materialSystem) Sync() {
+	if !m.dirty {
+		return
+	}
+	need := uint32(len(m.records))
+	if need > m.cap {
+		for m.cap < need {
+			m.cap *= 2
+		}
+		m.backend.Free(m.buf)
+		m.buf = m.backend.Alloc(uint64(m.cap)*uint64(materialSize), gpu.MemoryHost, "Materials")
+	}
+	if len(m.records) > 0 {
+		writeAt(m.buf, 0, toBytes(m.records))
+	}
+	m.dirty = false
+}
+
+// Destroy releases the table buffer.
+func (m *materialSystem) Destroy() {
+	if m.buf.Valid() {
+		m.backend.Free(m.buf)
+		m.buf = gpu.Buffer{}
 	}
 }
 
-// Material is the public handle for a renderer-owned material resource.
-type Material struct {
-	renderer *Renderer
-	ref      Ref[Material]
+// Disposer: dispose/generation let a Ref own a slot.
+func (m *materialSystem) dispose(id uint32) {
+	m.gens[id]++
+	m.free = append(m.free, id)
+}
+func (m *materialSystem) generation(id uint32) uint32 {
+	if id >= uint32(len(m.gens)) {
+		return 0
+	}
+	return m.gens[id]
 }
 
-func (m Material) Ref() Ref[Material] {
-	return m.ref
+func (m *materialSystem) newHandle(desc MaterialDesc) Material {
+	id := m.create(desc)
+	rc := int32(1)
+	return Material{ref: Ref{id: id, gen: m.gens[id], refCount: &rc, owner: m}}
 }
 
-// Release surrenders this handle's reference to the material resource.
-func (m Material) Release() { m.ref.Release() }
+// Material is a ref-counted handle to a renderer-owned material.
+type Material struct{ ref Ref }
 
-// Copy increments the reference count and returns an additional Material handle.
-func (m Material) Copy() Material { return Material{renderer: m.renderer, ref: m.ref.Copy()} }
-
-// Valid reports whether the underlying material resource is still alive.
-func (m Material) Valid() bool { return m.ref.Valid() }
-
-func hashShader(s1, s2 string) uint32 {
-	h := fnv.New32a()
-	h.Write(unsafe.Slice(unsafe.StringData(s1), len(s1)))
-	h.Write(unsafe.Slice(unsafe.StringData(s2), len(s2)))
-	return h.Sum32()
-}
+func (m Material) Copy() Material { return Material{m.ref.Copy()} }
+func (m Material) Release()       { m.ref.Release() }
+func (m Material) Valid() bool    { return m.ref.Valid() }
+func (m Material) id() uint32     { return m.ref.id }
