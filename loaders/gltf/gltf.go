@@ -55,6 +55,11 @@ func Load(r *pix.Renderer, scene *pix.Scene, path string) (int, error) {
 	return l.build()
 }
 
+type texKey struct {
+	index int
+	srgb  bool // color textures decode from sRGB; data maps (normal/MR) stay linear
+}
+
 type loader struct {
 	renderer *pix.Renderer
 	scene    *pix.Scene
@@ -62,14 +67,15 @@ type loader struct {
 	buffers  [][]byte
 	baseDir  string
 
-	textures  []pix.Texture  // per gltf texture (index used by materials)
-	materials []*pix.PBRMaterial // [0]=default; gltf material i -> [i+1]
-	nodes     []pix.Node     // per gltf node
+	texCache  map[texKey]pix.Texture // (gltf texture, color space) -> uploaded texture
+	allTex    []pix.Texture          // every uploaded texture, for release after build
+	materials []*pix.PBRMaterial     // [0]=default; gltf material i -> [i+1]
+	nodes     []pix.Node             // per gltf node
 	added     int
 }
 
 func (l *loader) build() (int, error) {
-	l.loadTextures()
+	l.texCache = map[texKey]pix.Texture{}
 	l.loadMaterials()
 
 	// Build only the nodes reachable from the loaded scene's roots (their subtrees).
@@ -86,7 +92,7 @@ func (l *loader) build() (int, error) {
 	for _, m := range l.materials {
 		m.Release()
 	}
-	for _, t := range l.textures {
+	for _, t := range l.allTex {
 		if t.Valid() {
 			t.Release()
 		}
@@ -187,23 +193,41 @@ func (l *loader) buildData(prim primitive) pix.Data {
 
 // ---- textures & materials ----
 
-func (l *loader) loadTextures() {
-	l.textures = make([]pix.Texture, len(l.doc.Textures))
-	for i, gt := range l.doc.Textures {
-		if gt.Source == nil {
-			continue
-		}
-		pixels, w, h, err := l.decodeImage(*gt.Source)
-		if err != nil {
-			continue // skip undecodable images; material falls back to base color
-		}
-		// Base-color textures are sRGB color (data maps would use pix.TextureLinear).
-		l.textures[i] = l.renderer.NewTexture(pixels, w, h, pix.TextureSRGB)
+// texture decodes + uploads a glTF texture in the given color space (deduped by
+// texture index + color space), returning a handle (zero if missing/undecodable).
+// Color textures use sRGB; data maps (normal, metallic-roughness) stay linear.
+func (l *loader) texture(idx int, srgb bool) pix.Texture {
+	if idx < 0 || idx >= len(l.doc.Textures) {
+		return pix.Texture{}
 	}
+	key := texKey{idx, srgb}
+	if t, ok := l.texCache[key]; ok {
+		return t
+	}
+	gt := l.doc.Textures[idx]
+	if gt.Source == nil {
+		l.texCache[key] = pix.Texture{}
+		return pix.Texture{}
+	}
+	pixels, w, h, err := l.decodeImage(*gt.Source)
+	if err != nil {
+		l.texCache[key] = pix.Texture{}
+		return pix.Texture{}
+	}
+	format := pix.TextureLinear
+	if srgb {
+		format = pix.TextureSRGB
+	}
+	t := l.renderer.NewTexture(pixels, w, h, format)
+	l.texCache[key] = t
+	l.allTex = append(l.allTex, t)
+	return t
 }
 
 func (l *loader) loadMaterials() {
-	// glTF materials are metallic-roughness PBR → load them as PBR materials.
+	// glTF materials are metallic-roughness PBR → load them as PBR materials with
+	// their base-color, normal, and metallic-roughness maps.
+	samp := l.renderer.DefaultSampler()
 	l.materials = make([]*pix.PBRMaterial, len(l.doc.Materials)+1)
 	def := l.renderer.NewPBRMaterial()
 	def.SetRoughness(1)
@@ -212,6 +236,11 @@ func (l *loader) loadMaterials() {
 		m := l.renderer.NewPBRMaterial()
 		m.SetMetallic(1)
 		m.SetRoughness(1)
+		if gm.NormalTexture != nil {
+			if t := l.texture(gm.NormalTexture.Index, false); t.Valid() {
+				m.SetNormalMap(t, samp)
+			}
+		}
 		if pbr := gm.PbrMetallicRoughness; pbr != nil {
 			if len(pbr.BaseColorFactor) >= 4 {
 				m.SetColor(glm.RGBA32F{pbr.BaseColorFactor[0], pbr.BaseColorFactor[1], pbr.BaseColorFactor[2], pbr.BaseColorFactor[3]})
@@ -222,9 +251,17 @@ func (l *loader) loadMaterials() {
 			if pbr.RoughnessFactor != nil {
 				m.SetRoughness(*pbr.RoughnessFactor)
 			}
-			if pbr.BaseColorTexture != nil && pbr.BaseColorTexture.Index < len(l.textures) {
-				if t := l.textures[pbr.BaseColorTexture.Index]; t.Valid() {
-					m.SetColorMap(t, l.renderer.DefaultSampler())
+			if pbr.BaseColorTexture != nil {
+				if t := l.texture(pbr.BaseColorTexture.Index, true); t.Valid() {
+					m.SetColorMap(t, samp)
+				}
+			}
+			// One combined metallic-roughness texture (glTF: .b metallic, .g roughness)
+			// feeds both independent map slots.
+			if pbr.MetallicRoughnessTexture != nil {
+				if t := l.texture(pbr.MetallicRoughnessTexture.Index, false); t.Valid() {
+					m.SetMetallicMap(t, samp)
+					m.SetRoughnessMap(t, samp)
 				}
 			}
 		}
