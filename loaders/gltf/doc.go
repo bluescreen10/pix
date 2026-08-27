@@ -45,17 +45,19 @@ type primitive struct {
 }
 
 type material struct {
-	Name                 string `json:"name"`
-	PbrMetallicRoughness *pbr   `json:"pbrMetallicRoughness"`
-	DoubleSided          bool   `json:"doubleSided"`
-	AlphaMode            string `json:"alphaMode"`
+	Name                 string      `json:"name"`
+	PbrMetallicRoughness *pbr        `json:"pbrMetallicRoughness"`
+	NormalTexture        *textureRef `json:"normalTexture"`
+	DoubleSided          bool        `json:"doubleSided"`
+	AlphaMode            string      `json:"alphaMode"`
 }
 
 type pbr struct {
-	BaseColorFactor  []float32   `json:"baseColorFactor"`
-	BaseColorTexture *textureRef `json:"baseColorTexture"`
-	MetallicFactor   *float32    `json:"metallicFactor"`
-	RoughnessFactor  *float32    `json:"roughnessFactor"`
+	BaseColorFactor          []float32   `json:"baseColorFactor"`
+	BaseColorTexture         *textureRef `json:"baseColorTexture"`
+	MetallicFactor           *float32    `json:"metallicFactor"`
+	RoughnessFactor          *float32    `json:"roughnessFactor"`
+	MetallicRoughnessTexture *textureRef `json:"metallicRoughnessTexture"`
 }
 
 type textureRef struct {

@@ -72,25 +72,13 @@ func (l *loader) build() (int, error) {
 	l.loadTextures()
 	l.loadMaterials()
 
-	// Create a node per glTF node, set its local transform, then wire the hierarchy
-	// and attach a Mesh child per primitive — the scene graph computes world matrices.
-	l.nodes = make([]pix.Node, len(l.doc.Nodes))
-	for i := range l.doc.Nodes {
-		l.nodes[i] = l.scene.NewGroup().Node
-		setLocal(l.nodes[i], l.doc.Nodes[i])
-	}
-	for i, gn := range l.doc.Nodes {
-		for _, c := range gn.Children {
-			l.nodes[i].Add(l.nodes[c])
-		}
-	}
-	for i, gn := range l.doc.Nodes {
-		if gn.Mesh != nil {
-			l.addMesh(l.nodes[i], *gn.Mesh)
-		}
-	}
+	// Build only the nodes reachable from the loaded scene's roots (their subtrees).
+	// glTF files can hold several scenes (e.g. this asset has "Extended" + "Original"
+	// with duplicate nodes) — nodes not in the loaded scene must NOT be created, or
+	// they'd render at identity (origin) since nothing parents them.
+	l.nodes = make([]pix.Node, len(l.doc.Nodes)) // sparse; only reachable nodes filled
 	for _, ri := range l.roots() {
-		l.scene.Add(l.nodes[ri])
+		l.scene.Add(l.buildNode(ri))
 	}
 
 	// Drop the loader's references now that ownership has transferred: each Mesh holds
@@ -104,6 +92,26 @@ func (l *loader) build() (int, error) {
 		}
 	}
 	return l.added, nil
+}
+
+// buildNode creates the scene node for a glTF node and its subtree: it sets the local
+// transform, attaches a Mesh child per triangle primitive, and recurses into children.
+// Returns the scene node (to be parented by the caller).
+func (l *loader) buildNode(idx int) pix.Node {
+	if l.nodes[idx].IsValid() {
+		return l.nodes[idx] // already built (defensive: a node with two parents)
+	}
+	gn := l.doc.Nodes[idx]
+	node := l.scene.NewGroup().Node
+	l.nodes[idx] = node
+	setLocal(node, gn)
+	if gn.Mesh != nil {
+		l.addMesh(node, *gn.Mesh)
+	}
+	for _, c := range gn.Children {
+		node.Add(l.buildNode(c))
+	}
+	return node
 }
 
 func (l *loader) roots() []int {

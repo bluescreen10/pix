@@ -13,6 +13,65 @@ import (
 	"github.com/bluescreen10/pix/glm"
 )
 
+// TestMultiSceneOnlyDefault verifies the loader builds ONLY the default scene's
+// nodes. A file with two scenes (each with its own mesh node) must load just the
+// default scene's mesh — the other scene's node must not be created (it would
+// otherwise render at identity/origin).
+func TestMultiSceneOnlyDefault(t *testing.T) {
+	// Two triangle meshes; scene 0 uses node 0, scene 1 uses node 1.
+	var buf []byte
+	putf := func(f float32) { buf = binary.LittleEndian.AppendUint32(buf, math.Float32bits(f)) }
+	for _, p := range [][3]float32{{-0.6, -0.6, 0}, {0.6, -0.6, 0}, {0, 0.6, 0}} {
+		putf(p[0])
+		putf(p[1])
+		putf(p[2])
+	}
+	posLen := len(buf)
+	for _, i := range []uint16{0, 1, 2} {
+		buf = binary.LittleEndian.AppendUint16(buf, i)
+	}
+	idxLen := len(buf) - posLen
+	uri := "data:application/octet-stream;base64," + base64.StdEncoding.EncodeToString(buf)
+	doc := fmt.Sprintf(`{
+      "asset": {"version": "2.0"},
+      "scene": 0,
+      "scenes": [{"name":"A","nodes": [0]}, {"name":"B","nodes": [1]}],
+      "nodes": [
+        {"mesh": 0, "translation": [0, 0, 0]},
+        {"mesh": 0, "translation": [100, 0, 0]}
+      ],
+      "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1}]}],
+      "accessors": [
+        {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3"},
+        {"bufferView": 1, "componentType": 5123, "count": 3, "type": "SCALAR"}
+      ],
+      "bufferViews": [
+        {"buffer": 0, "byteOffset": 0, "byteLength": %d},
+        {"buffer": 0, "byteOffset": %d, "byteLength": %d}
+      ],
+      "buffers": [{"uri": "%s", "byteLength": %d}]
+    }`, posLen, posLen, idxLen, uri, len(buf))
+	path := filepath.Join(t.TempDir(), "two.gltf")
+	if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := pix.NewOffscreenRenderer(32, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	scene := r.NewScene()
+	defer scene.Destroy()
+	n, err := Load(r, scene, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || scene.MeshCount() != 1 {
+		t.Fatalf("loaded %d meshes (scene has %d), want 1 — the second scene's node leaked", n, scene.MeshCount())
+	}
+}
+
 // writeTriangleGLTF writes a minimal .gltf: one triangle mesh under a parent node
 // that translates it +0.5 in x, with a green PBR base color. Returns the path.
 func writeTriangleGLTF(t *testing.T) string {

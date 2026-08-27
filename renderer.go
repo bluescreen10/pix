@@ -341,7 +341,8 @@ func (r *Renderer) encode(cl gpu.CommandList, target gpu.Texture, scene *Scene, 
 // changed (so a material raster/blend change re-batches without an explicit dirty).
 func (r *Renderer) syncScene(s *Scene) {
 	r.geo.Sync()
-	r.mats.Sync()
+	// Material records live in host-coherent mapped memory — writes are already
+	// visible, so no material upload step is needed.
 	s.UpdateTransforms()
 	s.dl.uploadWorld(s.world)
 

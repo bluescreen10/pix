@@ -1,9 +1,13 @@
 package pix
 
-import "github.com/bluescreen10/pix/glm"
+import (
+	"unsafe"
 
-// pbrRecord is the GPU material record for metallic-roughness PBR materials (scalar,
-// 48 bytes); matches the Material struct in scene_pbr.frag.
+	"github.com/bluescreen10/pix/glm"
+)
+
+// pbrRecord is the GPU material record for metallic-roughness PBR (64 bytes); matches
+// the Material struct in scene_pbr.frag. POD — it lives directly in the store buffer.
 type pbrRecord struct {
 	baseColor [4]float32
 	emissive  [4]float32
@@ -15,62 +19,46 @@ type pbrRecord struct {
 	_, _, _   uint32
 }
 
-// PBRMaterial is a metallic-roughness physically-based material (Cook-Torrance).
+// PBRMaterial is a metallic-roughness physically-based material (Cook-Torrance). It
+// embeds genericMaterial (satisfying Material) and adds typed accessors that write
+// straight into its record in the store's mapped buffer.
 type PBRMaterial struct {
 	genericMaterial
-	slab *materialSlab[pbrRecord]
 }
 
 // NewPBRMaterial creates a PBR material (1 texture slot: the base-color map).
-// Defaults to a white dielectric at mid roughness.
 func (r *Renderer) NewPBRMaterial() *PBRMaterial {
-	s := r.mats.pbrStore()
-	id := s.alloc(pbrRecord{baseColor: [4]float32{1, 1, 1, 1}, roughness: 0.5, colorMap: noTextureIndex})
+	st := r.mats.store(ShaderPBR, uint32(unsafe.Sizeof(pbrRecord{})), 1, "PBR Materials")
+	id := st.alloc()
 	rc := int32(1)
-	return &PBRMaterial{
-		genericMaterial: genericMaterial{store: s, ref: Ref{id: id, gen: s.gens[id], refCount: &rc, owner: s}},
-		slab:            s,
-	}
+	m := &PBRMaterial{genericMaterial{store: st, ref: Ref{id: id, gen: st.gens[id], refCount: &rc, owner: st}}}
+	*m.rec() = pbrRecord{baseColor: [4]float32{1, 1, 1, 1}, roughness: 0.5, colorMap: noTextureIndex}
+	return m
 }
 
-func (m *PBRMaterial) rec() *pbrRecord { return m.slab.get(m.ref.id) }
+func (m *PBRMaterial) rec() *pbrRecord { return (*pbrRecord)(m.store.record(m.ref.id)) }
 
-// Color returns the base color (rgba).
-func (m *PBRMaterial) Color() glm.RGBA32F { return glm.RGBA32F(m.rec().baseColor) }
+func (m *PBRMaterial) Color() glm.RGBA32F     { return glm.RGBA32F(m.rec().baseColor) }
+func (m *PBRMaterial) SetColor(c glm.RGBA32F) { m.rec().baseColor = c }
 
-// SetColor sets the base color (rgba).
-func (m *PBRMaterial) SetColor(c glm.RGBA32F) { m.rec().baseColor = c; m.slab.touch() }
+func (m *PBRMaterial) Metallic() float32     { return m.rec().metallic }
+func (m *PBRMaterial) SetMetallic(v float32) { m.rec().metallic = v }
 
-// Metallic returns the metallic factor [0,1].
-func (m *PBRMaterial) Metallic() float32 { return m.rec().metallic }
+func (m *PBRMaterial) Roughness() float32     { return m.rec().roughness }
+func (m *PBRMaterial) SetRoughness(v float32) { m.rec().roughness = v }
 
-// SetMetallic sets the metallic factor [0,1].
-func (m *PBRMaterial) SetMetallic(v float32) { m.rec().metallic = v; m.slab.touch() }
-
-// Roughness returns the roughness factor [0,1].
-func (m *PBRMaterial) Roughness() float32 { return m.rec().roughness }
-
-// SetRoughness sets the roughness factor [0,1].
-func (m *PBRMaterial) SetRoughness(v float32) { m.rec().roughness = v; m.slab.touch() }
-
-// Emissive returns the emissive color.
 func (m *PBRMaterial) Emissive() glm.RGB32F {
 	e := m.rec().emissive
 	return glm.RGB32F{e[0], e[1], e[2]}
 }
-
-// SetEmissive sets the emissive color.
-func (m *PBRMaterial) SetEmissive(c glm.RGB32F) {
-	m.rec().emissive = [4]float32{c[0], c[1], c[2], 0}
-	m.slab.touch()
-}
+func (m *PBRMaterial) SetEmissive(c glm.RGB32F) { m.rec().emissive = [4]float32{c[0], c[1], c[2], 0} }
 
 // ColorMap returns the bound base-color texture (or a zero handle).
-func (m *PBRMaterial) ColorMap() Texture { return m.slab.texture(m.ref.id, 0) }
+func (m *PBRMaterial) ColorMap() Texture { return m.store.texture(m.ref.id, 0) }
 
 // SetColorMap binds a base-color texture sampled with sampler (0 = default sampler).
 func (m *PBRMaterial) SetColorMap(t Texture, sampler uint32) {
-	m.slab.setTexture(m.ref.id, 0, t)
+	m.store.setTexture(m.ref.id, 0, t)
 	r := m.rec()
 	if t.Valid() {
 		r.colorMap, r.sampler, r.flags = t.index, sampler, r.flags|MatColorMap

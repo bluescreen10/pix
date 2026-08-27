@@ -9,7 +9,12 @@ import (
 const noTextureIndex uint32 = 0xFFFFFFFF
 
 // Material flag bits (mirror the per-type material structs in the shaders).
-const MatColorMap uint32 = 1 << 0
+const (
+	MatColorMap  uint32 = 1 << 0 // base-color map bound
+	MatNormalMap uint32 = 1 << 1 // tangent-space normal map bound (PBR)
+	MatMetalMap  uint32 = 1 << 2 // metallic map bound (PBR; sampled .b)
+	MatRoughMap  uint32 = 1 << 3 // roughness map bound (PBR; sampled .g)
+)
 
 // CullMode selects which triangle faces are discarded. CullNone is double-sided.
 type CullMode uint8
@@ -64,6 +69,11 @@ type Material interface {
 	Cull() CullMode
 	Blend() BlendMode
 
+	// Data is the material's per-instance uniform bytes — what the fragment shader
+	// reads from the material buffer (via BDA). The material system allocates storage
+	// from its size, so a material only declares its layout (no hand-written store).
+	Data() []byte
+
 	// Renderer-facing: the instance's index within its store, and the store's record
 	// buffer address (resolved at draw time — it moves when the store grows).
 	materialID() uint32
@@ -72,9 +82,9 @@ type Material interface {
 
 // genericMaterial is the minimal Material a mesh holds and the base the typed
 // material handles embed. It carries the store and the ref-counted instance handle;
-// shaders come from the store, raster state from the store's per-instance record.
+// shaders come from the store, raster + data from the store's per-instance record.
 type genericMaterial struct {
-	store materialStore
+	store *materialStore
 	ref   Ref
 }
 
@@ -85,6 +95,7 @@ func (m genericMaterial) Vertex() []byte        { return m.store.shader().Vertex
 func (m genericMaterial) Fragment() []byte      { return m.store.shader().Fragment }
 func (m genericMaterial) Cull() CullMode        { return m.store.rasterOf(m.ref.id).cull }
 func (m genericMaterial) Blend() BlendMode      { return m.store.rasterOf(m.ref.id).blend }
+func (m genericMaterial) Data() []byte          { return m.store.dataOf(m.ref.id) }
 func (m genericMaterial) materialID() uint32    { return m.ref.id }
 func (m genericMaterial) materialsAddr() uint64 { return m.store.bufAddr() }
 
@@ -112,50 +123,29 @@ func (m genericMaterial) SetBlend(b BlendMode) {
 	m.store.setRasterOf(m.ref.id, r)
 }
 
-// materialSystem OWNS every per-type material store (the renderer owns pipelines and
-// issues draws, never a store). It creates stores lazily, syncs and destroys them.
+// materialSystem OWNS every material store (the renderer owns pipelines and issues
+// draws, never a store). Stores are byte-based and created automatically, one per
+// material kind (keyed by fragment shader): a material declares its shader + data
+// size, and the system allocates storage — no hand-written per-type store.
 type materialSystem struct {
 	backend gpu.Backend
-	stores  []materialStore
-
-	basic *materialSlab[basicRecord]
-	blinn *materialSlab[blinnPhongRecord]
-	pbr   *materialSlab[pbrRecord]
+	stores  []*materialStore
 }
 
-func newMaterialSystem(b gpu.Backend) *materialSystem {
-	return &materialSystem{backend: b}
-}
+func newMaterialSystem(b gpu.Backend) *materialSystem { return &materialSystem{backend: b} }
 
-func (s *materialSystem) basicStore() *materialSlab[basicRecord] {
-	if s.basic == nil {
-		s.basic = newMaterialSlab[basicRecord](s.backend, ShaderUnlit, 1, "Basic Materials")
-		s.stores = append(s.stores, s.basic)
-	}
-	return s.basic
-}
-
-func (s *materialSystem) blinnStore() *materialSlab[blinnPhongRecord] {
-	if s.blinn == nil {
-		s.blinn = newMaterialSlab[blinnPhongRecord](s.backend, ShaderBlinnPhong, 1, "BlinnPhong Materials")
-		s.stores = append(s.stores, s.blinn)
-	}
-	return s.blinn
-}
-
-func (s *materialSystem) pbrStore() *materialSlab[pbrRecord] {
-	if s.pbr == nil {
-		s.pbr = newMaterialSlab[pbrRecord](s.backend, ShaderPBR, 1, "PBR Materials")
-		s.stores = append(s.stores, s.pbr)
-	}
-	return s.pbr
-}
-
-// Sync uploads every dirty store.
-func (s *materialSystem) Sync() {
+// store returns the store for a material kind, creating it on first use. The kind is
+// keyed by the fragment shader (which fixes the record layout); stride is the record
+// size in bytes, texSlots the number of texture slots per instance.
+func (s *materialSystem) store(sh Shader, stride uint32, texSlots int, label string) *materialStore {
 	for _, st := range s.stores {
-		st.sync()
+		if sameBytes(st.sh.Fragment, sh.Fragment) {
+			return st
+		}
 	}
+	st := newMaterialStore(s.backend, sh, stride, texSlots, label)
+	s.stores = append(s.stores, st)
+	return st
 }
 
 // Destroy releases every store.
@@ -163,5 +153,5 @@ func (s *materialSystem) Destroy() {
 	for _, st := range s.stores {
 		st.destroy()
 	}
-	s.stores, s.basic, s.blinn, s.pbr = nil, nil, nil, nil
+	s.stores = nil
 }
