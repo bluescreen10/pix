@@ -63,7 +63,7 @@ type loader struct {
 	baseDir  string
 
 	textures  []pix.Texture  // per gltf texture (index used by materials)
-	materials []pix.Material // [0]=default; gltf material i -> [i+1]
+	materials []*pix.PBRMaterial // [0]=default; gltf material i -> [i+1]
 	nodes     []pix.Node     // per gltf node
 	added     int
 }
@@ -93,10 +93,15 @@ func (l *loader) build() (int, error) {
 		l.scene.Add(l.nodes[ri])
 	}
 
-	// Drop the loader's material references (each Mesh holds its own copy). Textures
-	// stay owned by the renderer (materials reference them by heap index).
+	// Drop the loader's references now that ownership has transferred: each Mesh holds
+	// its own material copy, and each material holds its own color-map texture copy.
 	for _, m := range l.materials {
 		m.Release()
+	}
+	for _, t := range l.textures {
+		if t.Valid() {
+			t.Release()
+		}
 	}
 	return l.added, nil
 }
@@ -184,30 +189,43 @@ func (l *loader) loadTextures() {
 		if err != nil {
 			continue // skip undecodable images; material falls back to base color
 		}
-		l.textures[i] = l.renderer.NewTexture(pixels, w, h)
+		// Base-color textures are sRGB color (data maps would use pix.TextureLinear).
+		l.textures[i] = l.renderer.NewTexture(pixels, w, h, pix.TextureSRGB)
 	}
 }
 
 func (l *loader) loadMaterials() {
-	l.materials = make([]pix.Material, len(l.doc.Materials)+1)
-	l.materials[0] = l.renderer.NewMaterial(pix.MaterialDesc{BaseColor: glm.Vec4f{1, 1, 1, 1}, ColorMap: pix.NoTexture})
+	// glTF materials are metallic-roughness PBR → load them as PBR materials.
+	l.materials = make([]*pix.PBRMaterial, len(l.doc.Materials)+1)
+	def := l.renderer.NewPBRMaterial()
+	def.SetRoughness(1)
+	l.materials[0] = def
 	for i, gm := range l.doc.Materials {
-		desc := pix.MaterialDesc{BaseColor: glm.Vec4f{1, 1, 1, 1}, ColorMap: pix.NoTexture}
+		m := l.renderer.NewPBRMaterial()
+		m.SetMetallic(1)
+		m.SetRoughness(1)
 		if pbr := gm.PbrMetallicRoughness; pbr != nil {
 			if len(pbr.BaseColorFactor) >= 4 {
-				desc.BaseColor = glm.Vec4f{pbr.BaseColorFactor[0], pbr.BaseColorFactor[1], pbr.BaseColorFactor[2], pbr.BaseColorFactor[3]}
+				m.SetColor(glm.RGBA32F{pbr.BaseColorFactor[0], pbr.BaseColorFactor[1], pbr.BaseColorFactor[2], pbr.BaseColorFactor[3]})
+			}
+			if pbr.MetallicFactor != nil {
+				m.SetMetallic(*pbr.MetallicFactor)
+			}
+			if pbr.RoughnessFactor != nil {
+				m.SetRoughness(*pbr.RoughnessFactor)
 			}
 			if pbr.BaseColorTexture != nil && pbr.BaseColorTexture.Index < len(l.textures) {
 				if t := l.textures[pbr.BaseColorTexture.Index]; t.Valid() {
-					desc.ColorMap = t.Index()
-					desc.Sampler = l.renderer.DefaultSampler()
+					m.SetColorMap(t, l.renderer.DefaultSampler())
 				}
 			}
 		}
-		l.materials[i+1] = l.renderer.NewMaterial(desc)
+		l.materials[i+1] = m
 	}
 }
 
+// materialFor returns the (embedded) Material for a glTF material index; NewMesh
+// takes its own copy, and the loader releases these builders after building.
 func (l *loader) materialFor(ptr *int) pix.Material {
 	if ptr == nil || *ptr+1 >= len(l.materials) {
 		return l.materials[0]

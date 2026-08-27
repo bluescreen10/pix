@@ -43,7 +43,6 @@ layout(buffer_reference, scalar) readonly buffer DrawRoot {
     VisibleBuf visible;
     uint64_t materials;
     uint64_t lights;
-    uint regionBase;
     vec4 eye;
 };
 layout(push_constant) uniform PC { DrawRoot root; } pc;
@@ -59,7 +58,9 @@ const uint FLAG_UV = 2u;
 const uint FLAG_COLOR = 4u;
 
 void main() {
-    uint di = pc.root.visible.v[pc.root.regionBase + uint(gl_InstanceIndex)];
+    // Each indirect command sets firstInstance = its region base, so gl_InstanceIndex
+    // already includes it and indexes the compacted visible buffer directly.
+    uint di = pc.root.visible.v[uint(gl_InstanceIndex)];
     Drawable d = pc.root.drawables.v[di];
     GeoDesc g = pc.root.descs.v[d.geometryID];
     mat4 m = pc.root.models.v[d.transformID];

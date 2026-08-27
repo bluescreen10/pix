@@ -39,7 +39,7 @@ static VkResult vkbCreateComputePipeline(VkDevice dev, VkPipelineLayout layout,
 static VkResult vkbCreateCreateGraphicsPipeline(VkDevice dev, VkPipelineLayout layout,
         const void* vs, size_t vsBytes, const void* fs, size_t fsBytes, const char* entry,
         VkPrimitiveTopology topo, const VkFormat* colorFmts, uint32_t nColor,
-        VkFormat depthFmt, VkCullModeFlags cull,
+        VkFormat depthFmt, VkCullModeFlags cull, int frontFaceCW, int blendMode,
         int depthTest, int depthWrite, VkCompareOp depthCompare, uint32_t samples, VkPipeline* out) {
     VkShaderModule vmod, fmod;
     VkResult r = vkbShaderModule(dev, (const uint32_t*)vs, vsBytes, &vmod);
@@ -68,7 +68,7 @@ static VkResult vkbCreateCreateGraphicsPipeline(VkDevice dev, VkPipelineLayout l
     rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rs.polygonMode = VK_POLYGON_MODE_FILL;
     rs.cullMode = cull;
-    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.frontFace = frontFaceCW ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rs.lineWidth = 1.0f;
 
     VkPipelineMultisampleStateCreateInfo ms = {0};
@@ -81,10 +81,26 @@ static VkResult vkbCreateCreateGraphicsPipeline(VkDevice dev, VkPipelineLayout l
     ds.depthWriteEnable = depthWrite ? VK_TRUE : VK_FALSE;
     ds.depthCompareOp = depthCompare;
 
+    // blendMode: 0 = opaque, 1 = src-alpha over, 2 = additive.
     VkPipelineColorBlendAttachmentState atts[8] = {0};
     for (uint32_t i = 0; i < nColor && i < 8; i++) {
-        atts[i].blendEnable = VK_FALSE;
         atts[i].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        if (blendMode == 0) {
+            atts[i].blendEnable = VK_FALSE;
+        } else {
+            atts[i].blendEnable = VK_TRUE;
+            atts[i].colorBlendOp = VK_BLEND_OP_ADD;
+            atts[i].alphaBlendOp = VK_BLEND_OP_ADD;
+            atts[i].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            atts[i].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            if (blendMode == 1) { // src-alpha over
+                atts[i].srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+                atts[i].dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            } else { // additive
+                atts[i].srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+                atts[i].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            }
+        }
     }
     VkPipelineColorBlendStateCreateInfo cb = {0};
     cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
@@ -203,13 +219,28 @@ func (b *Backend) CreateGraphicsPipeline(d gpu.PipelineDescriptor) gpu.Pipeline 
 	if samples == 0 {
 		samples = 1
 	}
+	// blendMode: 0 opaque, 1 src-alpha over, 2 additive (from the first target's
+	// color op destination factor).
+	blendMode := C.int(0)
+	if len(d.Blend) > 0 && d.Blend[0].Enable {
+		if d.Blend[0].ColorOp.Dst == gpu.BlendOne {
+			blendMode = 2
+		} else {
+			blendMode = 1
+		}
+	}
+
+	frontFaceCW := C.int(0)
+	if d.FrontFaceCW {
+		frontFaceCW = 1
+	}
 
 	var p C.VkPipeline
 	r := C.vkbCreateCreateGraphicsPipeline(b.device, b.pipelineLayout,
 		unsafe.Pointer(&d.VertexShader[0]), C.size_t(len(d.VertexShader)),
 		unsafe.Pointer(&d.FragmentShader[0]), C.size_t(len(d.FragmentShader)), cEntry,
 		topology(d.Topology), colorPtr, C.uint32_t(len(d.ColorFormats)),
-		vkFormat(d.DepthFormat), cullMode(d.CullMode),
+		vkFormat(d.DepthFormat), cullMode(d.CullMode), frontFaceCW, blendMode,
 		depthTest, depthWrite, compareOp(d.DepthCompare), C.uint32_t(samples), &p)
 	if r != C.VK_SUCCESS {
 		panic(fmt.Sprintf("vulkan: CreateGraphicsPipeline(%q) failed (%d)", d.Label, int(r)))

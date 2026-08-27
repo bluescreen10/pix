@@ -54,7 +54,7 @@ func TestDirectionalLighting(t *testing.T) {
 	defer scene.Destroy()
 
 	cube := r.NewGeometry(normalCube())
-	mat := r.NewMaterial(MaterialDesc{BaseColor: glm.Vec4f{1, 1, 1, 1}, ColorMap: NoTexture})
+	mat := r.NewBlinnPhongMaterial()
 	m := scene.NewMesh(cube, mat)
 	m.SetRotationQuat(glm.NewQuat(float32(0.6), glm.Vec3f{0, 1, 0})) // rotate so +X and +Z faces both show
 	scene.Add(m)
@@ -64,15 +64,24 @@ func TestDirectionalLighting(t *testing.T) {
 	cam.Position = glm.Vec3f{0, 0.6, 3}
 	cam.Far = 100
 
+	// The renderer gamma-encodes output to sRGB; decode back to linear so the
+	// thresholds match the (linear) lighting math.
+	srgbToLinear := func(v byte) float64 {
+		c := float64(v) / 255
+		if c <= 0.04045 {
+			return c / 12.92
+		}
+		return math.Pow((c+0.055)/1.055, 2.4)
+	}
 	render := func() (meanLum, maxLum float64) {
 		r.Render(scene, cam)
 		px := r.Pixels()
 		var sum, n float64
 		for i := 0; i < len(px); i += 4 {
-			lum := (0.299*float64(px[i]) + 0.587*float64(px[i+1]) + 0.114*float64(px[i+2])) / 255
 			if px[i] == 0 && px[i+1] == 0 && px[i+2] == 0 {
 				continue
 			}
+			lum := 0.299*srgbToLinear(px[i]) + 0.587*srgbToLinear(px[i+1]) + 0.114*srgbToLinear(px[i+2])
 			sum += lum
 			n++
 			if lum > maxLum {

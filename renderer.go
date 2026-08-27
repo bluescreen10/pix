@@ -2,6 +2,7 @@ package pix
 
 import (
 	"fmt"
+	"slices"
 	"time"
 	"unsafe"
 
@@ -31,12 +32,17 @@ type Renderer struct {
 	readback   gpu.Buffer
 	pixels     []byte
 
-	// Renderer-owned shared resources + GPU-driven pipelines.
-	geo            *geometrySystem
-	mats           *materialSystem
-	texs           *textureSystem
-	cullPipe       gpu.Pipeline
-	drawPipe       gpu.Pipeline
+	// Renderer-owned shared resources + GPU-driven pipelines. The material stores are
+	// owned by the material system, not the renderer.
+	geo      *geometrySystem
+	mats     *materialSystem
+	texs     *textureSystem
+	cullPipe gpu.Pipeline
+	// Draw pipelines, one per distinct material pipeline key (shaders + cull + blend).
+	// drawKeys is parallel so pipelineFor can dedup and buildPipelines can rebuild
+	// them all when the target format changes.
+	drawPipes      []gpu.Pipeline
+	drawKeys       []materialPipeline
 	pipelinesReady bool
 
 	// Stats / debug HUD.
@@ -67,7 +73,7 @@ func NewRenderer(cfg *RendererConfig) (*Renderer, error) {
 	}
 	r := &Renderer{backend: b, clear: [4]float32{0, 0, 0, 1}}
 	r.geo = newGeometrySystem(b)
-	r.mats = newMaterialSystem(b)
+	r.mats = newMaterialSystem(b) // material system owns the stores
 	r.texs = newTextureSystem(b)
 	r.Stats = NewRendererStats(60)
 	r.FontColor = [4]float32{1, 0.9, 0.35, 1}
@@ -116,18 +122,19 @@ func (r *Renderer) configure(w, h uint32, format gpu.Format) {
 	r.buildPipelines()
 }
 
+// buildPipelines (re)creates the cull pipeline and every draw pipeline from the
+// registered material shaders (called on target/format change).
 func (r *Renderer) buildPipelines() {
 	if r.pipelinesReady {
 		r.backend.DestroyPipeline(r.cullPipe)
-		r.backend.DestroyPipeline(r.drawPipe)
+		for _, p := range r.drawPipes {
+			r.backend.DestroyPipeline(p)
+		}
 	}
 	r.cullPipe = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.SceneCull, Entry: "main", Label: "scene-cull"})
-	r.drawPipe = r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
-		VertexShader: shaders.SceneDraw, FragmentShader: shaders.SceneLit,
-		Topology: gpu.TopologyTriangles, ColorFormats: []gpu.Format{r.color},
-		DepthFormat: gpu.FormatDepth32F, DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareLess,
-		CullMode: gpu.CullNone,
-	})
+	for i, k := range r.drawKeys {
+		r.drawPipes[i] = r.buildDrawPipe(k)
+	}
 	r.pipelinesReady = true
 	if r.overlay != nil {
 		r.overlay.destroy()
@@ -135,14 +142,80 @@ func (r *Renderer) buildPipelines() {
 	}
 }
 
+// materialPipeline is a material's full pipeline identity: shaders + raster state.
+type materialPipeline struct {
+	vertex, fragment []byte
+	cull             CullMode
+	blend            BlendMode
+}
+
+// buildDrawPipe creates a graphics pipeline for a material pipeline key against the
+// current color/depth formats. The vertex-pull stage is shared unless the material
+// supplies its own vertex program.
+func (r *Renderer) buildDrawPipe(k materialPipeline) gpu.Pipeline {
+	vert := k.vertex
+	if vert == nil {
+		vert = shaders.SceneDraw
+	}
+	var blend []gpu.BlendState
+	switch k.blend {
+	case BlendAlpha:
+		blend = []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}}}
+	case BlendAdditive:
+		blend = []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOne, Op: gpu.BlendAdd}}}
+	}
+	return r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
+		VertexShader: vert, FragmentShader: k.fragment,
+		Topology: gpu.TopologyTriangles, ColorFormats: []gpu.Format{r.color},
+		DepthFormat: gpu.FormatDepth32F, DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareLess,
+		// The renderer flips clip-space Y (Vulkan NDC is Y-down), which reverses
+		// triangle winding, so front faces are clockwise on screen.
+		CullMode: gpu.CullMode(k.cull), FrontFaceCW: true, Blend: blend,
+	})
+}
+
+// pipelineFor resolves a material pipeline key to a draw-pipeline index, building and
+// caching a pipeline the first time a given key is seen (shaders deduped by SPIR-V
+// slice identity + cull/blend). Custom materials register here too.
+func (r *Renderer) pipelineFor(k materialPipeline) uint32 {
+	for i := range r.drawKeys {
+		if sameKey(r.drawKeys[i], k) {
+			return uint32(i)
+		}
+	}
+	id := uint32(len(r.drawKeys))
+	r.drawKeys = append(r.drawKeys, k)
+	r.drawPipes = append(r.drawPipes, r.buildDrawPipe(k))
+	return id
+}
+
+// pipelineForMaterial resolves the draw pipeline for a material from its interface.
+func (r *Renderer) pipelineForMaterial(m Material) uint32 {
+	return r.pipelineFor(materialPipeline{vertex: m.Vertex(), fragment: m.Fragment(), cull: m.Cull(), blend: m.Blend()})
+}
+
+func sameKey(a, b materialPipeline) bool {
+	return a.cull == b.cull && a.blend == b.blend && sameBytes(a.vertex, b.vertex) && sameBytes(a.fragment, b.fragment)
+}
+func sameBytes(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	return len(a) == 0 || &a[0] == &b[0]
+}
+
 // NewGeometry uploads mesh data and returns a ref-counted geometry handle.
 func (r *Renderer) NewGeometry(data Data) Geometry { return r.geo.newHandle(data) }
 
-// NewMaterial creates a material and returns a ref-counted handle.
-func (r *Renderer) NewMaterial(desc MaterialDesc) Material { return r.mats.newHandle(desc) }
+// The named material constructors (NewBasicMaterial, NewBlinnPhongMaterial,
+// NewPBRMaterial) live in their respective *_material.go files.
 
 // NewTexture uploads an RGBA8 image into the bindless heap and returns a handle.
-func (r *Renderer) NewTexture(pixels []byte, w, h int) Texture { return r.texs.upload(pixels, w, h) }
+// format selects the color space (TextureSRGB for color maps, TextureLinear for
+// data maps like normals/roughness).
+func (r *Renderer) NewTexture(pixels []byte, w, h int, format TextureFormat) Texture {
+	return r.texs.upload(pixels, w, h, format)
+}
 
 // DefaultSampler returns the heap index of the default linear/repeat sampler.
 func (r *Renderer) DefaultSampler() uint32 { return r.texs.DefaultSampler() }
@@ -263,13 +336,23 @@ func (r *Renderer) encode(cl gpu.CommandList, target gpu.Texture, scene *Scene, 
 }
 
 // syncScene uploads the renderer's shared tables + the scene's per-scene GPU state.
+// It resolves each mesh's draw pipeline from its material (shaders + raster) every
+// frame and rebuilds the draw list when the mesh set OR any pipeline assignment
+// changed (so a material raster/blend change re-batches without an explicit dirty).
 func (r *Renderer) syncScene(s *Scene) {
 	r.geo.Sync()
 	r.mats.Sync()
 	s.UpdateTransforms()
 	s.dl.uploadWorld(s.world)
-	if s.drawableDirty {
-		s.dl.rebuild(s.collectDrawables(), r.geo)
+
+	dl := s.dl
+	dl.pipeBuf = dl.pipeBuf[:0]
+	for i := range s.meshes {
+		dl.pipeBuf = append(dl.pipeBuf, r.pipelineForMaterial(s.meshes[i].material))
+	}
+	if s.drawableDirty || !slices.Equal(dl.pipeBuf, dl.batchedPipelines) {
+		drawables, materials := s.collectDrawables()
+		dl.rebuild(drawables, dl.pipeBuf, materials, r.geo)
 		s.drawableDirty = false
 	}
 	s.lights.Sync()
@@ -290,22 +373,27 @@ func (r *Renderer) recordCull(cl gpu.CommandList, dl *drawList, planes [6][4]flo
 	cl.Barrier(gpu.StageCompute, gpu.StageIndirect|gpu.StageVertex, 0)
 }
 
+// recordDraw issues one multi-draw-indirect call per pipeline run: all of a
+// material type's per-geometry commands go in a single DrawIndexedIndirect. Each
+// command's firstInstance is its region base, so gl_InstanceIndex indexes the
+// compacted visible buffer directly — no per-command push constant.
 func (r *Renderer) recordDraw(cl gpu.CommandList, dl *drawList, viewProj glm.Mat4f, eye glm.Vec3f, lightsAddr uint64) {
-	if dl.batchCount() == 0 {
+	if len(dl.runs) == 0 {
 		return
 	}
-	roots := unsafe.Slice((*drawRoot)(dl.drawRootBuf.Ptr), len(dl.batches))
+	roots := unsafe.Slice((*drawRoot)(dl.drawRootBuf.Ptr), len(dl.runs))
 	idx := r.geo.IndexBuffer()
-	cl.SetPipeline(r.drawPipe)
-	for bid := range dl.batches {
-		roots[bid] = drawRoot{
+	for ri := range dl.runs {
+		run := &dl.runs[ri]
+		roots[ri] = drawRoot{
 			viewProj: viewProj, pos: r.geo.PositionsAddr(), attr: r.geo.AttributesAddr(), descs: r.geo.DescriptorsAddr(),
 			models: dl.worldBuf.Addr, drawables: dl.drawableBuf.Addr, visible: dl.visibleBuf.Addr,
-			materials: r.mats.Addr(), lights: lightsAddr, regionBase: dl.batches[bid].regionBase,
+			materials: run.mat.materialsAddr(), lights: lightsAddr, // fresh store addr
 			eye: [4]float32{eye[0], eye[1], eye[2], 1},
 		}
-		cl.Root(dl.drawRootBuf.Addr + uint64(bid)*drawRootSize)
-		cl.DrawIndexedIndirect(idx, dl.indirectBuf, uint64(bid)*uint64(indirectSize), 1, indirectSize)
+		cl.SetPipeline(r.drawPipes[run.pipeline])
+		cl.Root(dl.drawRootBuf.Addr + uint64(ri)*drawRootSize)
+		cl.DrawIndexedIndirect(idx, dl.indirectBuf, uint64(run.firstBatch)*uint64(indirectSize), run.count, indirectSize)
 	}
 }
 
@@ -352,7 +440,9 @@ func (r *Renderer) Destroy() {
 	}
 	if r.pipelinesReady {
 		r.backend.DestroyPipeline(r.cullPipe)
-		r.backend.DestroyPipeline(r.drawPipe)
+		for _, p := range r.drawPipes {
+			r.backend.DestroyPipeline(p)
+		}
 	}
 	if r.depth.Valid() {
 		r.backend.DestroyTexture(r.depth)

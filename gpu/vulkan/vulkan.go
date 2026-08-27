@@ -90,11 +90,20 @@ static VkResult vkbCreateDevice(VkPhysicalDevice pd, uint32_t fam, VkDevice* out
     f13.synchronization2 = VK_TRUE;
     f12.pNext = &f13;
 
+    // Base features: drawIndirectFirstInstance lets each indirect command set its
+    // own firstInstance, so one multi-draw-indirect call can cover many geometries
+    // (gl_InstanceIndex directly indexes the compacted visible buffer).
+    VkPhysicalDeviceFeatures2 f2 = {0};
+    f2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    f2.features.drawIndirectFirstInstance = VK_TRUE;
+    f2.features.multiDrawIndirect = VK_TRUE;
+    f2.pNext = &f12;
+
     const char* devExts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 
     VkDeviceCreateInfo ci = {0};
     ci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    ci.pNext = &f12;
+    ci.pNext = &f2; // features2 chain (pEnabledFeatures must be NULL when using it)
     ci.queueCreateInfoCount = 1;
     ci.pQueueCreateInfos = &qi;
     ci.enabledExtensionCount = 1;

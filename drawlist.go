@@ -1,6 +1,7 @@
 package pix
 
 import (
+	"sort"
 	"unsafe"
 
 	"github.com/bluescreen10/pix/glm"
@@ -16,12 +17,15 @@ import (
 type drawList struct {
 	backend gpu.Backend
 
-	batches  []batch
-	regions  []uint32      // regionBase per batch (GPU mirror)
-	template []indirectCmd // per-batch indirect args (reset each frame)
-	visCap   uint32
-	numInst  uint32
-	worldCap uint32
+	batches          []batch
+	runs             []pipelineRun // contiguous same-pipeline batch spans (one MDI call each)
+	regions          []uint32      // regionBase per batch (GPU mirror)
+	template         []indirectCmd // per-batch indirect args (reset each frame)
+	pipeBuf          []uint32      // scratch: per-mesh pipeline ids resolved each frame
+	batchedPipelines []uint32      // the pipeline assignment the current batches were built from
+	visCap           uint32
+	numInst          uint32
+	worldCap         uint32
 
 	worldBuf    gpu.Buffer // per-node world matrices (models), indexed by node slot
 	drawableBuf gpu.Buffer
@@ -29,7 +33,7 @@ type drawList struct {
 	regionBuf   gpu.Buffer
 	visibleBuf  gpu.Buffer
 	cullRootBuf gpu.Buffer
-	drawRootBuf gpu.Buffer // one drawRoot per batch
+	drawRootBuf gpu.Buffer // one drawRoot per pipeline run
 }
 
 func newDrawList(b gpu.Backend) *drawList {
@@ -55,42 +59,80 @@ func (d *drawList) uploadWorld(world []glm.Mat4f) {
 	}
 }
 
-// rebuild groups drawables into (geometry, material) batches, lays out their
-// visible-buffer regions, fills the indirect template from geo descriptors, resizes
-// the GPU buffers, and uploads the drawable + region tables. Called by the Renderer
-// on a structural change (mesh add/remove). Each drawable's batchID is assigned here.
-func (d *drawList) rebuild(drawables []gpuDrawable, geo *geometrySystem) {
-	type key struct{ geo, mat uint32 }
+// rebuild groups drawables into (pipeline, geometry) batches (one indirect command
+// each), orders them so same-pipeline batches are contiguous (one multi-draw-indirect
+// call per pipeline), lays out their visible-buffer regions, fills the indirect
+// template (indexCount/firstIndex from the geometry, firstInstance = the region base),
+// resizes buffers, and uploads the drawable + region tables. Called on structural
+// change. pipelines[i] is drawables[i]'s draw pipeline.
+func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, materials []Material, geo *geometrySystem) {
+	type key struct{ pipeline, geo uint32 }
+
+	// First pass: unique (pipeline, geometry) batches + their instance counts, and a
+	// representative material per pipeline (any drawable using that pipeline).
 	index := map[key]uint32{}
-	d.batches = d.batches[:0]
-	counts := []uint32{}
+	rep := map[uint32]Material{}
+	var raw []batch
+	var counts []uint32
 	for i := range drawables {
-		dw := &drawables[i]
-		k := key{dw.geometryID, dw.materialID}
+		k := key{pipelines[i], drawables[i].geometryID}
+		if _, ok := rep[k.pipeline]; !ok {
+			rep[k.pipeline] = materials[i]
+		}
 		bid, ok := index[k]
 		if !ok {
-			bid = uint32(len(d.batches))
+			bid = uint32(len(raw))
 			index[k] = bid
-			d.batches = append(d.batches, batch{geometryID: dw.geometryID, materialID: dw.materialID})
+			raw = append(raw, batch{pipeline: k.pipeline, geometryID: k.geo})
 			counts = append(counts, 0)
 		}
 		counts[bid]++
-		dw.batchID = bid
 	}
 
+	// Remember the pipeline assignment these batches were built from (change detection).
+	d.batchedPipelines = append(d.batchedPipelines[:0], pipelines...)
+
+	// Order batches by pipeline so each pipeline's commands are contiguous (MDI).
+	order := make([]uint32, len(raw))
+	for i := range order {
+		order[i] = uint32(i)
+	}
+	sort.SliceStable(order, func(a, b int) bool { return raw[order[a]].pipeline < raw[order[b]].pipeline })
+	remap := make([]uint32, len(raw)) // old batch id -> new (sorted) id
+	for newID, oldID := range order {
+		remap[oldID] = uint32(newID)
+	}
+
+	d.batches = d.batches[:0]
 	d.regions = d.regions[:0]
 	d.template = d.template[:0]
+	d.runs = d.runs[:0]
 	var base uint32
-	for bid := range d.batches {
-		b := &d.batches[bid]
-		padded := (counts[bid] + regionAlign - 1) &^ (regionAlign - 1)
+	for _, oldID := range order {
+		b := raw[oldID]
+		padded := (counts[oldID] + regionAlign - 1) &^ (regionAlign - 1)
 		b.regionBase = base
 		b.regionCap = padded
+		d.batches = append(d.batches, b)
 		d.regions = append(d.regions, base)
 		desc := geo.Desc(b.geometryID)
-		d.template = append(d.template, indirectCmd{indexCount: desc.IndexCount, firstIndex: desc.IndexBase})
+		d.template = append(d.template, indirectCmd{
+			indexCount: desc.IndexCount, firstIndex: desc.IndexBase, firstInstance: base,
+		})
+		// Extend or start a pipeline run.
+		if n := len(d.runs); n > 0 && d.runs[n-1].pipeline == b.pipeline {
+			d.runs[n-1].count++
+		} else {
+			d.runs = append(d.runs, pipelineRun{pipeline: b.pipeline, firstBatch: uint32(len(d.batches) - 1), count: 1, mat: rep[b.pipeline]})
+		}
 		base += padded
 	}
+
+	// Second pass: set each drawable's batchID to its (remapped) batch.
+	for i := range drawables {
+		drawables[i].batchID = remap[index[key{pipelines[i], drawables[i].geometryID}]]
+	}
+
 	d.visCap = base
 	if d.visCap == 0 {
 		d.visCap = regionAlign
@@ -108,6 +150,7 @@ func (d *drawList) rebuild(drawables []gpuDrawable, geo *geometrySystem) {
 
 func (d *drawList) ensureBuffers() {
 	nb := max(uint32(len(d.batches)), 1)
+	nr := max(uint32(len(d.runs)), 1)
 	ni := max(d.numInst, 1)
 	realloc := func(old gpu.Buffer, size uint64, label string) gpu.Buffer {
 		if old.Valid() {
@@ -119,7 +162,7 @@ func (d *drawList) ensureBuffers() {
 	d.indirectBuf = realloc(d.indirectBuf, uint64(nb)*uint64(indirectSize), "indirect")
 	d.regionBuf = realloc(d.regionBuf, uint64(nb)*4, "regions")
 	d.visibleBuf = realloc(d.visibleBuf, uint64(d.visCap)*4, "visible")
-	d.drawRootBuf = realloc(d.drawRootBuf, uint64(nb)*drawRootSize, "draw-roots")
+	d.drawRootBuf = realloc(d.drawRootBuf, uint64(nr)*drawRootSize, "draw-roots")
 }
 
 func (d *drawList) batchCount() int { return len(d.batches) }

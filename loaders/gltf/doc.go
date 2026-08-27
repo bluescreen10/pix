@@ -54,6 +54,8 @@ type material struct {
 type pbr struct {
 	BaseColorFactor  []float32   `json:"baseColorFactor"`
 	BaseColorTexture *textureRef `json:"baseColorTexture"`
+	MetallicFactor   *float32    `json:"metallicFactor"`
+	RoughnessFactor  *float32    `json:"roughnessFactor"`
 }
 
 type textureRef struct {

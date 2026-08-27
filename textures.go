@@ -46,12 +46,32 @@ func (t *textureSystem) CreateSampler(d gpu.SamplerDescriptor) uint32 {
 	return s.Index
 }
 
-// upload creates an RGBA8 heap texture from pixels (w*h*4, row-major) and returns a
-// ref-counted handle. The upload is submitted and waited on immediately.
-func (t *textureSystem) upload(pixels []byte, w, h int) Texture {
+// TextureFormat selects the color space an RGBA8 texture is interpreted in when
+// sampled. Color images (base color, emissive) are authored in sRGB and are decoded
+// to linear on sample; data maps (normals, metallic-roughness, occlusion) are linear
+// and must be sampled as-is.
+type TextureFormat uint8
+
+const (
+	// TextureSRGB is 8-bit sRGB color — the GPU decodes to linear on sample.
+	TextureSRGB TextureFormat = iota
+	// TextureLinear is 8-bit linear data (normals, roughness, …) — sampled as-is.
+	TextureLinear
+)
+
+func (f TextureFormat) gpuFormat() gpu.Format {
+	if f == TextureLinear {
+		return gpu.FormatRGBA8Unorm
+	}
+	return gpu.FormatRGBA8Srgb
+}
+
+// upload creates an RGBA8 heap texture from pixels (w*h*4, row-major) in the given
+// color space and returns a ref-counted handle. Submitted+waited immediately.
+func (t *textureSystem) upload(pixels []byte, w, h int, format TextureFormat) Texture {
 	tex := t.backend.CreateTexture(gpu.TextureDescriptor{
 		Kind: gpu.Texture2D, Width: uint32(w), Height: uint32(h),
-		Format: gpu.FormatRGBA8Unorm, Usage: gpu.TextureSampled | gpu.TextureTransfer,
+		Format: format.gpuFormat(), Usage: gpu.TextureSampled | gpu.TextureTransfer,
 	})
 	staging := t.backend.Alloc(uint64(len(pixels)), gpu.MemoryHost, "tex-staging")
 	copy(unsafe.Slice((*byte)(staging.Ptr), len(pixels)), pixels)

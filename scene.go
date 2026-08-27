@@ -317,9 +317,11 @@ func (s *Scene) UpdateTransforms() bool {
 	return anyDirty
 }
 
-// collectDrawables builds the GPU drawable table from the mesh payloads.
-func (s *Scene) collectDrawables() []gpuDrawable {
+// collectDrawables builds the GPU drawable table from the mesh payloads, plus a
+// parallel slice of each drawable's material (for batching + store address).
+func (s *Scene) collectDrawables() ([]gpuDrawable, []Material) {
 	out := make([]gpuDrawable, 0, len(s.meshes))
+	materials := make([]Material, 0, len(s.meshes))
 	for i := range s.meshes {
 		md := &s.meshes[i]
 		var flags uint32
@@ -330,11 +332,12 @@ func (s *Scene) collectDrawables() []gpuDrawable {
 			bounds:      [4]float32{md.bounds.Center[0], md.bounds.Center[1], md.bounds.Center[2], md.bounds.Radius},
 			transformID: md.ownerNode,
 			geometryID:  md.geometry.id(),
-			materialID:  md.material.id(),
+			materialID:  md.material.materialID(),
 			flags:       flags,
 		})
+		materials = append(materials, md.material)
 	}
-	return out
+	return out, materials
 }
 
 // MeshCount returns the number of mesh nodes in the scene.

@@ -297,6 +297,7 @@ type PipelineDescriptor struct {
 	Samples      uint8
 
 	CullMode     CullMode
+	FrontFaceCW  bool // front face is clockwise (vs the default counter-clockwise)
 	DepthTest    bool
 	DepthWrite   bool
 	DepthCompare CompareOp

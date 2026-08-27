@@ -43,29 +43,41 @@ type cullRoot struct {
 	planes      [6][4]float32
 }
 
-// drawRoot matches DrawRoot in scene_draw.vert / scene_lit.frag (scalar; mat4 then
-// pointers grouped so nothing needs interior padding, then regionBase + eye).
+// drawRoot matches DrawRoot in scene_draw.vert / material_common.glsl (scalar; mat4
+// then pointers, then eye). One per pipeline (its material store's buffer address);
+// there is no regionBase — each indirect command sets firstInstance instead.
 type drawRoot struct {
-	viewProj   [16]float32
-	pos        uint64
-	attr       uint64
-	descs      uint64
-	models     uint64
-	drawables  uint64
-	visible    uint64
-	materials  uint64
-	lights     uint64
-	regionBase uint32
-	eye        [4]float32
+	viewProj  [16]float32
+	pos       uint64
+	attr      uint64
+	descs     uint64
+	models    uint64
+	drawables uint64
+	visible   uint64
+	materials uint64
+	lights    uint64
+	eye       [4]float32
 }
 
-// batch is a run of drawables sharing a (geometry, material) pair — one indirect
-// draw. Its region in the visible buffer is [regionBase, regionBase+regionCap).
+// batch is one indirect command: a run of drawables sharing a (pipeline, geometry)
+// pair. Material is NOT a batch key — per-drawable materialID selects the record in
+// the pipeline's store, so all materials of a type sharing a geometry draw together.
+// Its region in the visible buffer is [regionBase, regionBase+regionCap).
 type batch struct {
+	pipeline   uint32
 	geometryID uint32
-	materialID uint32
 	regionBase uint32
 	regionCap  uint32
+}
+
+// pipelineRun is a contiguous span of batches sharing a pipeline, drawn with one
+// multi-draw-indirect call. mat is any material of the run (they share a store), used
+// to read the store's current record-buffer address at draw time.
+type pipelineRun struct {
+	pipeline   uint32
+	firstBatch uint32
+	count      uint32
+	mat        Material
 }
 
 var (

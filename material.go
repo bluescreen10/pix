@@ -1,137 +1,167 @@
 package pix
 
 import (
-	"unsafe"
-
-	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
+	"github.com/bluescreen10/pix/shaders"
 )
 
-// NoTexture is the colorMap value for a material with no bound texture.
-const NoTexture uint32 = 0xFFFFFFFF
+// noTextureIndex is the shader sentinel heap index for "no bound texture".
+const noTextureIndex uint32 = 0xFFFFFFFF
 
-// Material flag bits (mirror scene_material.frag).
+// Material flag bits (mirror the per-type material structs in the shaders).
+const MatColorMap uint32 = 1 << 0
+
+// CullMode selects which triangle faces are discarded. CullNone is double-sided.
+type CullMode uint8
+
 const (
-	MatColorMap uint32 = 1 << 0
+	CullNone  CullMode = iota // double-sided
+	CullBack                  // discard back faces
+	CullFront                 // discard front faces
 )
 
-// MaterialDesc describes a material. Textures are bindless heap indices
-// (Texture.Index / Sampler.Index), not bindings.
-type MaterialDesc struct {
-	BaseColor glm.Vec4f
-	ColorMap  uint32 // heap sampled-image index, or NoTexture
-	Sampler   uint32 // heap sampler index
+// BlendMode selects how a material's fragments blend with the target.
+type BlendMode uint8
+
+const (
+	BlendOpaque   BlendMode = iota // no blending (writes replace)
+	BlendAlpha                     // src-alpha over
+	BlendAdditive                  // add
+)
+
+// Shader is a material type's GPU program. The vertex-pull stage is shared, so Vertex
+// is usually nil (defaults to the scene vertex shader); Fragment is the material's
+// fragment SPIR-V. Custom material types supply their own.
+type Shader struct {
+	Vertex   []byte // SPIR-V; nil => the default scene vertex-pull shader
+	Fragment []byte // SPIR-V
 }
 
-// gpuMaterial is one row of the material table (scalar, 32 bytes); matches the
-// GLSL Material struct.
-type gpuMaterial struct {
-	baseColor [4]float32
-	colorMap  uint32
-	sampler   uint32
-	flags     uint32
-	_         uint32
+// Built-in material shaders (fragment stage; the vertex stage is shared).
+var (
+	ShaderUnlit      = Shader{Fragment: shaders.SceneUnlit}
+	ShaderBlinnPhong = Shader{Fragment: shaders.SceneLit}
+	ShaderPBR        = Shader{Fragment: shaders.ScenePBR}
+)
+
+// Material is the handle a mesh holds. It is an interface: each material type owns
+// its own storage (a per-type record buffer), and a Material value is a ref-counted
+// instance in one of those stores. The renderer issues all draws; a Material reports
+// the pieces the renderer needs to build its pipeline — the vertex + fragment shaders
+// and the rasterization state (cull/blend) — plus where its record lives.
+type Material interface {
+	// Copy returns another handle to the same instance (refcount++).
+	Copy() Material
+	// Release drops this handle's reference (freed at refcount 0).
+	Release()
+	// Valid reports whether the underlying instance is still alive.
+	Valid() bool
+
+	// Pipeline identity — the renderer builds/caches one pipeline per distinct
+	// (Vertex, Fragment, Cull, Blend). Vertex nil means the default vertex-pull shader.
+	Vertex() []byte
+	Fragment() []byte
+	Cull() CullMode
+	Blend() BlendMode
+
+	// Renderer-facing: the instance's index within its store, and the store's record
+	// buffer address (resolved at draw time — it moves when the store grows).
+	materialID() uint32
+	materialsAddr() uint64
 }
 
-var materialSize = uint32(unsafe.Sizeof(gpuMaterial{}))
+// genericMaterial is the minimal Material a mesh holds and the base the typed
+// material handles embed. It carries the store and the ref-counted instance handle;
+// shaders come from the store, raster state from the store's per-instance record.
+type genericMaterial struct {
+	store materialStore
+	ref   Ref
+}
 
-// materialSystem is the renderer-owned material table: a growable BDA buffer of
-// material records indexed by materialID. No bind groups — the draw shader reads
-// materials[materialID] through the address in its root struct and samples heap
-// textures by the stored index. Freed slots are recycled (generation-stamped).
+func (m genericMaterial) Copy() Material        { return genericMaterial{store: m.store, ref: m.ref.Copy()} }
+func (m genericMaterial) Release()              { m.ref.Release() }
+func (m genericMaterial) Valid() bool           { return m.ref.Valid() }
+func (m genericMaterial) Vertex() []byte        { return m.store.shader().Vertex }
+func (m genericMaterial) Fragment() []byte      { return m.store.shader().Fragment }
+func (m genericMaterial) Cull() CullMode        { return m.store.rasterOf(m.ref.id).cull }
+func (m genericMaterial) Blend() BlendMode      { return m.store.rasterOf(m.ref.id).blend }
+func (m genericMaterial) materialID() uint32    { return m.ref.id }
+func (m genericMaterial) materialsAddr() uint64 { return m.store.bufAddr() }
+
+// SetCull sets which faces are culled (CullNone = double-sided). Shared by every
+// typed material via embedding.
+func (m genericMaterial) SetCull(c CullMode) {
+	r := m.store.rasterOf(m.ref.id)
+	r.cull = c
+	m.store.setRasterOf(m.ref.id, r)
+}
+
+// SetDoubleSided is a convenience for SetCull(CullNone|CullBack).
+func (m genericMaterial) SetDoubleSided(v bool) {
+	if v {
+		m.SetCull(CullNone)
+	} else {
+		m.SetCull(CullBack)
+	}
+}
+
+// SetBlend sets the material's blend mode (Opaque/Alpha/Additive).
+func (m genericMaterial) SetBlend(b BlendMode) {
+	r := m.store.rasterOf(m.ref.id)
+	r.blend = b
+	m.store.setRasterOf(m.ref.id, r)
+}
+
+// materialSystem OWNS every per-type material store (the renderer owns pipelines and
+// issues draws, never a store). It creates stores lazily, syncs and destroys them.
 type materialSystem struct {
 	backend gpu.Backend
-	records []gpuMaterial
-	gens    []uint32
-	free    []uint32
-	buf     gpu.Buffer
-	cap     uint32
-	dirty   bool
+	stores  []materialStore
+
+	basic *materialSlab[basicRecord]
+	blinn *materialSlab[blinnPhongRecord]
+	pbr   *materialSlab[pbrRecord]
 }
 
 func newMaterialSystem(b gpu.Backend) *materialSystem {
-	m := &materialSystem{backend: b, cap: 1}
-	m.buf = b.Alloc(uint64(materialSize), gpu.MemoryHost, "Materials")
-	return m
+	return &materialSystem{backend: b}
 }
 
-// create records a material and returns its slot id.
-func (m *materialSystem) create(desc MaterialDesc) uint32 {
-	var flags uint32
-	if desc.ColorMap != NoTexture {
-		flags |= MatColorMap
+func (s *materialSystem) basicStore() *materialSlab[basicRecord] {
+	if s.basic == nil {
+		s.basic = newMaterialSlab[basicRecord](s.backend, ShaderUnlit, 1, "Basic Materials")
+		s.stores = append(s.stores, s.basic)
 	}
-	rec := gpuMaterial{
-		baseColor: [4]float32{desc.BaseColor[0], desc.BaseColor[1], desc.BaseColor[2], desc.BaseColor[3]},
-		colorMap:  desc.ColorMap,
-		sampler:   desc.Sampler,
-		flags:     flags,
-	}
-	m.dirty = true
-	if n := len(m.free); n > 0 {
-		id := m.free[n-1]
-		m.free = m.free[:n-1]
-		m.records[id] = rec
-		return id
-	}
-	id := uint32(len(m.records))
-	m.records = append(m.records, rec)
-	m.gens = append(m.gens, 1)
-	return id
+	return s.basic
 }
 
-// Addr returns the material table's device address (re-read after Sync).
-func (m *materialSystem) Addr() uint64 { return m.buf.Addr }
-
-// Sync uploads the table when it changed, growing the buffer as needed.
-func (m *materialSystem) Sync() {
-	if !m.dirty {
-		return
+func (s *materialSystem) blinnStore() *materialSlab[blinnPhongRecord] {
+	if s.blinn == nil {
+		s.blinn = newMaterialSlab[blinnPhongRecord](s.backend, ShaderBlinnPhong, 1, "BlinnPhong Materials")
+		s.stores = append(s.stores, s.blinn)
 	}
-	need := uint32(len(m.records))
-	if need > m.cap {
-		for m.cap < need {
-			m.cap *= 2
-		}
-		m.backend.Free(m.buf)
-		m.buf = m.backend.Alloc(uint64(m.cap)*uint64(materialSize), gpu.MemoryHost, "Materials")
-	}
-	if len(m.records) > 0 {
-		writeAt(m.buf, 0, toBytes(m.records))
-	}
-	m.dirty = false
+	return s.blinn
 }
 
-// Destroy releases the table buffer.
-func (m *materialSystem) Destroy() {
-	if m.buf.Valid() {
-		m.backend.Free(m.buf)
-		m.buf = gpu.Buffer{}
+func (s *materialSystem) pbrStore() *materialSlab[pbrRecord] {
+	if s.pbr == nil {
+		s.pbr = newMaterialSlab[pbrRecord](s.backend, ShaderPBR, 1, "PBR Materials")
+		s.stores = append(s.stores, s.pbr)
+	}
+	return s.pbr
+}
+
+// Sync uploads every dirty store.
+func (s *materialSystem) Sync() {
+	for _, st := range s.stores {
+		st.sync()
 	}
 }
 
-// Disposer: dispose/generation let a Ref own a slot.
-func (m *materialSystem) dispose(id uint32) {
-	m.gens[id]++
-	m.free = append(m.free, id)
-}
-func (m *materialSystem) generation(id uint32) uint32 {
-	if id >= uint32(len(m.gens)) {
-		return 0
+// Destroy releases every store.
+func (s *materialSystem) Destroy() {
+	for _, st := range s.stores {
+		st.destroy()
 	}
-	return m.gens[id]
+	s.stores, s.basic, s.blinn, s.pbr = nil, nil, nil, nil
 }
-
-func (m *materialSystem) newHandle(desc MaterialDesc) Material {
-	id := m.create(desc)
-	rc := int32(1)
-	return Material{ref: Ref{id: id, gen: m.gens[id], refCount: &rc, owner: m}}
-}
-
-// Material is a ref-counted handle to a renderer-owned material.
-type Material struct{ ref Ref }
-
-func (m Material) Copy() Material { return Material{m.ref.Copy()} }
-func (m Material) Release()       { m.ref.Release() }
-func (m Material) Valid() bool    { return m.ref.Valid() }
-func (m Material) id() uint32     { return m.ref.id }
