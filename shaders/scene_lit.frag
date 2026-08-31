@@ -11,7 +11,7 @@
 
 // Material mirrors pix.blinnPhongRecord (64 bytes).
 struct Material {
-    vec4 baseColor;
+    vec4 color;
     vec4 emissive;
     float specular;
     float shininess;
@@ -33,7 +33,7 @@ vec3 blinnPhong(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float specSt
 
 void main() {
     Material m = MatBuf(pc.root.materials).v[vMat];
-    vec4 base = sampleBase(m.baseColor, m.flags, m.colorMap, m.samp);
+    vec4 base = sampleBase(m.color, m.flags, m.colorMap, m.samp);
     vec3 albedo = base.rgb;
 
     LightBuf L = pc.root.lights;

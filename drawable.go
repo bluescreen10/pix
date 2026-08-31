@@ -1,6 +1,10 @@
 package pix
 
-import "unsafe"
+import (
+	"unsafe"
+
+	"github.com/bluescreen10/pix/glm"
+)
 
 // regionAlign is the per-batch granularity in the visible buffer, in u32 entries.
 const regionAlign uint32 = 64
@@ -47,7 +51,7 @@ type cullRoot struct {
 // then pointers, then eye). One per pipeline (its material store's buffer address);
 // there is no regionBase — each indirect command sets firstInstance instead.
 type drawRoot struct {
-	viewProj  [16]float32
+	viewProj  glm.Mat4f
 	pos       uint64
 	attr      uint64
 	descs     uint64
@@ -56,7 +60,7 @@ type drawRoot struct {
 	visible   uint64
 	materials uint64
 	lights    uint64
-	eye       [4]float32
+	eye       glm.Vec4f
 }
 
 // batch is one indirect command: a run of drawables sharing a (pipeline, geometry)

@@ -196,7 +196,7 @@ func (b *Backend) CreateTexture(d gpu.TextureDescriptor) gpu.Texture {
 	var img C.VkImage
 	var mem C.VkDeviceMemory
 	var view C.VkImageView
-	r := C.vkbCreateImage(b.device, b.phys, vkFormat(d.Format),
+	r := C.vkbCreateImage(b.device, b.physicalDevice, vkFormat(d.Format),
 		C.uint32_t(d.Width), C.uint32_t(d.Height), C.uint32_t(layers), C.uint32_t(mips),
 		imageUsage(d.Usage, isDepth), aspect, viewType(d.Kind),
 		&img, &mem, &view)
@@ -204,8 +204,7 @@ func (b *Backend) CreateTexture(d gpu.TextureDescriptor) gpu.Texture {
 		panic(fmt.Sprintf("vulkan: CreateTexture(%dx%d, %q) failed (%d)", d.Width, d.Height, d.Label, int(r)))
 	}
 
-	h := b.nextH
-	b.nextH++
+	h := b.nextID.Add(1)
 	b.textures[h] = &textureEntry{
 		img: img, mem: mem, view: view, format: vkFormat(d.Format),
 		width: d.Width, height: d.Height, layout: C.VK_IMAGE_LAYOUT_UNDEFINED,
@@ -251,8 +250,7 @@ func (b *Backend) TextureView(t gpu.Texture, kind gpu.TextureKind, baseMip, mipC
 		panic(fmt.Sprintf("vulkan: TextureView failed (%d)", int(r)))
 	}
 
-	h := b.nextH
-	b.nextH++
+	h := b.nextID.Add(1)
 	b.textures[h] = &textureEntry{
 		view: view, format: src.format, width: src.width, height: src.height,
 		layout: C.VK_IMAGE_LAYOUT_UNDEFINED, depth: src.depth, owned: false,

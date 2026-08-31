@@ -20,7 +20,7 @@ type RendererStats struct {
 	start time.Time
 }
 
-func NewRendererStats(maxSamples int) *RendererStats {
+func newRendererStats(maxSamples int) *RendererStats {
 	return &RendererStats{
 		frameTimes: make([]float64, maxSamples),
 		cpuTimes:   make([]float64, maxSamples),

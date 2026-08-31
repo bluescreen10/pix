@@ -4,14 +4,19 @@
 package vulkan
 
 /*
-#cgo CFLAGS: -I/opt/homebrew/include
-#cgo LDFLAGS: -L/opt/homebrew/lib -lvulkan
+#cgo darwin  CFLAGS:  -I/usr/local/include
+#cgo darwin  LDFLAGS: -L/usr/local/lib -lvulkan -Wl,-rpath,/usr/local/lib
+#cgo linux   LDFLAGS: -lvulkan
+#cgo windows LDFLAGS: -lvulkan-1
 #include <vulkan/vulkan.h>
 #include <stdlib.h>
 #include <string.h>
 
 // createInstance targets Vulkan 1.4. Optional instance extensions (e.g. surface
 // extensions from the windowing lib) are enabled when nExt > 0.
+// TODO: make the application name configurable
+// TODO: make allocator configurable
+// TODO: Add VK_LAYER_KHRONOS_validation &&  VK_EXT_debug_utils, only enabled if is run in debug mode (configurable in the Renderer)
 static VkResult vkbCreateInstance(uint32_t nExt, const char* const* exts, VkInstance* out) {
     VkApplicationInfo app = {0};
     app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -28,24 +33,35 @@ static VkResult vkbCreateInstance(uint32_t nExt, const char* const* exts, VkInst
 }
 
 // pickPhysical chooses a device, preferring a discrete GPU.
+// TODO: allow the user to define what device they want
 static VkResult vkbPickPhysical(VkInstance inst, VkPhysicalDevice* out) {
     uint32_t n = 0;
     vkEnumeratePhysicalDevices(inst, &n, NULL);
-    if (n == 0) return VK_ERROR_INITIALIZATION_FAILED;
+
+	if (n == 0) {
+		return VK_ERROR_INITIALIZATION_FAILED;
+	}
+
     VkPhysicalDevice* devs = (VkPhysicalDevice*)malloc(n * sizeof(VkPhysicalDevice));
     vkEnumeratePhysicalDevices(inst, &n, devs);
     VkPhysicalDevice chosen = devs[0];
-    for (uint32_t i = 0; i < n; i++) {
+
+	for (uint32_t i = 0; i < n; i++) {
         VkPhysicalDeviceProperties p;
         vkGetPhysicalDeviceProperties(devs[i], &p);
-        if (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) { chosen = devs[i]; break; }
+        if (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+			chosen = devs[i];
+			break;
+		}
     }
-    *out = chosen;
+
+	*out = chosen;
     free(devs);
     return VK_SUCCESS;
 }
 
 // graphicsQueueFamily returns a family index with graphics+compute, or 0xFFFFFFFF.
+// TODO: switch to vkGetPhysicalDeviceQueueFamilyProperties2
 static uint32_t vkbGraphicsQueueFamily(VkPhysicalDevice pd) {
     uint32_t n = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(pd, &n, NULL);
@@ -53,7 +69,10 @@ static uint32_t vkbGraphicsQueueFamily(VkPhysicalDevice pd) {
     vkGetPhysicalDeviceQueueFamilyProperties(pd, &n, q);
     uint32_t fam = 0xFFFFFFFF;
     for (uint32_t i = 0; i < n; i++) {
-        if ((q[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && (q[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) { fam = i; break; }
+        if ((q[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && (q[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
+			fam = i;
+			break;
+		}
     }
     free(q);
     return fam;
@@ -61,6 +80,7 @@ static uint32_t vkbGraphicsQueueFamily(VkPhysicalDevice pd) {
 
 // createDevice enables the 1.4 feature chain the gpu relies on: buffer device
 // address, descriptor indexing (bindless heaps), dynamic rendering, sync2.
+// TODO: when we move to multi-threading use dedicated transfer queues
 static VkResult vkbCreateDevice(VkPhysicalDevice pd, uint32_t fam, VkDevice* outDev, VkQueue* outQueue) {
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {0};
@@ -110,7 +130,10 @@ static VkResult vkbCreateDevice(VkPhysicalDevice pd, uint32_t fam, VkDevice* out
     ci.ppEnabledExtensionNames = devExts;
 
     VkResult r = vkCreateDevice(pd, &ci, NULL, outDev);
-    if (r != VK_SUCCESS) return r;
+    if (r != VK_SUCCESS) {
+		return r;
+	}
+
     vkGetDeviceQueue(*outDev, fam, 0, outQueue);
     return VK_SUCCESS;
 }
@@ -131,6 +154,7 @@ import "C"
 
 import (
 	"fmt"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/bluescreen10/pix/gpu"
@@ -150,11 +174,11 @@ var _ gpu.Backend = (*Backend)(nil)
 // Backend is the Vulkan implementation of gpu.Backend. Only device init is wired
 // so far; memory/bindless/pipelines/swapchain/commands land in sibling files.
 type Backend struct {
-	instance    C.VkInstance
-	phys        C.VkPhysicalDevice
-	device      C.VkDevice
-	queue       C.VkQueue
-	queueFamily uint32
+	instance       C.VkInstance
+	physicalDevice C.VkPhysicalDevice
+	device         C.VkDevice
+	queue          C.VkQueue
+	queueFamily    uint32
 
 	// Bindless heap: one descriptor set (sampled/storage images + samplers) and
 	// the pipeline layout every pipeline shares (that set + push-constant root).
@@ -178,7 +202,11 @@ type Backend struct {
 	swapchains map[uint64]*swapchainState
 	queryPools map[uint64]C.VkQueryPool
 	activeSwap *swapchainState // set between AcquireNext and Present
-	nextH      uint64
+
+	// nextID hands out backend-private handle ids. Atomic so resources can be
+	// created from multiple goroutines without a lock on the counter itself.
+	// (The registry maps above are not yet guarded — that's a separate step.)
+	nextID atomic.Uint64
 
 	instanceExts []string
 }
@@ -195,7 +223,6 @@ func New(instanceExtensions ...string) *Backend {
 		textures:     map[uint64]*textureEntry{},
 		pipelines:    map[uint64]pipelineEntry{},
 		swapchains:   map[uint64]*swapchainState{},
-		nextH:        1,
 		instanceExts: instanceExtensions,
 	}
 }
@@ -203,6 +230,7 @@ func New(instanceExtensions ...string) *Backend {
 // Init creates the Vulkan instance, device, bindless heap and command pool. Safe to
 // call once; a second call is a no-op.
 func (b *Backend) Init() error {
+	//TODO: prefer the use of pinner.Pin() instead of C.malloc / C.free
 	if b.device != nil {
 		return nil
 	}
@@ -222,21 +250,21 @@ func (b *Backend) Init() error {
 		extPtr = &cExts[0]
 	}
 	if r := C.vkbCreateInstance(C.uint32_t(len(cExts)), extPtr, &b.instance); r != C.VK_SUCCESS {
-		return fmt.Errorf("vulkan: vkCreateInstance failed (%d)", int(r))
+		return fmt.Errorf("vulkan: create instance failed (%d)", int(r))
 	}
-	if r := C.vkbPickPhysical(b.instance, &b.phys); r != C.VK_SUCCESS {
+	if r := C.vkbPickPhysical(b.instance, &b.physicalDevice); r != C.VK_SUCCESS {
 		C.vkDestroyInstance(b.instance, nil)
 		return fmt.Errorf("vulkan: no physical device (%d)", int(r))
 	}
-	fam := C.vkbGraphicsQueueFamily(b.phys)
+	fam := C.vkbGraphicsQueueFamily(b.physicalDevice)
 	if uint32(fam) == 0xFFFFFFFF {
 		C.vkDestroyInstance(b.instance, nil)
 		return fmt.Errorf("vulkan: no graphics+compute queue family")
 	}
 	b.queueFamily = uint32(fam)
-	if r := C.vkbCreateDevice(b.phys, fam, &b.device, &b.queue); r != C.VK_SUCCESS {
+	if r := C.vkbCreateDevice(b.physicalDevice, fam, &b.device, &b.queue); r != C.VK_SUCCESS {
 		C.vkDestroyInstance(b.instance, nil)
-		return fmt.Errorf("vulkan: vkCreateDevice failed (%d) — a required 1.4 feature may be unsupported", int(r))
+		return fmt.Errorf("vulkan: create device failed (%d)", int(r))
 	}
 	if err := b.initBindless(); err != nil {
 		C.vkDestroyDevice(b.device, nil)
@@ -283,12 +311,12 @@ func (b *Backend) InstanceHandle() uintptr { return uintptr(unsafe.Pointer(b.ins
 // DeviceName returns the selected GPU's name (diagnostics).
 func (b *Backend) DeviceName() string {
 	var buf [C.VK_MAX_PHYSICAL_DEVICE_NAME_SIZE]C.char
-	C.vkbDeviceName(b.phys, &buf[0])
+	C.vkbDeviceName(b.physicalDevice, &buf[0])
 	return C.GoString(&buf[0])
 }
 
 // APIVersion returns the device's supported Vulkan version as (major, minor, patch).
 func (b *Backend) APIVersion() (uint32, uint32, uint32) {
-	v := uint32(C.vkbApiVersion(b.phys))
+	v := uint32(C.vkbApiVersion(b.physicalDevice))
 	return (v >> 22) & 0x7F, (v >> 12) & 0x3FF, v & 0xFFF
 }

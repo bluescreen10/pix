@@ -20,7 +20,9 @@ static VkResult vkbAllocBuffer(VkDevice dev, VkPhysicalDevice phys, VkDeviceSize
     bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
     VkResult r = vkCreateBuffer(dev, &bi, NULL, outBuf);
-    if (r != VK_SUCCESS) return r;
+    if (r != VK_SUCCESS) {
+        return r;
+    }
 
     VkMemoryRequirements req;
     vkGetBufferMemoryRequirements(dev, *outBuf, &req);
@@ -37,7 +39,10 @@ static VkResult vkbAllocBuffer(VkDevice dev, VkPhysicalDevice phys, VkDeviceSize
             break;
         }
     }
-    if (typeIndex == 0xFFFFFFFF) { vkDestroyBuffer(dev, *outBuf, NULL); return VK_ERROR_OUT_OF_DEVICE_MEMORY; }
+    if (typeIndex == 0xFFFFFFFF) {
+        vkDestroyBuffer(dev, *outBuf, NULL);
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
 
     VkMemoryAllocateFlagsInfo fi = {0};
     fi.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
@@ -50,14 +55,23 @@ static VkResult vkbAllocBuffer(VkDevice dev, VkPhysicalDevice phys, VkDeviceSize
     ai.memoryTypeIndex = typeIndex;
 
     r = vkAllocateMemory(dev, &ai, NULL, outMem);
-    if (r != VK_SUCCESS) { vkDestroyBuffer(dev, *outBuf, NULL); return r; }
+    if (r != VK_SUCCESS) {
+        vkDestroyBuffer(dev, *outBuf, NULL);
+        return r;
+    }
 
     r = vkBindBufferMemory(dev, *outBuf, *outMem, 0);
-    if (r != VK_SUCCESS) { vkFreeMemory(dev, *outMem, NULL); vkDestroyBuffer(dev, *outBuf, NULL); return r; }
+    if (r != VK_SUCCESS) {
+        vkFreeMemory(dev, *outMem, NULL); vkDestroyBuffer(dev, *outBuf, NULL);
+        return r;
+    }
 
     if (hostVisible) {
         r = vkMapMemory(dev, *outMem, 0, VK_WHOLE_SIZE, 0, outPtr);
-        if (r != VK_SUCCESS) { vkFreeMemory(dev, *outMem, NULL); vkDestroyBuffer(dev, *outBuf, NULL); return r; }
+        if (r != VK_SUCCESS) {
+            vkFreeMemory(dev, *outMem, NULL); vkDestroyBuffer(dev, *outBuf, NULL);
+            return r;
+        }
     } else {
         *outPtr = NULL;
     }
@@ -104,13 +118,12 @@ func (b *Backend) Alloc(size uint64, mem gpu.MemoryType, label string) gpu.Buffe
 	if mem == gpu.MemoryHost {
 		host = 1
 	}
-	r := C.vkbAllocBuffer(b.device, b.phys, C.VkDeviceSize(size), host, &buf, &dmem, &ptr, &addr)
+	r := C.vkbAllocBuffer(b.device, b.physicalDevice, C.VkDeviceSize(size), host, &buf, &dmem, &ptr, &addr)
 	if r != C.VK_SUCCESS {
 		panic(fmt.Sprintf("vulkan: Alloc(%d bytes, %q) failed (%d)", size, label, int(r)))
 	}
 
-	h := b.nextH
-	b.nextH++
+	h := b.nextID.Add(1)
 	b.buffers[h] = bufferEntry{buf: buf, mem: dmem}
 	return gpu.Buffer{Addr: uint64(addr), Ptr: ptr, Size: size, H: gpu.Handle(h)}
 }

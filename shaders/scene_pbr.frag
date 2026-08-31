@@ -9,18 +9,22 @@
 // PBRMaterial: metallic-roughness Cook-Torrance (GGX, Smith, Schlick), flat ambient.
 #include "material_common.glsl"
 
-// Material mirrors pix.pbrRecord (64 bytes).
+// Material mirrors pix.pbrRecord (80 bytes). Each map carries its own sampler.
 struct Material {
-    vec4 baseColor;
+    vec4 color;
     vec4 emissive;
     float metallic;
     float roughness;
+    float transmission;
     uint flags;
-    uint samp;
     uint colorMap;
+    uint colorSampler;
     uint normalMap;
+    uint normalSampler;
     uint metalMap;
+    uint metalSampler;
     uint roughMap;
+    uint roughSampler;
 };
 layout(buffer_reference, scalar) readonly buffer MatBuf { Material v[]; };
 
@@ -73,7 +77,9 @@ vec3 fresnelSchlick(float cosT, vec3 f0) {
     return f0 + (1.0 - f0) * pow(clamp(1.0 - cosT, 0.0, 1.0), 5.0);
 }
 
-vec3 cookTorrance(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float metallic, float rough) {
+// cookTorrance returns one light's outgoing radiance. diffuseScale attenuates the
+// diffuse (transmitted) term for glass while keeping the specular reflection.
+vec3 cookTorrance(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float metallic, float rough, float diffuseScale) {
     vec3 H = normalize(V + L);
     vec3 f0 = mix(vec3(0.04), albedo, metallic);
     float ndf = distributionGGX(N, H, rough);
@@ -82,32 +88,37 @@ vec3 cookTorrance(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float meta
     vec3 spec = (ndf * g * f) / max(4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0), 1e-4);
     vec3 kd = (vec3(1.0) - f) * (1.0 - metallic);
     float ndl = max(dot(N, L), 0.0);
-    return (kd * albedo / PI + spec) * radiance * ndl;
+    return (kd * albedo / PI * diffuseScale + spec) * radiance * ndl;
 }
 
 void main() {
     Material m = MatBuf(pc.root.materials).v[vMat];
-    vec4 base = sampleBase(m.baseColor, m.flags, m.colorMap, m.samp);
+    vec4 base = sampleBase(m.color, m.flags, m.colorMap, m.colorSampler);
     vec3 albedo = base.rgb;
 
     // Metallic/roughness maps modulate the factors (glTF: metallic in .b, roughness
     // in .g; grayscale maps work with any channel).
     float metallic = m.metallic;
-    if ((m.flags & MAT_METAL_MAP) != 0u) metallic *= tex(m.metalMap, m.samp).b;
+    if ((m.flags & MAT_METAL_MAP) != 0u) metallic *= tex(m.metalMap, m.metalSampler).b;
     float roughness = m.roughness;
-    if ((m.flags & MAT_ROUGH_MAP) != 0u) roughness *= tex(m.roughMap, m.samp).g;
+    if ((m.flags & MAT_ROUGH_MAP) != 0u) roughness *= tex(m.roughMap, m.roughSampler).g;
 
     LightBuf L = pc.root.lights;
     vec3 N = normalize(vNormal);
     if ((m.flags & MAT_NORMAL_MAP) != 0u) {
-        N = perturbNormal(N, tex(m.normalMap, m.samp).xyz * 2.0 - 1.0);
+        N = perturbNormal(N, tex(m.normalMap, m.normalSampler).xyz * 2.0 - 1.0);
     }
     vec3 V = normalize(pc.root.eye.xyz - vWorldPos);
+
+    // Transmission (glass): suppress the diffuse (transmitted) term, keep specular,
+    // and make the surface see-through via alpha. Not a true refraction — a cheap
+    // approximation of KHR_materials_transmission.
+    float diffuseScale = 1.0 - m.transmission;
 
     vec3 lo = vec3(0.0);
     for (uint i = 0u; i < L.numDir; i++) {
         DirLight dl = L.dirs[i];
-        lo += cookTorrance(N, V, normalize(-dl.dir.xyz), dl.color.rgb * dl.color.w, albedo, metallic, roughness);
+        lo += cookTorrance(N, V, normalize(-dl.dir.xyz), dl.color.rgb * dl.color.w, albedo, metallic, roughness, diffuseScale);
     }
     for (uint i = 0u; i < L.numPoint; i++) {
         PointLight pl = L.points[i];
@@ -116,9 +127,13 @@ void main() {
         float range = max(pl.pos.w, 0.0001);
         float atten = clamp(1.0 - dist / range, 0.0, 1.0);
         atten *= atten;
-        lo += cookTorrance(N, V, d / max(dist, 0.0001), pl.color.rgb * pl.color.w * atten, albedo, metallic, roughness);
+        lo += cookTorrance(N, V, d / max(dist, 0.0001), pl.color.rgb * pl.color.w * atten, albedo, metallic, roughness, diffuseScale);
     }
 
-    vec3 ambient = L.ambient.rgb * albedo;
-    outColor = vec4(linearToSrgb(ambient + lo + m.emissive.rgb), base.a);
+    vec3 ambient = L.ambient.rgb * albedo * diffuseScale;
+    float alpha = base.a;
+    if (m.transmission > 0.0) {
+        alpha = max(1.0 - m.transmission, 0.08); // glass never fully invisible
+    }
+    outColor = vec4(linearToSrgb(ambient + lo + m.emissive.rgb), alpha);
 }

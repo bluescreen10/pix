@@ -10,10 +10,10 @@ type RawMaterial struct {
 }
 
 // NewRawMaterial creates a material whose fragment shader is `shader.Fragment` and
-// whose per-instance record is dataSize bytes (with texSlots bindless texture slots).
+// whose per-instance record is dataSize bytes (with textureSlots bindless texture slots).
 // Materials sharing a fragment shader share a store automatically.
-func (r *Renderer) NewRawMaterial(shader Shader, dataSize, texSlots int) *RawMaterial {
-	st := r.mats.store(shader, uint32(dataSize), texSlots, "Custom Materials")
+func (r *Renderer) NewRawMaterial(shader Shader, dataSize, textureSlots int) *RawMaterial {
+	st := r.materials.store(shader, uint32(dataSize), textureSlots, "Custom Materials")
 	id := st.alloc()
 	rc := int32(1)
 	return &RawMaterial{genericMaterial{store: st, ref: Ref{id: id, gen: st.gens[id], refCount: &rc, owner: st}}}

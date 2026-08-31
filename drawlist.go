@@ -43,9 +43,10 @@ func newDrawList(b gpu.Backend) *drawList {
 	}
 }
 
-// uploadWorld uploads the scene's world matrices into the models buffer (growing it
-// as the node count grows). transformID in drawables indexes this array.
-func (d *drawList) uploadWorld(world []glm.Mat4f) {
+// sync uploads the scene's world matrices into the models buffer (growing it as the
+// node count grows). transformID in drawables indexes this array. The buffer is
+// host-visible per-frame streaming, so this is a direct write (no staging uploader).
+func (d *drawList) sync(world []glm.Mat4f) {
 	n := uint32(len(world))
 	if n > d.worldCap {
 		if d.worldBuf.Valid() {
@@ -92,12 +93,21 @@ func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, material
 	// Remember the pipeline assignment these batches were built from (change detection).
 	d.batchedPipelines = append(d.batchedPipelines[:0], pipelines...)
 
-	// Order batches by pipeline so each pipeline's commands are contiguous (MDI).
+	// Order batches: opaque pipelines before transparent (blended) ones so blending
+	// composites over the opaque scene; within each group, by pipeline (so a pipeline's
+	// commands stay contiguous for one MDI call).
+	transparent := func(pid uint32) bool { return rep[pid].Blend() != BlendOpaque }
 	order := make([]uint32, len(raw))
 	for i := range order {
 		order[i] = uint32(i)
 	}
-	sort.SliceStable(order, func(a, b int) bool { return raw[order[a]].pipeline < raw[order[b]].pipeline })
+	sort.SliceStable(order, func(a, b int) bool {
+		pa, pb := raw[order[a]].pipeline, raw[order[b]].pipeline
+		if ta, tb := transparent(pa), transparent(pb); ta != tb {
+			return !ta // opaque first
+		}
+		return pa < pb
+	})
 	remap := make([]uint32, len(raw)) // old batch id -> new (sorted) id
 	for newID, oldID := range order {
 		remap[oldID] = uint32(newID)

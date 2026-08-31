@@ -174,16 +174,16 @@ type fenceEntry struct {
 	fence C.VkFence
 }
 
-// cmdList is the Vulkan CommandList: a primary command buffer that has the
+// cmdBuffer is the Vulkan CommandBuffer: a primary command buffer that has the
 // bindless heap bound and the shared pipeline layout for push constants.
-type cmdList struct {
+type cmdBuffer struct {
 	b  *Backend
 	cb C.VkCommandBuffer
 }
 
 // Begin allocates a transient command buffer, begins recording, and binds the
 // global bindless descriptor set.
-func (b *Backend) Begin() gpu.CommandList {
+func (b *Backend) Begin() gpu.CommandBuffer {
 	var cb C.VkCommandBuffer
 	if r := C.vkbAllocCmd(b.device, b.cmdPool, &cb); r != C.VK_SUCCESS {
 		panic(fmt.Sprintf("vulkan: allocate command buffer failed (%d)", int(r)))
@@ -192,19 +192,18 @@ func (b *Backend) Begin() gpu.CommandList {
 		panic(fmt.Sprintf("vulkan: begin command buffer failed (%d)", int(r)))
 	}
 	C.vkbBindHeap(cb, b.pipelineLayout, b.descSet)
-	return &cmdList{b: b, cb: cb}
+	return &cmdBuffer{b: b, cb: cb}
 }
 
 // Submit ends recording and submits, returning a fence for the completion.
-func (b *Backend) Submit(cl gpu.CommandList) gpu.Fence {
-	c := cl.(*cmdList)
+func (b *Backend) Submit(cmd gpu.CommandBuffer) gpu.Fence {
+	c := cmd.(*cmdBuffer)
 	C.vkEndCommandBuffer(c.cb)
 	var fence C.VkFence
 	if r := C.vkbSubmit(b.device, b.queue, c.cb, &fence); r != C.VK_SUCCESS {
 		panic(fmt.Sprintf("vulkan: submit failed (%d)", int(r)))
 	}
-	h := b.nextH
-	b.nextH++
+	h := b.nextID.Add(1)
 	b.fences[h] = fenceEntry{cb: c.cb, fence: fence}
 	return gpu.Fence{H: gpu.Handle(h)}
 }
@@ -224,7 +223,7 @@ func (b *Backend) Wait(f gpu.Fence) {
 // WaitIdle blocks until the device is idle.
 func (b *Backend) WaitIdle() { C.vkDeviceWaitIdle(b.device) }
 
-// --- CommandList ---
+// --- CommandBuffer ---
 
 func (b *Backend) tex(t gpu.Texture) *textureEntry { return b.textures[uint64(t.H)] }
 
@@ -238,14 +237,14 @@ func aspectOf(e *textureEntry) C.VkImageAspectFlags {
 }
 
 // transition moves an image to newLayout from its tracked current layout.
-func (c *cmdList) transition(e *textureEntry, newLayout C.VkImageLayout,
+func (c *cmdBuffer) transition(e *textureEntry, newLayout C.VkImageLayout,
 	srcStage C.VkPipelineStageFlags2, srcAccess C.VkAccessFlags2,
 	dstStage C.VkPipelineStageFlags2, dstAccess C.VkAccessFlags2) {
 	C.vkbImageBarrier(c.cb, e.img, aspectOf(e), e.layout, newLayout, srcStage, srcAccess, dstStage, dstAccess)
 	e.layout = newLayout
 }
 
-func (c *cmdList) BeginRendering(rt gpu.RenderTargets) {
+func (c *cmdBuffer) BeginRenderPass(rt gpu.RenderTargets) {
 	var w, h uint32
 	var colorView C.VkImageView
 	var clear [4]float32
@@ -285,58 +284,58 @@ func (c *cmdList) BeginRendering(rt gpu.RenderTargets) {
 		hasDepth, depthView, depthClear, C.float(dclear))
 }
 
-func (c *cmdList) EndRendering() { C.vkCmdEndRendering(c.cb) }
+func (c *cmdBuffer) EndRenderPass() { C.vkCmdEndRendering(c.cb) }
 
 // SetPipeline binds a pipeline to its own bind point (graphics or compute),
 // recorded when the pipeline was created.
-func (c *cmdList) SetPipeline(p gpu.Pipeline) {
+func (c *cmdBuffer) SetPipeline(p gpu.Pipeline) {
 	e := c.b.pipelines[uint64(p.H)]
 	C.vkCmdBindPipeline(c.cb, e.bindPoint, e.pipe)
 }
 
-func (c *cmdList) Root(addr uint64) { C.vkbPush(c.cb, c.b.pipelineLayout, C.uint64_t(addr)) }
+func (c *cmdBuffer) Root(addr uint64) { C.vkbPush(c.cb, c.b.pipelineLayout, C.uint64_t(addr)) }
 
-func (c *cmdList) Viewport(x, y, width, height, minDepth, maxDepth float32) {
+func (c *cmdBuffer) Viewport(x, y, width, height, minDepth, maxDepth float32) {
 	vp := C.VkViewport{x: C.float(x), y: C.float(y), width: C.float(width), height: C.float(height),
 		minDepth: C.float(minDepth), maxDepth: C.float(maxDepth)}
 	C.vkCmdSetViewport(c.cb, 0, 1, &vp)
 }
 
-func (c *cmdList) Scissor(x, y, width, height int32) {
+func (c *cmdBuffer) Scissor(x, y, width, height int32) {
 	sc := C.VkRect2D{offset: C.VkOffset2D{x: C.int32_t(x), y: C.int32_t(y)},
 		extent: C.VkExtent2D{width: C.uint32_t(width), height: C.uint32_t(height)}}
 	C.vkCmdSetScissor(c.cb, 0, 1, &sc)
 }
 
-func (c *cmdList) Draw(vertexCount, instanceCount, firstVertex, firstInstance uint32) {
+func (c *cmdBuffer) Draw(vertexCount, instanceCount, firstVertex, firstInstance uint32) {
 	C.vkCmdDraw(c.cb, C.uint32_t(vertexCount), C.uint32_t(instanceCount), C.uint32_t(firstVertex), C.uint32_t(firstInstance))
 }
 
-func (c *cmdList) DrawIndexed(indexBuf gpu.Buffer, indexCount, instanceCount, firstIndex uint32, vertexOffset int32, firstInstance uint32) {
+func (c *cmdBuffer) DrawIndexed(indexBuf gpu.Buffer, indexCount, instanceCount, firstIndex uint32, vertexOffset int32, firstInstance uint32) {
 	C.vkCmdBindIndexBuffer(c.cb, c.b.bufRaw(indexBuf), 0, C.VK_INDEX_TYPE_UINT32)
 	C.vkCmdDrawIndexed(c.cb, C.uint32_t(indexCount), C.uint32_t(instanceCount), C.uint32_t(firstIndex), C.int32_t(vertexOffset), C.uint32_t(firstInstance))
 }
 
-func (c *cmdList) DrawIndexedIndirect(indexBuf, args gpu.Buffer, argsOffset uint64, drawCount, stride uint32) {
+func (c *cmdBuffer) DrawIndexedIndirect(indexBuf, args gpu.Buffer, argsOffset uint64, drawCount, stride uint32) {
 	C.vkCmdBindIndexBuffer(c.cb, c.b.bufRaw(indexBuf), 0, C.VK_INDEX_TYPE_UINT32)
 	C.vkCmdDrawIndexedIndirect(c.cb, c.b.bufRaw(args), C.VkDeviceSize(argsOffset), C.uint32_t(drawCount), C.uint32_t(stride))
 }
 
-func (c *cmdList) Dispatch(x, y, z uint32) {
+func (c *cmdBuffer) Dispatch(x, y, z uint32) {
 	C.vkCmdDispatch(c.cb, C.uint32_t(x), C.uint32_t(y), C.uint32_t(z))
 }
 
-func (c *cmdList) DispatchIndirect(args gpu.Buffer, offset uint64) {
+func (c *cmdBuffer) DispatchIndirect(args gpu.Buffer, offset uint64) {
 	C.vkCmdDispatchIndirect(c.cb, c.b.bufRaw(args), C.VkDeviceSize(offset))
 }
 
-func (c *cmdList) Barrier(src, dst gpu.Stage, flags gpu.BarrierFlags) {
+func (c *cmdBuffer) Barrier(src, dst gpu.Stage, flags gpu.BarrierFlags) {
 	ss, sa := stageAccess(src)
 	ds, da := stageAccess(dst)
 	C.vkbGlobalBarrier(c.cb, ss, sa, ds, da)
 }
 
-func (c *cmdList) PrepareSampled(t gpu.Texture, at gpu.Stage) {
+func (c *cmdBuffer) PrepareSampled(t gpu.Texture, at gpu.Stage) {
 	e := c.b.tex(t)
 	ds, _ := stageAccess(at)
 	if ds == 0 {
@@ -347,12 +346,12 @@ func (c *cmdList) PrepareSampled(t gpu.Texture, at gpu.Stage) {
 		ds, C.VK_ACCESS_2_SHADER_READ_BIT)
 }
 
-func (c *cmdList) CopyBuffer(dst, src gpu.Buffer, dstOffset, srcOffset, size uint64) {
+func (c *cmdBuffer) CopyBuffer(dst, src gpu.Buffer, dstOffset, srcOffset, size uint64) {
 	region := C.VkBufferCopy{srcOffset: C.VkDeviceSize(srcOffset), dstOffset: C.VkDeviceSize(dstOffset), size: C.VkDeviceSize(size)}
 	C.vkCmdCopyBuffer(c.cb, c.b.bufRaw(src), c.b.bufRaw(dst), 1, &region)
 }
 
-func (c *cmdList) CopyBufferToTexture(dst gpu.Texture, mip, layer uint32, src gpu.Buffer, srcOffset uint64) {
+func (c *cmdBuffer) CopyBufferToTexture(dst gpu.Texture, mip, layer uint32, src gpu.Buffer, srcOffset uint64) {
 	e := c.b.tex(dst)
 	c.transition(e, C.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 		C.VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
@@ -361,7 +360,7 @@ func (c *cmdList) CopyBufferToTexture(dst gpu.Texture, mip, layer uint32, src gp
 		C.uint32_t(e.width), C.uint32_t(e.height), C.uint32_t(mip), C.uint32_t(layer), aspectOf(e))
 }
 
-func (c *cmdList) CopyTextureToBuffer(dst gpu.Buffer, src gpu.Texture, mip, layer uint32) {
+func (c *cmdBuffer) CopyTextureToBuffer(dst gpu.Buffer, src gpu.Texture, mip, layer uint32) {
 	e := c.b.tex(src)
 	c.transition(e, C.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		C.VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, C.VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,

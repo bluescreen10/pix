@@ -17,7 +17,7 @@ func rotY(a float32) glm.Mat4f {
 
 // normalCube returns a cube with 24 vertices (4 per face) so each face carries a
 // constant outward normal — required for per-face lighting to vary.
-func normalCube() Data {
+func normalCube() GeometryConfig {
 	type face struct {
 		n       glm.Vec3f
 		corners [4]glm.Vec3f
@@ -31,16 +31,23 @@ func normalCube() Data {
 		{glm.Vec3f{0, 0, 1}, [4]glm.Vec3f{{-h, -h, h}, {h, -h, h}, {h, h, h}, {-h, h, h}}},
 		{glm.Vec3f{0, 0, -1}, [4]glm.Vec3f{{h, -h, -h}, {-h, -h, -h}, {-h, h, -h}, {h, h, -h}}},
 	}
-	var d Data
+	var positions, normals []glm.Vec3f
+	var indices []uint32
 	for _, f := range faces {
-		base := uint32(len(d.Positions))
+		base := uint32(len(positions))
 		for _, c := range f.corners {
-			d.Positions = append(d.Positions, c)
-			d.Normals = append(d.Normals, f.n)
+			positions = append(positions, c)
+			normals = append(normals, f.n)
 		}
-		d.Indices = append(d.Indices, base, base+1, base+2, base, base+2, base+3)
+		indices = append(indices, base, base+1, base+2, base, base+2, base+3)
 	}
-	return d
+	return GeometryConfig{
+		Attributes: []Attribute{
+			NewAttribute(AttributePosition, Float32x3, positions),
+			NewAttribute(AttributeNormal, Float32x3, normals),
+		},
+		Indices: indices,
+	}
 }
 
 func TestDirectionalLighting(t *testing.T) {

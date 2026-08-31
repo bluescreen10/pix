@@ -26,15 +26,23 @@ static VkResult vkbCreateSwapchain(VkPhysicalDevice phys, VkDevice dev, VkSurfac
     VkSurfaceFormatKHR chosen = fmts[0];
     for (uint32_t i = 0; i < nf; i++) {
         if ((fmts[i].format == VK_FORMAT_B8G8R8A8_UNORM || fmts[i].format == VK_FORMAT_R8G8B8A8_UNORM) &&
-            fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { chosen = fmts[i]; break; }
+            fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+                chosen = fmts[i];
+                break;
+            }
     }
     free(fmts);
 
     VkExtent2D ext = caps.currentExtent;
-    if (ext.width == 0xFFFFFFFF) { ext.width = w; ext.height = h; }
+    if (ext.width == 0xFFFFFFFF) {
+        ext.width = w;
+        ext.height = h;
+    }
 
     uint32_t minImg = caps.minImageCount + 1;
-    if (caps.maxImageCount > 0 && minImg > caps.maxImageCount) minImg = caps.maxImageCount;
+    if (caps.maxImageCount > 0 && minImg > caps.maxImageCount) {
+        minImg = caps.maxImageCount;
+    }
 
     VkSwapchainCreateInfoKHR ci = {0};
     ci.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -181,8 +189,7 @@ func (b *Backend) CreateSwapchain(surface uintptr, width, height uint32) gpu.Swa
 	s := &swapchainState{surface: C.vkbSurfaceFromHandle(C.uint64_t(surface))}
 	b.buildSwapchain(s, width, height, nil)
 
-	h := b.nextH
-	b.nextH++
+	h := b.nextID.Add(1)
 	b.swapchains[h] = s
 	return gpu.Swapchain{H: gpu.Handle(h)}
 }
@@ -191,7 +198,7 @@ func (b *Backend) buildSwapchain(s *swapchainState, width, height uint32, old C.
 	var swap C.VkSwapchainKHR
 	var cfmt C.VkFormat
 	var w, h C.uint32_t
-	if r := C.vkbCreateSwapchain(b.phys, b.device, s.surface, C.uint32_t(width), C.uint32_t(height), old,
+	if r := C.vkbCreateSwapchain(b.physicalDevice, b.device, s.surface, C.uint32_t(width), C.uint32_t(height), old,
 		&swap, &cfmt, &w, &h); r != C.VK_SUCCESS {
 		panic(fmt.Sprintf("vulkan: swapchain creation failed (%d)", int(r)))
 	}
@@ -210,8 +217,7 @@ func (b *Backend) buildSwapchain(s *swapchainState, width, height uint32, old C.
 	for i := uint32(0); i < n; i++ {
 		var view C.VkImageView
 		C.vkbSwapImageView(b.device, imgs[i], cfmt, &view)
-		hh := b.nextH
-		b.nextH++
+		hh := b.nextID.Add(1)
 		b.textures[hh] = &textureEntry{
 			img: imgs[i], view: view, format: cfmt,
 			width: s.w, height: s.h, layout: C.VK_IMAGE_LAYOUT_UNDEFINED, owned: false,
@@ -240,9 +246,9 @@ func (b *Backend) AcquireNext(sc gpu.Swapchain) (gpu.Texture, gpu.Fence) {
 // Present ends and submits the recorded command list (waiting on the acquire
 // semaphore, signalling render-done) and presents the backbuffer. The caller
 // must have recorded rendering into the Texture returned by AcquireNext.
-func (b *Backend) Present(sc gpu.Swapchain, cl gpu.CommandList) {
+func (b *Backend) Present(sc gpu.Swapchain, cmd gpu.CommandBuffer) {
 	s := b.swapchains[uint64(sc.H)]
-	c := cl.(*cmdList)
+	c := cmd.(*cmdBuffer)
 
 	// Transition the backbuffer to PRESENT_SRC before ending the buffer.
 	e := b.tex(s.images[s.curImage])

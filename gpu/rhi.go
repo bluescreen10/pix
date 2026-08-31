@@ -312,7 +312,7 @@ type ComputePipelineDescriptor struct {
 	Label  string
 }
 
-// RenderTargets is the dynamic-rendering attachment set for BeginRendering.
+// RenderTargets is the dynamic-rendering attachment set for BeginRenderPass.
 type RenderTargets struct {
 	Color []ColorAttachment
 	Depth *DepthAttachment
@@ -369,12 +369,12 @@ type Backend interface {
 	AcquireNext(sc Swapchain) (Texture, Fence)
 	// Present ends+submits the recorded command list (synced to the acquire) and
 	// presents the backbuffer. Use this instead of Submit for on-screen frames.
-	Present(sc Swapchain, cl CommandList)
+	Present(sc Swapchain, cmd CommandBuffer)
 	SwapchainFormat(sc Swapchain) Format
 
 	// Command recording (transient per frame).
-	Begin() CommandList
-	Submit(cl CommandList) Fence
+	Begin() CommandBuffer
+	Submit(cl CommandBuffer) Fence
 
 	// Synchronization.
 	Wait(Fence)
@@ -383,7 +383,7 @@ type Backend interface {
 	// GPU timing. CreateTimestampPool makes a pool of count timestamp slots;
 	// ReadTimestamps reads them back (call after the writes have completed, e.g.
 	// after Present/WaitIdle). Convert a tick delta to nanoseconds with
-	// TimestampPeriod. Record writes with CommandList.WriteTimestamp.
+	// TimestampPeriod. Record writes with CommandBuffer.WriteTimestamp.
 	CreateTimestampPool(count uint32) QueryPool
 	DestroyTimestampPool(QueryPool)
 	ReadTimestamps(pool QueryPool, count uint32) []uint64
@@ -392,13 +392,13 @@ type Backend interface {
 	Destroy()
 }
 
-// CommandList records GPU work. It is transient: acquire with Backend.Begin,
+// CommandBuffer records GPU work. It is transient: acquire with Backend.Begin,
 // submit once with Backend.Submit, discard. Recording order is execution order
 // on the queue; use Barrier to order dependent stages.
-type CommandList interface {
+type CommandBuffer interface {
 	// Dynamic rendering (no render pass objects).
-	BeginRendering(RenderTargets)
-	EndRendering()
+	BeginRenderPass(RenderTargets)
+	EndRenderPass()
 
 	// SetPipeline binds a pipeline; compute vs graphics is inferred from the
 	// pipeline's own kind (no separate bind-point call).

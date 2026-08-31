@@ -15,7 +15,7 @@ func TestShowFPS(t *testing.T) {
 	}
 	defer r.Destroy()
 	r.SetClearColor([4]float32{0, 0, 0, 1})
-	r.FontColor = [4]float32{1, 0.9, 0.35, 1}
+	r.fontColor = glm.RGBA32F{1, 0.9, 0.35, 1}
 	r.ShowFPS(true)
 
 	scene := r.NewScene()
@@ -38,11 +38,11 @@ func TestShowFPS(t *testing.T) {
 	if lit < 50 {
 		t.Fatalf("overlay text not visible (%d font px)", lit)
 	}
-	if r.Stats.AvgGPUTime() <= 0 {
+	if r.stats.AvgGPUTime() <= 0 {
 		t.Fatalf("no GPU time recorded via timestamps")
 	}
 	t.Logf("overlay lit=%d px | FPS=%.0f CPU=%.3fms GPU=%.3fms",
-		lit, r.Stats.FPS(),
-		float64(r.Stats.AvgCPUTime().Microseconds())/1000,
-		float64(r.Stats.AvgGPUTime().Microseconds())/1000)
+		lit, r.stats.FPS(),
+		float64(r.stats.AvgCPUTime().Microseconds())/1000,
+		float64(r.stats.AvgGPUTime().Microseconds())/1000)
 }

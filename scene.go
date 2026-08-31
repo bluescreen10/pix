@@ -82,14 +82,14 @@ type Scene struct {
 	lights *Lights
 
 	drawableDirty bool
-	dl            *drawList
+	drawList      *drawList
 }
 
 // NewScene creates an empty scene bound to a backend (usually via Renderer.NewScene).
 func NewScene(backend gpu.Backend) *Scene {
 	s := &Scene{backend: backend, freeHead: invalidIdx, topoDirty: true}
 	s.lights = NewLights(backend)
-	s.dl = newDrawList(backend)
+	s.drawList = newDrawList(backend)
 	s.root = s.allocNode(KindGroup)
 	s.flags[s.root.index] = flagAlive | flagLocalVisible | flagVisible
 	return s
@@ -317,6 +317,17 @@ func (s *Scene) UpdateTransforms() bool {
 	return anyDirty
 }
 
+// Sync uploads the scene's own per-scene GPU state through the uploader: the world
+// matrices (recomputed from dirty transforms) and the light table. The renderer
+// drives geometry/pipeline syncing and the draw-list rebuild separately, then flushes
+// the shared uploader once. The scene owns these resources, so it owns their upload.
+func (s *Scene) Sync(u *uploader) {
+	if dirty := s.UpdateTransforms(); dirty {
+		s.drawList.sync(s.world) // host-visible, direct write (not staged)
+	}
+	s.lights.Sync(u)
+}
+
 // collectDrawables builds the GPU drawable table from the mesh payloads, plus a
 // parallel slice of each drawable's material (for batching + store address).
 func (s *Scene) collectDrawables() ([]gpuDrawable, []Material) {
@@ -413,8 +424,8 @@ func (s *Scene) Destroy() {
 		s.meshes[i].material.Release()
 	}
 	s.meshes = nil
-	if s.dl != nil {
-		s.dl.destroy()
+	if s.drawList != nil {
+		s.drawList.destroy()
 	}
 	if s.lights != nil {
 		s.lights.Destroy()

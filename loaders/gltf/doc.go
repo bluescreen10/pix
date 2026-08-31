@@ -45,11 +45,20 @@ type primitive struct {
 }
 
 type material struct {
-	Name                 string      `json:"name"`
-	PbrMetallicRoughness *pbr        `json:"pbrMetallicRoughness"`
-	NormalTexture        *textureRef `json:"normalTexture"`
-	DoubleSided          bool        `json:"doubleSided"`
-	AlphaMode            string      `json:"alphaMode"`
+	Name                 string              `json:"name"`
+	PbrMetallicRoughness *pbr                `json:"pbrMetallicRoughness"`
+	NormalTexture        *textureRef         `json:"normalTexture"`
+	DoubleSided          bool                `json:"doubleSided"`
+	AlphaMode            string              `json:"alphaMode"`
+	Extensions           *materialExtensions `json:"extensions"`
+}
+
+type materialExtensions struct {
+	Transmission *transmissionExt `json:"KHR_materials_transmission"`
+}
+
+type transmissionExt struct {
+	TransmissionFactor *float32 `json:"transmissionFactor"` // default 0
 }
 
 type pbr struct {

@@ -1,32 +1,26 @@
-package vulkan
+package gpu_test
 
 import (
 	"testing"
 	"unsafe"
 
 	"github.com/bluescreen10/pix/gpu"
-	"github.com/bluescreen10/pix/shaders"
 )
 
-// vertex matches Vertex in shaders/common.glsl (scalar layout, 20 bytes).
+// vertex matches Vertex in testdata/common.glsl (scalar layout, 20 bytes).
 type vertex struct {
 	px, py     float32
 	cr, cg, cb float32
 }
 
-// rootData matches Root in shaders/common.glsl (scalar: vec4 @0, ptr @16).
+// rootData matches Root in testdata/common.glsl (scalar: vec4 @0, ptr @16).
 type rootData struct {
 	tint  [4]float32
 	verts uint64
 }
 
 func TestTriangle(t *testing.T) {
-	b := New()
-	err := b.Init()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer b.Destroy()
+	b := testBackend(t)
 
 	const size = 64
 
@@ -50,25 +44,25 @@ func TestTriangle(t *testing.T) {
 	root.verts = vb.Addr
 
 	pipe := b.CreateGraphicsPipeline(gpu.PipelineDescriptor{
-		VertexShader: shaders.TriangleVert, FragmentShader: shaders.TriangleFrag,
+		VertexShader: triangleVert, FragmentShader: triangleFrag,
 		Topology: gpu.TopologyTriangles, ColorFormats: []gpu.Format{gpu.FormatRGBA8Unorm},
 		CullMode: gpu.CullNone, Label: "triangle",
 	})
 
 	readback := b.Alloc(size*size*4, gpu.MemoryHost, "readback")
 
-	cl := b.Begin()
-	cl.BeginRendering(gpu.RenderTargets{
+	cmd := b.Begin()
+	cmd.BeginRenderPass(gpu.RenderTargets{
 		Color: []gpu.ColorAttachment{{Texture: target, Load: gpu.LoadClear, Clear: [4]float32{0, 0, 0, 1}}},
 	})
-	cl.SetPipeline(pipe)
-	cl.Root(rb.Addr)
-	cl.Viewport(0, 0, size, size, 0, 1)
-	cl.Scissor(0, 0, size, size)
-	cl.Draw(3, 1, 0, 0)
-	cl.EndRendering()
-	cl.CopyTextureToBuffer(readback, target, 0, 0)
-	f := b.Submit(cl)
+	cmd.SetPipeline(pipe)
+	cmd.Root(rb.Addr)
+	cmd.Viewport(0, 0, size, size, 0, 1)
+	cmd.Scissor(0, 0, size, size)
+	cmd.Draw(3, 1, 0, 0)
+	cmd.EndRenderPass()
+	cmd.CopyTextureToBuffer(readback, target, 0, 0)
+	f := b.Submit(cmd)
 	b.Wait(f)
 
 	px := unsafe.Slice((*byte)(readback.Ptr), size*size*4)

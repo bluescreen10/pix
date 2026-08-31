@@ -1,11 +1,10 @@
-package vulkan
+package gpu_test
 
 import (
 	"testing"
 	"unsafe"
 
 	"github.com/bluescreen10/pix/gpu"
-	"github.com/bluescreen10/pix/shaders"
 )
 
 // texVertex matches Vtx in textured.vert (vec2 pos, vec2 uv).
@@ -22,14 +21,9 @@ type texRoot struct {
 // across a fullscreen quad, then checks the four quadrants read the four texels —
 // proving in-shader sampling through the bindless descriptor heap.
 func TestBindlessTexture(t *testing.T) {
-	b := New()
-	err := b.Init()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer b.Destroy()
+	b := testBackend(t)
 
-	// 2x2 texels: TL red, TR green, BL blue, BstartR white (row-major, top row first).
+	// 2x2 texels: TL red, TR green, BL blue, BR white (row-major, top row first).
 	texels := []byte{
 		255, 0, 0, 255, 0, 255, 0, 255,
 		0, 0, 255, 255, 255, 255, 255, 255,
@@ -58,26 +52,26 @@ func TestBindlessTexture(t *testing.T) {
 	*(*texRoot)(root.Ptr) = texRoot{verts: vbuf.Addr, tex: tex.Index, samp: samp.Index}
 
 	pipe := b.CreateGraphicsPipeline(gpu.PipelineDescriptor{
-		VertexShader: shaders.TexturedVert, FragmentShader: shaders.TexturedFrag,
+		VertexShader: texturedVert, FragmentShader: texturedFrag,
 		Topology: gpu.TopologyTriangles, ColorFormats: []gpu.Format{gpu.FormatRGBA8Unorm},
 		CullMode: gpu.CullNone,
 	})
 
 	readback := b.Alloc(size*size*4, gpu.MemoryHost, "readback")
-	cl := b.Begin()
-	cl.CopyBufferToTexture(tex, 0, 0, staging, 0)
-	cl.PrepareSampled(tex, gpu.StageFragment)
-	cl.BeginRendering(gpu.RenderTargets{
+	cmd := b.Begin()
+	cmd.CopyBufferToTexture(tex, 0, 0, staging, 0)
+	cmd.PrepareSampled(tex, gpu.StageFragment)
+	cmd.BeginRenderPass(gpu.RenderTargets{
 		Color: []gpu.ColorAttachment{{Texture: color, Load: gpu.LoadClear, Clear: [4]float32{0, 0, 0, 1}}},
 	})
-	cl.SetPipeline(pipe)
-	cl.Root(root.Addr)
-	cl.Viewport(0, 0, size, size, 0, 1)
-	cl.Scissor(0, 0, size, size)
-	cl.Draw(6, 1, 0, 0)
-	cl.EndRendering()
-	cl.CopyTextureToBuffer(readback, color, 0, 0)
-	f := b.Submit(cl)
+	cmd.SetPipeline(pipe)
+	cmd.Root(root.Addr)
+	cmd.Viewport(0, 0, size, size, 0, 1)
+	cmd.Scissor(0, 0, size, size)
+	cmd.Draw(6, 1, 0, 0)
+	cmd.EndRenderPass()
+	cmd.CopyTextureToBuffer(readback, color, 0, 0)
+	f := b.Submit(cmd)
 	b.Wait(f)
 
 	px := unsafe.Slice((*byte)(readback.Ptr), size*size*4)

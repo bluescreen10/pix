@@ -58,8 +58,11 @@ static VkResult vkbCreateBindlessHeap(VkDevice dev, VkPhysicalDevice phys,
     lci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
     lci.bindingCount = 3;
     lci.pBindings = binds;
+
     VkResult r = vkCreateDescriptorSetLayout(dev, &lci, NULL, outLayout);
-    if (r != VK_SUCCESS) return r;
+    if (r != VK_SUCCESS) {
+        return r;
+    }
 
     VkDescriptorPoolSize sizes[3];
     sizes[0].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; sizes[0].descriptorCount = nSampled;
@@ -71,16 +74,25 @@ static VkResult vkbCreateBindlessHeap(VkDevice dev, VkPhysicalDevice phys,
     pci.maxSets = 1;
     pci.poolSizeCount = 3;
     pci.pPoolSizes = sizes;
+
     r = vkCreateDescriptorPool(dev, &pci, NULL, outPool);
-    if (r != VK_SUCCESS) return r;
+    if (r != VK_SUCCESS) {
+        vkDestroyDescriptorSetLayout(dev, *outLayout, NULL);
+        return r;
+    }
 
     VkDescriptorSetAllocateInfo sai = {0};
     sai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     sai.descriptorPool = *outPool;
     sai.descriptorSetCount = 1;
     sai.pSetLayouts = outLayout;
+
     r = vkAllocateDescriptorSets(dev, &sai, outSet);
-    if (r != VK_SUCCESS) return r;
+    if (r != VK_SUCCESS) {
+        vkDestroyDescriptorPool(dev, *outPool, NULL);
+        vkDestroyDescriptorSetLayout(dev, *outLayout, NULL);
+        return r;
+    }
 
     // Every pipeline shares this layout: the global set + a 128-byte push
     // constant. Root() writes the 64-bit root pointer into the first 8 bytes.
@@ -94,7 +106,15 @@ static VkResult vkbCreateBindlessHeap(VkDevice dev, VkPhysicalDevice phys,
     plci.pSetLayouts = outLayout;
     plci.pushConstantRangeCount = 1;
     plci.pPushConstantRanges = &pcr;
-    return vkCreatePipelineLayout(dev, &plci, NULL, outPipeLayout);
+
+
+    r = vkCreatePipelineLayout(dev, &plci, NULL, outPipeLayout);
+    if (r != VK_SUCCESS) {
+        vkDestroyDescriptorPool(dev, *outPool, NULL); // frees the allocated set too
+        vkDestroyDescriptorSetLayout(dev, *outLayout, NULL);
+        return r;
+    }
+    return VK_SUCCESS;
 }
 
 static VkResult vkbCreateSampler(VkDevice dev, VkFilter mag, VkFilter min, VkSamplerMipmapMode mip,
@@ -142,9 +162,10 @@ const (
 )
 
 // initBindless creates the global descriptor heap + shared pipeline layout.
+// TODO: make wantedSampledImages, wantStorageImages, and wantSamplers configurable
 func (b *Backend) initBindless() error {
 	var cs, cst, csa C.uint32_t
-	r := C.vkbCreateBindlessHeap(b.device, b.phys,
+	r := C.vkbCreateBindlessHeap(b.device, b.physicalDevice,
 		wantSampledImages, wantStorageImages, wantSamplers,
 		&b.setLayout, &b.descPool, &b.descSet, &b.pipelineLayout,
 		&cs, &cst, &csa)
@@ -214,8 +235,7 @@ func (b *Backend) CreateSampler(d gpu.SamplerDescriptor) gpu.Sampler {
 	b.samplerNext++
 	C.vkbWriteSampler(b.device, b.descSet, C.uint32_t(index), s)
 
-	h := b.nextH
-	b.nextH++
+	h := b.nextID.Add(1)
 	b.samplers[h] = s
 	return gpu.Sampler{Index: index, H: gpu.Handle(h)}
 }

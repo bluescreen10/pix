@@ -256,8 +256,7 @@ type pipelineEntry struct {
 }
 
 func (b *Backend) registerPipeline(p C.VkPipeline, bindPoint C.VkPipelineBindPoint) gpu.Pipeline {
-	h := b.nextH
-	b.nextH++
+	h := b.nextID.Add(1)
 	b.pipelines[h] = pipelineEntry{pipe: p, bindPoint: bindPoint}
 	return gpu.Pipeline{H: gpu.Handle(h)}
 }

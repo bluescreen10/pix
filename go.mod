@@ -1,6 +1,6 @@
 module github.com/bluescreen10/pix
 
-go 1.26.0
+go 1.27.0
 
 require (
 	github.com/bluescreen10/dawn-go v0.2.1

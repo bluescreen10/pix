@@ -1,6 +1,8 @@
 package pix
 
 import (
+	"bytes"
+
 	"github.com/bluescreen10/pix/gpu"
 	"github.com/bluescreen10/pix/shaders"
 )
@@ -44,7 +46,7 @@ type Shader struct {
 
 // Built-in material shaders (fragment stage; the vertex stage is shared).
 var (
-	ShaderUnlit      = Shader{Fragment: shaders.SceneUnlit}
+	ShaderBasic      = Shader{Fragment: shaders.SceneBasic}
 	ShaderBlinnPhong = Shader{Fragment: shaders.SceneLit}
 	ShaderPBR        = Shader{Fragment: shaders.ScenePBR}
 )
@@ -74,6 +76,10 @@ type Material interface {
 	// from its size, so a material only declares its layout (no hand-written store).
 	Data() []byte
 
+	// shaderHash is the cached 32-bit identity of (Vertex, Fragment) — the renderer
+	// keys draw pipelines on it instead of comparing SPIR-V every frame.
+	shaderHash() uint32
+
 	// Renderer-facing: the instance's index within its store, and the store's record
 	// buffer address (resolved at draw time — it moves when the store grows).
 	materialID() uint32
@@ -88,23 +94,53 @@ type genericMaterial struct {
 	ref   Ref
 }
 
-func (m genericMaterial) Copy() Material        { return genericMaterial{store: m.store, ref: m.ref.Copy()} }
-func (m genericMaterial) Release()              { m.ref.Release() }
-func (m genericMaterial) Valid() bool           { return m.ref.Valid() }
-func (m genericMaterial) Vertex() []byte        { return m.store.shader().Vertex }
-func (m genericMaterial) Fragment() []byte      { return m.store.shader().Fragment }
-func (m genericMaterial) Cull() CullMode        { return m.store.rasterOf(m.ref.id).cull }
-func (m genericMaterial) Blend() BlendMode      { return m.store.rasterOf(m.ref.id).blend }
-func (m genericMaterial) Data() []byte          { return m.store.dataOf(m.ref.id) }
-func (m genericMaterial) materialID() uint32    { return m.ref.id }
-func (m genericMaterial) materialsAddr() uint64 { return m.store.bufAddr() }
+func (m genericMaterial) Copy() Material {
+	return genericMaterial{store: m.store, ref: m.ref.Copy()}
+}
+
+func (m genericMaterial) Release() {
+	m.ref.Release()
+}
+
+func (m genericMaterial) Valid() bool {
+	return m.ref.Valid()
+}
+
+func (m genericMaterial) Vertex() []byte {
+	return m.store.shader().Vertex
+}
+
+func (m genericMaterial) Fragment() []byte {
+	return m.store.shader().Fragment
+}
+
+func (m genericMaterial) Cull() CullMode {
+	return m.store.cullOf(m.ref.id)
+}
+
+// shaderHash is the cached draw-pipeline identity for this material's shaders (see
+// the Material interface). It's precomputed once per store, so the renderer keys
+// pipelines on a uint32 instead of comparing SPIR-V slices every frame.
+func (m genericMaterial) shaderHash() uint32 {
+	return m.store.pipeHash
+}
+
+func (m genericMaterial) Data() []byte {
+	return m.store.dataOf(m.ref.id)
+}
+
+func (m genericMaterial) materialID() uint32 {
+	return m.ref.id
+}
+
+func (m genericMaterial) materialsAddr() uint64 {
+	return m.store.bufAddr()
+}
 
 // SetCull sets which faces are culled (CullNone = double-sided). Shared by every
 // typed material via embedding.
 func (m genericMaterial) SetCull(c CullMode) {
-	r := m.store.rasterOf(m.ref.id)
-	r.cull = c
-	m.store.setRasterOf(m.ref.id, r)
+	m.store.setCullOf(m.ref.id, c)
 }
 
 // SetDoubleSided is a convenience for SetCull(CullNone|CullBack).
@@ -116,11 +152,13 @@ func (m genericMaterial) SetDoubleSided(v bool) {
 	}
 }
 
+func (m genericMaterial) Blend() BlendMode {
+	return m.store.blendOf(m.ref.id)
+}
+
 // SetBlend sets the material's blend mode (Opaque/Alpha/Additive).
 func (m genericMaterial) SetBlend(b BlendMode) {
-	r := m.store.rasterOf(m.ref.id)
-	r.blend = b
-	m.store.setRasterOf(m.ref.id, r)
+	m.store.setBlendOf(m.ref.id, b)
 }
 
 // materialSystem OWNS every material store (the renderer owns pipelines and issues
@@ -132,20 +170,47 @@ type materialSystem struct {
 	stores  []*materialStore
 }
 
-func newMaterialSystem(b gpu.Backend) *materialSystem { return &materialSystem{backend: b} }
+func newMaterialSystem(backend gpu.Backend) *materialSystem {
+	return &materialSystem{backend: backend}
+}
 
 // store returns the store for a material kind, creating it on first use. The kind is
 // keyed by the fragment shader (which fixes the record layout); stride is the record
-// size in bytes, texSlots the number of texture slots per instance.
-func (s *materialSystem) store(sh Shader, stride uint32, texSlots int, label string) *materialStore {
+// size in bytes, textureSlots the number of texture slots per instance.
+func (s *materialSystem) store(sh Shader, stride uint32, textureSlots int, label string) *materialStore {
+	h := hashSPIRV(sh.Fragment)
 	for _, st := range s.stores {
-		if sameBytes(st.sh.Fragment, sh.Fragment) {
+		// The fragment hash fixes the record layout; verify the bytes on a hash hit
+		// (collisions are vanishingly unlikely, but a false share would corrupt records).
+		if st.fragHash == h && bytes.Equal(st.sh.Fragment, sh.Fragment) {
 			return st
 		}
 	}
-	st := newMaterialStore(s.backend, sh, stride, texSlots, label)
+	st := newMaterialStore(s.backend, sh, stride, textureSlots, label)
 	s.stores = append(s.stores, st)
 	return st
+}
+
+// hashSPIRV is FNV-1a over SPIR-V bytes. Computed once per store, so shader identity
+// checks (store dedup, draw-pipeline dedup) are a uint32 compare, not a slice scan.
+func hashSPIRV(b []byte) uint32 {
+	const offset, prime = uint32(2166136261), uint32(16777619)
+	h := offset
+	for _, c := range b {
+		h = (h ^ uint32(c)) * prime
+	}
+	return h
+}
+
+// shaderHash combines a Shader's vertex + fragment SPIR-V into one 32-bit pipeline
+// identity (nil vertex → the default vertex-pull shader, folded in as empty).
+func shaderHash(sh Shader) uint32 {
+	const prime = uint32(16777619)
+	h := hashSPIRV(sh.Vertex)
+	for _, c := range sh.Fragment {
+		h = (h ^ uint32(c)) * prime
+	}
+	return h
 }
 
 // Destroy releases every store.

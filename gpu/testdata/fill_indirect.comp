@@ -5,7 +5,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
 // The GPU-driven culler pattern: a compute pass writes a DrawIndexedIndirect
-// command (incl. an atomicAdd on instanceCount) that a later indirect draw reads.
+// command (incmd. an atomicAdd on instanceCount) that a later indirect draw reads.
 struct DrawIndexedIndirect {
     uint indexCount;
     uint instanceCount;

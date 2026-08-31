@@ -7,6 +7,7 @@ package pix
 import (
 	"fmt"
 	"math"
+	"sync"
 	"unsafe"
 
 	"github.com/bluescreen10/pix/glm"
@@ -81,30 +82,99 @@ func (d *GeometryDesc) setBase(stream int, base uint32) {
 	}
 }
 
-var descSize = uint32(unsafe.Sizeof(GeometryDesc{}))
+var descSize = uint64(unsafe.Sizeof(GeometryDesc{}))
 
-// Data is a geometry's source CPU data. Position is required; the optional
-// attributes, when present, must match the position count. A nil Indices list is
-// generated as 0..n-1.
-type Data struct {
-	Positions []glm.Vec3f
-	Normals   []glm.Vec3f
-	Colors    []glm.Vec4f
-	UVs       []glm.Vec2f
-	Indices   []uint32
+// AttributeType is a vertex attribute's semantic role.
+type AttributeType uint8
+
+const (
+	AttributePosition AttributeType = iota
+	AttributeNormal
+	AttributeColor
+	AttributeUV
+	attributeCount
+)
+
+// DataType is an attribute element's CPU format. It records how NewAttribute's
+// typed slice was laid out so GetAttributeData can hand it back in the same shape.
+type DataType uint8
+
+const (
+	Float32 DataType = iota
+	Float32x2
+	Float32x3
+	Float32x4
+	Float64
+	Int32
+	Uint32
+)
+
+// canonicalDataType is the element format the fixed GPU packer expects for each
+// known attribute; Create rejects mismatches.
+var canonicalDataType = [attributeCount]DataType{
+	AttributePosition: Float32x3,
+	AttributeNormal:   Float32x3,
+	AttributeColor:    Float32x4,
+	AttributeUV:       Float32x2,
 }
 
-// entry is the source of truth for one geometry. The packed stream bytes are never
-// stored — they're reconstructed from Data on demand (create, grow), so nothing is
-// duplicated. It holds each present stream's suballocation and the local bounds.
+// Attribute is one named vertex stream, built with NewAttribute.
+type Attribute struct {
+	attrType AttributeType
+	dataType DataType
+	data     []byte // the typed slice reinterpreted as raw bytes (no copy)
+	count    int    // element (vertex) count
+}
+
+// NewAttribute wraps a typed slice as an Attribute. dataType records the element
+// layout (so GetAttributeData returns the same shape); data is reinterpreted as
+// raw bytes without copying, so the backing array must outlive the geometry.
+func NewAttribute[T any](attrType AttributeType, dataType DataType, data []T) Attribute {
+	return Attribute{attrType: attrType, dataType: dataType, data: toBytes(data), count: len(data)}
+}
+
+// GeometryConfig is a geometry's source data: a set of vertex attributes (Position
+// required, others optional and matching the position count), an optional index
+// list (nil → generated 0..n-1), and a Static hint. Static has no effect today; it
+// is reserved for a future acceleration structure (BVH for collision / lighting).
+type GeometryConfig struct {
+	Attributes []Attribute
+	Indices    []uint32
+	Static     bool
+}
+
+// entry is the source of truth for one geometry. Attributes hold the original CPU
+// bytes (retained for grow-repacking and GetAttributeData); the packed GPU stream
+// bytes are reconstructed on demand. It holds each present stream's suballocation
+// and the local bounds.
 type entry struct {
-	data   Data
-	allocs [streamCount]mem.Allocation
-	bounds Sphere
+	attrs   [attributeCount]Attribute
+	indices []uint32
+	static  bool
+	allocs  [streamCount]mem.Allocation
+	bounds  Sphere
+}
+
+// has reports whether an attribute is present (non-empty).
+func (e *entry) has(t AttributeType) bool {
+	return e.attrs[t].count > 0
+}
+
+// vec2/vec3/vec4 return typed read-only views over an attribute's stored bytes.
+func (e *entry) vec2(t AttributeType) []glm.Vec2f {
+	return fromBytes[glm.Vec2f](e.attrs[t].data, e.attrs[t].count)
+}
+
+func (e *entry) vec3(t AttributeType) []glm.Vec3f {
+	return fromBytes[glm.Vec3f](e.attrs[t].data, e.attrs[t].count)
+}
+
+func (e *entry) vec4(t AttributeType) []glm.Vec4f {
+	return fromBytes[glm.Vec4f](e.attrs[t].data, e.attrs[t].count)
 }
 
 func (e *entry) hasVertexAttrs() bool {
-	return len(e.data.Normals) > 0 || len(e.data.Colors) > 0 || len(e.data.UVs) > 0
+	return e.has(AttributeNormal) || e.has(AttributeColor) || e.has(AttributeUV)
 }
 
 func (e *entry) streamPresent(stream int) bool {
@@ -116,25 +186,25 @@ func (e *entry) streamPresent(stream int) bool {
 
 func (e *entry) flags() uint32 {
 	var f uint32
-	if len(e.data.Normals) > 0 {
+	if e.has(AttributeNormal) {
 		f |= FlagNormal
 	}
-	if len(e.data.UVs) > 0 {
+	if e.has(AttributeUV) {
 		f |= FlagUV
 	}
-	if len(e.data.Colors) > 0 {
+	if e.has(AttributeColor) {
 		f |= FlagColor
 	}
 	return f
 }
 
-// bytes reconstructs the packed byte payload for a stream from the source Data.
+// bytes reconstructs the packed byte payload for a stream from the attributes.
 func (e *entry) bytes(stream int) []byte {
 	switch stream {
 	case streamPos:
-		return toBytes(e.data.Positions)
+		return e.attrs[AttributePosition].data // raw f32x3, same layout as the stream
 	case streamIndex:
-		return toBytes(e.data.Indices)
+		return toBytes(e.indices)
 	case streamAttr:
 		return e.packAttributes()
 	}
@@ -145,21 +215,22 @@ func (e *entry) packAttributes() []byte {
 	if !e.hasVertexAttrs() {
 		return nil
 	}
-	n := len(e.data.Positions)
+	n := e.attrs[AttributePosition].count
+	normals, colors, uvs := e.vec3(AttributeNormal), e.vec4(AttributeColor), e.vec2(AttributeUV)
 	attrs := make([]vertexAttributes, n)
 	for i := 0; i < n; i++ {
 		va := vertexAttributes{color: glm.RGBA8{255, 255, 255, 255}} // default white
-		if i < len(e.data.Normals) {
+		if i < len(normals) {
 			// RGB10A2 stores unsigned [0,1]; remap the [-1,1] normal so the shader
 			// can decode it back with *2-1.
-			n := e.data.Normals[i]
-			va.normal = glm.Vec3f{n[0]*0.5 + 0.5, n[1]*0.5 + 0.5, n[2]*0.5 + 0.5}.RGB10A2()
+			nn := normals[i]
+			va.normal = glm.Vec3f{nn[0]*0.5 + 0.5, nn[1]*0.5 + 0.5, nn[2]*0.5 + 0.5}.RGB10A2()
 		}
-		if i < len(e.data.Colors) {
-			va.color = e.data.Colors[i].RGBA8()
+		if i < len(colors) {
+			va.color = colors[i].RGBA8()
 		}
-		if i < len(e.data.UVs) {
-			va.uv = e.data.UVs[i]
+		if i < len(uvs) {
+			va.uv = uvs[i]
 		}
 		attrs[i] = va
 	}
@@ -185,25 +256,40 @@ type geometrySystem struct {
 	descs   []GeometryDesc
 
 	descBuf   gpu.Buffer
-	descCap   uint32
 	descDirty bool
+
+	// Stream buffers live in MemoryDevice, so Create/grow cannot write them
+	// directly; they enqueue pendingWrite entries that Sync drains through the
+	// uploader (stage + CopyBuffer). pendingWriteMu guards the queue because
+	// geometry may be created/freed from multiple goroutines.
+	pending        []pendingWrite
+	pendingWriteMu sync.Mutex
+}
+
+// pendingWrite is a deferred upload of packed bytes into a stream at a byte
+// offset. The data slice is retained until Sync stages it. Because it targets a
+// stream index (not a buffer handle), a grow that replaces the stream buffer
+// before Sync still resolves to the current buffer.
+type pendingWrite struct {
+	stream int
+	offset uint32
+	data   []byte
 }
 
 // newGeometrySystem creates the system, its three streams, and the descriptor buffer.
-func newGeometrySystem(b gpu.Backend) *geometrySystem {
-	g := &geometrySystem{backend: b, entries: mem.NewSlab[entry]()}
+func newGeometrySystem(backend gpu.Backend) *geometrySystem {
+	g := &geometrySystem{backend: backend, entries: mem.NewSlab[entry]()}
 	g.streams[streamPos] = g.newStream("Vertex Positions", initialStreamBytes)
 	g.streams[streamAttr] = g.newStream("Vertex Attributes", initialStreamBytes)
 	g.streams[streamIndex] = g.newStream("Vertex Indices", initialStreamBytes)
-	g.descBuf = b.Alloc(uint64(descSize), gpu.MemoryHost, "Geometry Descriptors")
-	g.descCap = 1
+	g.descBuf = backend.Alloc(descSize, gpu.MemoryDevice, "Geometry Descriptors")
 	return g
 }
 
 func (g *geometrySystem) newStream(label string, bytes uint32) *stream {
 	return &stream{
 		label: label,
-		buf:   g.backend.Alloc(uint64(bytes), gpu.MemoryHost, label),
+		buf:   g.backend.Alloc(uint64(bytes), gpu.MemoryDevice, label),
 		tlsf:  mem.NewTLSF(bytes),
 	}
 }
@@ -211,22 +297,38 @@ func (g *geometrySystem) newStream(label string, bytes uint32) *stream {
 // PositionsAddr / AttributesAddr / DescriptorsAddr return the current device
 // addresses of the shared buffers (they change when a stream grows, so read them
 // each frame when building root structs).
-func (g *geometrySystem) PositionsAddr() uint64   { return g.streams[streamPos].buf.Addr }
-func (g *geometrySystem) AttributesAddr() uint64  { return g.streams[streamAttr].buf.Addr }
-func (g *geometrySystem) DescriptorsAddr() uint64 { return g.descBuf.Addr }
+func (g *geometrySystem) PositionsAddr() uint64 {
+	return g.streams[streamPos].buf.Addr
+}
+
+func (g *geometrySystem) AttributesAddr() uint64 {
+	return g.streams[streamAttr].buf.Addr
+}
+
+func (g *geometrySystem) DescriptorsAddr() uint64 {
+	return g.descBuf.Addr
+}
 
 // IndexBuffer returns the shared index stream as a hardware index buffer, for
 // DrawIndexed / DrawIndexedIndirect. A geometry's firstIndex is its Desc().IndexBase.
-func (g *geometrySystem) IndexBuffer() gpu.Buffer { return g.streams[streamIndex].buf }
+func (g *geometrySystem) IndexBuffer() gpu.Buffer {
+	return g.streams[streamIndex].buf
+}
 
 // Desc returns a copy of a geometry's GPU descriptor (bases + counts + flags).
-func (g *geometrySystem) Desc(id uint32) GeometryDesc { return g.descs[id] }
+func (g *geometrySystem) Desc(id uint32) GeometryDesc {
+	return g.descs[id]
+}
 
 // Bounds returns a geometry's local bounding sphere.
-func (g *geometrySystem) Bounds(id uint32) Sphere { return g.entries.Get(id).bounds }
+func (g *geometrySystem) Bounds(id uint32) Sphere {
+	return g.entries.Get(id).bounds
+}
 
 // Generation returns the current generation of a geometry id (for stale checks).
-func (g *geometrySystem) Generation(id uint32) uint32 { return g.entries.Generation(id) }
+func (g *geometrySystem) Generation(id uint32) uint32 {
+	return g.entries.Generation(id)
+}
 
 // --- ref-counted handle (renderer-owned resource) ---
 
@@ -239,56 +341,154 @@ type Geometry struct {
 }
 
 // Copy returns another handle to the same geometry, bumping the refcount.
-func (g Geometry) Copy() Geometry { return Geometry{ref: g.ref.Copy(), bounds: g.bounds} }
+func (g Geometry) Copy() Geometry {
+	return Geometry{ref: g.ref.Copy(), bounds: g.bounds}
+}
 
 // Release drops this handle's reference; the geometry is freed when the last is released.
-func (g Geometry) Release() { g.ref.Release() }
+func (g Geometry) Release() {
+	g.ref.Release()
+}
 
 // Valid reports whether the underlying geometry is still alive.
-func (g Geometry) Valid() bool { return g.ref.Valid() }
+func (g Geometry) Valid() bool {
+	return g.ref.Valid()
+}
+
+// GetAttributeData returns a copy of a stored attribute reinterpreted as
+// []T (e.g. GetAttributeData[glm.Vec3f](AttributePosition)), or nil if the attribute
+// is absent. T must match the element layout the attribute was created with. Do not
+// mutate the returned slice — it aliases the geometry's internal bytes.
+func (g Geometry) GetAttributeData[T any](t AttributeType) []T {
+	sys, ok := g.ref.owner.(*geometrySystem)
+	if !ok {
+		return nil
+	}
+	a := sys.attribute(g.ref.id, t)
+	if a == nil {
+		return nil
+	}
+	return fromBytes[T](a.data, a.count)
+}
+
+// SetAttributeData replaces a present attribute's data and re-uploads it. T and the
+// element count must match what the attribute was created with (same byte length);
+// this does not add attributes or resize — use NewGeometry for that. Changing
+// AttributePosition also recomputes bounds (note: a Geometry handle caches bounds
+// from creation, so existing handles keep their old BoundingSphere).
+func (g Geometry) SetAttributeData[T any](t AttributeType, data []T) {
+	sys, ok := g.ref.owner.(*geometrySystem)
+	if !ok {
+		return
+	}
+	sys.setAttribute(g.ref.id, t, toBytes(data), len(data))
+}
 
 // BoundingSphere returns the geometry's local-space bounding sphere.
-func (g Geometry) BoundingSphere() Sphere { return g.bounds }
+func (g Geometry) BoundingSphere() Sphere {
+	return g.bounds
+}
 
 // id is the geometry's slot in the system (used by drawables).
-func (g Geometry) id() uint32 { return g.ref.id }
+func (g Geometry) id() uint32 {
+	return g.ref.id
+}
+
+// attribute returns a pointer to a geometry's stored attribute (nil if the id is
+// dead or the attribute is absent). The generic GetAttributeData/SetAttributeData
+// methods reinterpret its bytes.
+func (g *geometrySystem) attribute(id uint32, t AttributeType) *Attribute {
+	if !g.entries.Alive(id) || t >= attributeCount {
+		return nil
+	}
+	e := g.entries.Get(id)
+	if !e.has(t) {
+		return nil
+	}
+	return &e.attrs[t]
+}
+
+// setAttribute replaces a present attribute's bytes in place and re-uploads the
+// affected stream. The element size and count must match the existing attribute
+// (so the suballocation still fits); adding a new attribute or resizing is not
+// supported — use NewGeometry for that.
+func (g *geometrySystem) setAttribute(id uint32, t AttributeType, data []byte, count int) {
+	if !g.entries.Alive(id) || t >= attributeCount {
+		return
+	}
+	e := g.entries.Get(id)
+	if !e.has(t) {
+		panic(fmt.Sprintf("render: SetAttributeData on absent attribute %d (use NewGeometry to add it)", t))
+	}
+	old := &e.attrs[t]
+	if count != old.count || len(data) != len(old.data) {
+		panic(fmt.Sprintf("render: SetAttributeData size mismatch for attribute %d (want %d bytes / %d elems)", t, len(old.data), old.count))
+	}
+	old.data = data
+	// Re-upload the affected stream into its existing suballocation.
+	if t == AttributePosition {
+		g.writeStream(streamPos, e.allocs[streamPos].Offset(), e.bytes(streamPos))
+		e.bounds = boundingSphereOf(e.vec3(AttributePosition))
+	} else {
+		g.writeStream(streamAttr, e.allocs[streamAttr].Offset(), e.bytes(streamAttr))
+	}
+}
 
 // Disposer: dispose/generation let a Ref own a slot in this system.
-func (g *geometrySystem) dispose(id uint32)           { g.Free(id) }
-func (g *geometrySystem) generation(id uint32) uint32 { return g.entries.Generation(id) }
+func (g *geometrySystem) dispose(id uint32) {
+	g.Free(id)
+}
 
-// newHandle allocates a geometry from data and returns a fresh single-ref handle.
-func (g *geometrySystem) newHandle(data Data) Geometry {
-	id, gen := g.Create(data)
+func (g *geometrySystem) generation(id uint32) uint32 {
+	return g.entries.Generation(id)
+}
+
+// newHandle allocates a geometry from cfg and returns a fresh single-ref handle.
+func (g *geometrySystem) newHandle(cfg GeometryConfig) Geometry {
+	id, gen := g.Create(cfg)
 	rc := int32(1)
 	return Geometry{ref: Ref{id: id, gen: gen, refCount: &rc, owner: g}, bounds: g.Bounds(id)}
 }
 
-// Create allocates a generation-stamped geometry id from data, uploads its streams,
-// and records its descriptor. Positions are required; optional attributes must match
-// the position count; a nil index list is generated 0..n-1.
-func (g *geometrySystem) Create(data Data) (id, gen uint32) {
-	n := len(data.Positions)
+// Create allocates a generation-stamped geometry id from cfg, uploads its streams,
+// and records its descriptor. A Position attribute is required; other attributes
+// must match the position count and carry their canonical dataType; a nil index
+// list is generated 0..n-1.
+func (g *geometrySystem) Create(cfg GeometryConfig) (id, gen uint32) {
+	var e entry
+	e.static = cfg.Static
+	for _, a := range cfg.Attributes {
+		if a.attrType >= attributeCount {
+			panic(fmt.Sprintf("render: unknown attribute type %d", a.attrType))
+		}
+		if want := canonicalDataType[a.attrType]; a.dataType != want {
+			panic(fmt.Sprintf("render: attribute %d expects dataType %d, got %d", a.attrType, want, a.dataType))
+		}
+		e.attrs[a.attrType] = a
+	}
+
+	n := e.attrs[AttributePosition].count
 	if n == 0 {
 		panic("render: geometry has no positions")
 	}
-	for name, l := range map[string]int{"normals": len(data.Normals), "colors": len(data.Colors), "uvs": len(data.UVs)} {
-		if l != 0 && l != n {
-			panic(fmt.Sprintf("render: %s length %d does not match %d positions", name, l, n))
-		}
-	}
-	if len(data.Indices) == 0 {
-		data.Indices = make([]uint32, n)
-		for i := range data.Indices {
-			data.Indices[i] = uint32(i)
+	for t := AttributeType(0); t < attributeCount; t++ {
+		if e.has(t) && e.attrs[t].count != n {
+			panic(fmt.Sprintf("render: attribute %d length %d does not match %d positions", t, e.attrs[t].count, n))
 		}
 	}
 
-	e := entry{data: data, bounds: boundingSphereOf(data.Positions)}
+	e.indices = cfg.Indices
+	if len(e.indices) == 0 {
+		e.indices = make([]uint32, n)
+		for i := range e.indices {
+			e.indices[i] = uint32(i)
+		}
+	}
+	e.bounds = boundingSphereOf(e.vec3(AttributePosition))
 
 	var d GeometryDesc
 	d.Flags = e.flags()
-	d.IndexCount = uint32(len(data.Indices))
+	d.IndexCount = uint32(len(e.indices))
 
 	// Suballocate + upload each present stream. Growth repacks existing geometries
 	// only (this entry is not yet in the slab), so it's safe here.
@@ -379,34 +579,54 @@ func (g *geometrySystem) growStream(stream int, minCap uint32) {
 	g.descDirty = true
 }
 
-// Sync uploads the descriptor table when it changed. Stream bytes are written
-// directly into mapped memory on Create/grow, so they need nothing here. Call once
-// per frame before recording draws that read DescriptorsAddr.
-func (g *geometrySystem) Sync() {
+// Sync drains queued stream writes and the descriptor table into device memory
+// through the uploader. Stream buffers and the descriptor buffer are MemoryDevice,
+// so Create/grow only enqueue; the actual staging + CopyBuffer happens here. Call
+// once per frame before recording draws that read the *Addr getters. The caller
+// flushes the uploader (submit + wait) after all subsystems have synced.
+func (g *geometrySystem) Sync(u *uploader) {
+	g.pendingWriteMu.Lock()
+	for i := range g.pending {
+		w := &g.pending[i]
+		u.copy(g.streams[w.stream].buf, w.offset, w.data)
+	}
+	g.pending = g.pending[:0]
+	g.pendingWriteMu.Unlock()
+
 	if !g.descDirty {
 		return
 	}
-	g.ensureDescCap(uint32(len(g.descs)))
+	g.ensureDescCap(uint64(len(g.descs)))
 	if len(g.descs) > 0 {
-		writeAt(g.descBuf, 0, toBytes(g.descs))
+		u.copy(g.descBuf, 0, toBytes(g.descs))
 	}
 	g.descDirty = false
 }
 
-func (g *geometrySystem) ensureDescCap(need uint32) {
-	if g.descCap >= need {
+func (g *geometrySystem) ensureDescCap(need uint64) {
+	needSize := need * descSize
+	if g.descBuf.Size >= needSize {
 		return
 	}
-	for g.descCap < need {
-		g.descCap *= 2
+
+	newSize := g.descBuf.Size
+	for newSize < needSize {
+		newSize *= 2
 	}
 	g.backend.Free(g.descBuf)
-	g.descBuf = g.backend.Alloc(uint64(g.descCap)*uint64(descSize), gpu.MemoryHost, "Geometry Descriptors")
+	g.descBuf = g.backend.Alloc(newSize, gpu.MemoryDevice, "Geometry Descriptors")
 }
 
-// writeStream copies packed bytes into a stream's mapped buffer at a byte offset.
+// writeStream enqueues packed bytes to be uploaded into a stream at a byte offset.
+// The stream buffers are MemoryDevice, so the actual copy is deferred to Sync (via
+// the uploader). Safe to call from multiple goroutines creating geometry.
 func (g *geometrySystem) writeStream(stream int, byteOffset uint32, data []byte) {
-	writeAt(g.streams[stream].buf, byteOffset, data)
+	if len(data) == 0 {
+		return
+	}
+	g.pendingWriteMu.Lock()
+	g.pending = append(g.pending, pendingWrite{stream: stream, offset: byteOffset, data: data})
+	g.pendingWriteMu.Unlock()
 }
 
 // Destroy releases all GPU buffers held by the system.
@@ -438,6 +658,14 @@ func toBytes[T any](s []T) []byte {
 		return nil
 	}
 	return unsafe.Slice((*byte)(unsafe.Pointer(&s[0])), len(s)*int(unsafe.Sizeof(s[0])))
+}
+
+// fromBytes reinterprets raw bytes as a slice of n elements of T (no copy).
+func fromBytes[T any](b []byte, n int) []T {
+	if n == 0 || len(b) == 0 {
+		return nil
+	}
+	return unsafe.Slice((*T)(unsafe.Pointer(&b[0])), n)
 }
 
 // boundingSphereOf returns the centroid and max-radius bounding sphere of points.

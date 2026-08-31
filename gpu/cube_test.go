@@ -1,4 +1,4 @@
-package vulkan
+package gpu_test
 
 import (
 	"testing"
@@ -6,16 +6,15 @@ import (
 
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
-	"github.com/bluescreen10/pix/shaders"
 )
 
-// vertex3D matches Vertex3D in shaders/mesh.vert (scalar, 24 bytes).
+// vertex3D matches Vertex3D in testdata/mesh.vert (scalar, 24 bytes).
 type vertex3D struct {
 	px, py, pz float32
 	cr, cg, cb float32
 }
 
-// meshRoot matches MeshRoot in shaders/mesh.vert (mat4 @0, ptr @64).
+// meshRoot matches MeshRoot in testdata/mesh.vert (mat4 @0, ptr @64).
 type meshRoot struct {
 	mvp   [16]float32
 	verts uint64
@@ -24,12 +23,7 @@ type meshRoot struct {
 // TestCube renders a transformed, depth-tested indexed cube through the gpu —
 // the core of pix's mesh rendering (camera+model transform, index buffer, depth).
 func TestCube(t *testing.T) {
-	b := New()
-	err := b.Init()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer b.Destroy()
+	b := testBackend(t)
 
 	const size = 128
 	color := b.CreateTexture(gpu.TextureDescriptor{
@@ -73,7 +67,7 @@ func TestCube(t *testing.T) {
 	root.verts = vb.Addr
 
 	pipe := b.CreateGraphicsPipeline(gpu.PipelineDescriptor{
-		VertexShader: shaders.MeshVert, FragmentShader: shaders.MeshFrag,
+		VertexShader: meshVert, FragmentShader: meshFrag,
 		Topology: gpu.TopologyTriangles, ColorFormats: []gpu.Format{gpu.FormatRGBA8Unorm},
 		DepthFormat: gpu.FormatDepth32F, DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareLess,
 		CullMode: gpu.CullNone, Label: "mesh",
@@ -81,19 +75,19 @@ func TestCube(t *testing.T) {
 
 	readback := b.Alloc(size*size*4, gpu.MemoryHost, "readback")
 
-	cl := b.Begin()
-	cl.BeginRendering(gpu.RenderTargets{
+	cmd := b.Begin()
+	cmd.BeginRenderPass(gpu.RenderTargets{
 		Color: []gpu.ColorAttachment{{Texture: color, Load: gpu.LoadClear, Clear: [4]float32{0, 0, 0, 1}}},
 		Depth: &gpu.DepthAttachment{Texture: depth, Load: gpu.LoadClear, Clear: 1.0},
 	})
-	cl.SetPipeline(pipe)
-	cl.Root(rb.Addr)
-	cl.Viewport(0, 0, size, size, 0, 1)
-	cl.Scissor(0, 0, size, size)
-	cl.DrawIndexed(ib, uint32(len(indices)), 1, 0, 0, 0)
-	cl.EndRendering()
-	cl.CopyTextureToBuffer(readback, color, 0, 0)
-	f := b.Submit(cl)
+	cmd.SetPipeline(pipe)
+	cmd.Root(rb.Addr)
+	cmd.Viewport(0, 0, size, size, 0, 1)
+	cmd.Scissor(0, 0, size, size)
+	cmd.DrawIndexed(ib, uint32(len(indices)), 1, 0, 0, 0)
+	cmd.EndRenderPass()
+	cmd.CopyTextureToBuffer(readback, color, 0, 0)
+	f := b.Submit(cmd)
 	b.Wait(f)
 
 	px := unsafe.Slice((*byte)(readback.Ptr), size*size*4)

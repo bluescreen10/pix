@@ -3,6 +3,7 @@ package pix
 import (
 	"unsafe"
 
+	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
 )
 
@@ -26,9 +27,9 @@ type metalSurfacer interface {
 func (r *Renderer) attachWindow(w *Window, width, height uint32) {
 	ms := r.backend.(metalSurfacer)
 	surface := ms.CreateMetalSurface(w.NSWindow)
-	r.sc = r.backend.CreateSwapchain(surface, width, height)
-	sw, sh := ms.SwapchainSize(r.sc)
+	r.swapchain = r.backend.CreateSwapchain(surface, width, height)
+	sw, sh := ms.SwapchainSize(r.swapchain)
 	r.hasTarget = false
-	r.clear = [4]float32{0.05, 0.06, 0.1, 1}
-	r.configure(sw, sh, r.backend.SwapchainFormat(r.sc))
+	r.clear = glm.RGBA32F{}
+	r.configure(sw, sh, r.backend.SwapchainFormat(r.swapchain))
 }

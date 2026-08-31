@@ -12,9 +12,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
-	"math"
 	_ "image/jpeg"
 	_ "image/png"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,7 +150,7 @@ func (l *loader) addMesh(parent pix.Node, meshIdx int) {
 			continue
 		}
 		data := l.buildData(prim)
-		if len(data.Positions) == 0 {
+		if len(data.Attributes) == 0 {
 			continue
 		}
 		geo := l.renderer.NewGeometry(data)
@@ -161,34 +161,50 @@ func (l *loader) addMesh(parent pix.Node, meshIdx int) {
 	}
 }
 
-func (l *loader) buildData(prim primitive) pix.Data {
-	var d pix.Data
+func (l *loader) buildData(prim primitive) pix.GeometryConfig {
+	var positions, normals []glm.Vec3f
+	var colors []glm.Vec4f
+	var uvs []glm.Vec2f
+	var indices []uint32
 	if prim.Indices != nil {
-		d.Indices = l.readIndices(*prim.Indices)
+		indices = l.readIndices(*prim.Indices)
 	}
 	for name, acc := range prim.Attributes {
 		switch name {
 		case "POSITION":
-			d.Positions = castTo[glm.Vec3f](l.accessorBytes(acc))
+			positions = castTo[glm.Vec3f](l.accessorBytes(acc))
 		case "NORMAL":
-			d.Normals = castTo[glm.Vec3f](l.accessorBytes(acc))
+			normals = castTo[glm.Vec3f](l.accessorBytes(acc))
 		case "TEXCOORD_0":
-			d.UVs = castTo[glm.Vec2f](l.accessorBytes(acc))
+			uvs = castTo[glm.Vec2f](l.accessorBytes(acc))
 		case "COLOR_0":
 			if a := l.doc.Accessors[acc]; a.ComponentType == 5126 { // FLOAT only
 				if a.Type == "VEC4" {
-					d.Colors = castTo[glm.Vec4f](l.accessorBytes(acc))
+					colors = castTo[glm.Vec4f](l.accessorBytes(acc))
 				} else if a.Type == "VEC3" {
 					v3 := castTo[glm.Vec3f](l.accessorBytes(acc))
-					d.Colors = make([]glm.Vec4f, len(v3))
+					colors = make([]glm.Vec4f, len(v3))
 					for i, c := range v3 {
-						d.Colors[i] = glm.Vec4f{c[0], c[1], c[2], 1}
+						colors[i] = glm.Vec4f{c[0], c[1], c[2], 1}
 					}
 				}
 			}
 		}
 	}
-	return d
+	if len(positions) == 0 {
+		return pix.GeometryConfig{}
+	}
+	attrs := []pix.Attribute{pix.NewAttribute(pix.AttributePosition, pix.Float32x3, positions)}
+	if len(normals) > 0 {
+		attrs = append(attrs, pix.NewAttribute(pix.AttributeNormal, pix.Float32x3, normals))
+	}
+	if len(colors) > 0 {
+		attrs = append(attrs, pix.NewAttribute(pix.AttributeColor, pix.Float32x4, colors))
+	}
+	if len(uvs) > 0 {
+		attrs = append(attrs, pix.NewAttribute(pix.AttributeUV, pix.Float32x2, uvs))
+	}
+	return pix.GeometryConfig{Attributes: attrs, Indices: indices}
 }
 
 // ---- textures & materials ----
@@ -236,6 +252,22 @@ func (l *loader) loadMaterials() {
 		m := l.renderer.NewPBRMaterial()
 		m.SetMetallic(1)
 		m.SetRoughness(1)
+		// alphaMode BLEND → transparent (src-alpha over); OPAQUE/MASK stay opaque.
+		if gm.AlphaMode == "BLEND" {
+			m.SetBlend(pix.BlendAlpha)
+		}
+		// KHR_materials_transmission (glass): approximate as alpha-blended, diffuse
+		// suppressed. A transmission factor > 0 makes the surface see-through.
+		if ext := gm.Extensions; ext != nil && ext.Transmission != nil {
+			tf := float32(1)
+			if ext.Transmission.TransmissionFactor != nil {
+				tf = *ext.Transmission.TransmissionFactor
+			}
+			if tf > 0 {
+				m.SetTransmission(tf)
+				m.SetBlend(pix.BlendAlpha)
+			}
+		}
 		if gm.NormalTexture != nil {
 			if t := l.texture(gm.NormalTexture.Index, false); t.Valid() {
 				m.SetNormalMap(t, samp)

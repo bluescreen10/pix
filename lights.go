@@ -49,7 +49,7 @@ type Lights struct {
 func NewLights(b gpu.Backend) *Lights {
 	l := &Lights{backend: b}
 	l.data.ambient = [4]float32{0.08, 0.08, 0.08, 0}
-	l.buf = b.Alloc(lightsSize, gpu.MemoryHost, "Lights")
+	l.buf = b.Alloc(lightsSize, gpu.MemoryDevice, "Lights")
 	l.dirty = true
 	return l
 }
@@ -97,12 +97,13 @@ func (l *Lights) Clear() {
 // Addr returns the table's device address.
 func (l *Lights) Addr() uint64 { return l.buf.Addr }
 
-// Sync uploads the table when it changed.
-func (l *Lights) Sync() {
+// Sync uploads the table through the uploader when it changed. The buffer is
+// MemoryDevice, so the write is staged and copied (the caller flushes).
+func (l *Lights) Sync(u *uploader) {
 	if !l.dirty {
 		return
 	}
-	*(*gpuLights)(l.buf.Ptr) = l.data
+	u.copy(l.buf, 0, unsafe.Slice((*byte)(unsafe.Pointer(&l.data)), lightsSize))
 	l.dirty = false
 }
 

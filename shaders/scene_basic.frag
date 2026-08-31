@@ -11,7 +11,7 @@
 
 // Material mirrors pix.basicRecord (48 bytes).
 struct Material {
-    vec4 baseColor;
+    vec4 color;
     vec4 emissive;
     uint colorMap;
     uint samp;
@@ -22,6 +22,6 @@ layout(buffer_reference, scalar) readonly buffer MatBuf { Material v[]; };
 
 void main() {
     Material m = MatBuf(pc.root.materials).v[vMat];
-    vec4 base = sampleBase(m.baseColor, m.flags, m.colorMap, m.samp);
+    vec4 base = sampleBase(m.color, m.flags, m.colorMap, m.samp);
     outColor = vec4(linearToSrgb(base.rgb + m.emissive.rgb), base.a);
 }

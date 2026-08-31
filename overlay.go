@@ -3,6 +3,7 @@ package pix
 import (
 	"unsafe"
 
+	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
 	"github.com/bluescreen10/pix/shaders"
 )
@@ -10,15 +11,15 @@ import (
 // overlayQuad is one solid screen-space rectangle (scalar, 32 bytes); matches Quad
 // in overlay.vert. rect = x,y (top-left px), z,w (w,h px).
 type overlayQuad struct {
-	rect  [4]float32
-	color [4]float32
+	rect  glm.Vec4f
+	color glm.RGBA32F
 }
 
 // overlayRoot matches Root in overlay.vert. Scalar layout: vec2 viewport occupies
 // offset 0..8, and quads (a 64-bit reference) sits at offset 8 (already aligned) —
 // no interior padding.
 type overlayRoot struct {
-	viewport [2]float32
+	viewport glm.Vec2f
 	quads    uint64
 }
 
@@ -50,7 +51,7 @@ func (o *overlay) reset() { o.quads = o.quads[:0] }
 
 // text rasterizes s at (x,y) top-left in pixels, with glyph height `size` px, into
 // solid quads of the given color.
-func (o *overlay) text(s string, x, y, size float32, color [4]float32) {
+func (o *overlay) text(s string, x, y, size float32, color glm.RGBA32F) {
 	scale := size / 16
 	cx := x
 	for _, ch := range s {
@@ -64,7 +65,7 @@ func (o *overlay) text(s string, x, y, size float32, color [4]float32) {
 			for col := 0; col < 16; col++ {
 				if bits>>uint(col)&1 != 0 {
 					o.quads = append(o.quads, overlayQuad{
-						rect:  [4]float32{cx + float32(col)*scale, y + float32(row)*scale, scale, scale},
+						rect:  glm.Vec4f{cx + float32(col)*scale, y + float32(row)*scale, scale, scale},
 						color: color,
 					})
 				}
@@ -75,7 +76,7 @@ func (o *overlay) text(s string, x, y, size float32, color [4]float32) {
 }
 
 // draw records the overlay draw into cl for a viewport of vpW×vpH pixels.
-func (o *overlay) draw(cl gpu.CommandList, vpW, vpH float32) {
+func (o *overlay) draw(cmd gpu.CommandBuffer, vpW, vpH float32) {
 	n := len(o.quads)
 	if n == 0 {
 		return
@@ -88,11 +89,11 @@ func (o *overlay) draw(cl gpu.CommandList, vpW, vpH float32) {
 		o.quadBuf = o.backend.Alloc(uint64(o.quadCap)*uint64(unsafe.Sizeof(overlayQuad{})), gpu.MemoryHost, "overlay-quads")
 	}
 	copy(unsafe.Slice((*overlayQuad)(o.quadBuf.Ptr), n), o.quads)
-	*(*overlayRoot)(o.rootBuf.Ptr) = overlayRoot{viewport: [2]float32{vpW, vpH}, quads: o.quadBuf.Addr}
+	*(*overlayRoot)(o.rootBuf.Ptr) = overlayRoot{viewport: glm.Vec2f{vpW, vpH}, quads: o.quadBuf.Addr}
 
-	cl.SetPipeline(o.pipe)
-	cl.Root(o.rootBuf.Addr)
-	cl.Draw(6, uint32(n), 0, 0)
+	cmd.SetPipeline(o.pipe)
+	cmd.Root(o.rootBuf.Addr)
+	cmd.Draw(6, uint32(n), 0, 0)
 }
 
 func (o *overlay) destroy() {

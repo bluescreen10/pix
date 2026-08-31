@@ -1,11 +1,10 @@
-package vulkan
+package gpu_test
 
 import (
 	"testing"
 	"unsafe"
 
 	"github.com/bluescreen10/pix/gpu"
-	"github.com/bluescreen10/pix/shaders"
 )
 
 // drawIndexedIndirect mirrors VkDrawIndexedIndirectCommand (20 bytes).
@@ -19,12 +18,7 @@ type drawIndexedIndirect struct {
 // a compute pass writes the draw args (with atomicAdd on instanceCount) via BDA,
 // a barrier orders compute→indirect, then DrawIndexedIndirect consumes them.
 func TestComputeIndirect(t *testing.T) {
-	b := New()
-	err := b.Init()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer b.Destroy()
+	b := testBackend(t)
 
 	const size = 64
 	target := b.CreateTexture(gpu.TextureDescriptor{
@@ -59,36 +53,36 @@ func TestComputeIndirect(t *testing.T) {
 	root.verts = vb.Addr
 
 	comp := b.CreateComputePipeline(gpu.ComputePipelineDescriptor{
-		Shader: shaders.FillIndirect,
+		Shader: fillIndirect,
 		Entry:  "main",
 		Label:  "fill-indirect",
 	})
 	gfx := b.CreateGraphicsPipeline(gpu.PipelineDescriptor{
-		VertexShader: shaders.TriangleVert, FragmentShader: shaders.TriangleFrag,
+		VertexShader: triangleVert, FragmentShader: triangleFrag,
 		Topology: gpu.TopologyTriangles, ColorFormats: []gpu.Format{gpu.FormatRGBA8Unorm},
 		CullMode: gpu.CullNone, Label: "triangle",
 	})
 
 	readback := b.Alloc(size*size*4, gpu.MemoryHost, "readback")
 
-	cl := b.Begin()
-	cl.SetPipeline(comp)
-	cl.Root(cRoot.Addr)
-	cl.Dispatch(1, 1, 1)
+	cmd := b.Begin()
+	cmd.SetPipeline(comp)
+	cmd.Root(cRoot.Addr)
+	cmd.Dispatch(1, 1, 1)
 	// Order the compute writes before the indirect fetch + vertex/index read.
-	cl.Barrier(gpu.StageCompute, gpu.StageIndirect|gpu.StageVertex, 0)
+	cmd.Barrier(gpu.StageCompute, gpu.StageIndirect|gpu.StageVertex, 0)
 
-	cl.BeginRendering(gpu.RenderTargets{
+	cmd.BeginRenderPass(gpu.RenderTargets{
 		Color: []gpu.ColorAttachment{{Texture: target, Load: gpu.LoadClear, Clear: [4]float32{0, 0, 0, 1}}},
 	})
-	cl.SetPipeline(gfx)
-	cl.Root(gRoot.Addr)
-	cl.Viewport(0, 0, size, size, 0, 1)
-	cl.Scissor(0, 0, size, size)
-	cl.DrawIndexedIndirect(ib, indirect, 0, 1, 20)
-	cl.EndRendering()
-	cl.CopyTextureToBuffer(readback, target, 0, 0)
-	f := b.Submit(cl)
+	cmd.SetPipeline(gfx)
+	cmd.Root(gRoot.Addr)
+	cmd.Viewport(0, 0, size, size, 0, 1)
+	cmd.Scissor(0, 0, size, size)
+	cmd.DrawIndexedIndirect(ib, indirect, 0, 1, 20)
+	cmd.EndRenderPass()
+	cmd.CopyTextureToBuffer(readback, target, 0, 0)
+	f := b.Submit(cmd)
 	b.Wait(f)
 
 	// The compute pass must have written the draw args.

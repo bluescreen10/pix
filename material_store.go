@@ -6,36 +6,35 @@ import (
 	"github.com/bluescreen10/pix/gpu"
 )
 
-// materialRaster is a material instance's rasterization state (part of its pipeline
-// identity). Stored per-instance so all copies of a material share it.
-type materialRaster struct {
-	cull  CullMode
-	blend BlendMode
-}
-
 // materialStore is a generic, byte-based store for one material kind (one shader).
 // The material system creates it automatically from a material's declared data size
 // and shader — there is no per-type Go store to hand-write. Records live directly in
 // a host-coherent, GPU-mapped BDA buffer (correctly aligned, no upload copy): a
 // material's typed accessors write straight through record(id). Each instance also
-// carries ref-counted texture slots and rasterization state.
+// carries ref-counted texture slots and per-instance cull/blend rasterization state.
 type materialStore struct {
-	backend  gpu.Backend
-	sh       Shader
-	stride   uint32 // bytes per record (the material's data size)
-	count    uint32 // live + freed records
-	cap      uint32
-	buf      gpu.Buffer // mapped; records stored here directly
-	raster   []materialRaster
-	texSlots int
-	texRefs  []Texture // len == count*texSlots; instance i owns [i*n:(i+1)*n]
-	gens     []uint32
-	free     []uint32
-	label    string
+	backend      gpu.Backend
+	sh           Shader
+	fragHash     uint32 // hash of sh.Fragment (store dedup key)
+	pipeHash     uint32 // hash of sh.Vertex+sh.Fragment (draw-pipeline identity)
+	stride       uint32 // bytes per record (the material's data size)
+	count        uint32 // live + freed records
+	cap          uint32
+	buf          gpu.Buffer  // mapped; records stored here directly
+	cull         []CullMode  // per-instance, indexed by id
+	blend        []BlendMode // per-instance, indexed by id
+	textureSlots int
+	textures     []Texture // len == count*textureSlots; instance i owns [i*n:(i+1)*n]
+	gens         []uint32
+	free         []uint32
+	label        string
 }
 
-func newMaterialStore(b gpu.Backend, sh Shader, stride uint32, texSlots int, label string) *materialStore {
-	s := &materialStore{backend: b, sh: sh, stride: stride, texSlots: texSlots, label: label, cap: 1}
+func newMaterialStore(b gpu.Backend, sh Shader, stride uint32, textureSlots int, label string) *materialStore {
+	s := &materialStore{
+		backend: b, sh: sh, stride: stride, textureSlots: textureSlots, label: label, cap: 1,
+		fragHash: hashSPIRV(sh.Fragment), pipeHash: shaderHash(sh),
+	}
 	s.buf = b.Alloc(uint64(stride), gpu.MemoryHost, label)
 	return s
 }
@@ -48,7 +47,7 @@ func (s *materialStore) alloc() uint32 {
 		id := s.free[n-1]
 		s.free = s.free[:n-1]
 		s.zero(id)
-		s.raster[id] = materialRaster{}
+		s.cull[id], s.blend[id] = CullNone, BlendOpaque
 		return id
 	}
 	if s.count == s.cap {
@@ -56,9 +55,10 @@ func (s *materialStore) alloc() uint32 {
 	}
 	id := s.count
 	s.count++
-	s.raster = append(s.raster, materialRaster{})
+	s.cull = append(s.cull, CullNone)
+	s.blend = append(s.blend, BlendOpaque)
 	s.gens = append(s.gens, 1)
-	s.texRefs = append(s.texRefs, make([]Texture, s.texSlots)...)
+	s.textures = append(s.textures, make([]Texture, s.textureSlots)...)
 	s.zero(id)
 	return id
 }
@@ -91,18 +91,31 @@ func (s *materialStore) dataOf(id uint32) []byte {
 }
 
 func (s *materialStore) bufAddr() uint64 { return s.buf.Addr }
-func (s *materialStore) shader() Shader   { return s.sh }
+func (s *materialStore) shader() Shader  { return s.sh }
 
-func (s *materialStore) rasterOf(id uint32) materialRaster       { return s.raster[id] }
-func (s *materialStore) setRasterOf(id uint32, r materialRaster) { s.raster[id] = r }
+func (s *materialStore) cullOf(id uint32) CullMode {
+	return s.cull[id]
+}
+
+func (s *materialStore) setCullOf(id uint32, c CullMode) {
+	s.cull[id] = c
+}
+
+func (s *materialStore) blendOf(id uint32) BlendMode {
+	return s.blend[id]
+}
+
+func (s *materialStore) setBlendOf(id uint32, b BlendMode) {
+	s.blend[id] = b
+}
 
 func (s *materialStore) setTexture(id uint32, slot int, t Texture) {
-	i := int(id)*s.texSlots + slot
-	old := s.texRefs[i]
+	i := int(id)*s.textureSlots + slot
+	old := s.textures[i]
 	if t.Valid() {
-		s.texRefs[i] = t.Copy()
+		s.textures[i] = t.Copy()
 	} else {
-		s.texRefs[i] = Texture{}
+		s.textures[i] = Texture{}
 	}
 	if old.Valid() {
 		old.Release()
@@ -110,7 +123,7 @@ func (s *materialStore) setTexture(id uint32, slot int, t Texture) {
 }
 
 func (s *materialStore) texture(id uint32, slot int) Texture {
-	return s.texRefs[int(id)*s.texSlots+slot]
+	return s.textures[int(id)*s.textureSlots+slot]
 }
 
 // --- Disposer ---
@@ -123,11 +136,11 @@ func (s *materialStore) generation(id uint32) uint32 {
 }
 
 func (s *materialStore) dispose(id uint32) {
-	base := int(id) * s.texSlots
-	for i := 0; i < s.texSlots; i++ {
-		if t := s.texRefs[base+i]; t.Valid() {
+	base := int(id) * s.textureSlots
+	for i := 0; i < s.textureSlots; i++ {
+		if t := s.textures[base+i]; t.Valid() {
 			t.Release()
-			s.texRefs[base+i] = Texture{}
+			s.textures[base+i] = Texture{}
 		}
 	}
 	s.zero(id)
@@ -136,7 +149,7 @@ func (s *materialStore) dispose(id uint32) {
 }
 
 func (s *materialStore) destroy() {
-	for _, t := range s.texRefs {
+	for _, t := range s.textures {
 		if t.Valid() {
 			t.Release()
 		}

@@ -22,7 +22,7 @@ func TestMaterialClasses(t *testing.T) {
 
 	cube := r.NewGeometry(normalCube())
 	basic := r.NewBasicMaterial()
-	basic.SetColor(glm.RGB32F{0.8, 0.8, 0.8})
+	basic.SetColor(glm.RGBA32F{0.8, 0.8, 0.8, 1})
 	phong := r.NewBlinnPhongMaterial()
 	phong.SetColor(glm.RGBA32F{0.8, 0.8, 0.8, 1})
 	pbr := r.NewPBRMaterial()
