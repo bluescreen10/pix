@@ -9,9 +9,13 @@ import (
 // regionAlign is the per-batch granularity in the visible buffer, in u32 entries.
 const regionAlign uint32 = 64
 
-// Drawable flag bits (mirror the GLSL). castsShadow is structural so a cull pass
-// can filter shadow casters.
-const DrawableCastsShadow uint32 = 1 << 1
+// Drawable flag bits (mirror the GLSL). CastsShadow is structural so a cull pass can
+// filter shadow casters; ReceivesShadow lets the lit shaders skip shadow sampling for
+// a drawable (both default per-node — see scene flags).
+const (
+	DrawableCastsShadow    uint32 = 1 << 1
+	DrawableReceivesShadow uint32 = 1 << 2
+)
 
 // gpuDrawable is uploaded verbatim to the drawable buffer; matches Drawable in the
 // scene shaders (scalar, 40 bytes). bounds is the LOCAL bounding sphere; transformID
@@ -51,16 +55,31 @@ type cullRoot struct {
 // then pointers, then eye). One per pipeline (its material store's buffer address);
 // there is no regionBase — each indirect command sets firstInstance instead.
 type drawRoot struct {
+	viewProj         glm.Mat4f
+	pos              uint64
+	attr             uint64
+	descs            uint64
+	models           uint64
+	drawables        uint64
+	visible          uint64
+	materials        uint64
+	lights           uint64
+	eye              glm.Vec4f
+	shadowSampler    uint32 // bindless index of the PCF comparison sampler
+	pad0, pad1, pad2 uint32
+}
+
+// shadowRoot matches ShadowRoot in scene_shadow.vert (scalar; mat4 then pointers).
+// The depth pass is position-only, so this is a stripped drawRoot: no attributes,
+// descriptors are still needed to locate the position stream, and visible is the
+// shadow view's own compacted buffer. viewProj is the light camera's.
+type shadowRoot struct {
 	viewProj  glm.Mat4f
 	pos       uint64
-	attr      uint64
 	descs     uint64
 	models    uint64
 	drawables uint64
 	visible   uint64
-	materials uint64
-	lights    uint64
-	eye       glm.Vec4f
 }
 
 // batch is one indirect command: a run of drawables sharing a (pipeline, geometry)
@@ -85,7 +104,9 @@ type pipelineRun struct {
 }
 
 var (
-	drawableSize = uint32(unsafe.Sizeof(gpuDrawable{}))
-	indirectSize = uint32(unsafe.Sizeof(indirectCmd{}))
-	drawRootSize = uint64(unsafe.Sizeof(drawRoot{}))
+	drawableSize   = uint32(unsafe.Sizeof(gpuDrawable{}))
+	indirectSize   = uint32(unsafe.Sizeof(indirectCmd{}))
+	drawRootSize   = uint64(unsafe.Sizeof(drawRoot{}))
+	cullRootSize   = uint64(unsafe.Sizeof(cullRoot{}))
+	shadowRootSize = uint64(unsafe.Sizeof(shadowRoot{}))
 )

@@ -3,6 +3,7 @@ package pix
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -20,8 +21,8 @@ func TestShowFPS(t *testing.T) {
 
 	scene := r.NewScene()
 	defer scene.Destroy()
-	cam := NewCamera()
-	cam.Position = glm.Vec3f{0, 0, 3}
+	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 1000)
+	cam.SetPosition(glm.Vec3f{0, 0, 3})
 
 	for i := 0; i < 6; i++ {
 		r.Render(scene, cam)

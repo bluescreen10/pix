@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
+	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -138,10 +139,12 @@ func TestLoadTriangle(t *testing.T) {
 		t.Fatalf("loaded %d meshes (scene has %d), want 1", n, scene.MeshCount())
 	}
 
-	cam := pix.NewCamera()
-	cam.Position = glm.Vec3f{0, 0, 2.5}
-	cam.FOV = 50
-	cam.Far = 100
+	// Flat white ambient so the unlit base color shows through (this test checks
+	// loading/material/transform, not lighting — and there's no default ambient).
+	scene.SetAmbient(glm.Vec3f{1, 1, 1})
+
+	cam := cameras.NewPerspectiveCamera(50, 1, 0.1, 100)
+	cam.SetPosition(glm.Vec3f{0, 0, 2.5})
 	r.Render(scene, cam)
 
 	px := r.Pixels()

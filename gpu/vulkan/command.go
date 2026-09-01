@@ -110,8 +110,12 @@ static void vkbBeginRendering(VkCommandBuffer cb, uint32_t w, uint32_t h,
     ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
     ri.renderArea.extent.width = w; ri.renderArea.extent.height = h;
     ri.layerCount = 1;
-    ri.colorAttachmentCount = 1;
-    ri.pColorAttachments = &ci;
+    // A depth-only pass (shadow map) passes a null color view: advertise zero color
+    // attachments so the count matches a pipeline built with no color formats.
+    if (color != VK_NULL_HANDLE) {
+        ri.colorAttachmentCount = 1;
+        ri.pColorAttachments = &ci;
+    }
     if (hasDepth) ri.pDepthAttachment = &di;
     vkCmdBeginRendering(cb, &ri);
 }

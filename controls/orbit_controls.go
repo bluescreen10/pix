@@ -95,6 +95,8 @@ func (c *OrbitControls) SetTarget(target glm.Vec3f) {
 	c.desiredTarget = target
 }
 
+// SetPitch sets the target pitch. Positive pitch looks down from above the target,
+// negative from below; 0 is level. Clamped to ±1.5 rad while orbiting.
 func (c *OrbitControls) SetPitch(pitch float32) {
 	c.desiredPitch = pitch
 }
@@ -123,7 +125,7 @@ func (c *OrbitControls) Update() {
 		} else {
 			deltaMouse := newPos.Sub(c.mousePos)
 			c.desiredYaw -= deltaMouse[0] * c.rotateSpeed
-			c.desiredPitch -= deltaMouse[1] * c.rotateSpeed
+			c.desiredPitch += deltaMouse[1] * c.rotateSpeed
 			c.desiredPitch = glm.Clamp(c.desiredPitch, -1.5, 1.5)
 		}
 	} else {
@@ -170,9 +172,10 @@ func (c *OrbitControls) Update() {
 		c.target = c.desiredTarget
 	}
 
-	// build rotation quaternion from yaw/pitch
+	// build rotation quaternion from yaw/pitch. Pitch is negated so the convention is
+	// positive pitch = look from above (offset.y = radius·sin(pitch)).
 	quatYaw := glm.NewQuat(c.yaw, glm.Vec3f{0, 1, 0})
-	quatPitch := glm.NewQuat(c.pitch, glm.Vec3f{1, 0, 0})
+	quatPitch := glm.NewQuat(-c.pitch, glm.Vec3f{1, 0, 0})
 	rot := quatYaw.Mul(quatPitch)
 
 	// rebuild offset from base vector

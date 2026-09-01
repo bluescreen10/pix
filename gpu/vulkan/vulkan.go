@@ -290,6 +290,11 @@ func (b *Backend) Destroy() {
 		for _, qp := range b.queryPools {
 			C.vkDestroyQueryPool(b.device, qp, nil)
 		}
+		// The backend is a shared singleton (gpu.Instance); a later renderer re-inits
+		// the device. Reset the handle registries so they don't retain dead handles
+		// from this device (a subsequent Destroy would double-free them).
+		b.pipelines = map[uint64]pipelineEntry{}
+		b.queryPools = map[uint64]C.VkQueryPool{}
 		b.destroyAllSwapchains()
 		b.destroyAllTextures()
 		b.destroyAllBuffers()

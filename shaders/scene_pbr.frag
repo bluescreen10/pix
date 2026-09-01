@@ -115,10 +115,14 @@ void main() {
     // approximation of KHR_materials_transmission.
     float diffuseScale = 1.0 - m.transmission;
 
+    uint shadowSamp = pc.root.shadowSampler;
+    bool receives = (vFlags & FLAG_RECEIVES_SHADOW) != 0u;
+
     vec3 lo = vec3(0.0);
     for (uint i = 0u; i < L.numDir; i++) {
         DirLight dl = L.dirs[i];
-        lo += cookTorrance(N, V, normalize(-dl.dir.xyz), dl.color.rgb * dl.color.w, albedo, metallic, roughness, diffuseScale);
+        float sh = receives ? shadowFactor(dl.shadowVP, dl.shadowMap, vWorldPos, shadowSamp) : 1.0;
+        lo += sh * cookTorrance(N, V, normalize(-dl.dir.xyz), dl.color.rgb * dl.color.w, albedo, metallic, roughness, diffuseScale);
     }
     for (uint i = 0u; i < L.numPoint; i++) {
         PointLight pl = L.points[i];
@@ -127,7 +131,18 @@ void main() {
         float range = max(pl.pos.w, 0.0001);
         float atten = clamp(1.0 - dist / range, 0.0, 1.0);
         atten *= atten;
-        lo += cookTorrance(N, V, d / max(dist, 0.0001), pl.color.rgb * pl.color.w * atten, albedo, metallic, roughness, diffuseScale);
+        float sh = receives ? pointShadowFactor(pl, vWorldPos, shadowSamp) : 1.0;
+        lo += sh * cookTorrance(N, V, d / max(dist, 0.0001), pl.color.rgb * pl.color.w * atten, albedo, metallic, roughness, diffuseScale);
+    }
+    for (uint i = 0u; i < L.numSpot; i++) {
+        SpotLight sl = L.spots[i];
+        vec3 d = sl.pos.xyz - vWorldPos;
+        float dist = length(d);
+        vec3 Ldir = d / max(dist, 1e-4);
+        float atten = spotAttenuation(sl, vWorldPos, Ldir, dist);
+        if (atten <= 0.0) continue;
+        float sh = receives ? shadowFactor(sl.shadowVP, sl.shadowMap, vWorldPos, shadowSamp) : 1.0;
+        lo += sh * cookTorrance(N, V, Ldir, sl.color.rgb * sl.color.w * atten, albedo, metallic, roughness, diffuseScale);
     }
 
     vec3 ambient = L.ambient.rgb * albedo * diffuseScale;

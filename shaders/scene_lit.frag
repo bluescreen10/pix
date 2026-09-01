@@ -40,10 +40,14 @@ void main() {
     vec3 N = normalize(vNormal);
     vec3 V = normalize(pc.root.eye.xyz - vWorldPos);
 
+    uint shadowSamp = pc.root.shadowSampler;
+    bool receives = (vFlags & FLAG_RECEIVES_SHADOW) != 0u;
+
     vec3 lit = L.ambient.rgb * albedo;
     for (uint i = 0u; i < L.numDir; i++) {
         DirLight dl = L.dirs[i];
-        lit += blinnPhong(N, V, normalize(-dl.dir.xyz), dl.color.rgb * dl.color.w, albedo, m.specular, m.shininess);
+        float sh = receives ? shadowFactor(dl.shadowVP, dl.shadowMap, vWorldPos, shadowSamp) : 1.0;
+        lit += sh * blinnPhong(N, V, normalize(-dl.dir.xyz), dl.color.rgb * dl.color.w, albedo, m.specular, m.shininess);
     }
     for (uint i = 0u; i < L.numPoint; i++) {
         PointLight pl = L.points[i];
@@ -52,7 +56,18 @@ void main() {
         float range = max(pl.pos.w, 0.0001);
         float atten = clamp(1.0 - dist / range, 0.0, 1.0);
         atten *= atten;
-        lit += blinnPhong(N, V, d / max(dist, 0.0001), pl.color.rgb * pl.color.w * atten, albedo, m.specular, m.shininess);
+        float sh = receives ? pointShadowFactor(pl, vWorldPos, shadowSamp) : 1.0;
+        lit += sh * blinnPhong(N, V, d / max(dist, 0.0001), pl.color.rgb * pl.color.w * atten, albedo, m.specular, m.shininess);
+    }
+    for (uint i = 0u; i < L.numSpot; i++) {
+        SpotLight sl = L.spots[i];
+        vec3 d = sl.pos.xyz - vWorldPos;
+        float dist = length(d);
+        vec3 Ldir = d / max(dist, 1e-4);
+        float atten = spotAttenuation(sl, vWorldPos, Ldir, dist);
+        if (atten <= 0.0) continue;
+        float sh = receives ? shadowFactor(sl.shadowVP, sl.shadowMap, vWorldPos, shadowSamp) : 1.0;
+        lit += sh * blinnPhong(N, V, Ldir, sl.color.rgb * sl.color.w * atten, albedo, m.specular, m.shininess);
     }
 
     outColor = vec4(linearToSrgb(lit + m.emissive.rgb), base.a);

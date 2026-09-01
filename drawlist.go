@@ -34,6 +34,25 @@ type drawList struct {
 	visibleBuf  gpu.Buffer
 	cullRootBuf gpu.Buffer
 	drawRootBuf gpu.Buffer // one drawRoot per pipeline run
+
+	// Shadow views: one extra cull + depth pass per shadow-casting light. They share
+	// the drawable/world/region tables (culled from the same drawables) but each owns
+	// its indirect args, compacted-visible buffer and root buffers. Pooled and grown
+	// on demand; resized whenever the main batch/visible layout changes.
+	shadowViews []drawView
+	svBatchCap  uint32
+	svVisCap    uint32
+}
+
+// drawView is one shadow view's private GPU state: its own indirect args and
+// compacted-visible buffer (culled independently from the light's frustum) plus the
+// cull/depth-pass root buffers. The drawable/world/region tables it reads are the
+// drawList's shared ones.
+type drawView struct {
+	indirectBuf gpu.Buffer
+	visibleBuf  gpu.Buffer
+	cullRootBuf gpu.Buffer
+	drawRootBuf gpu.Buffer // single shadowRoot for the depth pass
 }
 
 func newDrawList(b gpu.Backend) *drawList {
@@ -175,10 +194,45 @@ func (d *drawList) ensureBuffers() {
 	d.drawRootBuf = realloc(d.drawRootBuf, uint64(nr)*drawRootSize, "draw-roots")
 }
 
+// ensureShadowViews grows the shadow-view pool to at least n views and sizes each
+// view's per-frame buffers to the current batch/visible layout. Root buffers are
+// allocated once; the indirect + visible buffers are (re)allocated whenever the main
+// layout changed (a structural rebuild) so they mirror it. Cheap when already sized.
+func (d *drawList) ensureShadowViews(n int) {
+	for len(d.shadowViews) < n {
+		d.shadowViews = append(d.shadowViews, drawView{
+			cullRootBuf: d.backend.Alloc(cullRootSize, gpu.MemoryHost, "shadow-cull-root"),
+			drawRootBuf: d.backend.Alloc(shadowRootSize, gpu.MemoryHost, "shadow-draw-root"),
+		})
+	}
+	nb := max(uint32(len(d.batches)), 1)
+	resize := nb != d.svBatchCap || d.visCap != d.svVisCap
+	for i := range d.shadowViews {
+		v := &d.shadowViews[i]
+		if !resize && v.indirectBuf.Valid() {
+			continue
+		}
+		if v.indirectBuf.Valid() {
+			d.backend.Free(v.indirectBuf)
+		}
+		if v.visibleBuf.Valid() {
+			d.backend.Free(v.visibleBuf)
+		}
+		v.indirectBuf = d.backend.Alloc(uint64(nb)*uint64(indirectSize), gpu.MemoryHost, "shadow-indirect")
+		v.visibleBuf = d.backend.Alloc(uint64(d.visCap)*4, gpu.MemoryHost, "shadow-visible")
+	}
+	d.svBatchCap = nb
+	d.svVisCap = d.visCap
+}
+
 func (d *drawList) batchCount() int { return len(d.batches) }
 
 func (d *drawList) destroy() {
-	for _, b := range []gpu.Buffer{d.worldBuf, d.drawableBuf, d.indirectBuf, d.regionBuf, d.visibleBuf, d.cullRootBuf, d.drawRootBuf} {
+	bufs := []gpu.Buffer{d.worldBuf, d.drawableBuf, d.indirectBuf, d.regionBuf, d.visibleBuf, d.cullRootBuf, d.drawRootBuf}
+	for _, v := range d.shadowViews {
+		bufs = append(bufs, v.indirectBuf, v.visibleBuf, v.cullRootBuf, v.drawRootBuf)
+	}
+	for _, b := range bufs {
 		if b.Valid() {
 			d.backend.Free(b)
 		}

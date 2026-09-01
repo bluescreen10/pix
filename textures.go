@@ -84,6 +84,26 @@ func (t *textureSystem) upload(pixels []byte, w, h int, format TextureFormat) Te
 	return Texture{ref: Ref{id: id, gen: gen, refCount: &rc, owner: t}, index: tex.Index}
 }
 
+// createDepthTarget allocates a w×h depth texture usable as both a depth attachment
+// (rendered into) and a bindless sampled image (sampled in the lit shaders) — i.e. a
+// shadow map. Index is its heap slot.
+func (t *textureSystem) createDepthTarget(w, h uint32) Texture {
+	tex := t.backend.CreateTexture(gpu.TextureDescriptor{
+		Kind: gpu.Texture2D, Width: w, Height: h,
+		Format: gpu.FormatDepth32F, Usage: gpu.TextureDepth | gpu.TextureSampled,
+		Label: "shadow-map",
+	})
+	id, gen := t.entries.Alloc(textureEntry{tex: tex, index: tex.Index})
+	rc := int32(1)
+	return Texture{ref: Ref{id: id, gen: gen, refCount: &rc, owner: t}, index: tex.Index}
+}
+
+// gpu resolves a handle to its backing backend texture (e.g. to bind a shadow map
+// as a depth render attachment, or to transition it for sampling).
+func (t *textureSystem) gpu(tex Texture) gpu.Texture {
+	return t.entries.Get(tex.ref.id).tex
+}
+
 // Destroy releases all uploaded textures and samplers.
 func (t *textureSystem) Destroy() {
 	for e := range t.entries.Items() {

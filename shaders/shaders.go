@@ -19,6 +19,8 @@ import _ "embed"
 
 //go:generate glslc --target-env=vulkan1.4 -O scene_cull.comp -o scene_cull.comp.spv
 //go:generate glslc --target-env=vulkan1.4 -O scene_draw.vert -o scene_draw.vert.spv
+//go:generate glslc --target-env=vulkan1.4 -O scene_shadow.vert -o scene_shadow.vert.spv
+//go:generate glslc --target-env=vulkan1.4 -O scene_shadow.frag -o scene_shadow.frag.spv
 //go:generate glslc --target-env=vulkan1.4 -O scene_basic.frag -o scene_basic.frag.spv
 //go:generate glslc --target-env=vulkan1.4 -O scene_lit.frag -o scene_lit.frag.spv
 //go:generate glslc --target-env=vulkan1.4 -O scene_pbr.frag -o scene_pbr.frag.spv
@@ -28,6 +30,12 @@ var SceneCull []byte
 
 //go:embed scene_draw.vert.spv
 var SceneDraw []byte
+
+//go:embed scene_shadow.vert.spv
+var SceneShadowVert []byte
+
+//go:embed scene_shadow.frag.spv
+var SceneShadowFrag []byte
 
 //go:embed scene_basic.frag.spv
 var SceneBasic []byte

@@ -3,6 +3,7 @@ package pix
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -40,8 +41,8 @@ func TestTransparency(t *testing.T) {
 	scene.Add(scene.NewMesh(quad(0), blue))   // front, transparent, added first
 	scene.Add(scene.NewMesh(quad(-0.5), red)) // behind, opaque, added last
 
-	cam := NewCamera()
-	cam.Position = glm.Vec3f{0, 0, 2}
+	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 1000)
+	cam.SetPosition(glm.Vec3f{0, 0, 2})
 	r.Render(scene, cam)
 
 	px := r.Pixels()

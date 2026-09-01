@@ -44,6 +44,10 @@ layout(buffer_reference, scalar) readonly buffer DrawRoot {
     uint64_t materials;
     uint64_t lights;
     vec4 eye;
+    uint shadowSampler;
+    uint spad0;
+    uint spad1;
+    uint spad2;
 };
 layout(push_constant) uniform PC { DrawRoot root; } pc;
 
@@ -52,6 +56,7 @@ layout(location = 1) out vec2 vUV;
 layout(location = 2) flat out uint vMat;
 layout(location = 3) out vec3 vWorldPos;
 layout(location = 4) out vec3 vNormal;
+layout(location = 5) flat out uint vFlags;
 
 const uint FLAG_NORMAL = 1u;
 const uint FLAG_UV = 2u;
@@ -65,6 +70,7 @@ void main() {
     GeoDesc g = pc.root.descs.v[d.geometryID];
     mat4 m = pc.root.models.v[d.transformID];
     vMat = d.materialID;
+    vFlags = d.flags;
 
     uint vi = uint(gl_VertexIndex);
     uint pb = g.positionBase + vi * 3u;

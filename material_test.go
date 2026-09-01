@@ -3,6 +3,7 @@ package pix
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -41,9 +42,8 @@ func TestMaterialClasses(t *testing.T) {
 	scene.SetAmbient(glm.Vec3f{0.15, 0.15, 0.15})
 	scene.AddDirectionalLight(glm.Vec3f{-1, -0.3, -0.6}, glm.Vec3f{1, 1, 1}, 1.0)
 
-	cam := NewCamera()
-	cam.Position = glm.Vec3f{0, 0.5, 5}
-	cam.FOV = 45
+	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 1000)
+	cam.SetPosition(glm.Vec3f{0, 0.5, 5})
 
 	r.Render(scene, cam)
 

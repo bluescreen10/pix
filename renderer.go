@@ -2,6 +2,7 @@ package pix
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"time"
 	"unsafe"
@@ -46,6 +47,15 @@ type Renderer struct {
 	drawPipelineKeys []materialPipeline
 	pipelinesReady   bool
 
+	// Shadows: global toggle + the shared PCF comparison sampler (created lazily) +
+	// the position-only depth-pass pipeline (rebuilt with the others on format change).
+	// shadowDistance caps how far down the view frustum directional shadows are fit
+	// (0 = auto: reach the far side of the scene sphere).
+	shadowsEnabled bool
+	shadowSampler  gpu.Sampler
+	shadowPipeline gpu.Pipeline
+	shadowDistance float32
+
 	// Stats / debug HUD.
 	stats     *RendererStats
 	fontColor glm.RGBA32F
@@ -53,6 +63,20 @@ type Renderer struct {
 	overlay   *overlay
 	gpuPool   gpu.QueryPool
 	gpuValid  bool
+}
+
+// EnableShadows globally enables or disables shadow rendering. When off, no shadow
+// views are culled and no shadow passes run.
+func (r *Renderer) EnableShadows(on bool) {
+	r.shadowsEnabled = on
+}
+
+// SetShadowDistance caps how far along the camera's view frustum directional shadows
+// are fit: a smaller distance packs the shadow map's resolution into the near view for
+// sharper shadows, at the cost of no shadows beyond it. Pass 0 for the automatic
+// default (fit reaches the far side of the scene's bounding sphere).
+func (r *Renderer) SetShadowDistance(d float32) {
+	r.shadowDistance = d
 }
 
 // NewRenderer creates a renderer from cfg: it selects and initializes a registered
@@ -134,11 +158,20 @@ func (r *Renderer) configure(w, h uint32, format gpu.Format) {
 func (r *Renderer) buildPipelines() {
 	if r.pipelinesReady {
 		r.backend.DestroyPipeline(r.cullPipeline)
+		r.backend.DestroyPipeline(r.shadowPipeline)
 		for _, p := range r.drawPipelines {
 			r.backend.DestroyPipeline(p)
 		}
 	}
 	r.cullPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.SceneCull, Entry: "main", Label: "scene-cull"})
+	// Shadow depth pass: position-only vertex-pull, no color attachment, writes depth.
+	// Cull is disabled so thin geometry still occludes from the light's view.
+	r.shadowPipeline = r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
+		VertexShader: shaders.SceneShadowVert, FragmentShader: shaders.SceneShadowFrag,
+		Topology: gpu.TopologyTriangles, DepthFormat: gpu.FormatDepth32F,
+		DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareLess,
+		CullMode: gpu.CullNone, Label: "scene-shadow",
+	})
 	for i, k := range r.drawPipelineKeys {
 		r.drawPipelines[i] = r.buildDrawPipe(k)
 	}
@@ -271,7 +304,7 @@ func (r *Renderer) ShowFPS(on bool) {
 
 // Render draws the scene from cam into the configured target (swapchain or texture).
 // The camera is not retained.
-func (r *Renderer) Render(scene *Scene, cam *Camera) {
+func (r *Renderer) Render(scene *Scene, cam Camera) {
 	//TODO: r.swapchain.H == 0 is a bit of a smell something like r.swapchain.Valid()
 	// would be better
 	if !r.hasTarget && r.swapchain.H == 0 {
@@ -279,11 +312,11 @@ func (r *Renderer) Render(scene *Scene, cam *Camera) {
 	}
 	r.stats.StartFrame()
 	prepStart := time.Now()
-	r.syncScene(scene)
-	vp := cam.ViewProj()
+	r.syncScene(scene, cam)
+	vp := cam.ViewProjection()
 	planes := FrustumPlanes(vp)
 	drawVP := flipClipY(vp)
-	eye := cam.Position
+	eye := cam.Position()
 	if r.showFPS {
 		r.buildOverlay()
 	}
@@ -336,20 +369,52 @@ func (r *Renderer) Capture() []byte {
 // Pixels is an alias for Capture (headless).
 func (r *Renderer) Pixels() []byte { return r.Capture() }
 
-// encode records the cull + lit draw (and, when enabled, GPU timestamps + the HUD).
+// encode records the frame: the shadow views (cull + depth pass per casting light),
+// then the main view (cull + lit draw), plus GPU timestamps + the HUD when enabled.
+// All compute culls run first (outside any render pass), share one barrier, then the
+// shadow depth passes and the main color pass consume their results.
 func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scene, planes [6][4]float32, drawVP glm.Mat4f, eye glm.Vec3f) {
 	if r.showFPS {
 		cmd.ResetTimestamps(r.gpuPool, 2)
 		cmd.WriteTimestamp(r.gpuPool, 0, gpu.StageNone)
 	}
-	r.recordCull(cmd, scene.drawList, planes)
+	dl := scene.drawList
+	// Shadow views only make sense when there's geometry to cast; with an empty draw
+	// list the per-view buffers would be zero-sized (visCap == 0) and there's nothing
+	// to render into a depth map anyway, so skip all shadow work.
+	var views []shadowView
+	if dl.batchCount() > 0 {
+		views = r.collectShadowViews(scene)
+		if len(views) > 0 {
+			dl.ensureShadowViews(len(views))
+		}
+	}
+
+	// 1. Cull every view (shadow views filter to casters). One barrier for all.
+	if dl.batchCount() > 0 {
+		for i := range views {
+			v := &dl.shadowViews[i]
+			sp := FrustumPlanes(views[i].cam.ViewProjection())
+			r.cullInto(cmd, dl, v.indirectBuf, v.visibleBuf, v.cullRootBuf, sp, 1)
+		}
+		r.cullInto(cmd, dl, dl.indirectBuf, dl.visibleBuf, dl.cullRootBuf, planes, 0)
+		cmd.Barrier(gpu.StageCompute, gpu.StageIndirect|gpu.StageVertex, 0)
+	}
+
+	// 2. Shadow depth passes: fill each view's map, then hand it to the samplers.
+	for i := range views {
+		r.recordShadowDepth(cmd, dl, &dl.shadowViews[i], views[i])
+		cmd.PrepareSampled(r.textures.gpu(views[i].m), gpu.StageFragment)
+	}
+
+	// 3. Main color pass.
 	cmd.BeginRenderPass(gpu.RenderTargets{
 		Color: []gpu.ColorAttachment{{Texture: target, Load: gpu.LoadClear, Clear: r.clear}},
 		Depth: &gpu.DepthAttachment{Texture: r.depth, Load: gpu.LoadClear, Clear: 1.0},
 	})
 	cmd.Viewport(0, 0, float32(r.width), float32(r.height), 0, 1)
 	cmd.Scissor(0, 0, int32(r.width), int32(r.height))
-	r.recordDraw(cmd, scene.drawList, drawVP, eye, scene.lights.Addr())
+	r.recordDraw(cmd, dl, drawVP, eye, scene.lights.Addr())
 	if r.showFPS && r.overlay != nil {
 		r.overlay.draw(cmd, float32(r.width), float32(r.height))
 	}
@@ -359,17 +424,63 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 	}
 }
 
+// shadowView is one depth-map render request: a camera, the map it renders into, and
+// its resolution. Directional and spot lights contribute one each; a point light
+// contributes six (its cube faces). The renderer treats them all uniformly — cull with
+// castersOnly, depth pass, hand to the samplers — so light types don't leak into the
+// GPU-driven path.
+type shadowView struct {
+	cam  Camera
+	m    Texture
+	size uint32
+}
+
+// collectShadowViews gathers every shadow-map render request in the scene: one per
+// casting directional/spot light and six per casting point light (Stage 3). Empty when
+// shadows are disabled or nothing casts.
+func (r *Renderer) collectShadowViews(scene *Scene) []shadowView {
+	if !r.shadowsEnabled {
+		return nil
+	}
+	var out []shadowView
+	for _, l := range scene.dirLights {
+		if s := l.shadow; s != nil && s.Map.Valid() {
+			out = append(out, shadowView{cam: s.Camera, m: s.Map, size: s.Size})
+		}
+	}
+	for _, l := range scene.spotLights {
+		if s := l.shadow; s != nil && s.Map.Valid() {
+			out = append(out, shadowView{cam: s.Camera, m: s.Map, size: s.Size})
+		}
+	}
+	for _, l := range scene.pointLights {
+		s := l.shadow
+		if s == nil {
+			continue
+		}
+		for i := range s.faces {
+			if f := s.faces[i]; f.m.Valid() {
+				out = append(out, shadowView{cam: f.cam, m: f.m, size: s.Size})
+			}
+		}
+	}
+	return out
+}
+
 // syncScene uploads the renderer's shared tables + the scene's per-scene GPU state.
 // It resolves each mesh's draw pipeline from its material (shaders + raster) every
 // frame and rebuilds the draw list when the mesh set OR any pipeline assignment
 // changed (so a material raster/blend change re-batches without an explicit dirty).
-func (r *Renderer) syncScene(scene *Scene) {
+func (r *Renderer) syncScene(scene *Scene, cam Camera) {
 	// Upload-once device resources (geometry streams + descriptors) are staged
 	// through a single uploader: each subsystem records copies, then flush submits
 	// and waits before the frame's draws read them.
 	// The renderer owns geometry (shared) and pipelines; the scene owns transforms,
 	// its draw list, and lights. Both stage into one uploader, flushed once here.
 	// Material records live in host-coherent mapped memory — already visible, no upload.
+	if r.shadowsEnabled {
+		r.prepareShadows(scene, cam)
+	}
 	up := newUploader(r.backend)
 	r.geometries.Sync(up)
 	scene.Sync(up)
@@ -388,19 +499,282 @@ func (r *Renderer) syncScene(scene *Scene) {
 	}
 }
 
-func (r *Renderer) recordCull(cmd gpu.CommandBuffer, dl *drawList, planes [6][4]float32) {
-	if dl.batchCount() == 0 {
+// prepareShadows ensures each shadow-casting directional light has a depth map and an
+// orthographic camera fitted to the camera's view frustum. Runs before the scene
+// derives its light table, so the table can carry each light's shadow map index +
+// view-projection.
+func (r *Renderer) prepareShadows(scene *Scene, cam Camera) {
+	if r.shadowSampler.H == 0 {
+		r.shadowSampler = r.backend.CreateSampler(gpu.SamplerDescriptor{
+			MinLinear: true, MagLinear: true,
+			AddressU: gpu.AddressClamp, AddressV: gpu.AddressClamp,
+			Compare: gpu.CompareLessEqual, // PCF comparison sampler
+			Label:   "shadow-cmp",
+		})
+	}
+	for _, l := range scene.pointLights {
+		s := l.shadow
+		if s == nil {
+			continue
+		}
+		aimPointShadow(r.textures, s, l)
+	}
+	if len(scene.dirLights) == 0 && len(scene.spotLights) == 0 {
 		return
 	}
-	writeAt(dl.indirectBuf, 0, toBytes(dl.template))
-	*(*cullRoot)(dl.cullRootBuf.Ptr) = cullRoot{
-		drawables: dl.drawableBuf.Addr, models: dl.worldBuf.Addr, indirect: dl.indirectBuf.Addr,
-		regions: dl.regionBuf.Addr, visible: dl.visibleBuf.Addr, count: dl.numInst, planes: planes,
+	sceneCenter, sceneRadius := scene.FrameSphere(1.0)
+	corners := frustumCornersWorld(cam.ViewProjection())
+	for _, l := range scene.dirLights {
+		s := l.shadow
+		if s == nil {
+			continue
+		}
+		if !s.Map.Valid() {
+			s.Map = r.textures.createDepthTarget(s.Size, s.Size)
+		}
+		r.fitDirectionalShadow(s, l.Direction, cam.Position(), corners, sceneCenter, sceneRadius)
+	}
+	for _, l := range scene.spotLights {
+		s := l.shadow
+		if s == nil {
+			continue
+		}
+		if !s.Map.Valid() {
+			s.Map = r.textures.createDepthTarget(s.Size, s.Size)
+		}
+		aimSpotShadow(s, l)
+	}
+}
+
+// aimPointShadow allocates (once) and re-aims a point light's six cube-face shadow
+// cameras from the light's current position and range.
+func aimPointShadow(tex *textureSystem, s *LightShadow, l *PointLight) {
+	for i := range s.faces {
+		f := &s.faces[i]
+		if !f.m.Valid() {
+			f.m = tex.createDepthTarget(s.Size, s.Size)
+		}
+		c, ok := f.cam.(interface {
+			SetPosition(glm.Vec3f)
+			SetTarget(glm.Vec3f)
+			SetUp(glm.Vec3f)
+			SetFar(float32)
+		})
+		if !ok {
+			continue
+		}
+		c.SetPosition(l.Position)
+		c.SetTarget(l.Position.Add(cubeFaceDirs[i]))
+		c.SetUp(cubeFaceUps[i])
+		c.SetFar(l.Range)
+	}
+}
+
+// aimSpotShadow re-aims a spot light's perspective shadow camera from the light's
+// current position/direction/cone/range (all mutable each frame).
+func aimSpotShadow(s *LightShadow, l *SpotLight) {
+	c, ok := s.Camera.(interface {
+		SetPosition(glm.Vec3f)
+		SetTarget(glm.Vec3f)
+		SetUp(glm.Vec3f)
+		SetFOV(float32)
+		SetFar(float32)
+	})
+	if !ok {
+		return
+	}
+	d := l.Direction.Normalize()
+	up := glm.Vec3f{0, 1, 0}
+	if abs32(d.Dot(up)) > 0.99 {
+		up = glm.Vec3f{0, 0, 1}
+	}
+	c.SetPosition(l.Position)
+	c.SetTarget(l.Position.Add(d))
+	c.SetUp(up)
+	c.SetFOV(glm.ToDegrees(2 * l.Angle))
+	c.SetFar(l.Range)
+}
+
+// frustumCornersWorld returns the 8 world-space corners of the frustum described by
+// viewProj (indices 0..3 near, 4..7 far). NDC is Vulkan's: xy in [-1,1], z in [0,1].
+func frustumCornersWorld(viewProj glm.Mat4f) [8]glm.Vec3f {
+	inv := viewProj.Inv()
+	var c [8]glm.Vec3f
+	i := 0
+	for _, z := range [2]float32{0, 1} {
+		for _, y := range [2]float32{-1, 1} {
+			for _, x := range [2]float32{-1, 1} {
+				p := inv.Mul4x1(glm.Vec4f{x, y, z, 1})
+				c[i] = glm.Vec3f{p[0] / p[3], p[1] / p[3], p[2] / p[3]}
+				i++
+			}
+		}
+	}
+	return c
+}
+
+// fitDirectionalShadow aims the light's orthographic camera to cover the slice of the
+// view frustum within the shadow distance, sized to enclose it. When that slice is as
+// large as the whole scene (zoomed out) it falls back to the scene sphere, so it's
+// never worse than a whole-scene fit; zoomed in, it packs resolution into the near
+// view. The eye is pulled back along -dir across the scene so occluders between the
+// light and the frustum are still captured, and the center is snapped to the shadow
+// texel grid so edges don't crawl as the camera moves.
+func (r *Renderer) fitDirectionalShadow(s *LightShadow, dir, eye glm.Vec3f, corners [8]glm.Vec3f, sceneCenter glm.Vec3f, sceneRadius float32) {
+	f, ok := s.Camera.(interface {
+		SetPosition(glm.Vec3f)
+		SetTarget(glm.Vec3f)
+		SetUp(glm.Vec3f)
+		SetFrustum(l, r, b, t float32)
+		SetClip(near, far float32)
+	})
+	if !ok {
+		return
+	}
+	d := dir.Normalize()
+
+	// Cap the frustum slice at the shadow distance by pulling each far corner back along
+	// its near→far edge. The default tracks the camera's distance to the scene center
+	// (so dollying in shrinks the box → more texels per pixel) rather than always
+	// spanning the whole scene depth. A small floor keeps the box from collapsing when
+	// the camera sits right on the scene. Override with Renderer.SetShadowDistance.
+	shadowDist := r.shadowDistance
+	if shadowDist <= 0 {
+		shadowDist = max(eye.Sub(sceneCenter).Length(), sceneRadius*0.15)
+	}
+	nearCenter := avgCorners(corners, 0)
+	farCenter := avgCorners(corners, 4)
+	nearDist := nearCenter.Sub(eye).Length()
+	farDist := farCenter.Sub(eye).Length()
+	t := float32(1)
+	if farDist > nearDist {
+		t = glm.Clamp((shadowDist-nearDist)/(farDist-nearDist), 0, 1)
+	}
+	var pts [8]glm.Vec3f
+	for j := 0; j < 4; j++ {
+		pts[j] = corners[j]
+		pts[j+4] = corners[j].Add(corners[j+4].Sub(corners[j]).Scale(t))
+	}
+
+	// Bounding sphere of the capped slice; fall back to the scene sphere when the fit
+	// isn't tighter (e.g. zoomed out), so we never do worse than whole-scene.
+	center, radius := boundingSphere(pts)
+	if radius >= sceneRadius {
+		center, radius = sceneCenter, sceneRadius
+	}
+
+	// Quantize the radius to a fixed grid so the texel size only changes in small,
+	// discrete steps as the camera zooms. A continuously-resizing box would keep moving
+	// the texel grid under the geometry, which is what makes the edges crawl — snapping
+	// the center only helps while the texel size holds still.
+	if step := sceneRadius / 64; step > 0 {
+		radius = float32(math.Ceil(float64(radius/step))) * step
+	}
+
+	// A stable light basis (avoid the degenerate LookAt when dir ∥ world-up).
+	up := glm.Vec3f{0, 1, 0}
+	if abs32(d.Dot(up)) > 0.99 {
+		up = glm.Vec3f{0, 0, 1}
+	}
+	right := up.Cross(d).Normalize()
+	up = d.Cross(right).Normalize()
+
+	// Snap the center to the shadow texel grid in the light's right/up plane.
+	texel := 2 * radius / float32(s.Size)
+	if texel > 0 {
+		cx := snap(center.Dot(right), texel)
+		cy := snap(center.Dot(up), texel)
+		cz := center.Dot(d)
+		center = right.Scale(cx).Add(up.Scale(cy)).Add(d.Scale(cz))
+	}
+
+	f.SetUp(up)
+	f.SetPosition(center.Sub(d.Scale(sceneRadius * 2))) // back up across the scene
+	f.SetTarget(center)
+	f.SetFrustum(-radius, radius, -radius, radius)
+	f.SetClip(0.01, sceneRadius*4) // depth spans the whole scene toward the light
+}
+
+// avgCorners averages the 4 frustum corners starting at base (0 = near, 4 = far).
+func avgCorners(c [8]glm.Vec3f, base int) glm.Vec3f {
+	sum := c[base].Add(c[base+1]).Add(c[base+2]).Add(c[base+3])
+	return sum.Scale(0.25)
+}
+
+// boundingSphere returns a center + radius enclosing the 8 points (centroid + max
+// distance; not minimal, but stable under rotation, which matters for shadow shimmer).
+func boundingSphere(p [8]glm.Vec3f) (glm.Vec3f, float32) {
+	var center glm.Vec3f
+	for _, v := range p {
+		center = center.Add(v)
+	}
+	center = center.Scale(1.0 / 8.0)
+	var radius float32
+	for _, v := range p {
+		d := v.Sub(center)
+		if dsq := d.Dot(d); dsq > radius {
+			radius = dsq
+		}
+	}
+	return center, sqrt32(radius)
+}
+
+// small float32 math helpers for the shadow fit.
+func abs32(x float32) float32 {
+	return float32(math.Abs(float64(x)))
+}
+func sqrt32(x float32) float32 {
+	return float32(math.Sqrt(float64(x)))
+}
+func cos32(x float32) float32 {
+	return float32(math.Cos(float64(x)))
+}
+
+// snap rounds x down to the nearest multiple of step (for texel-grid alignment).
+func snap(x, step float32) float32 {
+	return float32(math.Floor(float64(x/step))) * step
+}
+
+// cullInto dispatches the frustum-cull compute into one view's indirect + visible
+// buffers: it resets the indirect args from the shared template (zeroing each batch's
+// instanceCount), points a cull root at this view's buffers (the drawable/world/region
+// tables are shared), and dispatches one thread per instance. castersOnly=1 restricts
+// the view to shadow casters. No barrier — the caller batches all views behind one.
+func (r *Renderer) cullInto(cmd gpu.CommandBuffer, dl *drawList, indirect, visible, root gpu.Buffer, planes [6][4]float32, castersOnly uint32) {
+	writeAt(indirect, 0, toBytes(dl.template))
+	*(*cullRoot)(root.Ptr) = cullRoot{
+		drawables: dl.drawableBuf.Addr, models: dl.worldBuf.Addr, indirect: indirect.Addr,
+		regions: dl.regionBuf.Addr, visible: visible.Addr, count: dl.numInst,
+		castersOnly: castersOnly, planes: planes,
 	}
 	cmd.SetPipeline(r.cullPipeline)
-	cmd.Root(dl.cullRootBuf.Addr)
+	cmd.Root(root.Addr)
 	cmd.Dispatch((dl.numInst+63)/64, 1, 1)
-	cmd.Barrier(gpu.StageCompute, gpu.StageIndirect|gpu.StageVertex, 0)
+}
+
+// recordShadowDepth renders the caster geometry into a light's depth map from its
+// camera. It uses the view's own compacted-visible buffer (culled with castersOnly)
+// and a single position-only MDI over every batch — material/pipeline don't matter
+// for depth, so all batches draw with the one shadow pipeline.
+func (r *Renderer) recordShadowDepth(cmd gpu.CommandBuffer, dl *drawList, v *drawView, sv shadowView) {
+	size := sv.size
+	*(*shadowRoot)(v.drawRootBuf.Ptr) = shadowRoot{
+		viewProj:  sv.cam.ViewProjection(),
+		pos:       r.geometries.PositionsAddr(),
+		descs:     r.geometries.DescriptorsAddr(),
+		models:    dl.worldBuf.Addr,
+		drawables: dl.drawableBuf.Addr,
+		visible:   v.visibleBuf.Addr,
+	}
+	cmd.BeginRenderPass(gpu.RenderTargets{
+		Depth: &gpu.DepthAttachment{Texture: r.textures.gpu(sv.m), Load: gpu.LoadClear, Clear: 1.0},
+	})
+	cmd.Viewport(0, 0, float32(size), float32(size), 0, 1)
+	cmd.Scissor(0, 0, int32(size), int32(size))
+	cmd.SetPipeline(r.shadowPipeline)
+	cmd.Root(v.drawRootBuf.Addr)
+	cmd.DrawIndexedIndirect(r.geometries.IndexBuffer(), v.indirectBuf, 0, uint32(dl.batchCount()), indirectSize)
+	cmd.EndRenderPass()
 }
 
 // recordDraw issues one multi-draw-indirect call per pipeline run: all of a
@@ -416,16 +790,17 @@ func (r *Renderer) recordDraw(cmd gpu.CommandBuffer, dl *drawList, viewProj glm.
 	for ri := range dl.runs {
 		run := &dl.runs[ri]
 		roots[ri] = drawRoot{
-			viewProj:  viewProj,
-			pos:       r.geometries.PositionsAddr(),
-			attr:      r.geometries.AttributesAddr(),
-			descs:     r.geometries.DescriptorsAddr(),
-			models:    dl.worldBuf.Addr,
-			drawables: dl.drawableBuf.Addr,
-			visible:   dl.visibleBuf.Addr,
-			materials: run.mat.materialsAddr(),
-			lights:    lightsAddr,
-			eye:       glm.Vec4f{eye[0], eye[1], eye[2], 1},
+			viewProj:      viewProj,
+			pos:           r.geometries.PositionsAddr(),
+			attr:          r.geometries.AttributesAddr(),
+			descs:         r.geometries.DescriptorsAddr(),
+			models:        dl.worldBuf.Addr,
+			drawables:     dl.drawableBuf.Addr,
+			visible:       dl.visibleBuf.Addr,
+			materials:     run.mat.materialsAddr(),
+			lights:        lightsAddr,
+			eye:           glm.Vec4f{eye[0], eye[1], eye[2], 1},
+			shadowSampler: r.shadowSampler.Index,
 		}
 		cmd.SetPipeline(r.drawPipelines[run.pipeline])
 		cmd.Root(dl.drawRootBuf.Addr + uint64(ri)*drawRootSize)

@@ -4,6 +4,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -67,9 +68,8 @@ func TestDirectionalLighting(t *testing.T) {
 	scene.Add(m)
 	scene.SetAmbient(glm.Vec3f{0.1, 0.1, 0.1})
 
-	cam := NewCamera()
-	cam.Position = glm.Vec3f{0, 0.6, 3}
-	cam.Far = 100
+	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam.SetPosition(glm.Vec3f{0, 0.6, 3})
 
 	// The renderer gamma-encodes output to sRGB; decode back to linear so the
 	// thresholds match the (linear) lighting math.

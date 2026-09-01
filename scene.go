@@ -79,7 +79,14 @@ type Scene struct {
 	root      NodeID
 
 	meshes []meshData
-	lights *Lights
+
+	// Light objects the scene owns; the flat GPU table (lights) is derived from them
+	// (+ ambient) each frame in Sync.
+	ambient     glm.Vec3f
+	dirLights   []*DirectionalLight
+	pointLights []*PointLight
+	spotLights  []*SpotLight
+	lights      *Lights
 
 	drawableDirty bool
 	drawList      *drawList
@@ -107,16 +114,34 @@ func (s *Scene) NewGroup() Group {
 }
 
 // SetAmbient sets the ambient light term.
-func (s *Scene) SetAmbient(c glm.Vec3f) { s.lights.SetAmbient(c) }
+func (s *Scene) SetAmbient(c glm.Vec3f) { s.ambient = c }
 
-// AddDirectionalLight adds a directional light (dir = travel direction).
-func (s *Scene) AddDirectionalLight(dir, color glm.Vec3f, intensity float32) {
-	s.lights.AddDirectional(dir, color, intensity)
+// AddDirectionalLight adds a directional light (dir = travel direction) and returns
+// its handle — configure it further or call CastShadow on the returned light.
+func (s *Scene) AddDirectionalLight(dir, color glm.Vec3f, intensity float32) *DirectionalLight {
+	l := &DirectionalLight{Direction: dir, Color: color, Intensity: intensity}
+	s.dirLights = append(s.dirLights, l)
+	return l
 }
 
-// AddPointLight adds a point light at pos with linear falloff to zero at rng.
-func (s *Scene) AddPointLight(pos, color glm.Vec3f, intensity, rng float32) {
-	s.lights.AddPoint(pos, color, intensity, rng)
+// AddPointLight adds a point light at pos with linear falloff to zero at rng and
+// returns its handle.
+func (s *Scene) AddPointLight(pos, color glm.Vec3f, intensity, rng float32) *PointLight {
+	l := &PointLight{Position: pos, Color: color, Intensity: intensity, Range: rng}
+	s.pointLights = append(s.pointLights, l)
+	return l
+}
+
+// AddSpotLight adds a cone light at pos aimed along dir, full inside the inner cone and
+// falling to zero at half-angle angle (radians) / distance rng. penumbra (0..1) sets
+// the soft-edge fraction. Returns its handle.
+func (s *Scene) AddSpotLight(pos, dir, color glm.Vec3f, intensity, rng, angle, penumbra float32) *SpotLight {
+	l := &SpotLight{
+		Position: pos, Direction: dir, Color: color, Intensity: intensity,
+		Range: rng, Angle: angle, Penumbra: penumbra,
+	}
+	s.spotLights = append(s.spotLights, l)
+	return l
 }
 
 func (s *Scene) allocNode(kind NodeKind) NodeID {
@@ -136,7 +161,7 @@ func (s *Scene) allocNode(kind NodeKind) NodeID {
 		s.world = append(s.world, glm.Mat4fIndentity)
 		s.worldInv = append(s.worldInv, glm.Mat4fIndentity)
 		s.transforms = append(s.transforms, defaultTransform)
-		s.flags = append(s.flags, flagAlive|flagLocalVisible|flagDirty|flagVisibleDirty)
+		s.flags = append(s.flags, flagAlive|flagLocalVisible|flagCastShadow|flagReceiveShadow|flagDirty|flagVisibleDirty)
 		s.generation = append(s.generation, 1)
 		s.kind = append(s.kind, kind)
 		s.payload = append(s.payload, 0)
@@ -154,7 +179,7 @@ func (s *Scene) resetSlot(idx uint32, kind NodeKind) {
 	s.world[idx] = glm.Mat4fIndentity
 	s.worldInv[idx] = glm.Mat4fIndentity
 	s.transforms[idx] = defaultTransform
-	s.flags[idx] = flagAlive | flagLocalVisible | flagDirty | flagVisibleDirty
+	s.flags[idx] = flagAlive | flagLocalVisible | flagCastShadow | flagReceiveShadow | flagDirty | flagVisibleDirty
 	s.kind[idx] = kind
 	s.payload[idx] = 0
 }
@@ -325,6 +350,9 @@ func (s *Scene) Sync(u *uploader) {
 	if dirty := s.UpdateTransforms(); dirty {
 		s.drawList.sync(s.world) // host-visible, direct write (not staged)
 	}
+	// Light objects are mutable, so re-derive the flat GPU table each frame; rebuild
+	// only marks the buffer dirty (→ re-uploads) when the derived table changed.
+	s.lights.rebuild(s.ambient, s.dirLights, s.pointLights, s.spotLights)
 	s.lights.Sync(u)
 }
 
@@ -338,6 +366,9 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []Material) {
 		var flags uint32
 		if s.flags[md.ownerNode]&flagCastShadow != 0 {
 			flags |= DrawableCastsShadow
+		}
+		if s.flags[md.ownerNode]&flagReceiveShadow != 0 {
+			flags |= DrawableReceivesShadow
 		}
 		out = append(out, gpuDrawable{
 			bounds:      [4]float32{md.bounds.Center[0], md.bounds.Center[1], md.bounds.Center[2], md.bounds.Radius},
