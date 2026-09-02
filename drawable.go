@@ -82,6 +82,24 @@ type shadowRoot struct {
 	visible   uint64
 }
 
+// lightingRoot matches LightingRoot in pbr_frag.glsl's lighting pass (scalar; mat4,
+// then pointers, then plain fields). One per frame — the fullscreen lighting pass
+// doesn't batch by geometry. The *Texture fields are bindless heap indices.
+type lightingRoot struct {
+	invViewProj     glm.Mat4f
+	eye             glm.Vec4f
+	lights          uint64
+	shadowSampler   uint32
+	gbufferSampler  uint32
+	diffuseTexture  uint32
+	normalTexture   uint32
+	materialTexture uint32
+	emissiveTexture uint32
+	depthTexture    uint32
+	screen          [2]float32
+	pad0            uint32
+}
+
 // batch is one indirect command: a run of drawables sharing a (pipeline, geometry)
 // pair. Material is NOT a batch key — per-drawable materialID selects the record in
 // the pipeline's store, so all materials of a type sharing a geometry draw together.
@@ -104,9 +122,10 @@ type pipelineRun struct {
 }
 
 var (
-	drawableSize   = uint32(unsafe.Sizeof(gpuDrawable{}))
-	indirectSize   = uint32(unsafe.Sizeof(indirectCmd{}))
-	drawRootSize   = uint64(unsafe.Sizeof(drawRoot{}))
-	cullRootSize   = uint64(unsafe.Sizeof(cullRoot{}))
-	shadowRootSize = uint64(unsafe.Sizeof(shadowRoot{}))
+	drawableSize     = uint32(unsafe.Sizeof(gpuDrawable{}))
+	indirectSize     = uint32(unsafe.Sizeof(indirectCmd{}))
+	drawRootSize     = uint64(unsafe.Sizeof(drawRoot{}))
+	cullRootSize     = uint64(unsafe.Sizeof(cullRoot{}))
+	shadowRootSize   = uint64(unsafe.Sizeof(shadowRoot{}))
+	lightingRootSize = uint64(unsafe.Sizeof(lightingRoot{}))
 )

@@ -42,7 +42,7 @@ func TestDirectionalShadowMapAllocated(t *testing.T) {
 	if s.Camera.ViewProjection() == (glm.Mat4f{}) {
 		t.Fatal("shadow camera view-projection is zero — not fitted")
 	}
-	t.Logf("shadow map heap index=%d size=%d", s.Map.Index(), s.Size)
+	t.Logf("shadow map heap index=%d size=%d", s.Map.Index(), s.Size())
 }
 
 // TestDirectionalShadowDepthPass drives the Stage B path end to end: a shadow-casting
@@ -289,4 +289,62 @@ func TestDirectionalShadowDarkensReceiver(t *testing.T) {
 	}
 	t.Logf("luma shadows-off=%d shadows-on=%d (%.1f%% darker)", litLuma, shadowLuma,
 		100*float64(litLuma-shadowLuma)/float64(litLuma))
+}
+
+// TestShadowSetSizeReallocatesMap covers the accessor's contract: SetSize after the map
+// already exists must actually reallocate it, not be silently ignored. Size is also
+// read every frame for the bias and the shadow pass viewport, so a stale map would
+// leave those disagreeing with the texture they describe.
+func TestShadowSetSizeReallocatesMap(t *testing.T) {
+	r, err := NewOffscreenRenderer(64, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	r.EnableShadows(true)
+
+	scene := r.NewScene()
+	defer scene.Destroy()
+	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, glm.Vec3f{1, 1, 1}, 1)
+	light.SetCastShadow(true)
+
+	cube := r.NewGeometry(normalCube())
+	defer cube.Release()
+	scene.Add(scene.NewMesh(cube, r.NewPBRMaterial()))
+
+	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam.SetPosition(glm.Vec3f{0, 0, 3})
+	r.Render(scene, cam)
+
+	s := light.Shadow()
+	if s.Size() != defaultShadowSize {
+		t.Fatalf("default size = %d, want %d", s.Size(), defaultShadowSize)
+	}
+	first := s.Map.Index()
+
+	// Same size: the map must be left alone.
+	s.SetSize(defaultShadowSize)
+	r.Render(scene, cam)
+	if s.Map.Index() != first {
+		t.Error("map reallocated even though the size did not change")
+	}
+
+	// A zero size is ignored rather than producing an invalid texture.
+	s.SetSize(0)
+	if s.Size() != defaultShadowSize {
+		t.Fatalf("SetSize(0) changed size to %d", s.Size())
+	}
+
+	// A new size must take effect.
+	s.SetSize(512)
+	r.Render(scene, cam)
+	if s.Size() != 512 {
+		t.Fatalf("size = %d after SetSize(512)", s.Size())
+	}
+	if s.Map.Index() == first {
+		t.Fatal("map was not reallocated after SetSize changed the resolution")
+	}
+	if !s.Map.Valid() {
+		t.Fatal("map invalid after resize")
+	}
 }

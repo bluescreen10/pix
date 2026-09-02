@@ -238,8 +238,12 @@ func (b *Backend) AcquireNext(sc gpu.Swapchain) (gpu.Texture, gpu.Fence) {
 	C.vkbAcquire(b.device, s.swap, s.acquire[s.frame], &idx)
 	s.curImage = uint32(idx)
 	b.activeSwap = s
-	// Fresh acquire: the image's prior contents are undefined for our purposes.
-	b.tex(s.images[s.curImage]).layout = C.VK_IMAGE_LAYOUT_UNDEFINED
+	// Fresh acquire: the image's prior contents are undefined for our purposes, and
+	// last frame's producer is no longer the hazard to order against (the acquire
+	// semaphore covers that), so clear the tracked access too.
+	e := b.tex(s.images[s.curImage])
+	e.layout = C.VK_IMAGE_LAYOUT_UNDEFINED
+	e.lastStage, e.lastAccess = 0, 0
 	return s.images[s.curImage], gpu.Fence{}
 }
 

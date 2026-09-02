@@ -1,159 +1,210 @@
 package pix
 
 import (
-	"unsafe"
+	"fmt"
 
 	"github.com/bluescreen10/pix/gpu"
+	"github.com/bluescreen10/pix/internal/mem"
 )
 
-// materialStore is a generic, byte-based store for one material kind (one shader).
-// The material system creates it automatically from a material's declared data size
-// and shader — there is no per-type Go store to hand-write. Records live directly in
-// a host-coherent, GPU-mapped BDA buffer (correctly aligned, no upload copy): a
-// material's typed accessors write straight through record(id). Each instance also
-// carries ref-counted texture slots and per-instance cull/blend rasterization state.
-type materialStore struct {
-	backend      gpu.Backend
-	sh           Shader
-	fragHash     uint32 // hash of sh.Fragment (store dedup key)
-	pipeHash     uint32 // hash of sh.Vertex+sh.Fragment (draw-pipeline identity)
-	stride       uint32 // bytes per record (the material's data size)
-	count        uint32 // live + freed records
-	cap          uint32
-	buf          gpu.Buffer  // mapped; records stored here directly
-	cull         []CullMode  // per-instance, indexed by id
-	blend        []BlendMode // per-instance, indexed by id
-	textureSlots int
-	textures     []Texture // len == count*textureSlots; instance i owns [i*n:(i+1)*n]
-	gens         []uint32
-	free         []uint32
-	label        string
+// materialInstance is one live material. The typed materials implement it: a material
+// holds its own fields, and Bytes serializes them into the exact layout its shader
+// reads. There is no separate record type and no host shadow of the GPU buffer — the
+// material is the record, and Sync asks it for bytes only when it has changed.
+type materialInstance interface {
+	// Bytes returns the material's GPU record. It must be free of side effects (Sync
+	// calls it) and the same length on every call for a given material type.
+	Bytes() []byte
+	// release drops whatever the material holds (texture references). Called once, by
+	// the store, when the last handle is released.
+	release()
 }
 
-func newMaterialStore(b gpu.Backend, sh Shader, stride uint32, textureSlots int, label string) *materialStore {
+// materialEntry is one slot's bookkeeping: the material itself plus the rasterization
+// state the renderer reads without touching the record.
+type materialEntry struct {
+	inst  materialInstance
+	cull  CullMode
+	blend BlendMode
+}
+
+// materialStore holds every material of one kind (one shader). The material system
+// creates it automatically — there is no per-type Go store to hand-write.
+//
+// Records live in device-local memory, which the CPU cannot write. The store keeps no
+// copy of them: the materials are the source of truth, and Sync re-serializes just the
+// ones marked dirty. So every setter must call markDirty, or its change is never
+// uploaded and the GPU renders the previous value indefinitely.
+type materialStore struct {
+	backend     gpu.Backend
+	sh          Shader
+	forwardHash uint32 // hash of sh.Forward (store dedup key)
+	pipeHash    uint32 // hash of sh.Vertex+sh.Forward (forward pipeline identity)
+	deferHash   uint32 // hash of sh.Vertex+sh.Deferred (0 if sh.Deferred is nil)
+	lightHash   uint32 // hash of sh.Lighting alone (0 if sh.Lighting is nil)
+
+	entries mem.Slab[materialEntry]
+
+	stride uint32     // bytes per record, learned from the first material registered
+	cap    uint32     // records the device buffer holds
+	buf    gpu.Buffer // MemoryDevice; written only by Sync
+
+	dirty    map[uint32]struct{} // ids changed since the last Sync
+	allDirty bool                // every live record needs re-upload (set by grow)
+	scratch  []byte              // serialization buffer, reused across Syncs
+	parts    []scatterPart       // scatterCopy parts, reused across Syncs
+
+	label string
+}
+
+func newMaterialStore(b gpu.Backend, sh Shader, label string) *materialStore {
 	s := &materialStore{
-		backend: b, sh: sh, stride: stride, textureSlots: textureSlots, label: label, cap: 1,
-		fragHash: hashSPIRV(sh.Fragment), pipeHash: shaderHash(sh),
+		backend: b, sh: sh, label: label, entries: mem.NewSlab[materialEntry](),
+		forwardHash: hashSPIRV(sh.Forward), pipeHash: shaderHashOf(sh.Vertex, sh.Forward),
 	}
-	s.buf = b.Alloc(uint64(stride), gpu.MemoryHost, label)
+	if sh.Deferred != nil {
+		s.deferHash = shaderHashOf(sh.Vertex, sh.Deferred)
+	}
+	if sh.Lighting != nil {
+		s.lightHash = hashSPIRV(sh.Lighting)
+	}
+	// The buffer is allocated by the first register, which is what reveals the stride.
 	return s
 }
 
-// alloc reserves a record slot (zeroed) and returns its id. Grows the mapped buffer
-// (copying existing records) when full — its device address then changes, which the
-// renderer re-reads each draw.
-func (s *materialStore) alloc() uint32 {
-	if n := len(s.free); n > 0 {
-		id := s.free[n-1]
-		s.free = s.free[:n-1]
-		s.zero(id)
-		s.cull[id], s.blend[id] = CullNone, BlendOpaque
-		return id
+// register takes ownership of a material, assigns it a slot, and returns the
+// ref-counted handle it stores. The store's stride comes from the first material
+// registered; every later one must serialize to the same length, since a store is
+// keyed by shader and one shader reads one record layout.
+func (s *materialStore) register(inst materialInstance) Ref {
+	n := uint32(len(inst.Bytes()))
+	if s.stride == 0 {
+		s.stride = n
+	} else if n != s.stride {
+		panic(fmt.Sprintf("pix: material record is %d bytes, store %q holds %d", n, s.label, s.stride))
 	}
-	if s.count == s.cap {
-		s.grow()
+
+	if s.dirty == nil {
+		s.dirty = make(map[uint32]struct{})
 	}
-	id := s.count
-	s.count++
-	s.cull = append(s.cull, CullNone)
-	s.blend = append(s.blend, BlendOpaque)
-	s.gens = append(s.gens, 1)
-	s.textures = append(s.textures, make([]Texture, s.textureSlots)...)
-	s.zero(id)
-	return id
+	id, gen := s.entries.Alloc(materialEntry{inst: inst, cull: CullNone, blend: BlendOpaque})
+	s.ensureCap(id + 1)
+	s.markDirty(id)
+
+	rc := int32(1)
+	return Ref{id: id, gen: gen, refCount: &rc, owner: s}
 }
 
-func (s *materialStore) grow() {
-	s.cap *= 2
-	nb := s.backend.Alloc(uint64(s.cap)*uint64(s.stride), gpu.MemoryHost, s.label)
-	copy(unsafe.Slice((*byte)(nb.Ptr), uint64(s.count)*uint64(s.stride)),
-		unsafe.Slice((*byte)(s.buf.Ptr), uint64(s.count)*uint64(s.stride)))
-	s.backend.Free(s.buf)
-	s.buf = nb
-}
-
-func (s *materialStore) zero(id uint32) {
-	b := unsafe.Slice((*byte)(s.record(id)), s.stride)
-	for i := range b {
-		b[i] = 0
+// ensureCap grows the device buffer to hold at least n records. The new buffer's
+// contents are undefined and its device address changes, so every live record is
+// re-uploaded on the next Sync and the renderer re-reads the address each draw.
+func (s *materialStore) ensureCap(n uint32) {
+	if n <= s.cap {
+		return
 	}
+	newCap := max(s.cap, 1)
+	for newCap < n {
+		newCap *= 2
+	}
+	if s.buf.Valid() {
+		s.backend.Free(s.buf)
+	}
+	s.cap = newCap
+	s.buf = s.backend.Alloc(uint64(newCap)*uint64(s.stride), gpu.MemoryDevice, s.label)
+	s.markAllDirty()
 }
 
-// record returns a pointer to instance id's record bytes in the mapped buffer. Used
-// transiently (compute, read/write, discard) — never held across an alloc/grow.
-func (s *materialStore) record(id uint32) unsafe.Pointer {
-	return unsafe.Pointer(uintptr(s.buf.Ptr) + uintptr(id)*uintptr(s.stride))
+func (s *materialStore) markDirty(id uint32) {
+	if s.allDirty {
+		return
+	}
+	s.dirty[id] = struct{}{}
 }
 
-// dataOf returns instance id's record as a byte slice (Material.Data()).
-func (s *materialStore) dataOf(id uint32) []byte {
-	return unsafe.Slice((*byte)(s.record(id)), s.stride)
+func (s *materialStore) markAllDirty() {
+	s.allDirty = true
+	clear(s.dirty)
+}
+
+// Sync re-serializes every material changed since the last call and uploads it through
+// the uploader. Call once per frame before recording draws that read the record buffer;
+// the caller flushes the uploader (submit + wait) after all subsystems have synced.
+//
+// At most a few dozen materials change in a frame, so this does not bother coalescing
+// adjacent ids into contiguous device-side runs: scatterCopy stages every changed
+// record into ONE staging buffer regardless of how scattered their ids are, so there is
+// nothing left to gain by sorting them first. That also means the dirty set does not
+// need to be ordered — a plain map works.
+func (s *materialStore) Sync(u *uploader) {
+	if s.allDirty {
+		s.allDirty = false
+		for id := range s.entries.All() {
+			s.dirty[id] = struct{}{}
+		}
+	}
+	if len(s.dirty) == 0 {
+		return
+	}
+	need := len(s.dirty) * int(s.stride)
+	if cap(s.scratch) < need {
+		s.scratch = make([]byte, need)
+	}
+	scratch := s.scratch[:0]
+	parts := s.parts[:0]
+	for id := range s.dirty {
+		lo := len(scratch)
+		if s.entries.Alive(id) {
+			scratch = append(scratch, s.entries.Get(id).inst.Bytes()...)
+		} else {
+			// A freed slot still gets one last write, of zeros: a draw issued in the
+			// same frame the material was released must not read its old record.
+			scratch = scratch[:lo+int(s.stride)]
+			clear(scratch[lo:])
+		}
+		parts = append(parts, scatterPart{dstOffset: id * s.stride, data: scratch[lo:]})
+	}
+	u.scatterCopy(s.buf, parts)
+	s.scratch, s.parts = scratch, parts[:0]
+	clear(s.dirty)
 }
 
 func (s *materialStore) bufAddr() uint64 { return s.buf.Addr }
 func (s *materialStore) shader() Shader  { return s.sh }
 
 func (s *materialStore) cullOf(id uint32) CullMode {
-	return s.cull[id]
+	return s.entries.Get(id).cull
 }
 
 func (s *materialStore) setCullOf(id uint32, c CullMode) {
-	s.cull[id] = c
+	s.entries.Get(id).cull = c
 }
 
 func (s *materialStore) blendOf(id uint32) BlendMode {
-	return s.blend[id]
+	return s.entries.Get(id).blend
 }
 
 func (s *materialStore) setBlendOf(id uint32, b BlendMode) {
-	s.blend[id] = b
-}
-
-func (s *materialStore) setTexture(id uint32, slot int, t Texture) {
-	i := int(id)*s.textureSlots + slot
-	old := s.textures[i]
-	if t.Valid() {
-		s.textures[i] = t.Copy()
-	} else {
-		s.textures[i] = Texture{}
-	}
-	if old.Valid() {
-		old.Release()
-	}
-}
-
-func (s *materialStore) texture(id uint32, slot int) Texture {
-	return s.textures[int(id)*s.textureSlots+slot]
+	s.entries.Get(id).blend = b
 }
 
 // --- Disposer ---
 
 func (s *materialStore) generation(id uint32) uint32 {
-	if id >= uint32(len(s.gens)) {
+	if id >= uint32(s.entries.Len()) {
 		return 0
 	}
-	return s.gens[id]
+	return s.entries.Generation(id)
 }
 
+// dispose frees the slot behind the last released handle: the material drops the
+// textures it held, and the slot uploads zeros on the next Sync.
 func (s *materialStore) dispose(id uint32) {
-	base := int(id) * s.textureSlots
-	for i := 0; i < s.textureSlots; i++ {
-		if t := s.textures[base+i]; t.Valid() {
-			t.Release()
-			s.textures[base+i] = Texture{}
-		}
-	}
-	s.zero(id)
-	s.gens[id]++
-	s.free = append(s.free, id)
+	s.entries.Get(id).inst.release()
+	s.entries.Free(id)
+	s.markDirty(id)
 }
 
 func (s *materialStore) destroy() {
-	for _, t := range s.textures {
-		if t.Valid() {
-			t.Release()
-		}
-	}
 	if s.buf.Valid() {
 		s.backend.Free(s.buf)
 		s.buf = gpu.Buffer{}

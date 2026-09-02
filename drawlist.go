@@ -2,7 +2,6 @@ package pix
 
 import (
 	"sort"
-	"unsafe"
 
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
@@ -27,21 +26,20 @@ type drawList struct {
 	numInst          uint32
 	worldCap         uint32
 
-	worldBuf    gpu.Buffer // per-node world matrices (models), indexed by node slot
-	drawableBuf gpu.Buffer
-	indirectBuf gpu.Buffer
-	regionBuf   gpu.Buffer
-	visibleBuf  gpu.Buffer
-	cullRootBuf gpu.Buffer
-	drawRootBuf gpu.Buffer // one drawRoot per pipeline run
+	worldBuf        gpu.Buffer // per-node world matrices (models), indexed by node slot
+	drawableBuf     gpu.Buffer
+	indirectBuf     gpu.Buffer
+	regionBuf       gpu.Buffer
+	visibleBuf      gpu.Buffer
+	cullRootBuf     gpu.Buffer
+	drawRootBuf     gpu.Buffer // one drawRoot per pipeline run
+	lightingRootBuf gpu.Buffer // one lightingRoot per frame (the deferred lighting pass)
 
 	// Shadow views: one extra cull + depth pass per shadow-casting light. They share
 	// the drawable/world/region tables (culled from the same drawables) but each owns
 	// its indirect args, compacted-visible buffer and root buffers. Pooled and grown
-	// on demand; resized whenever the main batch/visible layout changes.
+	// on demand; each view's buffers grow to fit the main batch/visible layout.
 	shadowViews []drawView
-	svBatchCap  uint32
-	svVisCap    uint32
 }
 
 // drawView is one shadow view's private GPU state: its own indirect args and
@@ -56,10 +54,7 @@ type drawView struct {
 }
 
 func newDrawList(b gpu.Backend) *drawList {
-	return &drawList{
-		backend:     b,
-		cullRootBuf: b.Alloc(uint64(unsafe.Sizeof(cullRoot{})), gpu.MemoryHost, "cull-root"),
-	}
+	return &drawList{backend: b}
 }
 
 // sync uploads the scene's world matrices into the models buffer (growing it as the
@@ -177,27 +172,62 @@ func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, material
 	}
 }
 
+// ensureBuffers owns every buffer the draw list allocates. The count-dependent ones
+// (instances, batches, pipeline runs) only grow: a buffer that is already big enough
+// is kept, so a steady-state scene reallocates nothing even though rebuild runs
+// whenever the mesh set or a pipeline assignment changes. Every writer bounds itself
+// by the current count rather than the buffer's capacity, so the slack is harmless.
+// The two root buffers are single fixed-size structs — allocated once, never resized.
 func (d *drawList) ensureBuffers() {
 	nb := max(uint32(len(d.batches)), 1)
 	nr := max(uint32(len(d.runs)), 1)
 	ni := max(d.numInst, 1)
-	realloc := func(old gpu.Buffer, size uint64, label string) gpu.Buffer {
-		if old.Valid() {
-			d.backend.Free(old)
+
+	if size := uint64(ni) * uint64(drawableSize); !d.drawableBuf.Valid() || d.drawableBuf.Size < size {
+		if d.drawableBuf.Valid() {
+			d.backend.Free(d.drawableBuf)
 		}
-		return d.backend.Alloc(size, gpu.MemoryHost, label)
+		d.drawableBuf = d.backend.Alloc(size, gpu.MemoryHost, "drawables")
 	}
-	d.drawableBuf = realloc(d.drawableBuf, uint64(ni)*uint64(drawableSize), "drawables")
-	d.indirectBuf = realloc(d.indirectBuf, uint64(nb)*uint64(indirectSize), "indirect")
-	d.regionBuf = realloc(d.regionBuf, uint64(nb)*4, "regions")
-	d.visibleBuf = realloc(d.visibleBuf, uint64(d.visCap)*4, "visible")
-	d.drawRootBuf = realloc(d.drawRootBuf, uint64(nr)*drawRootSize, "draw-roots")
+	if size := uint64(nb) * uint64(indirectSize); !d.indirectBuf.Valid() || d.indirectBuf.Size < size {
+		if d.indirectBuf.Valid() {
+			d.backend.Free(d.indirectBuf)
+		}
+		d.indirectBuf = d.backend.Alloc(size, gpu.MemoryHost, "indirect")
+	}
+	if size := uint64(nb) * 4; !d.regionBuf.Valid() || d.regionBuf.Size < size {
+		if d.regionBuf.Valid() {
+			d.backend.Free(d.regionBuf)
+		}
+		d.regionBuf = d.backend.Alloc(size, gpu.MemoryHost, "regions")
+	}
+	if size := uint64(d.visCap) * 4; !d.visibleBuf.Valid() || d.visibleBuf.Size < size {
+		if d.visibleBuf.Valid() {
+			d.backend.Free(d.visibleBuf)
+		}
+		d.visibleBuf = d.backend.Alloc(size, gpu.MemoryHost, "visible")
+	}
+	if size := uint64(nr) * drawRootSize; !d.drawRootBuf.Valid() || d.drawRootBuf.Size < size {
+		if d.drawRootBuf.Valid() {
+			d.backend.Free(d.drawRootBuf)
+		}
+		d.drawRootBuf = d.backend.Alloc(size, gpu.MemoryHost, "draw-roots")
+	}
+	// One cullRoot for the main view; one lightingRoot per frame. Fixed size, so
+	// validity alone decides — there is no size that could grow.
+	if !d.cullRootBuf.Valid() {
+		d.cullRootBuf = d.backend.Alloc(cullRootSize, gpu.MemoryHost, "cull-root")
+	}
+	if !d.lightingRootBuf.Valid() {
+		d.lightingRootBuf = d.backend.Alloc(lightingRootSize, gpu.MemoryHost, "lighting-root")
+	}
 }
 
-// ensureShadowViews grows the shadow-view pool to at least n views and sizes each
-// view's per-frame buffers to the current batch/visible layout. Root buffers are
-// allocated once; the indirect + visible buffers are (re)allocated whenever the main
-// layout changed (a structural rebuild) so they mirror it. Cheap when already sized.
+// ensureShadowViews grows the shadow-view pool to at least n views and makes sure each
+// view's indirect + visible buffers are big enough for the current batch/visible
+// layout. Same grow-only rule as ensureBuffers: a view already large enough is left
+// alone, so this is free once the pool has settled. Root buffers are fixed size and
+// allocated with the view.
 func (d *drawList) ensureShadowViews(n int) {
 	for len(d.shadowViews) < n {
 		d.shadowViews = append(d.shadowViews, drawView{
@@ -205,30 +235,29 @@ func (d *drawList) ensureShadowViews(n int) {
 			drawRootBuf: d.backend.Alloc(shadowRootSize, gpu.MemoryHost, "shadow-draw-root"),
 		})
 	}
-	nb := max(uint32(len(d.batches)), 1)
-	resize := nb != d.svBatchCap || d.visCap != d.svVisCap
+	indirect := uint64(max(uint32(len(d.batches)), 1)) * uint64(indirectSize)
+	visible := uint64(d.visCap) * 4
 	for i := range d.shadowViews {
 		v := &d.shadowViews[i]
-		if !resize && v.indirectBuf.Valid() {
-			continue
+		if !v.indirectBuf.Valid() || v.indirectBuf.Size < indirect {
+			if v.indirectBuf.Valid() {
+				d.backend.Free(v.indirectBuf)
+			}
+			v.indirectBuf = d.backend.Alloc(indirect, gpu.MemoryHost, "shadow-indirect")
 		}
-		if v.indirectBuf.Valid() {
-			d.backend.Free(v.indirectBuf)
+		if !v.visibleBuf.Valid() || v.visibleBuf.Size < visible {
+			if v.visibleBuf.Valid() {
+				d.backend.Free(v.visibleBuf)
+			}
+			v.visibleBuf = d.backend.Alloc(visible, gpu.MemoryHost, "shadow-visible")
 		}
-		if v.visibleBuf.Valid() {
-			d.backend.Free(v.visibleBuf)
-		}
-		v.indirectBuf = d.backend.Alloc(uint64(nb)*uint64(indirectSize), gpu.MemoryHost, "shadow-indirect")
-		v.visibleBuf = d.backend.Alloc(uint64(d.visCap)*4, gpu.MemoryHost, "shadow-visible")
 	}
-	d.svBatchCap = nb
-	d.svVisCap = d.visCap
 }
 
 func (d *drawList) batchCount() int { return len(d.batches) }
 
 func (d *drawList) destroy() {
-	bufs := []gpu.Buffer{d.worldBuf, d.drawableBuf, d.indirectBuf, d.regionBuf, d.visibleBuf, d.cullRootBuf, d.drawRootBuf}
+	bufs := []gpu.Buffer{d.worldBuf, d.drawableBuf, d.indirectBuf, d.regionBuf, d.visibleBuf, d.cullRootBuf, d.drawRootBuf, d.lightingRootBuf}
 	for _, v := range d.shadowViews {
 		bufs = append(bufs, v.indirectBuf, v.visibleBuf, v.cullRootBuf, v.drawRootBuf)
 	}

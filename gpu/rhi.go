@@ -330,6 +330,10 @@ type DepthAttachment struct {
 	Load    LoadOp
 	Store   StoreOp
 	Clear   float32
+	// ReadOnly binds the depth buffer for testing only (no writes), in a layout that
+	// also permits sampling the same image from the bindless heap during the pass.
+	// A pipeline used with it must have DepthWrite false.
+	ReadOnly bool
 }
 
 // ----------------------------------------------------------------------------

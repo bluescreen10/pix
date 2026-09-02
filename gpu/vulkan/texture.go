@@ -61,11 +61,17 @@ static VkResult vkbCreateImage(VkDevice dev, VkPhysicalDevice phys,
     return VK_SUCCESS;
 }
 
-// vkbWriteSampledImage registers a view into the bindless sampled-image array.
-static void vkbWriteSampledImage(VkDevice dev, VkDescriptorSet set, uint32_t index, VkImageView view) {
+// vkbWriteSampledImage registers a view into the bindless sampled-image array. layout
+// is the layout the image is guaranteed to be in whenever this descriptor is used —
+// SHADER_READ_ONLY_OPTIMAL for color, DEPTH_STENCIL_READ_ONLY_OPTIMAL for depth (which
+// additionally permits the image to be bound as a read-only depth attachment in the
+// same render pass, so the deferred lighting pass can depth-test against the very
+// buffer it samples).
+static void vkbWriteSampledImage(VkDevice dev, VkDescriptorSet set, uint32_t index, VkImageView view,
+                                 VkImageLayout layout) {
     VkDescriptorImageInfo ii = {0};
     ii.imageView = view;
-    ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    ii.imageLayout = layout;
     VkWriteDescriptorSet w = {0};
     w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     w.dstSet = set;
@@ -127,17 +133,35 @@ import (
 // textureEntry is the backend record for a Texture handle. layout tracks the
 // image's current Vulkan layout so the backend can transition it internally
 // (the gpu API hides layouts, but Vulkan still requires them).
+//
+// lastStage/lastAccess track how the image was last used, so a transition can name
+// the real producer as its source scope. Without this, a barrier that guesses
+// TOP_OF_PIPE establishes no dependency on the previous pass's writes, and reads or
+// re-writes of the same image across render passes race (Vulkan does not order
+// separate render pass instances implicitly).
 type textureEntry struct {
-	img    C.VkImage
-	mem    C.VkDeviceMemory
-	view   C.VkImageView
-	format C.VkFormat
-	width  uint32
-	height uint32
-	layout C.VkImageLayout
-	depth  bool
+	img        C.VkImage
+	mem        C.VkDeviceMemory
+	view       C.VkImageView
+	format     C.VkFormat
+	width      uint32
+	height     uint32
+	layout     C.VkImageLayout
+	lastStage  C.VkPipelineStageFlags2
+	lastAccess C.VkAccessFlags2
+	depth      bool
 	// swapchain-owned backbuffers set owned=false so Destroy skips image/mem.
 	owned bool
+}
+
+// sampledLayout is the layout a texture rests in while it's read through the bindless
+// heap. Depth images use DEPTH_STENCIL_READ_ONLY_OPTIMAL so they may simultaneously be
+// bound as a read-only depth attachment (see PrepareSampled / BeginRenderPass).
+func sampledLayout(depth bool) C.VkImageLayout {
+	if depth {
+		return C.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+	}
+	return C.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
 }
 
 func viewType(k gpu.TextureKind) C.VkImageViewType {
@@ -215,7 +239,7 @@ func (b *Backend) CreateTexture(d gpu.TextureDescriptor) gpu.Texture {
 	if d.Usage&gpu.TextureSampled != 0 {
 		tex.Index = b.sampledNext
 		b.sampledNext++
-		C.vkbWriteSampledImage(b.device, b.descSet, C.uint32_t(tex.Index), view)
+		C.vkbWriteSampledImage(b.device, b.descSet, C.uint32_t(tex.Index), view, sampledLayout(isDepth))
 	} else if d.Usage&gpu.TextureStorage != 0 {
 		tex.Index = b.storageNext
 		b.storageNext++
@@ -257,7 +281,7 @@ func (b *Backend) TextureView(t gpu.Texture, kind gpu.TextureKind, baseMip, mipC
 	}
 	tex := gpu.Texture{H: gpu.Handle(h), Index: b.sampledNext}
 	b.sampledNext++
-	C.vkbWriteSampledImage(b.device, b.descSet, C.uint32_t(tex.Index), view)
+	C.vkbWriteSampledImage(b.device, b.descSet, C.uint32_t(tex.Index), view, sampledLayout(src.depth))
 	return tex
 }
 

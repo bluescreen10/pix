@@ -42,6 +42,47 @@ func (u *uploader) copy(dst gpu.Buffer, dstOffset uint32, data []byte) {
 	u.staging = append(u.staging, s)
 }
 
+// scatterCopy stages every part into ONE staging buffer, then records one CopyBuffer
+// per part into dst at its own offset. Unlike calling copy per part, this pays for a
+// single staging allocation no matter how many parts there are — worth it when a
+// subsystem has many small, non-adjacent writes into the same destination buffer (see
+// materialStore.Sync). Parts may land at any offsets in any order; nothing here
+// assumes they are contiguous or sorted. Empty parts records nothing.
+func (u *uploader) scatterCopy(dst gpu.Buffer, parts []scatterPart) {
+	var total uint64
+	for _, p := range parts {
+		total += uint64(len(p.data))
+	}
+	if total == 0 {
+		return
+	}
+	if !u.began {
+		u.cmd = u.backend.Begin()
+		u.began = true
+	}
+	s := u.backend.Alloc(total, gpu.MemoryHost, "upload-staging")
+	staging := unsafe.Slice((*byte)(s.Ptr), total)
+	var srcOffset uint64
+	for _, p := range parts {
+		n := uint64(len(p.data))
+		if n == 0 {
+			continue
+		}
+		copy(staging[srcOffset:srcOffset+n], p.data)
+		u.cmd.CopyBuffer(dst, s, uint64(p.dstOffset), srcOffset, n)
+		srcOffset += n
+	}
+	u.staging = append(u.staging, s)
+}
+
+// scatterPart is one region of a scatterCopy: data lands at dstOffset in the
+// destination buffer, wherever scatterCopy happens to place it in the shared staging
+// buffer.
+type scatterPart struct {
+	dstOffset uint32
+	data      []byte
+}
+
 // copyToTexture stages image pixels and records a buffer->texture copy into mip 0
 // / layer 0, then the transition to sampled layout for reads at stage. Like copy,
 // the staging buffer lives until flush() frees it. Empty pixels record nothing.

@@ -10,8 +10,8 @@ const gpuWarmup = 3
 type RendererStats struct {
 	frameTimes []float64
 	cpuTimes   []float64
-	gpuEMA  float64 // GPU time (seconds), smoothed — readback is sparse/async
-	gpuSeen int     // GPU samples observed (to skip warmup, then seed the EMA)
+	gpuEMA     float64 // GPU time (seconds), smoothed — readback is sparse/async
+	gpuSeen    int     // GPU samples observed (to skip warmup, then seed the EMA)
 
 	currentFrame int
 	samples      int // frames recorded, capped at maxSamples

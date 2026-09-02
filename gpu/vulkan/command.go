@@ -84,24 +84,31 @@ static void vkbGlobalBarrier(VkCommandBuffer cb, VkPipelineStageFlags2 srcStage,
     vkCmdPipelineBarrier2(cb, &di);
 }
 
-// vkbBeginRendering starts dynamic rendering with one color attachment and an
-// optional depth attachment (covers the common case; multi-RT is a TODO).
+// vkbBeginRendering starts dynamic rendering with up to 4 color attachments (0 for a
+// depth-only pass, e.g. a shadow map; up to 4 for MRT, e.g. the G-buffer fill) and an
+// optional depth attachment. colors/loads/clears are parallel arrays of length nColor
+// (clears is nColor*4 floats, rgba per attachment).
 static void vkbBeginRendering(VkCommandBuffer cb, uint32_t w, uint32_t h,
-                              VkImageView color, int colorClear, float cr, float cg, float cb_, float ca,
-                              int hasDepth, VkImageView depth, int depthClear, float dclear) {
-    VkRenderingAttachmentInfo ci = {0};
-    ci.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    ci.imageView = color;
-    ci.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    ci.loadOp = colorClear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
-    ci.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    ci.clearValue.color.float32[0] = cr; ci.clearValue.color.float32[1] = cg;
-    ci.clearValue.color.float32[2] = cb_; ci.clearValue.color.float32[3] = ca;
+                              const VkImageView* colors, const int* loads, const float* clears, uint32_t nColor,
+                              int hasDepth, VkImageView depth, int depthClear, float dclear,
+                              VkImageLayout depthLayout) {
+    VkRenderingAttachmentInfo cis[4] = {0};
+    for (uint32_t i = 0; i < nColor; i++) {
+        cis[i].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        cis[i].imageView = colors[i];
+        cis[i].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        cis[i].loadOp = loads[i] ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+        cis[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        cis[i].clearValue.color.float32[0] = clears[i * 4 + 0];
+        cis[i].clearValue.color.float32[1] = clears[i * 4 + 1];
+        cis[i].clearValue.color.float32[2] = clears[i * 4 + 2];
+        cis[i].clearValue.color.float32[3] = clears[i * 4 + 3];
+    }
 
     VkRenderingAttachmentInfo di = {0};
     di.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     di.imageView = depth;
-    di.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    di.imageLayout = depthLayout;
     di.loadOp = depthClear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
     di.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     di.clearValue.depthStencil.depth = dclear;
@@ -110,12 +117,8 @@ static void vkbBeginRendering(VkCommandBuffer cb, uint32_t w, uint32_t h,
     ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
     ri.renderArea.extent.width = w; ri.renderArea.extent.height = h;
     ri.layerCount = 1;
-    // A depth-only pass (shadow map) passes a null color view: advertise zero color
-    // attachments so the count matches a pipeline built with no color formats.
-    if (color != VK_NULL_HANDLE) {
-        ri.colorAttachmentCount = 1;
-        ri.pColorAttachments = &ci;
-    }
+    ri.colorAttachmentCount = nColor;
+    ri.pColorAttachments = nColor > 0 ? cis : NULL;
     if (hasDepth) ri.pDepthAttachment = &di;
     vkCmdBeginRendering(cb, &ri);
 }
@@ -240,35 +243,57 @@ func aspectOf(e *textureEntry) C.VkImageAspectFlags {
 	return C.VK_IMAGE_ASPECT_COLOR_BIT
 }
 
-// transition moves an image to newLayout from its tracked current layout.
+// transition moves an image to newLayout and orders the new access against however
+// the image was last used (e.lastStage/lastAccess), then records this access as the
+// new "last use". The source scope comes from the tracked state rather than the
+// caller so that cross-pass hazards — sampling a G-buffer the previous pass rendered,
+// or blending onto a color target a previous pass wrote — are actually synchronized;
+// a caller-supplied TOP_OF_PIPE would silently establish no dependency at all.
+//
+// The barrier is emitted even when the layout is unchanged: a write-after-write on the
+// same layout (two render passes onto one color target) still needs ordering.
 func (c *cmdBuffer) transition(e *textureEntry, newLayout C.VkImageLayout,
-	srcStage C.VkPipelineStageFlags2, srcAccess C.VkAccessFlags2,
 	dstStage C.VkPipelineStageFlags2, dstAccess C.VkAccessFlags2) {
+	srcStage, srcAccess := e.lastStage, e.lastAccess
+	if srcStage == 0 {
+		srcStage = C.VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT
+	}
 	C.vkbImageBarrier(c.cb, e.img, aspectOf(e), e.layout, newLayout, srcStage, srcAccess, dstStage, dstAccess)
 	e.layout = newLayout
+	e.lastStage, e.lastAccess = dstStage, dstAccess
 }
 
+// maxColorAttachments bounds a single render pass's color targets (today's largest
+// user is the G-buffer fill: albedo/normal/metal-rough + emissive-to-color).
+const maxColorAttachments = 4
+
 func (c *cmdBuffer) BeginRenderPass(rt gpu.RenderTargets) {
+	if len(rt.Color) > maxColorAttachments {
+		panic("vulkan: BeginRenderPass: too many color attachments")
+	}
 	var w, h uint32
-	var colorView C.VkImageView
-	var clear [4]float32
-	colorClear := C.int(0)
-	if len(rt.Color) > 0 {
-		e := c.b.tex(rt.Color[0].Texture)
+	var views [maxColorAttachments]C.VkImageView
+	var loads [maxColorAttachments]C.int
+	var clears [maxColorAttachments * 4]C.float
+	for i, ca := range rt.Color {
+		e := c.b.tex(ca.Texture)
 		w, h = e.width, e.height
-		colorView = e.view
-		clear = rt.Color[0].Clear
-		if rt.Color[0].Load == gpu.LoadClear {
-			colorClear = 1
+		views[i] = e.view
+		if ca.Load == gpu.LoadClear {
+			loads[i] = 1
 		}
+		clears[i*4+0] = C.float(ca.Clear[0])
+		clears[i*4+1] = C.float(ca.Clear[1])
+		clears[i*4+2] = C.float(ca.Clear[2])
+		clears[i*4+3] = C.float(ca.Clear[3])
 		c.transition(e, C.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-			C.VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
 			C.VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, C.VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT)
 	}
 	var depthView C.VkImageView
 	hasDepth := C.int(0)
 	depthClear := C.int(0)
 	var dclear float32
+	depthLayout := C.VkImageLayout(C.VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL)
 	if rt.Depth != nil {
 		e := c.b.tex(rt.Depth.Texture)
 		w, h = e.width, e.height
@@ -278,14 +303,29 @@ func (c *cmdBuffer) BeginRenderPass(rt gpu.RenderTargets) {
 		if rt.Depth.Load == gpu.LoadClear {
 			depthClear = 1
 		}
-		c.transition(e, C.VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-			C.VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
-			C.VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT|C.VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-			C.VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)
+		// A read-only depth attachment rests in DEPTH_STENCIL_READ_ONLY_OPTIMAL — the
+		// same layout its bindless descriptor declares — so the pass may depth-test
+		// against the image while also sampling it (deferred lighting does both).
+		if rt.Depth.ReadOnly {
+			depthLayout = sampledLayout(true)
+			c.transition(e, depthLayout,
+				C.VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT|C.VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT|C.VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+				C.VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT|C.VK_ACCESS_2_SHADER_READ_BIT)
+		} else {
+			c.transition(e, depthLayout,
+				C.VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT|C.VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+				C.VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)
+		}
+	}
+	var viewsPtr *C.VkImageView
+	var loadsPtr *C.int
+	var clearsPtr *C.float
+	if n := len(rt.Color); n > 0 {
+		viewsPtr, loadsPtr, clearsPtr = &views[0], &loads[0], &clears[0]
 	}
 	C.vkbBeginRendering(c.cb, C.uint32_t(w), C.uint32_t(h),
-		colorView, colorClear, C.float(clear[0]), C.float(clear[1]), C.float(clear[2]), C.float(clear[3]),
-		hasDepth, depthView, depthClear, C.float(dclear))
+		viewsPtr, loadsPtr, clearsPtr, C.uint32_t(len(rt.Color)),
+		hasDepth, depthView, depthClear, C.float(dclear), depthLayout)
 }
 
 func (c *cmdBuffer) EndRenderPass() { C.vkCmdEndRendering(c.cb) }
@@ -345,9 +385,7 @@ func (c *cmdBuffer) PrepareSampled(t gpu.Texture, at gpu.Stage) {
 	if ds == 0 {
 		ds = C.VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
 	}
-	c.transition(e, C.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-		C.VK_PIPELINE_STAGE_2_COPY_BIT, C.VK_ACCESS_2_TRANSFER_WRITE_BIT,
-		ds, C.VK_ACCESS_2_SHADER_READ_BIT)
+	c.transition(e, sampledLayout(e.depth), ds, C.VK_ACCESS_2_SHADER_READ_BIT)
 }
 
 func (c *cmdBuffer) CopyBuffer(dst, src gpu.Buffer, dstOffset, srcOffset, size uint64) {
@@ -358,7 +396,6 @@ func (c *cmdBuffer) CopyBuffer(dst, src gpu.Buffer, dstOffset, srcOffset, size u
 func (c *cmdBuffer) CopyBufferToTexture(dst gpu.Texture, mip, layer uint32, src gpu.Buffer, srcOffset uint64) {
 	e := c.b.tex(dst)
 	c.transition(e, C.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-		C.VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
 		C.VK_PIPELINE_STAGE_2_COPY_BIT, C.VK_ACCESS_2_TRANSFER_WRITE_BIT)
 	C.vkbCopyBufferToImage(c.cb, c.b.bufRaw(src), C.uint64_t(srcOffset), e.img,
 		C.uint32_t(e.width), C.uint32_t(e.height), C.uint32_t(mip), C.uint32_t(layer), aspectOf(e))
@@ -367,7 +404,6 @@ func (c *cmdBuffer) CopyBufferToTexture(dst gpu.Texture, mip, layer uint32, src 
 func (c *cmdBuffer) CopyTextureToBuffer(dst gpu.Buffer, src gpu.Texture, mip, layer uint32) {
 	e := c.b.tex(src)
 	c.transition(e, C.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-		C.VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, C.VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
 		C.VK_PIPELINE_STAGE_2_COPY_BIT, C.VK_ACCESS_2_TRANSFER_READ_BIT)
 	C.vkbCopyImageToBuffer(c.cb, e.img, c.b.bufRaw(dst),
 		C.uint32_t(e.width), C.uint32_t(e.height), C.uint32_t(mip), C.uint32_t(layer), aspectOf(e))

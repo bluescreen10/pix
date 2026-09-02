@@ -9,6 +9,8 @@
 // BasicMaterial (unlit): base color × vertex color × color map, plus emissive.
 #include "material_common.glsl"
 
+layout(location = 0) out vec4 outColor;
+
 // Material mirrors pix.basicRecord (48 bytes).
 struct Material {
     vec4 color;

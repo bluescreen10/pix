@@ -270,7 +270,8 @@ func (l *loader) loadMaterials() {
 		}
 		if gm.NormalTexture != nil {
 			if t := l.texture(gm.NormalTexture.Index, false); t.Valid() {
-				m.SetNormalMap(t, samp)
+				m.SetNormalMap(t)
+				m.SetNormalMapSampler(samp)
 			}
 		}
 		if pbr := gm.PbrMetallicRoughness; pbr != nil {
@@ -285,15 +286,18 @@ func (l *loader) loadMaterials() {
 			}
 			if pbr.BaseColorTexture != nil {
 				if t := l.texture(pbr.BaseColorTexture.Index, true); t.Valid() {
-					m.SetColorMap(t, samp)
+					m.SetColorMap(t)
+					m.SetColorMapSampler(samp)
 				}
 			}
 			// One combined metallic-roughness texture (glTF: .b metallic, .g roughness)
 			// feeds both independent map slots.
 			if pbr.MetallicRoughnessTexture != nil {
 				if t := l.texture(pbr.MetallicRoughnessTexture.Index, false); t.Valid() {
-					m.SetMetallicMap(t, samp)
-					m.SetRoughnessMap(t, samp)
+					m.SetMetallicMap(t)
+					m.SetMetallicMapSampler(samp)
+					m.SetRoughnessMap(t)
+					m.SetRoughnessMapSampler(samp)
 				}
 			}
 		}
