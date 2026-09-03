@@ -16,6 +16,7 @@ const (
 	MatNormalMap uint32 = 1 << 1 // tangent-space normal map bound (PBR)
 	MatMetalMap  uint32 = 1 << 2 // metallic map bound (PBR; sampled .b)
 	MatRoughMap  uint32 = 1 << 3 // roughness map bound (PBR; sampled .g)
+	MatTransMap  uint32 = 1 << 4 // transmission map bound (PBR; sampled .r)
 )
 
 // CullMode selects which triangle faces are discarded. CullNone is double-sided.

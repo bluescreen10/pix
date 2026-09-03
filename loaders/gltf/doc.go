@@ -96,6 +96,10 @@ type materialExtensions struct {
 
 type transmissionExt struct {
 	TransmissionFactor *float32 `json:"transmissionFactor"` // default 0
+	// TransmissionTexture's RED channel scales the factor per texel. Assets use it
+	// for surfaces that are only partly glass (a cabinet's panes, a sign's window);
+	// ignoring it makes the whole object transparent.
+	TransmissionTexture *textureRef `json:"transmissionTexture"`
 }
 
 type pbr struct {

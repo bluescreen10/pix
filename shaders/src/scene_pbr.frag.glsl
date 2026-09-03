@@ -80,8 +80,9 @@ layout(push_constant) uniform PC { LightingRoot root; } pc;
 const uint MAT_NORMAL_MAP = 2u;
 const uint MAT_METAL_MAP = 4u;
 const uint MAT_ROUGH_MAP = 8u;
+const uint MAT_TRANS_MAP = 16u;
 
-// Material mirrors pix.pbrRecord (80 bytes). Each map carries its own sampler.
+// Material mirrors pix.pbrRecord (88 bytes). Each map carries its own sampler.
 struct Material {
     vec4 color;
     vec4 emissive;
@@ -97,6 +98,8 @@ struct Material {
     uint metalSampler;
     uint roughMap;
     uint roughSampler;
+    uint transMap;
+    uint transSampler;
 };
 layout(buffer_reference, scalar) readonly buffer MatBuf { Material v[]; };
 
@@ -263,15 +266,37 @@ void main() {
     // Transmission (glass): suppress the diffuse (transmitted) term, keep specular,
     // and make the surface see-through via alpha. Not a true refraction — a cheap
     // approximation of KHR_materials_transmission.
-    float diffuseScale = 1.0 - m.transmission;
+    //
+    // The map (red channel, per the extension) is what keeps a partly-glass object
+    // from going uniformly transparent: without it a cabinet with glass panes turns
+    // the whole cabinet into a ghost.
+    float transmission = m.transmission;
+    if ((m.flags & MAT_TRANS_MAP) != 0u) transmission *= tex(m.transMap, m.transSampler).r;
+    float diffuseScale = 1.0 - transmission;
     vec3 V = normalize(pc.root.eye.xyz - vWorldPos);
     bool receives = (vFlags & FLAG_RECEIVES_SHADOW) != 0u;
 
     vec3 lit = shadeSurface(s, vWorldPos, V, pc.root.shadowSampler, diffuseScale, receives);
 
     float alpha = baseAlpha;
-    if (m.transmission > 0.0) {
-        alpha = max(1.0 - m.transmission, 0.08); // glass never fully invisible
+    if (transmission > 0.0) {
+        // Glass is legible through what it reflects, not through how transparent it
+        // is. A flat alpha of 1 - transmission scales the specular highlight away
+        // with the body, leaving a uniform grey wash with no silhouette. Drive
+        // coverage from reflectance instead, so highlights and the grazing-angle rim
+        // keep their shape while the face-on centre stays clear.
+        //
+        // abs() because glass is double-sided: a back face has the normal pointing
+        // away, and a signed dot would read every one of them as pure grazing.
+        float ndv = abs(dot(s.normal, V));
+        float fres = 0.04 + 0.96 * pow(1.0 - ndv, 5.0);
+        // There is no environment probe yet, so the rim has nothing to reflect and
+        // Fresnel alone would turn the silhouette opaque black. Stand the ambient
+        // term in for the surroundings: it is what an environment would contribute
+        // if we had one, and it keeps the rim additive rather than a dark outline.
+        lit += fres * transmission * pc.root.lights.ambient.rgb;
+        float refl = max(fres * fres, dot(lit, vec3(0.2126, 0.7152, 0.0722)));
+        alpha = clamp(baseAlpha * mix(1.0, refl, transmission), 0.04, 1.0);
     }
     outColor = vec4(linearToSrgb(lit), alpha);
 

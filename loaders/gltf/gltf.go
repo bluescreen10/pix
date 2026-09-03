@@ -637,6 +637,18 @@ func (l *loader) loadMaterials() {
 			if tf > 0 {
 				m.SetTransmission(tf)
 				m.SetBlend(pix.BlendAlpha)
+				// The mask matters more than the factor for most assets: these
+				// materials are usually declared OPAQUE with a factor of 1 and a
+				// texture that is glass in only a few places. Loading the factor
+				// alone turns the entire object into a ghost.
+				if tt := ext.Transmission.TransmissionTexture; tt != nil {
+					// Single-channel data (the extension reads red), so upload it
+					// as R8 rather than paying for four channels.
+					if t := l.texture(tt.Index, pix.TextureGrayscale); t.Valid() {
+						m.SetTransmissionMap(t)
+						m.SetTransmissionMapSampler(samp)
+					}
+				}
 			}
 		}
 		if gm.NormalTexture != nil {

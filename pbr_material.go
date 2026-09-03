@@ -46,6 +46,12 @@ type PBRMaterial struct {
 	roughness        float32
 	roughnessMap     Texture
 	roughnessSampler uint32
+
+	// transmissionMap scales transmission per texel (glTF KHR_materials_transmission
+	// stores it in red). Without it a partly-glass object — a cabinet with panes, a
+	// sign with a glass front — becomes uniformly transparent.
+	transmissionMap     Texture
+	transmissionSampler uint32
 }
 
 // NewPBRMaterial creates a PBR material with four unbound maps: color, normal,
@@ -61,7 +67,7 @@ func (r *Renderer) NewPBRMaterial() *PBRMaterial {
 	return m
 }
 
-// Bytes implements materialInstance: the 80-byte record matching the Material struct
+// Bytes implements materialInstance: the 88-byte record matching the Material struct
 // in shaders/src/scene_pbr.frag.glsl. Field order and padding here ARE the GPU layout —
 // changing either without changing the shader silently misreads every material.
 func (m *PBRMaterial) Bytes() []byte {
@@ -80,6 +86,8 @@ func (m *PBRMaterial) Bytes() []byte {
 		metallicSampler  uint32
 		roughnessMap     uint32
 		roughnessSampler uint32
+		transMap         uint32
+		transSampler     uint32
 	}{
 		color:        m.color,
 		emissive:     m.emissive,
@@ -87,11 +95,13 @@ func (m *PBRMaterial) Bytes() []byte {
 		roughness:    m.roughness,
 		transmission: m.transmission,
 		flags: mapFlag(m.colorMap, MatColorMap) | mapFlag(m.normalMap, MatNormalMap) |
-			mapFlag(m.metallicMap, MatMetalMap) | mapFlag(m.roughnessMap, MatRoughMap),
+			mapFlag(m.metallicMap, MatMetalMap) | mapFlag(m.roughnessMap, MatRoughMap) |
+			mapFlag(m.transmissionMap, MatTransMap),
 		colorMap: mapIndex(m.colorMap), colorSampler: m.colorSampler,
 		normalMap: mapIndex(m.normalMap), normalSampler: m.normalSampler,
 		metallicMap: mapIndex(m.metallicMap), metallicSampler: m.metallicSampler,
 		roughnessMap: mapIndex(m.roughnessMap), roughnessSampler: m.roughnessSampler,
+		transMap: mapIndex(m.transmissionMap), transSampler: m.transmissionSampler,
 	}
 	return unsafe.Slice((*byte)(unsafe.Pointer(&rec)), unsafe.Sizeof(rec))
 }
@@ -102,6 +112,7 @@ func (m *PBRMaterial) release() {
 	m.normalMap.Release()
 	m.metallicMap.Release()
 	m.roughnessMap.Release()
+	m.transmissionMap.Release()
 }
 
 // dirty marks the record for re-upload in the next Sync. Every setter must call it;
@@ -251,6 +262,27 @@ func (m *PBRMaterial) RoughnessMapSampler() uint32 {
 
 func (m *PBRMaterial) SetRoughnessMapSampler(s uint32) {
 	m.roughnessSampler = s
+	m.dirty()
+}
+
+// TransmissionMap returns the bound transmission map.
+func (m *PBRMaterial) TransmissionMap() Texture { return m.transmissionMap }
+
+// SetTransmissionMap binds a per-texel transmission mask, multiplied with the scalar
+// Transmission (glTF KHR_materials_transmission keeps it in the red channel). Use it
+// when only part of a surface is glass — a cabinet's panes, a sign's window — since
+// the scalar alone makes the whole object see-through.
+func (m *PBRMaterial) SetTransmissionMap(t Texture) {
+	newRef := t.Copy()
+	m.transmissionMap.Release()
+	m.transmissionMap = newRef
+	m.dirty()
+}
+
+// SetTransmissionMapSampler sets the heap index of the sampler used for the
+// transmission map.
+func (m *PBRMaterial) SetTransmissionMapSampler(s uint32) {
+	m.transmissionSampler = s
 	m.dirty()
 }
 

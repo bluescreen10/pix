@@ -48,10 +48,12 @@ func TestMaterialRecordLayouts(t *testing.T) {
 		m.SetTransmission(0.5)
 		m.SetNormalMap(tex)
 		m.SetNormalMapSampler(7)
+		m.SetTransmissionMap(tex)
+		m.SetTransmissionMapSampler(9)
 
 		b := m.Bytes()
-		if len(b) != 80 {
-			t.Fatalf("record is %d bytes, shader expects 80", len(b))
+		if len(b) != 88 {
+			t.Fatalf("record is %d bytes, shader expects 88", len(b))
 		}
 		checks := []struct {
 			name string
@@ -67,8 +69,8 @@ func TestMaterialRecordLayouts(t *testing.T) {
 				t.Errorf("%s at byte %d = %v, want %v", c.name, c.off, got, c.want)
 			}
 		}
-		if got := u32At(t, b, 44); got != MatNormalMap {
-			t.Errorf("flags at byte 44 = %#x, want just MatNormalMap (%#x)", got, MatNormalMap)
+		if want := MatNormalMap | MatTransMap; u32At(t, b, 44) != want {
+			t.Errorf("flags at byte 44 = %#x, want MatNormalMap|MatTransMap (%#x)", u32At(t, b, 44), want)
 		}
 		if got := u32At(t, b, 48); got != noTextureIndex {
 			t.Errorf("unbound colorMap at byte 48 = %d, want the no-texture sentinel", got)
@@ -78,6 +80,12 @@ func TestMaterialRecordLayouts(t *testing.T) {
 		}
 		if got := u32At(t, b, 60); got != 7 {
 			t.Errorf("normalSampler at byte 60 = %d, want 7", got)
+		}
+		if got := u32At(t, b, 80); got != tex.Index() {
+			t.Errorf("transmissionMap index at byte 80 = %d, want %d", got, tex.Index())
+		}
+		if got := u32At(t, b, 84); got != 9 {
+			t.Errorf("transmissionSampler at byte 84 = %d, want 9", got)
 		}
 	})
 
