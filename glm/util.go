@@ -23,6 +23,33 @@ func PerspectiveRH[T number](fovYrad, aspectRatio, zNear, zFar T) Mat4[T] {
 	}
 }
 
+// PerspectiveRevZRH is PerspectiveRH with a REVERSED depth range: the near plane
+// maps to 1 and the far plane to 0, instead of 0 and 1.
+//
+// This is what makes a floating-point depth buffer behave. Float precision is
+// densest near 0, and the perspective divide crowds depth values toward the far
+// plane — with the conventional mapping those two effects compound, so most of the
+// buffer's precision lands where nothing needs it. Reversing lines float's dense
+// region up with the far plane, where the projection is coarsest, and the two
+// cancel into near-uniform precision. It costs nothing: same format, same speed.
+//
+// Swapping the near and far arguments is the whole implementation — the standard
+// formula run with them exchanged produces exactly the reversed mapping. Callers
+// still pass near and far in the usual order.
+//
+// Depth state must agree: clear to 0 (not 1) and compare with Greater (not Less).
+func PerspectiveRevZRH[T number](fovYrad, aspectRatio, zNear, zFar T) Mat4[T] {
+	return PerspectiveRH(fovYrad, aspectRatio, zFar, zNear)
+}
+
+// OrthoFullRevZRH is OrthoFullRH with the same reversed depth range, so
+// orthographic (directional shadow) cameras match the convention above. An
+// orthographic projection is linear in z, so this buys no precision on its own —
+// it exists so every depth buffer in the engine reads the same way.
+func OrthoFullRevZRH[T number](left, right, bottom, top, near, far T) Mat4[T] {
+	return OrthoFullRH(left, right, bottom, top, far, near)
+}
+
 func LookAtRH[T number](eye, center, up Vec3[T]) Mat4[T] {
 	f := (center.Sub(eye)).Normalize()
 	s := f.Cross(up).Normalize()

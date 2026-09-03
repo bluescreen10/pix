@@ -397,16 +397,28 @@ func (c *cmdBuffer) CopyBufferToTexture(dst gpu.Texture, mip, layer uint32, src 
 	e := c.b.tex(dst)
 	c.transition(e, C.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 		C.VK_PIPELINE_STAGE_2_COPY_BIT, C.VK_ACCESS_2_TRANSFER_WRITE_BIT)
+	// A mip level is half the size of the one above it, floored at 1 — copying the
+	// base extent into a smaller level would overrun it.
+	w, h := mipExtent(e.width, e.height, mip)
 	C.vkbCopyBufferToImage(c.cb, c.b.bufRaw(src), C.uint64_t(srcOffset), e.img,
-		C.uint32_t(e.width), C.uint32_t(e.height), C.uint32_t(mip), C.uint32_t(layer), aspectOf(e))
+		C.uint32_t(w), C.uint32_t(h), C.uint32_t(mip), C.uint32_t(layer), aspectOf(e))
 }
 
 func (c *cmdBuffer) CopyTextureToBuffer(dst gpu.Buffer, src gpu.Texture, mip, layer uint32) {
 	e := c.b.tex(src)
 	c.transition(e, C.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		C.VK_PIPELINE_STAGE_2_COPY_BIT, C.VK_ACCESS_2_TRANSFER_READ_BIT)
+	w, h := mipExtent(e.width, e.height, mip)
 	C.vkbCopyImageToBuffer(c.cb, e.img, c.b.bufRaw(dst),
-		C.uint32_t(e.width), C.uint32_t(e.height), C.uint32_t(mip), C.uint32_t(layer), aspectOf(e))
+		C.uint32_t(w), C.uint32_t(h), C.uint32_t(mip), C.uint32_t(layer), aspectOf(e))
+}
+
+// mipExtent returns level's dimensions for a base-size image: each level halves,
+// floored at 1 (so a 4x1 image's level 2 is 1x1, not 1x0).
+func mipExtent(w, h, level uint32) (uint32, uint32) {
+	w >>= level
+	h >>= level
+	return max(w, 1), max(h, 1)
 }
 
 // stageAccess maps an gpu.Stage bitmask to a coarse (stage, access) pair.

@@ -134,6 +134,54 @@ func BoxGeometry(width, height, depth float32) GeometryConfig {
 	}
 }
 
+// PlaneGeometry is a flat grid in the XZ plane facing +Y — a ground plane, not
+// three.js's XY orientation, so it needs no rotation to be a floor. Centered on the
+// origin, subdivided widthSegments × depthSegments.
+//
+// Two triangles would represent a plane exactly; the subdivision is there for what
+// consumes vertices rather than pixels — vertex displacement, terrain, or anything
+// that wants interior vertices to move.
+func PlaneGeometry(width, depth float32, widthSegments, depthSegments int) GeometryConfig {
+	widthSegments = max(widthSegments, 1)
+	depthSegments = max(depthSegments, 1)
+	cols, rows := widthSegments+1, depthSegments+1
+	hw, hd := width/2, depth/2
+
+	positions := make([]glm.Vec3f, 0, cols*rows)
+	normals := make([]glm.Vec3f, 0, cols*rows)
+	uvs := make([]glm.Vec2f, 0, cols*rows)
+	for ix := range cols {
+		u := float32(ix) / float32(widthSegments)
+		for iz := range rows {
+			v := float32(iz) / float32(depthSegments)
+			positions = append(positions, glm.Vec3f{-hw + u*width, 0, -hd + v*depth})
+			normals = append(normals, glm.Vec3f{0, 1, 0})
+			uvs = append(uvs, glm.Vec2f{u, v})
+		}
+	}
+
+	indices := make([]uint32, 0, widthSegments*depthSegments*6)
+	for ix := range widthSegments {
+		for iz := range depthSegments {
+			a := uint32(ix*rows + iz)
+			b := a + 1
+			c := uint32((ix+1)*rows + iz + 1)
+			d := c - 1
+			// Wound so the right-hand rule points +Y, matching the normal above.
+			indices = append(indices, a, b, c, a, c, d)
+		}
+	}
+
+	return GeometryConfig{
+		Attributes: []Attribute{
+			NewAttribute(AttributePosition, Float32x3, positions),
+			NewAttribute(AttributeNormal, Float32x3, normals),
+			NewAttribute(AttributeUV, Float32x2, uvs),
+		},
+		Indices: indices,
+	}
+}
+
 // SphereGeometry is a UV sphere centered on the origin: widthSegments around the
 // equator, heightSegments from pole to pole.
 func SphereGeometry(radius float32, widthSegments, heightSegments int) GeometryConfig {
@@ -235,6 +283,11 @@ func CapsuleGeometry(radius, length float32, capSegments, radialSegments int) Ge
 // NewBoxGeometry uploads a BoxGeometry and returns its handle.
 func (r *Renderer) NewBoxGeometry(width, height, depth float32) Geometry {
 	return r.NewGeometry(BoxGeometry(width, height, depth))
+}
+
+// NewPlaneGeometry uploads a PlaneGeometry and returns its handle.
+func (r *Renderer) NewPlaneGeometry(width, depth float32, widthSegments, depthSegments int) Geometry {
+	return r.NewGeometry(PlaneGeometry(width, depth, widthSegments, depthSegments))
 }
 
 // NewSphereGeometry uploads a SphereGeometry and returns its handle.

@@ -88,6 +88,6 @@ func (c *PerspectiveCamera) SetFar(f float32) {
 // so a moved position stays aimed at Target.
 func (c *PerspectiveCamera) ViewProjection() glm.Mat4f {
 	view := glm.LookAtRH(c.position, c.target, c.up)
-	proj := glm.PerspectiveRH(glm.ToRadians(c.fov), c.aspect, c.near, c.far)
+	proj := glm.PerspectiveRevZRH(glm.ToRadians(c.fov), c.aspect, c.near, c.far)
 	return proj.Mul4x4(view)
 }

@@ -117,6 +117,9 @@ static VkResult vkbCreateDevice(VkPhysicalDevice pd, uint32_t fam, VkDevice* out
     f2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     f2.features.drawIndirectFirstInstance = VK_TRUE;
     f2.features.multiDrawIndirect = VK_TRUE;
+    // Anisotropic filtering is a base feature and must be requested explicitly,
+    // or creating a sampler with anisotropyEnable is invalid.
+    f2.features.samplerAnisotropy = VK_TRUE;
     f2.pNext = &f12;
 
     const char* devExts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
@@ -142,6 +145,12 @@ static void vkbDeviceName(VkPhysicalDevice pd, char* out) {
     VkPhysicalDeviceProperties p;
     vkGetPhysicalDeviceProperties(pd, &p);
     memcpy(out, p.deviceName, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE);
+}
+
+static float vkbMaxAnisotropy(VkPhysicalDevice pd) {
+    VkPhysicalDeviceProperties p;
+    vkGetPhysicalDeviceProperties(pd, &p);
+    return p.limits.maxSamplerAnisotropy;
 }
 
 static uint32_t vkbApiVersion(VkPhysicalDevice pd) {
@@ -174,7 +183,11 @@ var _ gpu.Backend = (*Backend)(nil)
 // Backend is the Vulkan implementation of gpu.Backend. Only device init is wired
 // so far; memory/bindless/pipelines/swapchain/commands land in sibling files.
 type Backend struct {
-	instance       C.VkInstance
+	instance C.VkInstance
+	// maxAnisotropy is the device's maxSamplerAnisotropy limit, cached at Init so
+	// CreateSampler can clamp to it — callers ask for the quality they want and
+	// get whatever the hardware can actually do.
+	maxAnisotropy  float32
 	physicalDevice C.VkPhysicalDevice
 	device         C.VkDevice
 	queue          C.VkQueue
@@ -266,6 +279,7 @@ func (b *Backend) Init() error {
 		C.vkDestroyInstance(b.instance, nil)
 		return fmt.Errorf("vulkan: create device failed (%d)", int(r))
 	}
+	b.maxAnisotropy = float32(C.vkbMaxAnisotropy(b.physicalDevice))
 	if err := b.initBindless(); err != nil {
 		C.vkDestroyDevice(b.device, nil)
 		C.vkDestroyInstance(b.instance, nil)

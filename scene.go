@@ -39,6 +39,11 @@ const (
 	flagLocalVisible
 	flagVisibleDirty
 	flagVisible
+	// flagAttached marks a node reachable from the scene root. Maintained by
+	// flushTopoIfDirty, which already computes exactly that set. Only attached
+	// nodes get their world matrix updated, so only attached meshes may draw —
+	// see collectDrawables.
+	flagAttached
 )
 
 // NodeID is a generation-counted handle. Zero value is invalid (gen starts at 1).
@@ -324,6 +329,9 @@ func (s *Scene) flushTopoIfDirty() {
 		return
 	}
 	s.topoOrder = s.topoOrder[:0]
+	for i := range s.flags {
+		s.flags[i] &^= flagAttached
+	}
 	queue := []uint32{s.root.index}
 	for len(queue) > 0 {
 		idx := queue[0]
@@ -332,6 +340,7 @@ func (s *Scene) flushTopoIfDirty() {
 			continue
 		}
 		s.topoOrder = append(s.topoOrder, idx)
+		s.flags[idx] |= flagAttached
 		child := s.firstChildren[idx]
 		for child.isValid() {
 			queue = append(queue, child.index)
@@ -396,12 +405,23 @@ func (s *Scene) Sync() {
 // payloads, plus a parallel slice of each drawable's material (for batching + store
 // address). A skinned mesh's transformID is its skeleton root's node slot (not its
 // own) — its own local transform plays no part in rendering; see skeleton.go.
+//
+// Only nodes attached to the scene draw. Creating a mesh does NOT attach it —
+// scene.Add (or parenting it under something attached) does. An unattached node is
+// never visited by UpdateTransforms, so its world matrix would still be the identity
+// it was born with: drawing it anyway would silently place it at the origin,
+// ignoring every transform set on it. Skipping it instead makes the omission
+// obvious — the mesh is simply missing until it is added.
 func (s *Scene) collectDrawables() ([]gpuDrawable, []Material) {
+	s.flushTopoIfDirty() // attachment is derived from the topological walk
 	n := len(s.meshes) + s.skinnedMeshes.Len()
 	out := make([]gpuDrawable, 0, n)
 	materials := make([]Material, 0, n)
 	for i := range s.meshes {
 		md := &s.meshes[i]
+		if s.flags[md.ownerNode]&flagAttached == 0 {
+			continue
+		}
 		var flags uint32
 		if s.flags[md.ownerNode]&flagCastShadow != 0 {
 			flags |= DrawableCastsShadow
@@ -419,6 +439,12 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []Material) {
 		materials = append(materials, md.material)
 	}
 	for _, sm := range s.skinnedMeshes.All() {
+		// Both must be attached: the mesh node puts it in the scene, and the
+		// skeleton root supplies the transform its drawable is rendered with.
+		root := s.skeletons.Get(sm.skeleton).ownerNode
+		if s.flags[sm.ownerNode]&flagAttached == 0 || s.flags[root]&flagAttached == 0 {
+			continue
+		}
 		var flags uint32
 		if s.flags[sm.ownerNode]&flagCastShadow != 0 {
 			flags |= DrawableCastsShadow
@@ -426,7 +452,6 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []Material) {
 		if s.flags[sm.ownerNode]&flagReceiveShadow != 0 {
 			flags |= DrawableReceivesShadow
 		}
-		root := s.skeletons.Get(sm.skeleton).ownerNode
 		out = append(out, gpuDrawable{
 			bounds:      [4]float32{sm.bounds.Center[0], sm.bounds.Center[1], sm.bounds.Center[2], sm.bounds.Radius},
 			transformID: root,

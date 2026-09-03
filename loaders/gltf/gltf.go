@@ -82,9 +82,13 @@ func LoadFull(r *pix.Renderer, scene *pix.Scene, path string) (LoadResult, error
 	return LoadResult{Added: added, Skeletons: l.skeletons, Clips: l.loadAnimations()}, nil
 }
 
+// texKey dedups uploaded textures. Usage is part of the key, not just an upload
+// argument: the same glTF image can legitimately be referenced as both a color map
+// and a data map, and those must become different GPU textures (different format,
+// different mip filtering).
 type texKey struct {
 	index int
-	srgb  bool // color textures decode from sRGB; data maps (normal/MR) stay linear
+	usage pix.TextureFormat
 }
 
 type loader struct {
@@ -94,7 +98,7 @@ type loader struct {
 	buffers  [][]byte
 	baseDir  string
 
-	texCache  map[texKey]pix.Texture // (gltf texture, color space) -> uploaded texture
+	texCache  map[texKey]pix.Texture // (gltf texture, usage) -> uploaded texture
 	allTex    []pix.Texture          // every uploaded texture, for release after build
 	materials []*pix.PBRMaterial     // [0]=default; gltf material i -> [i+1]
 	nodes     []pix.Node             // per gltf node
@@ -576,14 +580,18 @@ func (l *loader) animTarget(nodeIdx int) (pix.SceneNode, bool) {
 
 // ---- textures & materials ----
 
-// texture decodes + uploads a glTF texture in the given color space (deduped by
-// texture index + color space), returning a handle (zero if missing/undecodable).
-// Color textures use sRGB; data maps (normal, metallic-roughness) stay linear.
-func (l *loader) texture(idx int, srgb bool) pix.Texture {
+// texture decodes + uploads a glTF texture for a given usage (deduped by texture
+// index + usage), returning a handle (zero if missing/undecodable).
+//
+// Usage — not just color space — is what the loader has to decide here, because it
+// determines the GPU format: only the call site knows an image is a normal map, and
+// a normal map wants two channels with Z reconstructed in the shader rather than a
+// wasted third. See pix.TextureFormat.
+func (l *loader) texture(idx int, usage pix.TextureFormat) pix.Texture {
 	if idx < 0 || idx >= len(l.doc.Textures) {
 		return pix.Texture{}
 	}
-	key := texKey{idx, srgb}
+	key := texKey{idx, usage}
 	if t, ok := l.texCache[key]; ok {
 		return t
 	}
@@ -597,11 +605,7 @@ func (l *loader) texture(idx int, srgb bool) pix.Texture {
 		l.texCache[key] = pix.Texture{}
 		return pix.Texture{}
 	}
-	format := pix.TextureLinear
-	if srgb {
-		format = pix.TextureSRGB
-	}
-	t := l.renderer.NewTexture(pixels, w, h, format)
+	t := l.renderer.NewTexture(pixels, w, h, usage)
 	l.texCache[key] = t
 	l.allTex = append(l.allTex, t)
 	return t
@@ -636,7 +640,7 @@ func (l *loader) loadMaterials() {
 			}
 		}
 		if gm.NormalTexture != nil {
-			if t := l.texture(gm.NormalTexture.Index, false); t.Valid() {
+			if t := l.texture(gm.NormalTexture.Index, pix.TextureNormal); t.Valid() {
 				m.SetNormalMap(t)
 				m.SetNormalMapSampler(samp)
 			}
@@ -652,7 +656,7 @@ func (l *loader) loadMaterials() {
 				m.SetRoughness(*pbr.RoughnessFactor)
 			}
 			if pbr.BaseColorTexture != nil {
-				if t := l.texture(pbr.BaseColorTexture.Index, true); t.Valid() {
+				if t := l.texture(pbr.BaseColorTexture.Index, pix.TextureSRGB); t.Valid() {
 					m.SetColorMap(t)
 					m.SetColorMapSampler(samp)
 				}
@@ -660,7 +664,7 @@ func (l *loader) loadMaterials() {
 			// One combined metallic-roughness texture (glTF: .b metallic, .g roughness)
 			// feeds both independent map slots.
 			if pbr.MetallicRoughnessTexture != nil {
-				if t := l.texture(pbr.MetallicRoughnessTexture.Index, false); t.Valid() {
+				if t := l.texture(pbr.MetallicRoughnessTexture.Index, pix.TextureLinear); t.Valid() {
 					m.SetMetallicMap(t)
 					m.SetMetallicMapSampler(samp)
 					m.SetRoughnessMap(t)

@@ -47,10 +47,16 @@ float shadowFactor(mat4 shadowVP, uint shadowMap, vec3 worldPos, uint shadowSamp
     if (c.w <= 0.0) return 1.0;
     vec3 ndc = c.xyz / c.w;
     vec2 uv = ndc.xy * 0.5 + 0.5;
-    if (ndc.z > 1.0 || any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
+    // Reversed-Z: the far plane is 0 and nearer is GREATER, so "beyond the shadow
+    // camera's far plane" is z < 0 rather than z > 1.
+    if (ndc.z < 0.0 || any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
         return 1.0;
     }
-    float ref = ndc.z - bias;
+    // Bias pushes the reference toward the light to avoid self-shadowing acne.
+    // Under reversed-Z "toward the light" is a LARGER depth, so this adds where a
+    // conventional depth buffer would subtract. The comparison sampler is
+    // GreaterEqual to match (see Renderer.prepareShadows).
+    float ref = ndc.z + bias;
     return texture(sampler2DShadow(gTextures[nonuniformEXT(shadowMap)], gSamplers[nonuniformEXT(shadowSamp)]), vec3(uv, ref));
 }
 

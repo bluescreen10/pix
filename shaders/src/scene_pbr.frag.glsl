@@ -143,7 +143,14 @@ Surface materialSurface(Material m, out float baseAlpha) {
 
     s.normal = normalize(vNormal);
     if ((m.flags & MAT_NORMAL_MAP) != 0u) {
-        s.normal = perturbNormal(s.normal, tex(m.normalMap, m.normalSampler).xyz * 2.0 - 1.0);
+        // Z is reconstructed rather than sampled: a tangent-space normal is a unit
+        // vector, so the third component carries no independent information. This
+        // is what lets normal maps be stored two-channel (pix.TextureNormal -> RG8,
+        // and BC5 later), and it is equally correct for an RGBA8 normal map, whose
+        // blue channel holds exactly this value.
+        vec2 nxy = tex(m.normalMap, m.normalSampler).rg * 2.0 - 1.0;
+        float nz = sqrt(clamp(1.0 - dot(nxy, nxy), 0.0, 1.0));
+        s.normal = perturbNormal(s.normal, vec3(nxy, nz));
     }
     return s;
 }

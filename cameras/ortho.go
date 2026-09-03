@@ -40,6 +40,6 @@ func (c *OrthographicCamera) SetClip(near, far float32) {
 
 func (c *OrthographicCamera) ViewProjection() glm.Mat4f {
 	view := glm.LookAtRH(c.position, c.target, c.up)
-	proj := glm.OrthoFullRH(c.left, c.right, c.bottom, c.top, c.near, c.far)
+	proj := glm.OrthoFullRevZRH(c.left, c.right, c.bottom, c.top, c.near, c.far)
 	return proj.Mul4x4(view)
 }

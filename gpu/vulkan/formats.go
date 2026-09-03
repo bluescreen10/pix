@@ -10,6 +10,8 @@ func vkFormat(f gpu.Format) C.VkFormat {
 	switch f {
 	case gpu.FormatR8Unorm:
 		return C.VK_FORMAT_R8_UNORM
+	case gpu.FormatRG8Unorm:
+		return C.VK_FORMAT_R8G8_UNORM
 	case gpu.FormatRGBA8Unorm:
 		return C.VK_FORMAT_R8G8B8A8_UNORM
 	case gpu.FormatRGBA8Srgb:

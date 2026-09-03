@@ -223,11 +223,17 @@ func (b *Backend) CreateSampler(d gpu.SamplerDescriptor) gpu.Sampler {
 	if d.Compare != gpu.CompareNever {
 		compareEnable = 1
 	}
+	// Clamp to what the device supports: a sampler asking for more anisotropy than
+	// maxSamplerAnisotropy is invalid, and callers shouldn't have to query first.
+	aniso := float32(d.MaxAnisotropy)
+	if aniso > b.maxAnisotropy {
+		aniso = b.maxAnisotropy
+	}
 	var s C.VkSampler
 	r := C.vkbCreateSampler(b.device,
 		filter(d.MagLinear), filter(d.MinLinear), mipmapMode(d.MipLinear),
 		addressMode(d.AddressU), addressMode(d.AddressV), addressMode(d.AddressW),
-		compareEnable, compareOp(d.Compare), C.float(d.MaxAnisotropy), &s)
+		compareEnable, compareOp(d.Compare), C.float(aniso), &s)
 	if r != C.VK_SUCCESS {
 		panic(fmt.Sprintf("vulkan: CreateSampler failed (%d)", int(r)))
 	}

@@ -249,7 +249,7 @@ func (r *Renderer) buildPipelines() {
 	r.shadowPipeline = r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
 		VertexShader: shaders.SceneShadowVert, FragmentShader: shaders.SceneShadowFrag,
 		Topology: gpu.TopologyTriangles, DepthFormat: gpu.FormatDepth32F,
-		DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareLess,
+		DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareGreater,
 		CullMode: gpu.CullNone, Label: "scene-shadow",
 	})
 	for i, k := range r.drawPipelineKeys {
@@ -302,7 +302,7 @@ func (r *Renderer) buildDrawPipe(k materialPipeline) gpu.Pipeline {
 			VertexShader: vert, FragmentShader: k.fragment,
 			Topology:     gpu.TopologyTriangles,
 			ColorFormats: []gpu.Format{gpu.FormatRGBA8Unorm, gpu.FormatRG16F, gpu.FormatRGBA8Unorm, gpu.FormatRGBA8Unorm},
-			DepthFormat:  gpu.FormatDepth32F, DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareLess,
+			DepthFormat:  gpu.FormatDepth32F, DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareGreater,
 			CullMode: gpu.CullMode(k.cull), FrontFaceCW: true,
 		})
 	}
@@ -319,7 +319,7 @@ func (r *Renderer) buildDrawPipe(k materialPipeline) gpu.Pipeline {
 	return r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
 		VertexShader: vert, FragmentShader: k.fragment,
 		Topology: gpu.TopologyTriangles, ColorFormats: []gpu.Format{r.color},
-		DepthFormat: gpu.FormatDepth32F, DepthTest: true, DepthWrite: depthWrite, DepthCompare: gpu.CompareLess,
+		DepthFormat: gpu.FormatDepth32F, DepthTest: true, DepthWrite: depthWrite, DepthCompare: gpu.CompareGreater,
 		// The renderer flips clip-space Y (Vulkan NDC is Y-down), which reverses
 		// triangle winding, so front faces are clockwise on screen.
 		CullMode: gpu.CullMode(k.cull), FrontFaceCW: true, Blend: blend,
@@ -332,16 +332,17 @@ func (r *Renderer) buildDrawPipe(k materialPipeline) gpu.Pipeline {
 // once, so there is nothing to accumulate; the pass clears to the scene clear color, so
 // rejected background pixels keep it).
 //
-// The G-buffer's depth is bound read-only and tested with CompareGreater against the
-// fullscreen triangle's far-plane depth (see fullscreen.vert), so the hardware rejects
-// background pixels — those still holding the far clear value — before the fragment
-// shader runs at all. Without it every pixel in the viewport pays for an invocation
-// and a depth sample just to discard.
+// The G-buffer's depth is bound read-only and tested with CompareLess against the
+// fullscreen triangle's depth of 0 (see fullscreen.vert), so the hardware rejects
+// background pixels — those still holding the 0 clear value — before the fragment
+// shader runs at all. Under reversed-Z the background is 0 and geometry is greater,
+// so the sense is the mirror of the conventional arrangement. Without it every pixel
+// in the viewport pays for an invocation and a depth sample just to discard.
 func (r *Renderer) buildLightingPipe(fragment []byte) gpu.Pipeline {
 	return r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
 		VertexShader: shaders.FullscreenVert, FragmentShader: fragment,
 		Topology: gpu.TopologyTriangles, ColorFormats: []gpu.Format{r.color},
-		DepthFormat: gpu.FormatDepth32F, DepthTest: true, DepthWrite: false, DepthCompare: gpu.CompareGreater,
+		DepthFormat: gpu.FormatDepth32F, DepthTest: true, DepthWrite: false, DepthCompare: gpu.CompareLess,
 		CullMode: gpu.CullNone,
 	})
 }
@@ -607,7 +608,7 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 				{Texture: r.materialTexture, Load: gpu.LoadClear},
 				{Texture: r.emissiveTexture, Load: gpu.LoadClear},
 			},
-			Depth: &gpu.DepthAttachment{Texture: r.depth, Load: gpu.LoadClear, Clear: 1.0},
+			Depth: &gpu.DepthAttachment{Texture: r.depth, Load: gpu.LoadClear, Clear: 0.0},
 		})
 		cmd.Viewport(0, 0, float32(r.width), float32(r.height), 0, 1)
 		cmd.Scissor(0, 0, int32(r.width), int32(r.height))
@@ -632,7 +633,7 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 	}
 	cmd.BeginRenderPass(gpu.RenderTargets{
 		Color: []gpu.ColorAttachment{{Texture: target, Load: colorLoad, Clear: r.clear}},
-		Depth: &gpu.DepthAttachment{Texture: r.depth, Load: depthLoad, Clear: 1.0},
+		Depth: &gpu.DepthAttachment{Texture: r.depth, Load: depthLoad, Clear: 0.0},
 	})
 	cmd.Viewport(0, 0, float32(r.width), float32(r.height), 0, 1)
 	cmd.Scissor(0, 0, int32(r.width), int32(r.height))
@@ -750,7 +751,7 @@ func (r *Renderer) prepareShadows(scene *Scene, cam Camera) {
 		r.shadowSampler = r.backend.CreateSampler(gpu.SamplerDescriptor{
 			MinLinear: true, MagLinear: true,
 			AddressU: gpu.AddressClamp, AddressV: gpu.AddressClamp,
-			Compare: gpu.CompareLessEqual, // PCF comparison sampler
+			Compare: gpu.CompareGreaterEqual, // PCF comparison sampler (reversed-Z: nearer is greater)
 			Label:   "shadow-cmp",
 		})
 	}
@@ -834,12 +835,17 @@ func aimSpotShadow(s *LightShadow, l *SpotLight) {
 }
 
 // frustumCornersWorld returns the 8 world-space corners of the frustum described by
-// viewProj (indices 0..3 near, 4..7 far). NDC is Vulkan's: xy in [-1,1], z in [0,1].
+// viewProj (indices 0..3 near, 4..7 far). NDC is Vulkan's xy in [-1,1] with z in
+// [0,1] — but the engine uses REVERSED-Z, so the near plane is at z=1 and the far
+// plane at z=0 (see glm.PerspectiveRevZRH). Hence the {1, 0} order: it keeps the
+// documented "near first" layout that fitDirectionalShadow depends on to measure
+// its near→far slice. Reading these in the wrong order silently mis-sizes and
+// mis-places the shadow box rather than failing outright.
 func frustumCornersWorld(viewProj glm.Mat4f) [8]glm.Vec3f {
 	inv := viewProj.Inv()
 	var c [8]glm.Vec3f
 	i := 0
-	for _, z := range [2]float32{0, 1} {
+	for _, z := range [2]float32{1, 0} {
 		for _, y := range [2]float32{-1, 1} {
 			for _, x := range [2]float32{-1, 1} {
 				p := inv.Mul4x1(glm.Vec4f{x, y, z, 1})
@@ -1049,7 +1055,7 @@ func (r *Renderer) recordShadowDepth(cmd gpu.CommandBuffer, dl *drawList, v *dra
 		visible:   v.visibleBuf.Addr,
 	}
 	cmd.BeginRenderPass(gpu.RenderTargets{
-		Depth: &gpu.DepthAttachment{Texture: r.textures.gpu(sv.m), Load: gpu.LoadClear, Clear: 1.0},
+		Depth: &gpu.DepthAttachment{Texture: r.textures.gpu(sv.m), Load: gpu.LoadClear, Clear: 0.0},
 	})
 	cmd.Viewport(0, 0, float32(size), float32(size), 0, 1)
 	cmd.Scissor(0, 0, int32(size), int32(size))

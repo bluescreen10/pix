@@ -103,6 +103,7 @@ type Format uint16
 const (
 	FormatUndefined Format = iota
 	FormatR8Unorm
+	FormatRG8Unorm
 	FormatRGBA8Unorm
 	FormatRGBA8Srgb
 	FormatBGRA8Unorm
