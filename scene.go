@@ -105,6 +105,11 @@ type Scene struct {
 
 	drawableDirty bool
 	drawList      *drawList
+
+	// FrameSphere scratch, retained because it runs every frame (see prepareShadows).
+	frameCenters []glm.Vec3f
+	frameReach   []float32
+	frameScratch []float32
 }
 
 // NewScene creates an empty scene bound to a backend (usually via Renderer.NewScene).
@@ -353,6 +358,10 @@ func (s *Scene) UpdateTransforms() bool {
 		} else {
 			s.world[i] = s.world[p.index].Mul4x4(s.local[i])
 		}
+		//TODO: compute worldInv lazily. Every dirty node pays a full 4x4 inverse
+		// here, but the only readers are skeleton roots (Scene.syncSkinning) and
+		// the public Node.WorldTransformInv accessor — so in a scene of 10k static
+		// boxes, 10k inversions per dirty pass are thrown away unread.
 		s.worldInv[i] = s.world[i].Inv()
 		s.flags[i] &^= flagDirty
 		child := s.firstChildren[i]
@@ -456,8 +465,10 @@ func (s *Scene) FrameSphere(pct float32) (center glm.Vec3f, radius float32) {
 	worldRadius := func(m glm.Mat4f, r float32) float32 {
 		return r * maxColumnLength(m)
 	}
-	centers := make([]glm.Vec3f, 0, n)
-	reach := make([]float32, 0, n)
+	// Scratch is retained on the Scene: this runs every frame (prepareShadows fits
+	// the directional shadow camera from it), so it must not allocate per call.
+	centers := s.frameCenters[:0]
+	reach := s.frameReach[:0]
 	for i := range s.meshes {
 		md := &s.meshes[i]
 		m := s.world[md.ownerNode]
@@ -469,24 +480,28 @@ func (s *Scene) FrameSphere(pct float32) (center glm.Vec3f, radius float32) {
 		centers = append(centers, worldCenter(m, sm.bounds.Center))
 		reach = append(reach, worldRadius(m, sm.bounds.Radius))
 	}
+	s.frameCenters, s.frameReach = centers, reach
+
 	n = len(centers)
+	if cap(s.frameScratch) < n {
+		s.frameScratch = make([]float32, n)
+	}
+	scratch := s.frameScratch[:n]
+
+	// Only one order statistic is ever needed per axis, so select it directly
+	// rather than sorting the whole axis (which is what made this O(n²)).
 	median := func(axis int) float32 {
-		v := make([]float32, n)
 		for i, c := range centers {
-			v[i] = c[axis]
+			scratch[i] = c[axis]
 		}
-		sortFloat32(v)
-		return v[n/2]
+		return selectNth(scratch, n/2)
 	}
 	center = glm.Vec3f{median(0), median(1), median(2)}
-	dists := make([]float32, n)
+
 	for i, c := range centers {
-		dx, dy, dz := c[0]-center[0], c[1]-center[1], c[2]-center[2]
-		dists[i] = float32(math.Sqrt(float64(dx*dx+dy*dy+dz*dz))) + reach[i]
+		scratch[i] = c.Sub(center).Length() + reach[i]
 	}
-	sortFloat32(dists)
-	k := int(float32(n-1) * clamp01(pct))
-	radius = dists[k]
+	radius = selectNth(scratch, int(float32(n-1)*clamp01(pct)))
 	if radius <= 0 {
 		radius = 1
 	}
@@ -503,15 +518,51 @@ func clamp01(x float32) float32 {
 	return x
 }
 
-func sortFloat32(v []float32) {
-	for i := 1; i < len(v); i++ {
-		x := v[i]
-		j := i - 1
-		for j >= 0 && v[j] > x {
-			v[j+1] = v[j]
-			j--
+// selectNth reorders v so that v[k] holds the value it would have if v were fully
+// sorted, and returns it — Hoare quickselect, O(n) average. FrameSphere only ever
+// wants one order statistic (a median per axis, then a percentile of distances),
+// so sorting the whole slice for it is pure waste.
+func selectNth(v []float32, k int) float32 {
+	lo, hi := 0, len(v)-1
+	for lo < hi {
+		p := partitionFloat32(v, lo, hi)
+		if k <= p {
+			hi = p
+		} else {
+			lo = p + 1
 		}
-		v[j+1] = x
+	}
+	return v[k]
+}
+
+// partitionFloat32 Hoare-partitions v[lo:hi+1] about a median-of-three pivot and
+// returns an index p with everything in v[lo..p] <= everything in v[p+1..hi].
+//
+// Median-of-three earns its keep here rather than being cargo-culted: scene
+// objects are very often laid out on a grid or along an axis, so the input
+// arrives nearly sorted — exactly the case a first- or last-element pivot
+// degenerates to O(n²) on, which is the bug this replaced.
+func partitionFloat32(v []float32, lo, hi int) int {
+	a, b, c := v[lo], v[lo+(hi-lo)/2], v[hi]
+	pivot := max(min(a, b), min(max(a, b), c))
+	i, j := lo-1, hi+1
+	for {
+		for {
+			i++
+			if v[i] >= pivot {
+				break
+			}
+		}
+		for {
+			j--
+			if v[j] <= pivot {
+				break
+			}
+		}
+		if i >= j {
+			return j
+		}
+		v[i], v[j] = v[j], v[i]
 	}
 }
 
