@@ -1,8 +1,7 @@
 package gltf
 
-// glTF 2.0 JSON document types — only the subset the loader consumes (static
-// meshes, PBR base color + texture, node hierarchy). Skins/animations are parsed
-// enough to be ignored.
+// glTF 2.0 JSON document types — the subset the loader consumes: static meshes,
+// PBR base color + texture, node hierarchy, skins, and animations.
 
 type doc struct {
 	Scene       int          `json:"scene"`
@@ -16,6 +15,8 @@ type doc struct {
 	Accessors   []accessor   `json:"accessors"`
 	BufferViews []bufferView `json:"bufferViews"`
 	Buffers     []gltfBuffer `json:"buffers"`
+	Skins       []skin       `json:"skins"`
+	Animations  []animation  `json:"animations"`
 }
 
 type scene struct {
@@ -26,10 +27,46 @@ type node struct {
 	Name        string    `json:"name"`
 	Children    []int     `json:"children"`
 	Mesh        *int      `json:"mesh"`
+	Skin        *int      `json:"skin"`
 	Matrix      []float32 `json:"matrix"`
 	Translation []float32 `json:"translation"`
 	Rotation    []float32 `json:"rotation"`
 	Scale       []float32 `json:"scale"`
+}
+
+// skin is a glTF skin: joints[i] is a node index, and inverseBindMatrices[i] (a
+// MAT4 FLOAT accessor, one per joint) maps a bind-pose vertex into joint i's local
+// space. skeleton, if present, names the joint hierarchy's common root node.
+type skin struct {
+	Name                string `json:"name"`
+	InverseBindMatrices *int   `json:"inverseBindMatrices"`
+	Skeleton            *int   `json:"skeleton"`
+	Joints              []int  `json:"joints"`
+}
+
+type animation struct {
+	Name     string        `json:"name"`
+	Channels []animChannel `json:"channels"`
+	Samplers []animSampler `json:"samplers"`
+}
+
+type animChannel struct {
+	Sampler int        `json:"sampler"`
+	Target  animTarget `json:"target"`
+}
+
+type animTarget struct {
+	Node *int   `json:"node"`
+	Path string `json:"path"` // "translation" | "rotation" | "scale" | "weights"
+}
+
+// animSampler's input/output are accessor indices: input is a SCALAR FLOAT
+// keyframe-time accessor, output is VEC3 (translation/scale) or VEC4
+// (rotation, xyzw) matching the channel(s) that reference this sampler.
+type animSampler struct {
+	Input         int    `json:"input"`
+	Output        int    `json:"output"`
+	Interpolation string `json:"interpolation"` // "LINEAR" | "STEP" | "CUBICSPLINE"
 }
 
 type mesh struct {

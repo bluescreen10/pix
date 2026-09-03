@@ -6,112 +6,190 @@ import (
 	"github.com/bluescreen10/pix/gpu"
 )
 
-// uploader batches staged uploads to MemoryDevice buffers into a single command
-// list. Subsystems record copies via copy(); they never allocate staging and
-// never free it. The renderer owns the lifecycle: create one with newUploader,
-// hand it to each thing that needs syncing, then flush() to submit, wait for the
-// GPU, and release the staging buffers.
+// Staging arena tuning.
+const (
+	// stagingArenaMinSize is the arena's floor: its size when it first allocates, the
+	// size of an overflow chunk, and the smallest it is ever trimmed back to.
+	stagingArenaMinSize uint64 = 1 << 20 // 1 MiB
+
+	// stagingCopyAlign is the suballocation alignment. Buffer-to-buffer copies have
+	// no hardware alignment requirement; 16 bytes just keeps records off shared
+	// cache lines for free. (Texture uploads don't come through here — they have
+	// stricter alignment rules and their own one-shot path in textures.go.)
+	stagingCopyAlign uint64 = 16
+
+	// stagingTrimFrames is how many consecutive mostly-idle resets the arena must
+	// see before shrinking: a load-time spike shouldn't pin peak memory forever,
+	// but neither should a couple of quiet frames cost a realloc.
+	stagingTrimFrames = 120
+)
+
+// uploader stages uploads to MemoryDevice buffers into the frame's command buffer.
+// Subsystems record copies via copy(); they never allocate staging and never free
+// it. The renderer owns one for the process (see Renderer.uploader): Start it on
+// the frame's command buffer, let each subsystem sync into it, then End to drop the
+// barrier that orders the copies before the stages that read them.
 //
-// The command list is created lazily on the first copy, so a flush with nothing
-// recorded is a no-op (no empty submit).
+// The copies ride the frame's single submit rather than getting one of their own.
+// That matters because the backend currently drains the queue at Present, so a
+// separate upload submit+wait would be a *second* full pipeline drain per frame,
+// with the GPU idle while the CPU records the rest of the frame.
+//
+// Staging memory is a bump-allocated arena, not an allocation per copy. Every copy
+// in a frame retires at the same instant (when that frame's submit completes),
+// which is linear-allocator lifetime, not general alloc/free: copy() aligns and
+// advances an offset, and Start rewinds it. The arena keeps its memory across
+// frames, so once it has grown to the high-water mark it stops allocating entirely
+// — the steady state is zero allocations per frame, versus one vkAllocateMemory per
+// copy before.
+//
+// The arena is a list of arenas only so overflow is safe. A copy that doesn't fit
+// takes a new chunk rather than growing the existing one, because copies already
+// recorded into the frame's command buffer still name it as their source. At the
+// next Start the arenas collapse into a single buffer sized to what the frame
+// actually needed. Multi-chunk is a transient state; one buffer is the steady state.
 type uploader struct {
 	backend gpu.Backend
-	cmd     gpu.CommandBuffer
-	began   bool
-	staging []gpu.Buffer
+	// cmd is the frame's command buffer, bound between Start and End; recorded
+	// says whether anything was staged into it (so End can skip the barrier).
+	cmd      gpu.CommandBuffer
+	recorded bool
+
+	arenas []stagingArena
+	cur    int // chunk currently being filled; earlier ones are full
+	idle   int // consecutive resets that left the arena mostly unused
+}
+
+// stagingArena is one host-visible buffer of the arena plus its bump offset.
+type stagingArena struct {
+	buf    gpu.Buffer
+	offset uint64
 }
 
 func newUploader(backend gpu.Backend) *uploader {
 	return &uploader{backend: backend}
 }
 
+// Begin binds the frame's command buffer and reclaims the arena. Copies recorded
+// between Begin and End go into cmd.
+//
+// Reclaiming here is what keeps the arena safe without fence tracking: Start is
+// only reached after the previous frame's submit has completed (the backend drains
+// the queue at Present today), so the GPU is provably finished with the staging
+// memory about to be handed out again. When frames-in-flight lands, this is the one
+// place that has to start retiring arenas against a fence instead.
+func (u *uploader) Begin(cmd gpu.CommandBuffer) {
+	u.cmd = cmd
+	u.recorded = false
+	u.reset()
+}
+
+// End orders this frame's staged copies before the stages that read them, and
+// unbinds the command buffer. Nothing staged, no barrier.
+func (u *uploader) End(cmd gpu.CommandBuffer) {
+	if u.recorded {
+		// What reads staged data: vertex pulling (positions/attributes/skin),
+		// compute (skinning reads those same streams plus the descriptors) and
+		// fragment (material records). Indirect args are host-written, never staged.
+		cmd.Barrier(gpu.StageTransfer, gpu.StageVertex|gpu.StageFragment|gpu.StageCompute, 0)
+	}
+	u.cmd = nil
+	u.recorded = false
+}
+
+// stage copies data into the arena and returns the chunk buffer plus the byte offset
+// within it to copy from. The host copy happens here, so callers may reuse or free
+// data as soon as stage returns.
+func (u *uploader) stage(data []byte, align uint64) (gpu.Buffer, uint64) {
+	n := uint64(len(data))
+	for {
+		if u.cur < len(u.arenas) {
+			c := &u.arenas[u.cur]
+			if off := alignUp(c.offset, align); off+n <= c.buf.Size {
+				c.offset = off + n
+				copy(unsafe.Slice((*byte)(c.buf.Ptr), int(c.buf.Size))[off:], data)
+				return c.buf, off
+			}
+			u.cur++ // no room for this one; the next chunk starts empty
+			continue
+		}
+		// Out of arenas: add one big enough for this copy. Existing arenas stay
+		// alive — copies already recorded still reference them as their source.
+		u.arenas = append(u.arenas, stagingArena{
+			buf: u.backend.Alloc(max(n+align, stagingArenaMinSize), gpu.MemoryHost, "upload-staging"),
+		})
+	}
+}
+
 // copy stages data on the host and records a device copy into dst at dstOffset.
-// The staging buffer lives until flush() frees it, so data need not outlive this
-// call. Empty data records nothing.
+// The staging is copied immediately, so data need not outlive this call.
+// Empty data records nothing.
 func (u *uploader) copy(dst gpu.Buffer, dstOffset uint32, data []byte) {
 	if len(data) == 0 {
 		return
 	}
-	if !u.began {
-		u.cmd = u.backend.Begin()
-		u.began = true
+	if u.cmd == nil {
+		panic("render: uploader.copy outside Start/End")
 	}
-	s := u.backend.Alloc(uint64(len(data)), gpu.MemoryHost, "upload-staging")
-	copy(unsafe.Slice((*byte)(s.Ptr), len(data)), data)
-	u.cmd.CopyBuffer(dst, s, uint64(dstOffset), 0, uint64(len(data)))
-	u.staging = append(u.staging, s)
+	src, srcOffset := u.stage(data, stagingCopyAlign)
+	u.cmd.CopyBuffer(dst, src, uint64(dstOffset), srcOffset, uint64(len(data)))
+	u.recorded = true
 }
 
-// scatterCopy stages every part into ONE staging buffer, then records one CopyBuffer
-// per part into dst at its own offset. Unlike calling copy per part, this pays for a
-// single staging allocation no matter how many parts there are — worth it when a
-// subsystem has many small, non-adjacent writes into the same destination buffer (see
-// materialStore.Sync). Parts may land at any offsets in any order; nothing here
-// assumes they are contiguous or sorted. Empty parts records nothing.
-func (u *uploader) scatterCopy(dst gpu.Buffer, parts []scatterPart) {
-	var total uint64
-	for _, p := range parts {
-		total += uint64(len(p.data))
+// reset rewinds the arena for the next frame and right-sizes it: arenas collapse
+// into one buffer after an overflow, and a long-idle oversized arena is trimmed.
+// Only safe where Start calls it — previous submit complete — since it frees the
+// buffers earlier copies referenced.
+func (u *uploader) reset() {
+	var used uint64
+	for i := range u.arenas {
+		used += u.arenas[i].offset
+		u.arenas[i].offset = 0
 	}
-	if total == 0 {
-		return
-	}
-	if !u.began {
-		u.cmd = u.backend.Begin()
-		u.began = true
-	}
-	s := u.backend.Alloc(total, gpu.MemoryHost, "upload-staging")
-	staging := unsafe.Slice((*byte)(s.Ptr), total)
-	var srcOffset uint64
-	for _, p := range parts {
-		n := uint64(len(p.data))
-		if n == 0 {
-			continue
+	u.cur = 0
+
+	switch {
+	case len(u.arenas) > 1:
+		// Overflowed into extra arenas: collapse to one buffer sized for what that
+		// frame actually needed, plus headroom, so the next one fits in a single
+		// chunk and allocates nothing.
+		u.reserve(used + used/2)
+		u.idle = 0
+	case len(u.arenas) == 1 && u.arenas[0].buf.Size > stagingArenaMinSize && used < u.arenas[0].buf.Size/4:
+		// Oversized (a load spike) and mostly unused since. Shrink, but only after
+		// a long quiet stretch, so this never thrashes.
+		u.idle++
+		if u.idle >= stagingTrimFrames {
+			u.reserve(used * 2)
+			u.idle = 0
 		}
-		copy(staging[srcOffset:srcOffset+n], p.data)
-		u.cmd.CopyBuffer(dst, s, uint64(p.dstOffset), srcOffset, n)
-		srcOffset += n
+	default:
+		u.idle = 0
 	}
-	u.staging = append(u.staging, s)
 }
 
-// scatterPart is one region of a scatterCopy: data lands at dstOffset in the
-// destination buffer, wherever scatterCopy happens to place it in the shared staging
-// buffer.
-type scatterPart struct {
-	dstOffset uint32
-	data      []byte
+// reserve replaces the arena with a single chunk of at least size bytes (never
+// below stagingArenaMinSize). Callers must satisfy reset's safety rule.
+func (u *uploader) reserve(size uint64) {
+	for i := range u.arenas {
+		u.backend.Free(u.arenas[i].buf)
+	}
+	u.arenas = append(u.arenas[:0], stagingArena{
+		buf: u.backend.Alloc(max(size, stagingArenaMinSize), gpu.MemoryHost, "upload-staging"),
+	})
+	u.cur = 0
 }
 
-// copyToTexture stages image pixels and records a buffer->texture copy into mip 0
-// / layer 0, then the transition to sampled layout for reads at stage. Like copy,
-// the staging buffer lives until flush() frees it. Empty pixels record nothing.
-func (u *uploader) copyToTexture(tex gpu.Texture, pixels []byte, stage gpu.Stage) {
-	if len(pixels) == 0 {
-		return
+// destroy releases the arena. The uploader must not be used afterwards.
+func (u *uploader) destroy() {
+	for i := range u.arenas {
+		u.backend.Free(u.arenas[i].buf)
 	}
-	if !u.began {
-		u.cmd = u.backend.Begin()
-		u.began = true
-	}
-	s := u.backend.Alloc(uint64(len(pixels)), gpu.MemoryHost, "upload-staging")
-	copy(unsafe.Slice((*byte)(s.Ptr), len(pixels)), pixels)
-	u.cmd.CopyBufferToTexture(tex, 0, 0, s, 0)
-	u.cmd.PrepareSampled(tex, stage)
-	u.staging = append(u.staging, s)
+	u.arenas = nil
+	u.cur = 0
 }
 
-// flush submits the recorded copies, waits for completion, then frees staging.
-// It is a no-op if nothing was recorded. Safe to call and reuse afterwards.
-func (u *uploader) flush() {
-	if !u.began {
-		return
-	}
-	fence := u.backend.Submit(u.cmd)
-	u.backend.Wait(fence)
-	for _, s := range u.staging {
-		u.backend.Free(s)
-	}
-	u.staging = u.staging[:0]
-	u.began = false
+// alignUp rounds v up to a multiple of a, which must be a power of two.
+func alignUp(v, a uint64) uint64 {
+	return (v + a - 1) &^ (a - 1)
 }

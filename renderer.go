@@ -38,8 +38,15 @@ type Renderer struct {
 	geometries *geometrySystem
 	materials  *materialSystem
 	textures   *textureSystem
+	// uploader is shared by every subsystem that stages into device memory; it
+	// lives as long as the renderer so its staging arena is reused across frames.
+	uploader *uploader
 
 	cullPipeline gpu.Pipeline
+	skinPipeline gpu.Pipeline // compute pre-skinning (scene_skin.comp) — see dispatchSkinning
+	// skinScratch collects the frame's compute-skinning dispatches (see skinCommands);
+	// reused every frame rather than reallocated.
+	skinScratch []skinCmd
 	// Draw pipelines, one per distinct material pipeline key (shaders + cull + blend).
 	// drawPipelineKeys is parallel so pipelineFor can dedup and buildPipelines can rebuild
 	// them all when the target format changes. A key's pass says whether it belongs to
@@ -124,9 +131,12 @@ func NewRenderer(cfg *RendererConfig) (*Renderer, error) {
 		return nil, fmt.Errorf("render: init backend: %w", err)
 	}
 	r := &Renderer{
-		backend:    backend,
-		clear:      glm.RGBA32F{0, 0, 0, 1},      //TODO: extract as constant
-		fontColor:  glm.RGBA32F{1, 0.9, 0.35, 1}, //TODO: extract as constant
+		backend:   backend,
+		clear:     glm.RGBA32F{0, 0, 0, 1},      //TODO: extract as constant
+		fontColor: glm.RGBA32F{1, 0.9, 0.35, 1}, //TODO: extract as constant
+		// One uploader for the process, not one per frame: its staging arena only
+		// pays off by keeping its memory across frames (see uploader).
+		uploader:   newUploader(backend),
 		geometries: newGeometrySystem(backend),
 		materials:  newMaterialSystem(backend),
 		textures:   newTextureSystem(backend),
@@ -223,6 +233,7 @@ func (r *Renderer) destroyGBuffer() {
 func (r *Renderer) buildPipelines() {
 	if r.pipelinesReady {
 		r.backend.DestroyPipeline(r.cullPipeline)
+		r.backend.DestroyPipeline(r.skinPipeline)
 		r.backend.DestroyPipeline(r.shadowPipeline)
 		for _, p := range r.drawPipelines {
 			r.backend.DestroyPipeline(p)
@@ -232,6 +243,7 @@ func (r *Renderer) buildPipelines() {
 		}
 	}
 	r.cullPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.SceneCull, Entry: "main", Label: "scene-cull"})
+	r.skinPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.SceneSkin, Entry: "main", Label: "scene-skin"})
 	// Shadow depth pass: position-only vertex-pull, no color attachment, writes depth.
 	// Cull is disabled so thin geometry still occludes from the light's view.
 	r.shadowPipeline = r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
@@ -470,7 +482,13 @@ func (r *Renderer) Render(scene *Scene, cam Camera) {
 	}
 	r.stats.StartFrame()
 	prepStart := time.Now()
-	r.syncScene(scene, cam)
+	// One command buffer for the whole frame: the staged uploads record into its
+	// head and are ordered against the rest by a barrier (see uploader.End), rather
+	// than taking a submit + queue drain of their own before the frame even starts.
+	// Recording can begin before AcquireNext — the acquire semaphore is waited on at
+	// submit time, not at record time.
+	cmd := r.backend.Begin()
+	r.syncScene(scene, cam, cmd)
 	vp := cam.ViewProjection()
 	planes := FrustumPlanes(vp)
 	drawVP := flipClipY(vp)
@@ -487,7 +505,6 @@ func (r *Renderer) Render(scene *Scene, cam Camera) {
 		target, _ = r.backend.AcquireNext(r.swapchain)
 	}
 	encStart := time.Now()
-	cmd := r.backend.Begin()
 	r.encode(cmd, target, scene, planes, drawVP, eye)
 	cpu += time.Since(encStart)
 	r.stats.AddCPUTime(cpu)
@@ -548,8 +565,15 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 		}
 	}
 
-	// 1. Cull every view (shadow views filter to casters). One barrier for all.
+	// 1. Compute pre-skinning, then cull every view (shadow views filter to
+	// casters). Skinning writes positions that the shadow/G-buffer/forward vertex
+	// stages read (not cull — it only reads CPU-supplied bounds), so one barrier
+	// after both covers everything.
 	if dl.batchCount() > 0 {
+		if cmds := r.skinCommands(scene); len(cmds) > 0 {
+			dl.ensureSkinRoots(len(cmds))
+			r.dispatchSkinning(cmd, dl, cmds, scene.jointBuf.Addr)
+		}
 		for i := range views {
 			v := &dl.shadowViews[i]
 			sp := FrustumPlanes(views[i].cam.ViewProjection())
@@ -562,6 +586,8 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 	// 2. Shadow depth passes: fill each view's map, then hand it to the samplers.
 	for i := range views {
 		r.recordShadowDepth(cmd, dl, &dl.shadowViews[i], views[i])
+		//FIXME: use VK_KHR_unified_image_layouts
+		// this should remove the PreparedSampled from the RHI API
 		cmd.PrepareSampled(r.textures.gpu(views[i].m), gpu.StageFragment)
 	}
 
@@ -678,27 +704,35 @@ func (r *Renderer) collectShadowViews(scene *Scene) []shadowView {
 // It resolves each mesh's draw pipeline from its material (shaders + raster) every
 // frame and rebuilds the draw list when the mesh set OR any pipeline assignment
 // changed (so a material raster/blend change re-batches without an explicit dirty).
-func (r *Renderer) syncScene(scene *Scene, cam Camera) {
-	// Upload-once device resources (geometry streams + descriptors) are staged
-	// through a single uploader: each subsystem records copies, then flush submits
-	// and waits before the frame's draws read them.
-	// The renderer owns geometry (shared) and pipelines; the scene owns transforms,
-	// its draw list, and lights. Both stage into one uploader, flushed once here.
-	// Material records live in host-coherent mapped memory — already visible, no upload.
+func (r *Renderer) syncScene(scene *Scene, cam Camera, cmd gpu.CommandBuffer) {
+	// Device-only resources (geometry streams + descriptors, material records) are
+	// staged through the shared uploader, which records the copies into the head of
+	// this frame's command buffer and barriers them against the passes that read
+	// them — no separate submit. The scene owns transforms, skinning, its draw list
+	// and lights, and writes those straight to MemoryHost buffers (see Scene.Sync),
+	// so a frame where only scene-owned state changed (a refit shadow camera, an
+	// animated pose) stages nothing at all and End skips even the barrier.
 	if r.shadowsEnabled {
 		r.prepareShadows(scene, cam)
 	}
-	up := newUploader(r.backend)
+	up := r.uploader
+	up.Begin(cmd)
 	r.geometries.Sync(up)
 	r.materials.Sync(up)
-	scene.Sync(up)
-	up.flush()
+	scene.Sync()
+	up.End(cmd)
 
 	dl := scene.drawList
 	dl.pipeBuf = dl.pipeBuf[:0]
 	for i := range scene.meshes {
 		//TODO: maybe the material should have a []pipelineKey (or pipelineID) stored
 		dl.pipeBuf = append(dl.pipeBuf, r.pipelineForMaterial(scene.meshes[i].material))
+	}
+	// Order must match collectDrawables (meshes, then skinnedMeshes.All()) — both
+	// calls run back-to-back here with no scene mutation between them, so the slab
+	// iteration order is identical.
+	for _, sm := range scene.skinnedMeshes.All() {
+		dl.pipeBuf = append(dl.pipeBuf, r.pipelineForMaterial(sm.material))
 	}
 	if scene.drawableDirty || !slices.Equal(dl.pipeBuf, dl.batchedPipelines) {
 		drawables, materials := scene.collectDrawables()
@@ -961,6 +995,45 @@ func (r *Renderer) cullInto(cmd gpu.CommandBuffer, dl *drawList, indirect, visib
 	cmd.Dispatch((dl.numInst+63)/64, 1, 1)
 }
 
+// skinCommands builds this frame's compute-skinning dispatch list, one entry per
+// SkinnedMesh, into a scratch slice reused across frames. The scene supplies the
+// state (which meshes are skinned, their source/output geometry, their skeleton's
+// joint range); deciding what GPU work that implies is the renderer's job, like
+// every other command list it builds here.
+//
+// Every skinned mesh is dispatched regardless of visibility — a v1 simplification;
+// a scene with many off-screen skinned meshes pays for all of them.
+func (r *Renderer) skinCommands(scene *Scene) []skinCmd {
+	r.skinScratch = r.skinScratch[:0]
+	for _, sm := range scene.skinnedMeshes.All() {
+		sk := scene.skeletons.Get(sm.skeleton)
+		r.skinScratch = append(r.skinScratch, skinCmd{
+			srcDesc: sm.srcGeometry.id(), dstDesc: sm.outputGeo.id(),
+			jointBase: sk.jointBase, vertexCount: sm.vertCount,
+		})
+	}
+	return r.skinScratch
+}
+
+// dispatchSkinning fills one skinRoot per skinned mesh (position/attribute/skin/
+// descriptor streams and the scene's joint buffer are frame-global; only
+// srcDesc/dstDesc/jointBase/vertexCount vary per mesh) and issues one Dispatch per
+// mesh, sized to its vertex count. See scene_skin.comp.
+func (r *Renderer) dispatchSkinning(cmd gpu.CommandBuffer, dl *drawList, cmds []skinCmd, jointsAddr uint64) {
+	roots := unsafe.Slice((*skinRoot)(dl.skinRootBuf.Ptr), len(cmds))
+	posAddr, attrAddr := r.geometries.PositionsAddr(), r.geometries.AttributesAddr()
+	skinAddr, descAddr := r.geometries.SkinAddr(), r.geometries.DescriptorsAddr()
+	cmd.SetPipeline(r.skinPipeline)
+	for i, c := range cmds {
+		roots[i] = skinRoot{
+			pos: posAddr, attr: attrAddr, skin: skinAddr, descs: descAddr, joints: jointsAddr,
+			srcDesc: c.srcDesc, dstDesc: c.dstDesc, jointBase: c.jointBase, vertexCount: c.vertexCount,
+		}
+		cmd.Root(dl.skinRootBuf.Addr + uint64(i)*skinRootSize)
+		cmd.Dispatch((c.vertexCount+63)/64, 1, 1)
+	}
+}
+
 // recordShadowDepth renders the caster geometry into a light's depth map from its
 // camera. It uses the view's own compacted-visible buffer (culled with castersOnly)
 // and a single position-only MDI over every batch — material/pipeline don't matter
@@ -1135,6 +1208,7 @@ func (r *Renderer) Destroy() {
 	}
 	if r.pipelinesReady {
 		r.backend.DestroyPipeline(r.cullPipeline)
+		r.backend.DestroyPipeline(r.skinPipeline)
 		r.backend.DestroyPipeline(r.shadowPipeline)
 		for _, p := range r.drawPipelines {
 			r.backend.DestroyPipeline(p)
@@ -1162,6 +1236,7 @@ func (r *Renderer) Destroy() {
 	r.geometries.Destroy()
 	r.materials.Destroy()
 	r.textures.Destroy()
+	r.uploader.destroy()
 	r.backend.Destroy()
 }
 

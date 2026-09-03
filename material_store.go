@@ -126,15 +126,23 @@ func (s *materialStore) markAllDirty() {
 	clear(s.dirty)
 }
 
+// scatterPart is one changed record: data lands at dstOffset in the store's record
+// buffer, wherever the uploader's arena happens to stage it.
+type scatterPart struct {
+	dstOffset uint32
+	data      []byte
+}
+
 // Sync re-serializes every material changed since the last call and uploads it through
 // the uploader. Call once per frame before recording draws that read the record buffer;
 // the caller flushes the uploader (submit + wait) after all subsystems have synced.
 //
 // At most a few dozen materials change in a frame, so this does not bother coalescing
-// adjacent ids into contiguous device-side runs: scatterCopy stages every changed
-// record into ONE staging buffer regardless of how scattered their ids are, so there is
-// nothing left to gain by sorting them first. That also means the dirty set does not
-// need to be ordered — a plain map works.
+// adjacent ids into contiguous device-side runs: the uploader stages every changed
+// record into its shared arena regardless of how scattered their ids are, so per-record
+// copies cost a bump-pointer advance each and there is nothing left to gain by sorting
+// them first. That also means the dirty set does not need to be ordered — a plain map
+// works.
 func (s *materialStore) Sync(u *uploader) {
 	if s.allDirty {
 		s.allDirty = false
@@ -163,7 +171,9 @@ func (s *materialStore) Sync(u *uploader) {
 		}
 		parts = append(parts, scatterPart{dstOffset: id * s.stride, data: scratch[lo:]})
 	}
-	u.scatterCopy(s.buf, parts)
+	for _, p := range parts {
+		u.copy(s.buf, p.dstOffset, p.data)
+	}
 	s.scratch, s.parts = scratch, parts[:0]
 	clear(s.dirty)
 }

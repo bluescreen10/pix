@@ -5,6 +5,7 @@ import (
 
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
+	"github.com/bluescreen10/pix/internal/mem"
 )
 
 const invalidIdx = ^uint32(0)
@@ -18,6 +19,7 @@ const (
 	KindInstancedMesh
 	KindInstance
 	KindBone
+	KindSkeleton
 	KindSkinnedMesh
 	KindAmbientLight
 	KindDirectionalLight
@@ -80,6 +82,19 @@ type Scene struct {
 
 	meshes []meshData
 
+	// Skinning: skeletons (bone hierarchies + inverse binds) and skinned meshes
+	// (a source geometry + a compute-derived output geometry, bound to a skeleton).
+	// Both use a Slab rather than swap-remove: skinnedMeshData.skeleton stores a
+	// skeletons slab id, which a swap-remove would silently invalidate.
+	skeletons     mem.Slab[skeletonData]
+	skinnedMeshes mem.Slab[skinnedMeshData]
+
+	// jointBuf holds every skeleton's current joint matrices (skeleton-local space),
+	// TLSF-suballocated per skeleton. Rewritten in full every Sync — a grow only
+	// re-suballocates each skeleton's existing range (no data copy needed).
+	jointBuf  gpu.Buffer
+	jointTLSF *mem.TLSF
+
 	// Light objects the scene owns; the flat GPU table (lights) is derived from them
 	// (+ ambient) each frame in Sync.
 	ambient     glm.Vec3f
@@ -95,6 +110,8 @@ type Scene struct {
 // NewScene creates an empty scene bound to a backend (usually via Renderer.NewScene).
 func NewScene(backend gpu.Backend) *Scene {
 	s := &Scene{backend: backend, freeHead: invalidIdx, topoDirty: true}
+	s.skeletons = mem.NewSlab[skeletonData]()
+	s.skinnedMeshes = mem.NewSlab[skinnedMeshData]()
 	s.lights = NewLights(backend)
 	s.drawList = newDrawList(backend)
 	s.root = s.allocNode(KindGroup)
@@ -269,8 +286,13 @@ func (s *Scene) destroySubtree(id NodeID) {
 func (s *Scene) destroyNode(id NodeID) {
 	idx := id.index
 	s.detachFromParent(id)
-	if s.kind[idx] == KindMesh {
+	switch s.kind[idx] {
+	case KindMesh:
 		s.swapRemoveMesh(s.payload[idx])
+	case KindSkinnedMesh:
+		s.freeSkinnedMesh(s.payload[idx])
+	case KindSkeleton:
+		s.freeSkeleton(s.payload[idx])
 	}
 	s.flags[idx] &^= flagAlive
 	s.generation[idx]++
@@ -342,25 +364,33 @@ func (s *Scene) UpdateTransforms() bool {
 	return anyDirty
 }
 
-// Sync uploads the scene's own per-scene GPU state through the uploader: the world
-// matrices (recomputed from dirty transforms) and the light table. The renderer
-// drives geometry/pipeline syncing and the draw-list rebuild separately, then flushes
-// the shared uploader once. The scene owns these resources, so it owns their upload.
-func (s *Scene) Sync(u *uploader) {
+// Sync writes the scene's own per-scene GPU state: the world matrices (recomputed
+// from dirty transforms), skinning (joint matrices + bounds), and the light table.
+// All of it lands in MemoryHost buffers the scene owns directly — no uploader. The
+// renderer drives geometry/pipeline syncing (which do need staging, into shared
+// MemoryDevice buffers) and the draw-list rebuild separately.
+func (s *Scene) Sync() {
 	if dirty := s.UpdateTransforms(); dirty {
 		s.drawList.sync(s.world) // host-visible, direct write (not staged)
 	}
+	s.syncSkinning()
 	// Light objects are mutable, so re-derive the flat GPU table each frame; rebuild
-	// only marks the buffer dirty (→ re-uploads) when the derived table changed.
+	// only marks the buffer dirty (→ re-writes) when the derived table changed. Both
+	// this and drawList.sync above write straight to MemoryHost buffers — nothing
+	// scene-owned goes through the shared uploader, so a frame where nothing but
+	// (say) an animated character's pose changed stages/submits nothing extra.
 	s.lights.rebuild(s.ambient, s.dirLights, s.pointLights, s.spotLights)
-	s.lights.Sync(u)
+	s.lights.Sync()
 }
 
-// collectDrawables builds the GPU drawable table from the mesh payloads, plus a
-// parallel slice of each drawable's material (for batching + store address).
+// collectDrawables builds the GPU drawable table from the mesh and skinned-mesh
+// payloads, plus a parallel slice of each drawable's material (for batching + store
+// address). A skinned mesh's transformID is its skeleton root's node slot (not its
+// own) — its own local transform plays no part in rendering; see skeleton.go.
 func (s *Scene) collectDrawables() ([]gpuDrawable, []Material) {
-	out := make([]gpuDrawable, 0, len(s.meshes))
-	materials := make([]Material, 0, len(s.meshes))
+	n := len(s.meshes) + s.skinnedMeshes.Len()
+	out := make([]gpuDrawable, 0, n)
+	materials := make([]Material, 0, n)
 	for i := range s.meshes {
 		md := &s.meshes[i]
 		var flags uint32
@@ -379,6 +409,24 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []Material) {
 		})
 		materials = append(materials, md.material)
 	}
+	for _, sm := range s.skinnedMeshes.All() {
+		var flags uint32
+		if s.flags[sm.ownerNode]&flagCastShadow != 0 {
+			flags |= DrawableCastsShadow
+		}
+		if s.flags[sm.ownerNode]&flagReceiveShadow != 0 {
+			flags |= DrawableReceivesShadow
+		}
+		root := s.skeletons.Get(sm.skeleton).ownerNode
+		out = append(out, gpuDrawable{
+			bounds:      [4]float32{sm.bounds.Center[0], sm.bounds.Center[1], sm.bounds.Center[2], sm.bounds.Radius},
+			transformID: root,
+			geometryID:  sm.outputGeo.id(),
+			materialID:  sm.material.materialID(),
+			flags:       flags,
+		})
+		materials = append(materials, sm.material)
+	}
 	return out, materials
 }
 
@@ -388,21 +436,40 @@ func (s *Scene) MeshCount() int { return len(s.meshes) }
 // FrameSphere returns a robust center + radius for the mesh nodes' world-space
 // bounds (median center, percentile-of-center-distances). Run UpdateTransforms first.
 func (s *Scene) FrameSphere(pct float32) (center glm.Vec3f, radius float32) {
-	n := len(s.meshes)
+	n := len(s.meshes) + s.skinnedMeshes.Len()
 	if n == 0 {
 		return glm.Vec3f{}, 1
 	}
-	centers := make([]glm.Vec3f, n)
-	for i := range s.meshes {
-		md := &s.meshes[i]
-		m := s.world[md.ownerNode]
-		c := md.bounds.Center
-		centers[i] = glm.Vec3f{
+	worldCenter := func(m glm.Mat4f, c glm.Vec3f) glm.Vec3f {
+		return glm.Vec3f{
 			m[0]*c[0] + m[4]*c[1] + m[8]*c[2] + m[12],
 			m[1]*c[0] + m[5]*c[1] + m[9]*c[2] + m[13],
 			m[2]*c[0] + m[6]*c[1] + m[10]*c[2] + m[14],
 		}
 	}
+	// worldRadius scales a local bounding radius by the node's dominant axis
+	// scale — an approximation (exact for uniform scale), matching the same
+	// estimate scene_cull.comp uses. Folded into each entry's own "reach" below
+	// so a scene with few (or one) object doesn't collapse to a near-zero radius
+	// just because their centers coincide (e.g. a single skinned character's
+	// several sub-meshes).
+	worldRadius := func(m glm.Mat4f, r float32) float32 {
+		return r * maxColumnLength(m)
+	}
+	centers := make([]glm.Vec3f, 0, n)
+	reach := make([]float32, 0, n)
+	for i := range s.meshes {
+		md := &s.meshes[i]
+		m := s.world[md.ownerNode]
+		centers = append(centers, worldCenter(m, md.bounds.Center))
+		reach = append(reach, worldRadius(m, md.bounds.Radius))
+	}
+	for _, sm := range s.skinnedMeshes.All() {
+		m := s.world[s.skeletons.Get(sm.skeleton).ownerNode]
+		centers = append(centers, worldCenter(m, sm.bounds.Center))
+		reach = append(reach, worldRadius(m, sm.bounds.Radius))
+	}
+	n = len(centers)
 	median := func(axis int) float32 {
 		v := make([]float32, n)
 		for i, c := range centers {
@@ -415,7 +482,7 @@ func (s *Scene) FrameSphere(pct float32) (center glm.Vec3f, radius float32) {
 	dists := make([]float32, n)
 	for i, c := range centers {
 		dx, dy, dz := c[0]-center[0], c[1]-center[1], c[2]-center[2]
-		dists[i] = float32(math.Sqrt(float64(dx*dx + dy*dy + dz*dz)))
+		dists[i] = float32(math.Sqrt(float64(dx*dx+dy*dy+dz*dz))) + reach[i]
 	}
 	sortFloat32(dists)
 	k := int(float32(n-1) * clamp01(pct))
@@ -455,11 +522,19 @@ func (s *Scene) Destroy() {
 		s.meshes[i].material.Release()
 	}
 	s.meshes = nil
+	for _, sm := range s.skinnedMeshes.All() {
+		sm.srcGeometry.Release()
+		sm.outputGeo.Release()
+		sm.material.Release()
+	}
 	if s.drawList != nil {
 		s.drawList.destroy()
 	}
 	if s.lights != nil {
 		s.lights.Destroy()
+	}
+	if s.jointBuf.Valid() {
+		s.backend.Free(s.jointBuf)
 	}
 }
 

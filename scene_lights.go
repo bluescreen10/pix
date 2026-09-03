@@ -74,10 +74,18 @@ type Lights struct {
 
 // NewLights creates the table. ambient defaults to a low neutral fill so an
 // unlit-looking scene still shows geometry; call SetAmbient to change it.
+//
+// MemoryHost (not Device): a shadow-casting light's shadowVP is refit from the
+// current scene bounds every frame (see Renderer.prepareShadows), so any moving
+// or animated geometry — a SkinnedMesh, say — makes the table "dirty" essentially
+// every frame, not just on user edits. Staging that through the shared uploader
+// would force a real GPU submit+wait every frame just for a few KB of light data;
+// a direct host write (like worldBuf/drawableBuf already do for the same reason)
+// costs a memcpy instead.
 func NewLights(b gpu.Backend) *Lights {
 	l := &Lights{backend: b}
 	l.data.ambient = [4]float32{0.08, 0.08, 0.08, 0}
-	l.buf = b.Alloc(lightsSize, gpu.MemoryDevice, "Lights")
+	l.buf = b.Alloc(lightsSize, gpu.MemoryHost, "Lights")
 	l.dirty = true
 	return l
 }
@@ -166,13 +174,13 @@ func (l *Lights) rebuild(ambient glm.Vec3f, dirs []*DirectionalLight, points []*
 // Addr returns the table's device address.
 func (l *Lights) Addr() uint64 { return l.buf.Addr }
 
-// Sync uploads the table through the uploader when it changed. The buffer is
-// MemoryDevice, so the write is staged and copied (the caller flushes).
-func (l *Lights) Sync(u *uploader) {
+// Sync writes the table directly (MemoryHost, no staging/uploader) when it
+// changed since the last call.
+func (l *Lights) Sync() {
 	if !l.dirty {
 		return
 	}
-	u.copy(l.buf, 0, unsafe.Slice((*byte)(unsafe.Pointer(&l.data)), lightsSize))
+	writeAt(l.buf, 0, unsafe.Slice((*byte)(unsafe.Pointer(&l.data)), lightsSize))
 	l.dirty = false
 }
 

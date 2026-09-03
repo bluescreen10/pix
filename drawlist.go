@@ -34,6 +34,7 @@ type drawList struct {
 	cullRootBuf     gpu.Buffer
 	drawRootBuf     gpu.Buffer // one drawRoot per pipeline run
 	lightingRootBuf gpu.Buffer // one lightingRoot per frame (the deferred lighting pass)
+	skinRootBuf     gpu.Buffer // one skinRoot per skinned mesh per frame
 
 	// Shadow views: one extra cull + depth pass per shadow-casting light. They share
 	// the drawable/world/region tables (culled from the same drawables) but each owns
@@ -256,8 +257,21 @@ func (d *drawList) ensureShadowViews(n int) {
 
 func (d *drawList) batchCount() int { return len(d.batches) }
 
+// ensureSkinRoots makes sure the per-frame skin-root buffer is big enough for n
+// skinned-mesh dispatches (grow-only, same rule as ensureBuffers).
+func (d *drawList) ensureSkinRoots(n int) {
+	size := uint64(n) * skinRootSize
+	if d.skinRootBuf.Valid() && d.skinRootBuf.Size >= size {
+		return
+	}
+	if d.skinRootBuf.Valid() {
+		d.backend.Free(d.skinRootBuf)
+	}
+	d.skinRootBuf = d.backend.Alloc(size, gpu.MemoryHost, "skin-roots")
+}
+
 func (d *drawList) destroy() {
-	bufs := []gpu.Buffer{d.worldBuf, d.drawableBuf, d.indirectBuf, d.regionBuf, d.visibleBuf, d.cullRootBuf, d.drawRootBuf, d.lightingRootBuf}
+	bufs := []gpu.Buffer{d.worldBuf, d.drawableBuf, d.indirectBuf, d.regionBuf, d.visibleBuf, d.cullRootBuf, d.drawRootBuf, d.lightingRootBuf, d.skinRootBuf}
 	for _, v := range d.shadowViews {
 		bufs = append(bufs, v.indirectBuf, v.visibleBuf, v.cullRootBuf, v.drawRootBuf)
 	}

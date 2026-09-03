@@ -34,6 +34,7 @@ import _ "embed"
 // --- scene pipeline ---
 
 //go:generate glslc -fshader-stage=compute --target-env=vulkan1.4 -O src/scene_cull.comp.glsl -o build/scene_cull.comp.spv
+//go:generate glslc -fshader-stage=compute --target-env=vulkan1.4 -O src/scene_skin.comp.glsl -o build/scene_skin.comp.spv
 //go:generate glslc -fshader-stage=vertex --target-env=vulkan1.4 -O src/scene_draw.vert.glsl -o build/scene_draw.vert.spv
 //go:generate glslc -fshader-stage=vertex --target-env=vulkan1.4 -O src/scene_shadow.vert.glsl -o build/scene_shadow.vert.spv
 //go:generate glslc -fshader-stage=fragment --target-env=vulkan1.4 -O src/scene_shadow.frag.glsl -o build/scene_shadow.frag.spv
@@ -49,6 +50,9 @@ import _ "embed"
 
 //go:embed build/scene_cull.comp.spv
 var SceneCull []byte
+
+//go:embed build/scene_skin.comp.spv
+var SceneSkin []byte
 
 //go:embed build/scene_draw.vert.spv
 var SceneDraw []byte

@@ -1,8 +1,11 @@
 // Package gltf loads .gltf / .glb assets into a pix.Scene. It depends only on
 // the renderer (pix) and math (glm) — never the gpu backend — so the same
-// loader works against any backend the renderer runs on. Static meshes only for
-// now: node hierarchy transforms are flattened to world matrices at load time;
-// skinning and animation (which need a live node hierarchy) are not yet wired.
+// loader works against any backend the renderer runs on. Skinning and animation
+// are supported: a glTF skin becomes a pix.Skeleton (its joint nodes become
+// pix.Bone nodes, not plain groups — see LoadFull), a mesh referencing that skin
+// becomes a pix.SkinnedMesh, and glTF animations come back as pix.AnimationClips
+// ready for a pix.AnimationMixer. CUBICSPLINE interpolation and morph-target
+// ("weights") channels are not supported (channels using either are skipped).
 package gltf
 
 import (
@@ -25,34 +28,58 @@ import (
 )
 
 // Load reads a .gltf or .glb file, creates its geometries/materials/textures on the
-// renderer, and builds its node hierarchy (with Mesh nodes) into the scene. Returns
-// the number of mesh nodes added.
+// renderer, and builds its node hierarchy (with Mesh/SkinnedMesh nodes) into the
+// scene. Returns the number of mesh nodes added. A thin wrapper over LoadFull for
+// callers that don't need its skeletons/animation clips.
 func Load(r *pix.Renderer, scene *pix.Scene, path string) (int, error) {
+	res, err := LoadFull(r, scene, path)
+	return res.Added, err
+}
+
+// LoadResult is everything LoadFull produced beyond the mesh nodes it added
+// directly to the scene: the skeletons built from the asset's skins (a
+// SkinnedMesh already references its own — this is for e.g. Skeleton.Pose or
+// attaching props to a named bone) and its animation clips, each ready to hand to
+// an AnimationMixer via mixer.Action(clip).
+type LoadResult struct {
+	Added     int
+	Skeletons []pix.Skeleton
+	Clips     []*pix.AnimationClip
+}
+
+// LoadFull is Load plus skins and animations: a glTF skin becomes a pix.Skeleton
+// (see package doc), and every pix.AnimationClip in the file comes back ready to
+// play.
+func LoadFull(r *pix.Renderer, scene *pix.Scene, path string) (LoadResult, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return 0, fmt.Errorf("gltf: read %q: %w", path, err)
+		return LoadResult{}, fmt.Errorf("gltf: read %q: %w", path, err)
 	}
 	l := &loader{renderer: r, scene: scene}
 	if strings.ToLower(filepath.Ext(path)) == ".glb" {
 		jsonData, binData, err := splitGLB(data)
 		if err != nil {
-			return 0, err
+			return LoadResult{}, err
 		}
 		if err := json.Unmarshal(jsonData, &l.doc); err != nil {
-			return 0, fmt.Errorf("gltf: JSON: %w", err)
+			return LoadResult{}, fmt.Errorf("gltf: JSON: %w", err)
 		}
 		if err := l.loadBuffers("", binData); err != nil {
-			return 0, err
+			return LoadResult{}, err
 		}
 	} else {
 		if err := json.Unmarshal(data, &l.doc); err != nil {
-			return 0, fmt.Errorf("gltf: JSON: %w", err)
+			return LoadResult{}, fmt.Errorf("gltf: JSON: %w", err)
 		}
 		if err := l.loadBuffers(filepath.Dir(path), nil); err != nil {
-			return 0, err
+			return LoadResult{}, err
 		}
 	}
-	return l.build()
+	added, err := l.build()
+	if err != nil {
+		return LoadResult{}, err
+	}
+	return LoadResult{Added: added, Skeletons: l.skeletons, Clips: l.loadAnimations()}, nil
 }
 
 type texKey struct {
@@ -72,11 +99,26 @@ type loader struct {
 	materials []*pix.PBRMaterial     // [0]=default; gltf material i -> [i+1]
 	nodes     []pix.Node             // per gltf node
 	added     int
+
+	// Skinning: parent[i] is node i's glTF parent index, or -1 (built once by
+	// loadSkins, needed to walk from a joint up to its nearest joint ancestor or
+	// the skin's attach node). jointOwner/jointBoneIdx map a joint's glTF node
+	// index to (skin index, index within that skin's joint array). attachNode[si]
+	// is the glTF node loadSkins chose to represent skin si's Skeleton root in the
+	// scene graph (see loadSkins) — buildNode special-cases it and every joint
+	// node instead of building them as plain groups.
+	parent       []int
+	skeletons    []pix.Skeleton
+	jointOwner   map[int]int
+	jointBoneIdx map[int]int
+	attachNode   []int
+	attachSkin   map[int]int // reverse of attachNode: glTF node index -> skin index
 }
 
 func (l *loader) build() (int, error) {
 	l.texCache = map[texKey]pix.Texture{}
 	l.loadMaterials()
+	l.loadSkins()
 
 	// Build only the nodes reachable from the loaded scene's roots (their subtrees).
 	// glTF files can hold several scenes (e.g. this asset has "Extended" + "Original"
@@ -100,19 +142,55 @@ func (l *loader) build() (int, error) {
 	return l.added, nil
 }
 
-// buildNode creates the scene node for a glTF node and its subtree: it sets the local
-// transform, attaches a Mesh child per triangle primitive, and recurses into children.
-// Returns the scene node (to be parented by the caller).
+// buildNode creates the scene node for a glTF node and its subtree, in one of
+// three ways:
+//
+//   - A skin's attach node (see loadSkins) becomes that skin's pix.Skeleton — its
+//     local transform is set on the Skeleton's own node, and its joint children
+//     are skipped (NewSkeleton already parented them).
+//   - A joint node becomes its pre-built pix.Bone (from the same NewSkeleton
+//     call); non-joint children (rare — e.g. a prop attached to a hand bone) are
+//     built normally and parented under it.
+//   - Anything else becomes a plain group, with a Mesh/SkinnedMesh child per
+//     triangle primitive if it has one.
+//
+// Returns the node to be parented by the caller.
 func (l *loader) buildNode(idx int) pix.Node {
 	if l.nodes[idx].IsValid() {
 		return l.nodes[idx] // already built (defensive: a node with two parents)
 	}
 	gn := l.doc.Nodes[idx]
+
+	if si, ok := l.attachSkin[idx]; ok {
+		skel := l.skeletons[si]
+		setLocal(skel.Node, gn)
+		l.nodes[idx] = skel.Node
+		for _, c := range gn.Children {
+			if owner, isJoint := l.jointOwner[c]; isJoint && owner == si {
+				continue // already parented by NewSkeleton
+			}
+			skel.Node.Add(l.buildNode(c))
+		}
+		return skel.Node
+	}
+
+	if si, ok := l.jointOwner[idx]; ok {
+		bone := l.skeletons[si].Bone(l.jointBoneIdx[idx])
+		l.nodes[idx] = bone.Node
+		for _, c := range gn.Children {
+			if owner, isJoint := l.jointOwner[c]; isJoint && owner == si {
+				continue // already parented by NewSkeleton
+			}
+			bone.Node.Add(l.buildNode(c))
+		}
+		return bone.Node
+	}
+
 	node := l.scene.NewGroup().Node
 	l.nodes[idx] = node
 	setLocal(node, gn)
 	if gn.Mesh != nil {
-		l.addMesh(node, *gn.Mesh)
+		l.addMesh(node, *gn.Mesh, gn.Skin)
 	}
 	for _, c := range gn.Children {
 		node.Add(l.buildNode(c))
@@ -139,8 +217,16 @@ func (l *loader) roots() []int {
 	return roots
 }
 
-func (l *loader) addMesh(parent pix.Node, meshIdx int) {
+// addMesh creates a Mesh (or, when a primitive carries skin data and the node
+// references a skin, a SkinnedMesh bound to that skin's pix.Skeleton) child per
+// triangle primitive of meshIdx, parented under parent.
+func (l *loader) addMesh(parent pix.Node, meshIdx int, skinIdx *int) {
 	gm := l.doc.Meshes[meshIdx]
+	var skel pix.Skeleton
+	hasSkel := skinIdx != nil && *skinIdx >= 0 && *skinIdx < len(l.skeletons)
+	if hasSkel {
+		skel = l.skeletons[*skinIdx]
+	}
 	for _, prim := range gm.Primitives {
 		mode := 4
 		if prim.Mode != nil {
@@ -149,22 +235,36 @@ func (l *loader) addMesh(parent pix.Node, meshIdx int) {
 		if mode != 4 { // triangles only
 			continue
 		}
-		data := l.buildData(prim)
+		data, skinned := l.buildData(prim)
 		if len(data.Attributes) == 0 {
 			continue
 		}
 		geo := l.renderer.NewGeometry(data)
-		m := l.scene.NewMesh(geo, l.materialFor(prim.Material))
-		geo.Release() // the mesh holds its own copy
-		parent.Add(m)
+		mat := l.materialFor(prim.Material)
+		if hasSkel && skinned {
+			sm := l.scene.NewSkinnedMesh(geo, mat, skel)
+			geo.Release() // the mesh holds its own copy
+			parent.Add(sm)
+		} else {
+			m := l.scene.NewMesh(geo, mat)
+			geo.Release()
+			parent.Add(m)
+		}
 		l.added++
 	}
 }
 
-func (l *loader) buildData(prim primitive) pix.GeometryConfig {
+// buildData reads a primitive's attributes into a GeometryConfig. The returned
+// bool reports whether it carries both skin index and weight attributes (JOINTS_0
+// componentType UNSIGNED_BYTE or UNSIGNED_SHORT; WEIGHTS_0 FLOAT — normalized
+// UBYTE/USHORT weights are not supported) — addMesh uses it to decide Mesh vs
+// SkinnedMesh independent of whether the owning node even references a skin.
+func (l *loader) buildData(prim primitive) (pix.GeometryConfig, bool) {
 	var positions, normals []glm.Vec3f
 	var colors []glm.Vec4f
 	var uvs []glm.Vec2f
+	var joints []glm.Vec4[uint16]
+	var weights []glm.Vec4f
 	var indices []uint32
 	if prim.Indices != nil {
 		indices = l.readIndices(*prim.Indices)
@@ -189,10 +289,16 @@ func (l *loader) buildData(prim primitive) pix.GeometryConfig {
 					}
 				}
 			}
+		case "JOINTS_0":
+			joints = l.readJoints(acc)
+		case "WEIGHTS_0":
+			if a := l.doc.Accessors[acc]; a.ComponentType == 5126 { // FLOAT only
+				weights = castTo[glm.Vec4f](l.accessorBytes(acc))
+			}
 		}
 	}
 	if len(positions) == 0 {
-		return pix.GeometryConfig{}
+		return pix.GeometryConfig{}, false
 	}
 	attrs := []pix.Attribute{pix.NewAttribute(pix.AttributePosition, pix.Float32x3, positions)}
 	if len(normals) > 0 {
@@ -204,7 +310,268 @@ func (l *loader) buildData(prim primitive) pix.GeometryConfig {
 	if len(uvs) > 0 {
 		attrs = append(attrs, pix.NewAttribute(pix.AttributeUV, pix.Float32x2, uvs))
 	}
-	return pix.GeometryConfig{Attributes: attrs, Indices: indices}
+	skinned := len(joints) == len(positions) && len(weights) == len(positions) && len(positions) > 0
+	if skinned {
+		attrs = append(attrs, pix.NewAttribute(pix.AttributeSkinIndex, pix.Uint16x4, joints))
+		attrs = append(attrs, pix.NewAttribute(pix.AttributeSkinWeight, pix.Float32x4, weights))
+	}
+	return pix.GeometryConfig{Attributes: attrs, Indices: indices}, skinned
+}
+
+// ---- skinning ----
+
+// loadSkins builds a pix.Skeleton for every glTF skin, upfront (before the scene
+// graph traversal — a skin's joints, parenting and bind pose come entirely from
+// raw doc data, not from already-built scene nodes, so nothing here depends on
+// traversal order).
+//
+// For each skin: a joint's skeleton-relative parent is its nearest ancestor that
+// is itself a joint of the same skin (walking up via parent[]), or -1 if none —
+// so intervening non-joint nodes (rare) collapse into the bind-pose transform
+// instead of becoming extra bones. Its bind-pose local transform is therefore the
+// composition of every node's local matrix from that ancestor (exclusive) down to
+// the joint (inclusive) — see relativeMatrix. A joint with no joint ancestor is a
+// root; its glTF parent (skin.Skeleton if given, else the first root joint's
+// direct parent) becomes the skin's "attach node" — buildNode places the
+// Skeleton there instead of a plain group, and skips the joint nodes.
+func (l *loader) loadSkins() {
+	if len(l.doc.Skins) == 0 {
+		return
+	}
+	l.buildParentMap()
+	l.skeletons = make([]pix.Skeleton, len(l.doc.Skins))
+	l.jointOwner = map[int]int{}
+	l.jointBoneIdx = map[int]int{}
+	l.attachNode = make([]int, len(l.doc.Skins))
+	l.attachSkin = map[int]int{}
+
+	for si, sk := range l.doc.Skins {
+		isJoint := make(map[int]bool, len(sk.Joints))
+		jointIdx := make(map[int]int, len(sk.Joints))
+		for i, j := range sk.Joints {
+			isJoint[j] = true
+			jointIdx[j] = i
+			l.jointOwner[j] = si
+			l.jointBoneIdx[j] = i
+		}
+
+		n := len(sk.Joints)
+		parents := make([]int32, n)
+		attach := -1
+		if sk.Skeleton != nil {
+			attach = *sk.Skeleton
+		}
+		for i, j := range sk.Joints {
+			p := l.parent[j]
+			for p != -1 && !isJoint[p] {
+				p = l.parent[p]
+			}
+			if p == -1 {
+				parents[i] = -1
+				if attach == -1 {
+					attach = l.parent[j] // direct (possibly non-joint) parent
+				}
+			} else {
+				parents[i] = int32(jointIdx[p])
+			}
+		}
+
+		names := make([]string, n)
+		bindPose := make([]pix.Transform, n)
+		for i, j := range sk.Joints {
+			names[i] = l.doc.Nodes[j].Name
+			stopAt := attach
+			if parents[i] >= 0 {
+				stopAt = sk.Joints[parents[i]]
+			}
+			pos, rot, scale := decomposeMatrix(l.relativeMatrix(j, stopAt))
+			bindPose[i] = pix.Transform{Position: pos, Rotation: rot, Scale: scale}
+		}
+
+		invBind := make([]glm.Mat4f, n)
+		for i := range invBind {
+			invBind[i] = glm.Mat4fIndentity
+		}
+		if sk.InverseBindMatrices != nil {
+			m := castTo[glm.Mat4f](l.accessorBytes(*sk.InverseBindMatrices))
+			copy(invBind, m)
+		}
+
+		l.skeletons[si] = l.scene.NewSkeleton(pix.SkeletonConfig{
+			Names: names, Parents: parents, InverseBind: invBind, BindPose: bindPose,
+		})
+		l.attachNode[si] = attach
+		if attach >= 0 {
+			l.attachSkin[attach] = si
+		}
+	}
+}
+
+// buildParentMap fills l.parent[i] with node i's glTF parent index, or -1.
+func (l *loader) buildParentMap() {
+	l.parent = make([]int, len(l.doc.Nodes))
+	for i := range l.parent {
+		l.parent[i] = -1
+	}
+	for i, n := range l.doc.Nodes {
+		for _, c := range n.Children {
+			l.parent[c] = i
+		}
+	}
+}
+
+// relativeMatrix composes local matrices from stopAt (exclusive) down to idx
+// (inclusive), root-to-leaf — i.e. idx's transform relative to stopAt's space,
+// exactly as if stopAt's own world transform were identity.
+func (l *loader) relativeMatrix(idx, stopAt int) glm.Mat4f {
+	var chain []int
+	for cur := idx; cur != stopAt && cur != -1; cur = l.parent[cur] {
+		chain = append(chain, cur)
+	}
+	m := glm.Mat4fIndentity
+	for i := len(chain) - 1; i >= 0; i-- {
+		m = m.Mul4x4(nodeLocalMatrix(l.doc.Nodes[chain[i]]))
+	}
+	return m
+}
+
+// nodeLocalMatrix returns a glTF node's local transform as a matrix (its
+// authored matrix, or its composed TRS).
+func nodeLocalMatrix(gn node) glm.Mat4f {
+	if len(gn.Matrix) == 16 {
+		var m glm.Mat4f
+		copy(m[:], gn.Matrix)
+		return m
+	}
+	pos, rot, scale := glm.Vec3f{}, glm.QuatIdentityf, glm.Vec3f{1, 1, 1}
+	if len(gn.Translation) == 3 {
+		pos = glm.Vec3f{gn.Translation[0], gn.Translation[1], gn.Translation[2]}
+	}
+	if len(gn.Rotation) == 4 {
+		rot = glm.Quatf{gn.Rotation[0], gn.Rotation[1], gn.Rotation[2], gn.Rotation[3]}
+	}
+	if len(gn.Scale) == 3 {
+		scale = glm.Vec3f{gn.Scale[0], gn.Scale[1], gn.Scale[2]}
+	}
+	return glm.Transform(scale, rot, pos)
+}
+
+// readJoints decodes a JOINTS_0 accessor (UNSIGNED_BYTE or UNSIGNED_SHORT) into
+// skeleton-relative joint indices.
+func (l *loader) readJoints(idx int) []glm.Vec4[uint16] {
+	acc := l.doc.Accessors[idx]
+	raw := l.accessorBytes(idx)
+	out := make([]glm.Vec4[uint16], acc.Count)
+	switch acc.ComponentType {
+	case 5121: // UNSIGNED_BYTE
+		for i := range out {
+			b := raw[i*4 : i*4+4]
+			out[i] = glm.Vec4[uint16]{uint16(b[0]), uint16(b[1]), uint16(b[2]), uint16(b[3])}
+		}
+	case 5123: // UNSIGNED_SHORT
+		for i := range out {
+			b := raw[i*8 : i*8+8]
+			out[i] = glm.Vec4[uint16]{
+				binary.LittleEndian.Uint16(b[0:]), binary.LittleEndian.Uint16(b[2:]),
+				binary.LittleEndian.Uint16(b[4:]), binary.LittleEndian.Uint16(b[6:]),
+			}
+		}
+	}
+	return out
+}
+
+// ---- animation ----
+
+// loadAnimations builds a pix.AnimationClip per glTF animation. Must run after
+// the scene graph traversal (build's node loop) — a track's Target is resolved
+// directly to the already-built scene node/bone, not a name. Channels targeting
+// an unbuilt node (unreachable from the loaded scene) or the "weights" (morph
+// target) path are skipped; CUBICSPLINE samplers are treated as LINEAR over their
+// value keys (the in/out tangents are ignored) — not spec-exact, but avoids
+// silently misreading the 3x-wider CUBICSPLINE output layout as flat keys.
+func (l *loader) loadAnimations() []*pix.AnimationClip {
+	clips := make([]*pix.AnimationClip, 0, len(l.doc.Animations))
+	for _, ga := range l.doc.Animations {
+		clip := &pix.AnimationClip{Name: ga.Name}
+		for _, ch := range ga.Channels {
+			if ch.Target.Node == nil || ch.Sampler < 0 || ch.Sampler >= len(ga.Samplers) {
+				continue
+			}
+			target, ok := l.animTarget(*ch.Target.Node)
+			if !ok {
+				continue
+			}
+			var channel pix.Channel
+			switch ch.Target.Path {
+			case "translation":
+				channel = pix.ChannelPosition
+			case "rotation":
+				channel = pix.ChannelRotation
+			case "scale":
+				channel = pix.ChannelScale
+			default: // "weights" (morph targets) — not supported
+				continue
+			}
+			sampler := ga.Samplers[ch.Sampler]
+			interp := pix.InterpLinear
+			if sampler.Interpolation == "STEP" {
+				interp = pix.InterpStep
+			}
+			times := castTo[float32](l.accessorBytes(sampler.Input))
+			values := l.animValues(sampler, channel, len(times))
+			if len(times) == 0 || len(values) == 0 {
+				continue
+			}
+			if last := times[len(times)-1]; last > clip.Duration {
+				clip.Duration = last
+			}
+			clip.Tracks = append(clip.Tracks, pix.Track{
+				Target: target, Channel: channel, Interp: interp, Times: times, Values: values,
+			})
+		}
+		clips = append(clips, clip)
+	}
+	return clips
+}
+
+// animValues reads a sampler's output accessor into a flat []float32 (3 floats
+// per key for Position/Scale, 4 for Rotation), extracting only the value (middle
+// third) of each key when the sampler is CUBICSPLINE.
+func (l *loader) animValues(sampler animSampler, channel pix.Channel, keyCount int) []float32 {
+	raw := l.accessorBytes(sampler.Output)
+	stride := 3
+	if channel == pix.ChannelRotation {
+		stride = 4
+	}
+	if sampler.Interpolation == "CUBICSPLINE" {
+		all := castTo[float32](raw)
+		if len(all) != keyCount*stride*3 {
+			return nil
+		}
+		out := make([]float32, keyCount*stride)
+		for i := 0; i < keyCount; i++ {
+			copy(out[i*stride:], all[i*stride*3+stride:i*stride*3+stride*2])
+		}
+		return out
+	}
+	out := castTo[float32](raw)
+	if len(out) != keyCount*stride {
+		return nil
+	}
+	return out
+}
+
+// animTarget resolves a glTF node index to the scene handle its track should
+// drive: the pre-built pix.Bone if it's a joint, otherwise its built scene node.
+// false if the node was never built (unreachable from the loaded scene).
+func (l *loader) animTarget(nodeIdx int) (pix.SceneNode, bool) {
+	if si, ok := l.jointOwner[nodeIdx]; ok {
+		return l.skeletons[si].Bone(l.jointBoneIdx[nodeIdx]), true
+	}
+	if nodeIdx < 0 || nodeIdx >= len(l.nodes) || !l.nodes[nodeIdx].IsValid() {
+		return nil, false
+	}
+	return l.nodes[nodeIdx], true
 }
 
 // ---- textures & materials ----

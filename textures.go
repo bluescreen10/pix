@@ -1,6 +1,8 @@
 package pix
 
 import (
+	"unsafe"
+
 	"github.com/bluescreen10/pix/gpu"
 	"github.com/bluescreen10/pix/internal/mem"
 )
@@ -73,11 +75,18 @@ func (t *textureSystem) upload(pixels []byte, w, h int, format TextureFormat) Te
 		Kind: gpu.Texture2D, Width: uint32(w), Height: uint32(h),
 		Format: format.gpuFormat(), Usage: gpu.TextureSampled | gpu.TextureTransfer,
 	})
-	// Textures upload at load time and must be usable immediately, so stage and
-	// flush right away (a one-shot submit) rather than batching with the frame.
-	up := newUploader(t.backend)
-	up.copyToTexture(tex, pixels, gpu.StageFragment)
-	up.flush()
+	// Textures upload at load time and must be usable the moment this returns, so
+	// they don't ride the frame's uploader (whose copies only execute when that
+	// frame is submitted). One throwaway staging buffer, one submit, one wait —
+	// which also keeps the stricter buffer-to-image copy alignment out of the
+	// frame arena's business.
+	staging := t.backend.Alloc(uint64(len(pixels)), gpu.MemoryHost, "texture-staging")
+	copy(unsafe.Slice((*byte)(staging.Ptr), len(pixels)), pixels)
+	cmd := t.backend.Begin()
+	cmd.CopyBufferToTexture(tex, 0, 0, staging, 0)
+	cmd.PrepareSampled(tex, gpu.StageFragment)
+	t.backend.Wait(t.backend.Submit(cmd))
+	t.backend.Free(staging)
 
 	id, gen := t.entries.Alloc(textureEntry{tex: tex, index: tex.Index})
 	rc := int32(1)

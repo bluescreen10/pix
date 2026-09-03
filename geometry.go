@@ -23,17 +23,19 @@ const (
 	streamPos = iota
 	streamAttr
 	streamIndex
+	streamSkin
 	streamCount
 )
 
 // streamElemSize is the byte size of one addressable element of each stream, used
 // to turn a TLSF byte offset into the element base stored in the descriptor.
 // Positions are addressed as floats (base in f32 units) so the vertex shader can
-// pull an x/y/z triple; attributes as 16-byte records; indices as u32.
+// pull an x/y/z triple; attributes and skin records as 16-byte records; indices as u32.
 var streamElemSize = [streamCount]uint32{
 	streamPos:   4,
 	streamAttr:  16,
 	streamIndex: 4,
+	streamSkin:  16,
 }
 
 // Attribute-presence flags stored in GeometryDesc.Flags (mirrors the GLSL).
@@ -41,6 +43,7 @@ const (
 	FlagNormal uint32 = 1 << iota
 	FlagUV
 	FlagColor
+	FlagSkinned
 )
 
 const initialStreamBytes uint32 = 1 << 16
@@ -60,6 +63,14 @@ type vertexAttributes struct {
 	uv     glm.Vec2f
 }
 
+// vertexSkin is the interleaved per-vertex skin record (16 bytes): 4 skeleton-
+// relative joint indices + 4 unorm16 weights (normalized to sum 1 at pack time).
+// Same 4-word shape as vertexAttributes, so it addresses identically in the GLSL.
+type vertexSkin struct {
+	joints  [4]uint16
+	weights [4]uint16 // unorm16
+}
+
 // GeometryDesc links a geometry id to its data in the shared streams. Bases are
 // element offsets (byteOffset / streamElemSize). 24 bytes; matches the GLSL GeoDesc.
 type GeometryDesc struct {
@@ -68,7 +79,7 @@ type GeometryDesc struct {
 	IndexBase     uint32
 	IndexCount    uint32
 	Flags         uint32
-	_             uint32
+	SkinBase      uint32
 }
 
 func (d *GeometryDesc) setBase(stream int, base uint32) {
@@ -79,6 +90,8 @@ func (d *GeometryDesc) setBase(stream int, base uint32) {
 		d.AttributeBase = base
 	case streamIndex:
 		d.IndexBase = base
+	case streamSkin:
+		d.SkinBase = base
 	}
 }
 
@@ -92,6 +105,8 @@ const (
 	AttributeNormal
 	AttributeColor
 	AttributeUV
+	AttributeSkinIndex  // skeleton-relative joint indices, per vertex (up to 4)
+	AttributeSkinWeight // per-joint blend weights, per vertex (normalized at pack time)
 	attributeCount
 )
 
@@ -107,15 +122,18 @@ const (
 	Float64
 	Int32
 	Uint32
+	Uint16x4
 )
 
 // canonicalDataType is the element format the fixed GPU packer expects for each
 // known attribute; Create rejects mismatches.
 var canonicalDataType = [attributeCount]DataType{
-	AttributePosition: Float32x3,
-	AttributeNormal:   Float32x3,
-	AttributeColor:    Float32x4,
-	AttributeUV:       Float32x2,
+	AttributePosition:   Float32x3,
+	AttributeNormal:     Float32x3,
+	AttributeColor:      Float32x4,
+	AttributeUV:         Float32x2,
+	AttributeSkinIndex:  Uint16x4,
+	AttributeSkinWeight: Float32x4,
 }
 
 // Attribute is one named vertex stream, built with NewAttribute.
@@ -147,12 +165,21 @@ type GeometryConfig struct {
 // bytes (retained for grow-repacking and GetAttributeData); the packed GPU stream
 // bytes are reconstructed on demand. It holds each present stream's suballocation
 // and the local bounds.
+//
+// derived marks a geometry with no CPU-side attribute bytes at all: a compute-
+// skinning output range (see createSkinOutput), sized to mirror a source geometry's
+// vertex count but filled by the GPU every frame instead of uploaded once. Its
+// position/attribute presence is tracked directly (derivedHasAttr) rather than
+// through has()/hasVertexAttrs(), which read attrs[].count — a derived entry only
+// sets AttributePosition's count (for sizing) and carries no other attribute data.
 type entry struct {
-	attrs   [attributeCount]Attribute
-	indices []uint32
-	static  bool
-	allocs  [streamCount]mem.Allocation
-	bounds  Sphere
+	attrs          [attributeCount]Attribute
+	indices        []uint32
+	static         bool
+	derived        bool
+	derivedHasAttr bool
+	allocs         [streamCount]mem.Allocation
+	bounds         Sphere
 }
 
 // has reports whether an attribute is present (non-empty).
@@ -160,7 +187,7 @@ func (e *entry) has(t AttributeType) bool {
 	return e.attrs[t].count > 0
 }
 
-// vec2/vec3/vec4 return typed read-only views over an attribute's stored bytes.
+// vec2/vec3/vec4/vec4u16 return typed read-only views over an attribute's stored bytes.
 func (e *entry) vec2(t AttributeType) []glm.Vec2f {
 	return fromBytes[glm.Vec2f](e.attrs[t].data, e.attrs[t].count)
 }
@@ -173,15 +200,35 @@ func (e *entry) vec4(t AttributeType) []glm.Vec4f {
 	return fromBytes[glm.Vec4f](e.attrs[t].data, e.attrs[t].count)
 }
 
+func (e *entry) vec4u16(t AttributeType) []glm.Vec4[uint16] {
+	return fromBytes[glm.Vec4[uint16]](e.attrs[t].data, e.attrs[t].count)
+}
+
 func (e *entry) hasVertexAttrs() bool {
 	return e.has(AttributeNormal) || e.has(AttributeColor) || e.has(AttributeUV)
 }
 
+// hasSkin reports whether both skin attributes are present. Create() rejects one
+// without the other, so this is also the single source of truth for FlagSkinned.
+func (e *entry) hasSkin() bool {
+	return e.has(AttributeSkinIndex) && e.has(AttributeSkinWeight)
+}
+
 func (e *entry) streamPresent(stream int) bool {
-	if stream == streamAttr {
+	switch stream {
+	case streamPos:
+		return true
+	case streamAttr:
+		if e.derived {
+			return e.derivedHasAttr
+		}
 		return e.hasVertexAttrs()
+	case streamIndex:
+		return !e.derived // a derived (skin output) entry reuses its source's index range
+	case streamSkin:
+		return !e.derived && e.hasSkin()
 	}
-	return true
+	return false
 }
 
 func (e *entry) flags() uint32 {
@@ -195,10 +242,14 @@ func (e *entry) flags() uint32 {
 	if e.has(AttributeColor) {
 		f |= FlagColor
 	}
+	if e.hasSkin() {
+		f |= FlagSkinned
+	}
 	return f
 }
 
-// bytes reconstructs the packed byte payload for a stream from the attributes.
+// bytes reconstructs the packed byte payload for a stream from the attributes. Never
+// called for a derived entry (it has none — see growStream's derived special case).
 func (e *entry) bytes(stream int) []byte {
 	switch stream {
 	case streamPos:
@@ -207,6 +258,8 @@ func (e *entry) bytes(stream int) []byte {
 		return toBytes(e.indices)
 	case streamAttr:
 		return e.packAttributes()
+	case streamSkin:
+		return e.packSkin()
 	}
 	return nil
 }
@@ -235,6 +288,47 @@ func (e *entry) packAttributes() []byte {
 		attrs[i] = va
 	}
 	return toBytes(attrs)
+}
+
+// packSkin builds the packed skin-record stream from the skin index/weight
+// attributes: weights are normalized to sum 1 (an all-zero record falls back to
+// full weight on joint 0) and quantized to unorm16.
+func (e *entry) packSkin() []byte {
+	if !e.hasSkin() {
+		return nil
+	}
+	n := e.attrs[AttributePosition].count
+	joints, weights := e.vec4u16(AttributeSkinIndex), e.vec4(AttributeSkinWeight)
+	out := make([]vertexSkin, n)
+	for i := 0; i < n; i++ {
+		var j glm.Vec4[uint16]
+		if i < len(joints) {
+			j = joints[i]
+		}
+		w := glm.Vec4f{1, 0, 0, 0}
+		if i < len(weights) {
+			if sum := weights[i][0] + weights[i][1] + weights[i][2] + weights[i][3]; sum > 0 {
+				inv := 1 / sum
+				w = glm.Vec4f{weights[i][0] * inv, weights[i][1] * inv, weights[i][2] * inv, weights[i][3] * inv}
+			}
+		}
+		out[i] = vertexSkin{
+			joints:  [4]uint16{j[0], j[1], j[2], j[3]},
+			weights: [4]uint16{quantizeUnorm16(w[0]), quantizeUnorm16(w[1]), quantizeUnorm16(w[2]), quantizeUnorm16(w[3])},
+		}
+	}
+	return toBytes(out)
+}
+
+// quantizeUnorm16 clamps v to [0,1] and quantizes it to a 16-bit unsigned-normalized value.
+func quantizeUnorm16(v float32) uint16 {
+	if v < 0 {
+		v = 0
+	}
+	if v > 1 {
+		v = 1
+	}
+	return uint16(v*65535 + 0.5)
 }
 
 type stream struct {
@@ -282,6 +376,7 @@ func newGeometrySystem(backend gpu.Backend) *geometrySystem {
 	g.streams[streamPos] = g.newStream("Vertex Positions", initialStreamBytes)
 	g.streams[streamAttr] = g.newStream("Vertex Attributes", initialStreamBytes)
 	g.streams[streamIndex] = g.newStream("Vertex Indices", initialStreamBytes)
+	g.streams[streamSkin] = g.newStream("Vertex Skin", initialStreamBytes)
 	g.descBuf = backend.Alloc(descSize, gpu.MemoryDevice, "Geometry Descriptors")
 	return g
 }
@@ -307,6 +402,12 @@ func (g *geometrySystem) AttributesAddr() uint64 {
 
 func (g *geometrySystem) DescriptorsAddr() uint64 {
 	return g.descBuf.Addr
+}
+
+// SkinAddr returns the current device address of the shared skin-record stream
+// (joint indices + weights). Changes when the stream grows, like the others.
+func (g *geometrySystem) SkinAddr() uint64 {
+	return g.streams[streamSkin].buf.Addr
 }
 
 // IndexBuffer returns the shared index stream as a hardware index buffer, for
@@ -394,6 +495,20 @@ func (g Geometry) id() uint32 {
 	return g.ref.id
 }
 
+// skinOutput allocates a derived output geometry that receives this geometry's
+// compute-skinned vertex data (see geometrySystem.createSkinOutput), and returns a
+// fresh single-ref handle to it. g must carry skin index/weight attributes.
+// Package-internal — used by Scene.NewSkinnedMesh.
+func (g Geometry) skinOutput() Geometry {
+	sys, ok := g.ref.owner.(*geometrySystem)
+	if !ok {
+		panic("render: skinOutput on a geometry with no owning system")
+	}
+	id, gen := sys.createSkinOutput(g.ref.id)
+	rc := int32(1)
+	return Geometry{ref: Ref{id: id, gen: gen, refCount: &rc, owner: sys}, bounds: sys.Bounds(id)}
+}
+
 // attribute returns a pointer to a geometry's stored attribute (nil if the id is
 // dead or the attribute is absent). The generic GetAttributeData/SetAttributeData
 // methods reinterpret its bytes.
@@ -475,6 +590,9 @@ func (g *geometrySystem) Create(cfg GeometryConfig) (id, gen uint32) {
 		if e.has(t) && e.attrs[t].count != n {
 			panic(fmt.Sprintf("render: attribute %d length %d does not match %d positions", t, e.attrs[t].count, n))
 		}
+	}
+	if e.has(AttributeSkinIndex) != e.has(AttributeSkinWeight) {
+		panic("render: geometry must have both skin index and skin weight attributes, or neither")
 	}
 
 	e.indices = cfg.Indices
@@ -566,6 +684,19 @@ func (g *geometrySystem) growStream(stream int, minCap uint32) {
 		if !e.streamPresent(stream) {
 			continue
 		}
+		// A derived (compute-skinning output) entry has no CPU bytes to repack from
+		// — its content is rewritten by the GPU every frame regardless — so just
+		// re-suballocate at the same size and move on.
+		if e.derived {
+			old := e.allocs[stream]
+			alloc, err := ns.tlsf.Alloc(old.Size())
+			if err != nil {
+				panic(fmt.Sprintf("render: repack of %s failed", s.label))
+			}
+			e.allocs[stream] = alloc
+			g.descs[id].setBase(stream, alloc.Offset()/streamElemSize[stream])
+			continue
+		}
 		b := e.bytes(stream)
 		alloc, err := ns.tlsf.Alloc(uint32(len(b)))
 		if err != nil {
@@ -577,6 +708,52 @@ func (g *geometrySystem) growStream(stream int, minCap uint32) {
 	}
 	g.backend.Free(s.buf)
 	g.descDirty = true
+}
+
+// createSkinOutput allocates a derived geometry that receives compute-skinned
+// vertex output: its own position range, and (if the source carries one) its own
+// attribute range, both sized to the source's vertex count — but no CPU bytes and
+// no index stream of its own, since it reuses the source's index range verbatim
+// (skinning never changes topology). FlagSkinned is cleared on the output
+// descriptor: once skinned, the data is plain triangles again.
+func (g *geometrySystem) createSkinOutput(srcID uint32) (id, gen uint32) {
+	if !g.entries.Alive(srcID) {
+		panic("render: createSkinOutput on a dead geometry")
+	}
+	src := g.entries.Get(srcID)
+	srcDesc := g.descs[srcID]
+	n := src.attrs[AttributePosition].count
+	if n == 0 {
+		panic("render: createSkinOutput on an empty geometry")
+	}
+
+	var e entry
+	e.derived = true
+	e.attrs[AttributePosition].count = n // sizing only; no data
+	e.derivedHasAttr = src.hasVertexAttrs()
+
+	var d GeometryDesc
+	d.Flags = srcDesc.Flags &^ FlagSkinned
+	d.IndexBase = srcDesc.IndexBase
+	d.IndexCount = srcDesc.IndexCount
+
+	posAlloc := g.allocIn(streamPos, uint32(n)*3*4)
+	e.allocs[streamPos] = posAlloc
+	d.setBase(streamPos, posAlloc.Offset()/streamElemSize[streamPos])
+
+	if e.derivedHasAttr {
+		attrAlloc := g.allocIn(streamAttr, uint32(n)*streamElemSize[streamAttr])
+		e.allocs[streamAttr] = attrAlloc
+		d.setBase(streamAttr, attrAlloc.Offset()/streamElemSize[streamAttr])
+	}
+
+	id, gen = g.entries.Alloc(e)
+	if g.entries.Len() >= len(g.descs) {
+		g.descs = append(g.descs, GeometryDesc{})
+	}
+	g.descs[id] = d
+	g.descDirty = true
+	return id, gen
 }
 
 // Sync drains queued stream writes and the descriptor table into device memory

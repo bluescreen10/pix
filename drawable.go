@@ -82,6 +82,22 @@ type shadowRoot struct {
 	visible   uint64
 }
 
+// skinCmd is one SkinnedMesh's compute-skinning dispatch, built by
+// Renderer.skinCommands(): srcDesc is the source geometry's descriptor id (positions,
+// attributes, skin records), dstDesc is its persistent compute-output geometry's
+// descriptor id, jointBase is its skeleton's offset into the scene's joint buffer,
+// and vertexCount sizes the dispatch.
+type skinCmd struct {
+	srcDesc, dstDesc, jointBase, vertexCount uint32
+}
+
+// skinRoot matches SkinRoot in scene_skin.comp (scalar; pointers, then plain
+// fields). One per skinned mesh per frame — see Renderer.dispatchSkinning.
+type skinRoot struct {
+	pos, attr, skin, descs, joints           uint64
+	srcDesc, dstDesc, jointBase, vertexCount uint32
+}
+
 // lightingRoot matches LightingRoot in pbr_frag.glsl's lighting pass (scalar; mat4,
 // then pointers, then plain fields). One per frame — the fullscreen lighting pass
 // doesn't batch by geometry. The *Texture fields are bindless heap indices.
@@ -128,4 +144,5 @@ var (
 	cullRootSize     = uint64(unsafe.Sizeof(cullRoot{}))
 	shadowRootSize   = uint64(unsafe.Sizeof(shadowRoot{}))
 	lightingRootSize = uint64(unsafe.Sizeof(lightingRoot{}))
+	skinRootSize     = uint64(unsafe.Sizeof(skinRoot{}))
 )
