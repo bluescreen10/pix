@@ -277,6 +277,10 @@ void main() {
     bool receives = (vFlags & FLAG_RECEIVES_SHADOW) != 0u;
 
     vec3 lit = shadeSurface(s, vWorldPos, V, pc.root.shadowSampler, diffuseScale, receives);
+    // Fogged before the alpha below reads its luminance: a distant window should
+    // derive its coverage from what it actually contributes to the frame, not from
+    // an unfogged highlight it never shows.
+    lit = applyFog(lit, vWorldPos, pc.root.eye.xyz, pc.root.lights.fogColor, pc.root.lights.fogParams);
 
     float alpha = baseAlpha;
     if (transmission > 0.0) {
@@ -322,6 +326,7 @@ void main() {
     // receive-shadow flag isn't carried through the G-buffer, so deferred surfaces
     // always receive. Emissive is summed in LINEAR space and encoded once.
     vec3 lit = shadeSurface(s, worldPos, V, pc.root.shadowSampler, 1.0, true);
+    lit = applyFog(lit, worldPos, pc.root.eye.xyz, pc.root.lights.fogColor, pc.root.lights.fogParams);
     outColor = vec4(linearToSrgb(lit), 1.0);
 #endif
 }

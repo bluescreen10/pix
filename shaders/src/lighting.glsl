@@ -15,6 +15,11 @@ layout(set = 0, binding = 2) uniform sampler gSamplers[];
 const uint MAX_DIR = 4u;
 const uint MAX_POINT = 16u;
 const uint MAX_SPOT = 8u;
+// Fog modes, mirroring pix.fogNone/fogLinear/fogExp2.
+const uint FOG_NONE = 0u;
+const uint FOG_LINEAR = 1u;
+const uint FOG_EXP2 = 2u;
+
 const uint NO_SHADOW = 0xFFFFFFFFu; // shadowMap sentinel: light casts no shadow
 
 struct DirLight { vec4 dir; vec4 color; mat4 shadowVP; uint shadowMap; float shadowBias; uint pad0; uint pad1; };
@@ -22,6 +27,8 @@ struct PointLight { vec4 pos; vec4 color; mat4 shadowVP[6]; uint shadowMap[6]; f
 struct SpotLight { vec4 pos; vec4 dir; vec4 color; mat4 shadowVP; float cosInner; uint shadowMap; float shadowBias; uint pad0; };
 layout(buffer_reference, scalar) readonly buffer LightBuf {
     vec4 ambient;
+    vec4 fogColor;  // rgb = fog colour, w = FOG_* mode
+    vec4 fogParams; // (near, far, density, _)
     uint numDir;
     uint numPoint;
     uint numSpot;
@@ -90,6 +97,34 @@ float spotAttenuation(SpotLight sl, vec3 worldPos, vec3 Ldir, float dist) {
 vec3 linearToSrgb(vec3 c) {
     c = clamp(c, 0.0, 1.0);
     return mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, c * 12.92, lessThanEqual(c, vec3(0.0031308)));
+}
+
+// applyFog blends a LINEAR-space shaded colour toward the scene's fog colour by
+// distance from the eye. Call it before the sRGB encode: fog is a physical blend
+// between the surface and the medium in front of it, and doing it after the encode
+// washes the result out.
+//
+// The returned value is the fogged colour; a scene with no fog returns lit unchanged
+// (one compare, and the branch is uniform across the draw).
+//
+// fogColor/fogParams are passed by value rather than the LightBuf itself: a
+// buffer_reference cannot cross a function parameter without dropping its readonly
+// qualifier, the same reason shadeSurface reads the table from pc.root directly.
+vec3 applyFog(vec3 lit, vec3 worldPos, vec3 eye, vec4 fogColor, vec4 fogParams) {
+    uint mode = uint(fogColor.w);
+    if (mode == FOG_NONE) return lit;
+    float d = distance(worldPos, eye);
+    // f is transmittance: 1 = the surface is fully visible, 0 = fully fogged out.
+    float f;
+    if (mode == FOG_LINEAR) {
+        f = clamp((fogParams.y - d) / max(fogParams.y - fogParams.x, 1e-4), 0.0, 1.0);
+    } else {
+        // exp(-(d*density)^2): Beer-Lambert with the exponent squared, which keeps
+        // the foreground clear instead of hazing from the camera outward.
+        float t = d * fogParams.z;
+        f = exp(-t * t);
+    }
+    return mix(fogColor.rgb, lit, f);
 }
 
 #endif // PIX_LIGHTING_GLSL

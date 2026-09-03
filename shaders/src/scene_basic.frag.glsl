@@ -25,5 +25,8 @@ layout(buffer_reference, scalar) readonly buffer MatBuf { Material v[]; };
 void main() {
     Material m = MatBuf(pc.root.materials).v[vMat];
     vec4 base = sampleBase(m.color, m.flags, m.colorMap, m.samp);
-    outColor = vec4(linearToSrgb(base.rgb + m.emissive.rgb), base.a);
+    // Unlit, but still fogged: an unlit surface that ignored fog would hang in
+    // front of the haze while everything around it receded into it.
+    vec3 c = applyFog(base.rgb + m.emissive.rgb, vWorldPos, pc.root.eye.xyz, pc.root.lights.fogColor, pc.root.lights.fogParams);
+    outColor = vec4(linearToSrgb(c), base.a);
 }

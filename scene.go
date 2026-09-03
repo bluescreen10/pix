@@ -103,6 +103,7 @@ type Scene struct {
 	// Light objects the scene owns; the flat GPU table (lights) is derived from them
 	// (+ ambient) each frame in Sync.
 	ambient     glm.Vec3f
+	fog         Fog
 	dirLights   []*DirectionalLight
 	pointLights []*PointLight
 	spotLights  []*SpotLight
@@ -142,6 +143,14 @@ func (s *Scene) NewGroup() Group {
 
 // SetAmbient sets the ambient light term.
 func (s *Scene) SetAmbient(c glm.Vec3f) { s.ambient = c }
+
+// SetFog sets the scene's distance fog, or clears it when f is nil (the default).
+// Pass one of the fog models — scene.SetFog(pix.NewExp2Fog(color, 0.01)) — and keep
+// the returned value if you want to animate its fields; they are re-read every frame.
+func (s *Scene) SetFog(f Fog) { s.fog = f }
+
+// Fog returns the scene's distance fog, or nil when there is none.
+func (s *Scene) Fog() Fog { return s.fog }
 
 // AddDirectionalLight adds a directional light (dir = travel direction) and returns
 // its handle — configure it further or call CastShadow on the returned light.
@@ -397,7 +406,7 @@ func (s *Scene) Sync() {
 	// this and drawList.sync above write straight to MemoryHost buffers — nothing
 	// scene-owned goes through the shared uploader, so a frame where nothing but
 	// (say) an animated character's pose changed stages/submits nothing extra.
-	s.lights.rebuild(s.ambient, s.dirLights, s.pointLights, s.spotLights)
+	s.lights.rebuild(s.ambient, s.fog, s.dirLights, s.pointLights, s.spotLights)
 	s.lights.Sync()
 }
 

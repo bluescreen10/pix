@@ -72,5 +72,6 @@ void main() {
         lit += sh * blinnPhong(N, V, Ldir, sl.color.rgb * sl.color.w * atten, albedo, m.specular, m.shininess);
     }
 
-    outColor = vec4(linearToSrgb(lit + m.emissive.rgb), base.a);
+    lit = applyFog(lit + m.emissive.rgb, vWorldPos, pc.root.eye.xyz, L.fogColor, L.fogParams);
+    outColor = vec4(linearToSrgb(lit), base.a);
 }

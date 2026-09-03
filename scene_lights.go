@@ -51,14 +51,20 @@ type gpuSpotLight struct {
 
 // gpuLights is the whole light table (scalar; matches LightBuf in scene_lit.frag).
 type gpuLights struct {
-	ambient  [4]float32
-	numDir   uint32
-	numPoint uint32
-	numSpot  uint32
-	pad0     uint32
-	dirs     [MaxDirLights]gpuDirLight
-	points   [MaxPointLights]gpuPointLight
-	spots    [MaxSpotLights]gpuSpotLight
+	ambient [4]float32
+	// fogColor is rgb + the fog mode in w; fogParams is (near, far, density, _).
+	// Fog rides in the light table rather than in each root because both the forward
+	// and the deferred lighting passes already carry the table, and neither push
+	// constant has to grow.
+	fogColor  [4]float32
+	fogParams [4]float32
+	numDir    uint32
+	numPoint  uint32
+	numSpot   uint32
+	pad0      uint32
+	dirs      [MaxDirLights]gpuDirLight
+	points    [MaxPointLights]gpuPointLight
+	spots     [MaxSpotLights]gpuSpotLight
 }
 
 var lightsSize = uint64(unsafe.Sizeof(gpuLights{}))
@@ -95,9 +101,12 @@ func NewLights(b gpu.Backend) *Lights {
 // are mutable), but it only marks the buffer dirty when the derived table actually
 // changed, so a static scene re-uploads nothing. Lights past the fixed caps
 // (MaxDirLights/MaxPointLights/MaxSpotLights) are dropped.
-func (l *Lights) rebuild(ambient glm.Vec3f, dirs []*DirectionalLight, points []*PointLight, spots []*SpotLight) {
+func (l *Lights) rebuild(ambient glm.Vec3f, fog Fog, dirs []*DirectionalLight, points []*PointLight, spots []*SpotLight) {
 	var next gpuLights
 	next.ambient = [4]float32{ambient[0], ambient[1], ambient[2], 0}
+	fs := stateOf(fog)
+	next.fogColor = [4]float32{fs.color[0], fs.color[1], fs.color[2], float32(fs.mode)}
+	next.fogParams = [4]float32{fs.near, fs.far, fs.density, 0}
 	for _, d := range dirs {
 		if next.numDir >= MaxDirLights {
 			break
