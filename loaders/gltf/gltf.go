@@ -24,6 +24,7 @@ import (
 	"unsafe"
 
 	"github.com/bluescreen10/pix"
+	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -659,7 +660,7 @@ func (l *loader) loadMaterials() {
 		}
 		if pbr := gm.PbrMetallicRoughness; pbr != nil {
 			if len(pbr.BaseColorFactor) >= 4 {
-				m.SetColor(glm.RGBA32F{pbr.BaseColorFactor[0], pbr.BaseColorFactor[1], pbr.BaseColorFactor[2], pbr.BaseColorFactor[3]})
+				m.SetColor(colors.RGBA32F{pbr.BaseColorFactor[0], pbr.BaseColorFactor[1], pbr.BaseColorFactor[2], pbr.BaseColorFactor[3]})
 			}
 			if pbr.MetallicFactor != nil {
 				m.SetMetallic(*pbr.MetallicFactor)

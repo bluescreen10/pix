@@ -5,6 +5,7 @@ package pix
 
 import (
 	"github.com/bluescreen10/pix/cameras"
+	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -51,11 +52,11 @@ func (s *LightShadow) Size() uint32 { return s.size }
 
 // SetSize sets the shadow map's resolution per side. The map is reallocated at the new
 // resolution on the next frame that renders it; a zero size is ignored.
-func (s *LightShadow) SetSize(n uint32) {
-	if n == 0 {
+func (s *LightShadow) SetSize(size uint32) {
+	if size == 0 {
 		return
 	}
-	s.size = n
+	s.size = size
 }
 
 // Bias is the extra depth offset applied to the shadow comparison, in world units.
@@ -65,7 +66,7 @@ func (s *LightShadow) Bias() float32 { return s.bias }
 // of a bias derived from the map's texel footprint. 0 (the default) is usually right —
 // the derived term already scales with the fit, so it works at any scene scale. Raise
 // this if surfaces self-shadow (acne); it takes effect on the next frame.
-func (s *LightShadow) SetBias(b float32) { s.bias = b }
+func (s *LightShadow) SetBias(bias float32) { s.bias = bias }
 
 // ensureMap allocates the depth map, or reallocates it when SetSize changed the
 // requested resolution. Point lights use ensureFaceMaps instead.
@@ -141,7 +142,7 @@ func (s *LightShadow) updateLocalBias(rng float32) {
 // and may be changed at any time; the scene re-derives the GPU light table each frame.
 type DirectionalLight struct {
 	Direction glm.Vec3f
-	Color     glm.Vec3f
+	Color     colors.RGB32F
 	Intensity float32
 	shadow    *LightShadow
 }
@@ -168,7 +169,7 @@ func (l *DirectionalLight) Shadow() *LightShadow {
 // Range. Fields are exported and may be changed at any time.
 type PointLight struct {
 	Position  glm.Vec3f
-	Color     glm.Vec3f
+	Color     colors.RGB32F
 	Intensity float32
 	Range     float32
 	shadow    *LightShadow
@@ -209,7 +210,7 @@ func (l *PointLight) Shadow() *LightShadow {
 type SpotLight struct {
 	Position  glm.Vec3f
 	Direction glm.Vec3f
-	Color     glm.Vec3f
+	Color     colors.RGB32F
 	Intensity float32
 	Range     float32
 	Angle     float32 // outer cone half-angle (radians)

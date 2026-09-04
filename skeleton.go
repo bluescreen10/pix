@@ -59,8 +59,8 @@ func (s Skeleton) data() *skeletonData {
 }
 
 // Bone returns joint i's node handle.
-func (s Skeleton) Bone(i int) Bone {
-	return Bone{Node{scene: s.scene, id: s.data().bones[i]}}
+func (s Skeleton) Bone(index int) Bone {
+	return Bone{Node{scene: s.scene, id: s.data().bones[index]}}
 }
 
 // BoneByName returns the named joint's node handle, or the zero Bone if not found.

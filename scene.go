@@ -3,6 +3,7 @@ package pix
 import (
 	"math"
 
+	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
 	"github.com/bluescreen10/pix/internal/mem"
@@ -102,7 +103,7 @@ type Scene struct {
 
 	// Light objects the scene owns; the flat GPU table (lights) is derived from them
 	// (+ ambient) each frame in Sync.
-	ambient     glm.Vec3f
+	ambient     colors.RGB32F
 	fog         Fog
 	dirLights   []*DirectionalLight
 	pointLights []*PointLight
@@ -142,19 +143,21 @@ func (s *Scene) NewGroup() Group {
 }
 
 // SetAmbient sets the ambient light term.
-func (s *Scene) SetAmbient(c glm.Vec3f) { s.ambient = c }
+func (s *Scene) SetAmbient(color colors.RGB32F) {
+	s.ambient = color
+}
 
 // SetFog sets the scene's distance fog, or clears it when f is nil (the default).
-// Pass one of the fog models — scene.SetFog(pix.NewExp2Fog(color, 0.01)) — and keep
+// Pass one of the fog models — scene.SetFog(pix.NewExp2Fog(color, 60000)) — and keep
 // the returned value if you want to animate its fields; they are re-read every frame.
-func (s *Scene) SetFog(f Fog) { s.fog = f }
+func (s *Scene) SetFog(fog Fog) { s.fog = fog }
 
 // Fog returns the scene's distance fog, or nil when there is none.
 func (s *Scene) Fog() Fog { return s.fog }
 
 // AddDirectionalLight adds a directional light (dir = travel direction) and returns
 // its handle — configure it further or call CastShadow on the returned light.
-func (s *Scene) AddDirectionalLight(dir, color glm.Vec3f, intensity float32) *DirectionalLight {
+func (s *Scene) AddDirectionalLight(dir glm.Vec3f, color colors.RGB32F, intensity float32) *DirectionalLight {
 	l := &DirectionalLight{Direction: dir, Color: color, Intensity: intensity}
 	s.dirLights = append(s.dirLights, l)
 	return l
@@ -162,7 +165,7 @@ func (s *Scene) AddDirectionalLight(dir, color glm.Vec3f, intensity float32) *Di
 
 // AddPointLight adds a point light at pos with linear falloff to zero at rng and
 // returns its handle.
-func (s *Scene) AddPointLight(pos, color glm.Vec3f, intensity, rng float32) *PointLight {
+func (s *Scene) AddPointLight(pos glm.Vec3f, color colors.RGB32F, intensity, rng float32) *PointLight {
 	l := &PointLight{Position: pos, Color: color, Intensity: intensity, Range: rng}
 	s.pointLights = append(s.pointLights, l)
 	return l
@@ -171,7 +174,7 @@ func (s *Scene) AddPointLight(pos, color glm.Vec3f, intensity, rng float32) *Poi
 // AddSpotLight adds a cone light at pos aimed along dir, full inside the inner cone and
 // falling to zero at half-angle angle (radians) / distance rng. penumbra (0..1) sets
 // the soft-edge fraction. Returns its handle.
-func (s *Scene) AddSpotLight(pos, dir, color glm.Vec3f, intensity, rng, angle, penumbra float32) *SpotLight {
+func (s *Scene) AddSpotLight(pos, dir glm.Vec3f, color colors.RGB32F, intensity, rng, angle, penumbra float32) *SpotLight {
 	l := &SpotLight{
 		Position: pos, Direction: dir, Color: color, Intensity: intensity,
 		Range: rng, Angle: angle, Penumbra: penumbra,

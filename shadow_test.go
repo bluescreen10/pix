@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix/cameras"
+	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -20,7 +21,7 @@ func TestDirectionalShadowMapAllocated(t *testing.T) {
 
 	scene := r.NewScene()
 	defer scene.Destroy()
-	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, glm.Vec3f{1, 1, 1}, 1)
+	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 1)
 	light.SetCastShadow(true)
 
 	cube := r.NewGeometry(normalCube())
@@ -57,12 +58,12 @@ func TestDirectionalShadowDepthPass(t *testing.T) {
 	}
 	defer r.Destroy()
 	r.EnableShadows(true)
-	r.SetClearColor(glm.RGBA32F{0, 0, 0, 1})
+	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
 	scene := r.NewScene()
 	defer scene.Destroy()
-	scene.SetAmbient(glm.Vec3f{0.3, 0.3, 0.3})
-	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, glm.Vec3f{1, 1, 1}, 2)
+	scene.SetAmbient(colors.RGB32F{0.3, 0.3, 0.3})
+	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 2)
 	light.SetCastShadow(true)
 
 	cube := r.NewGeometry(normalCube())
@@ -108,7 +109,7 @@ func TestShadowsEmptyScene(t *testing.T) {
 
 	scene := r.NewScene()
 	defer scene.Destroy()
-	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, glm.Vec3f{1, 1, 1}, 1)
+	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 1)
 	light.SetCastShadow(true)
 
 	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
@@ -127,17 +128,17 @@ func TestSpotShadowDarkensReceiver(t *testing.T) {
 		}
 		defer r.Destroy()
 		r.EnableShadows(shadows)
-		r.SetClearColor(glm.RGBA32F{0, 0, 0, 1})
+		r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
 		scene := r.NewScene()
 		defer scene.Destroy()
-		scene.SetAmbient(glm.Vec3f{0.04, 0.04, 0.04})
+		scene.SetAmbient(colors.RGB32F{0.04, 0.04, 0.04})
 		// Spot up and to the side, aimed at the scene center, so the occluder's shadow
 		// falls offset onto the ground where the camera can see it (a straight-down spot
 		// would hide its own shadow behind the occluder).
 		pos := glm.Vec3f{3, 6, 2}
 		dir := glm.Vec3f{0, 0, 0}.Sub(pos).Normalize()
-		spot := scene.AddSpotLight(pos, dir, glm.Vec3f{1, 1, 1}, 6, 30, 0.7, 0.2)
+		spot := scene.AddSpotLight(pos, dir, colors.RGB32F{1, 1, 1}, 6, 30, 0.7, 0.2)
 		spot.SetCastShadow(true)
 
 		cube := r.NewGeometry(normalCube())
@@ -184,14 +185,14 @@ func TestPointShadowDarkensReceiver(t *testing.T) {
 		}
 		defer r.Destroy()
 		r.EnableShadows(shadows)
-		r.SetClearColor(glm.RGBA32F{0, 0, 0, 1})
+		r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
 		scene := r.NewScene()
 		defer scene.Destroy()
-		scene.SetAmbient(glm.Vec3f{0.04, 0.04, 0.04})
+		scene.SetAmbient(colors.RGB32F{0.04, 0.04, 0.04})
 		// Point light up and to the side so the occluder's shadow lands offset on the
 		// ground within the camera's view.
-		pl := scene.AddPointLight(glm.Vec3f{3, 5, 2}, glm.Vec3f{1, 1, 1}, 8, 40)
+		pl := scene.AddPointLight(glm.Vec3f{3, 5, 2}, colors.RGB32F{1, 1, 1}, 8, 40)
 		pl.SetCastShadow(true)
 
 		cube := r.NewGeometry(normalCube())
@@ -249,12 +250,12 @@ func TestDirectionalShadowDarkensReceiver(t *testing.T) {
 		}
 		defer r.Destroy()
 		r.EnableShadows(shadows)
-		r.SetClearColor(glm.RGBA32F{0, 0, 0, 1})
+		r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
 		scene := r.NewScene()
 		defer scene.Destroy()
-		scene.SetAmbient(glm.Vec3f{0.05, 0.05, 0.05}) // low fill so the shadow is visible
-		light := scene.AddDirectionalLight(glm.Vec3f{0.15, -1, 0.15}, glm.Vec3f{1, 1, 1}, 3)
+		scene.SetAmbient(colors.RGB32F{0.05, 0.05, 0.05}) // low fill so the shadow is visible
+		light := scene.AddDirectionalLight(glm.Vec3f{0.15, -1, 0.15}, colors.RGB32F{1, 1, 1}, 3)
 		light.SetCastShadow(true)
 
 		cube := r.NewGeometry(normalCube())
@@ -305,7 +306,7 @@ func TestShadowSetSizeReallocatesMap(t *testing.T) {
 
 	scene := r.NewScene()
 	defer scene.Destroy()
-	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, glm.Vec3f{1, 1, 1}, 1)
+	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 1)
 	light.SetCastShadow(true)
 
 	cube := r.NewGeometry(normalCube())

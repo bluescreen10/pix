@@ -87,7 +87,8 @@ void main() {
         vUV = vec2(uintBitsToFloat(pc.root.attr.v[ab + 2u]), uintBitsToFloat(pc.root.attr.v[ab + 3u]));
     }
 
-    // World-space normal (decode RGB10A2 [-1,1]; rotate by the model's 3x3).
+    // World-space normal: decode glm.Unorm10x3 and remap back to [-1,1] (the
+    // inverse of the pack in geometry.go), then rotate by the model's 3x3.
     vec3 nrm = vec3(0.0, 0.0, 1.0);
     if ((g.flags & FLAG_NORMAL) != 0u) {
         uint nw = pc.root.attr.v[ab];

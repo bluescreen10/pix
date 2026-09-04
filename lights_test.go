@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix/cameras"
+	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -66,7 +67,7 @@ func TestDirectionalLighting(t *testing.T) {
 	m := scene.NewMesh(cube, mat)
 	m.SetRotationQuat(glm.NewQuat(float32(0.6), glm.Vec3f{0, 1, 0})) // rotate so +X and +Z faces both show
 	scene.Add(m)
-	scene.SetAmbient(glm.Vec3f{0.1, 0.1, 0.1})
+	scene.SetAmbient(colors.RGB32F{0.1, 0.1, 0.1})
 
 	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
 	cam.SetPosition(glm.Vec3f{0, 0.6, 3})
@@ -103,7 +104,7 @@ func TestDirectionalLighting(t *testing.T) {
 
 	ambMean, ambMax := render()
 
-	scene.AddDirectionalLight(glm.Vec3f{-1, -0.2, -0.5}, glm.Vec3f{1, 1, 1}, 1.0)
+	scene.AddDirectionalLight(glm.Vec3f{-1, -0.2, -0.5}, colors.RGB32F{1, 1, 1}, 1.0)
 	litMean, litMax := render()
 
 	t.Logf("ambient(mean=%.3f max=%.3f) -> lit(mean=%.3f max=%.3f)", ambMean, ambMax, litMean, litMax)

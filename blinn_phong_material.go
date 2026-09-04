@@ -4,7 +4,7 @@ import (
 	_ "embed"
 	"unsafe"
 
-	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/colors"
 )
 
 //go:embed shaders/build/scene_lit.frag.spv
@@ -19,14 +19,14 @@ type BlinnPhongMaterial struct {
 	store *materialStore
 	ref   Ref
 
-	emissive  glm.RGBA32F
+	emissive  colors.RGB32F
 	specular  float32
 	shininess float32
 
 	// Bound maps. The material holds the reference that keeps each texture alive; the
 	// record's bindless index and presence flag are derived from it in Bytes, so they
 	// cannot fall out of step with what is actually bound.
-	color        glm.RGBA32F
+	color        colors.RGBA32F
 	colorMap     Texture
 	colorSampler uint32
 }
@@ -38,7 +38,7 @@ func (r *Renderer) NewBlinnPhongMaterial() *BlinnPhongMaterial {
 	// (specular, shininess) into the G-buffer's model-defined material channel, plus a
 	// matching Lighting pass. See shaders/src/gbuffer.glsl.
 	st := r.materials.store(Shader{Forward: blinnPhongForwardSPV}, "BlinnPhong Material")
-	m := &BlinnPhongMaterial{color: glm.RGBA32F{1, 1, 1, 1}, specular: 0.3, shininess: 32}
+	m := &BlinnPhongMaterial{color: colors.RGBA32F{1, 1, 1, 1}, specular: 0.3, shininess: 32}
 	m.store = st
 	m.ref = st.register(m)
 	return m
@@ -49,8 +49,9 @@ func (r *Renderer) NewBlinnPhongMaterial() *BlinnPhongMaterial {
 // changing either without changing the shader silently misreads every material.
 func (m *BlinnPhongMaterial) Bytes() []byte {
 	rec := struct {
-		color        glm.RGBA32F
-		emissive     glm.RGBA32F
+		color        colors.RGBA32F
+		emissive     colors.RGB32F
+		_            float32 // the shader declares vec4; the 4th channel is unused
 		specular     float32
 		shininess    float32
 		colorMap     uint32
@@ -80,11 +81,11 @@ func (m *BlinnPhongMaterial) dirty() {
 	m.store.markDirty(m.ref.id)
 }
 
-func (m *BlinnPhongMaterial) Color() glm.RGBA32F {
+func (m *BlinnPhongMaterial) Color() colors.RGBA32F {
 	return m.color
 }
 
-func (m *BlinnPhongMaterial) SetColor(color glm.RGBA32F) {
+func (m *BlinnPhongMaterial) SetColor(color colors.RGBA32F) {
 	m.color = color
 	m.dirty()
 }
@@ -93,8 +94,8 @@ func (m *BlinnPhongMaterial) Specular() float32 {
 	return m.specular
 }
 
-func (m *BlinnPhongMaterial) SetSpecular(v float32) {
-	m.specular = v
+func (m *BlinnPhongMaterial) SetSpecular(specular float32) {
+	m.specular = specular
 	m.dirty()
 }
 
@@ -102,17 +103,20 @@ func (m *BlinnPhongMaterial) Shininess() float32 {
 	return m.shininess
 }
 
-func (m *BlinnPhongMaterial) SetShininess(v float32) {
-	m.shininess = v
+func (m *BlinnPhongMaterial) SetShininess(shininess float32) {
+	m.shininess = shininess
 	m.dirty()
 }
 
-func (m *BlinnPhongMaterial) Emissive() glm.RGB32F {
-	return glm.RGB32F{m.emissive[0], m.emissive[1], m.emissive[2]}
+// Emissive is the light the surface emits on its own, added after lighting. It has no
+// alpha: emitted light is not a coverage, and the record's fourth channel is padding
+// the shader never reads.
+func (m *BlinnPhongMaterial) Emissive() colors.RGB32F {
+	return m.emissive
 }
 
-func (m *BlinnPhongMaterial) SetEmissive(c glm.RGB32F) {
-	m.emissive = glm.RGBA32F{c[0], c[1], c[2], 0}
+func (m *BlinnPhongMaterial) SetEmissive(color colors.RGB32F) {
+	m.emissive = color
 	m.dirty()
 }
 
@@ -123,9 +127,9 @@ func (m *BlinnPhongMaterial) ColorMap() Texture {
 
 // SetColorMap binds the base-color map; pass a zero Texture to clear it. The material
 // takes its own reference, so the caller may release theirs.
-func (m *BlinnPhongMaterial) SetColorMap(t Texture) {
+func (m *BlinnPhongMaterial) SetColorMap(texture Texture) {
 	old := m.colorMap
-	m.colorMap = t.Copy()
+	m.colorMap = texture.Copy()
 	old.Release() // after the copy, so rebinding a texture to itself cannot free it
 	m.dirty()
 }
@@ -135,8 +139,8 @@ func (m *BlinnPhongMaterial) ColorMapSampler() uint32 {
 	return m.colorSampler
 }
 
-func (m *BlinnPhongMaterial) SetColorMapSampler(s uint32) {
-	m.colorSampler = s
+func (m *BlinnPhongMaterial) SetColorMapSampler(sampler uint32) {
+	m.colorSampler = sampler
 	m.dirty()
 }
 
@@ -192,13 +196,13 @@ func (m *BlinnPhongMaterial) Cull() CullMode {
 }
 
 // SetCull sets which faces are culled (CullNone = double-sided).
-func (m *BlinnPhongMaterial) SetCull(c CullMode) {
-	m.store.setCullOf(m.ref.id, c)
+func (m *BlinnPhongMaterial) SetCull(mode CullMode) {
+	m.store.setCullOf(m.ref.id, mode)
 }
 
 // SetDoubleSided is a convenience for SetCull(CullNone) / SetCull(CullBack).
-func (m *BlinnPhongMaterial) SetDoubleSided(v bool) {
-	if v {
+func (m *BlinnPhongMaterial) SetDoubleSided(enabled bool) {
+	if enabled {
 		m.SetCull(CullNone)
 	} else {
 		m.SetCull(CullBack)
@@ -213,8 +217,8 @@ func (m *BlinnPhongMaterial) Blend() BlendMode {
 }
 
 // SetBlend sets the material's blend mode (Opaque/Alpha/Additive).
-func (m *BlinnPhongMaterial) SetBlend(b BlendMode) {
-	m.store.setBlendOf(m.ref.id, b)
+func (m *BlinnPhongMaterial) SetBlend(mode BlendMode) {
+	m.store.setBlendOf(m.ref.id, mode)
 }
 
 // Cached pipeline identities, precomputed per store (see the Material interface).

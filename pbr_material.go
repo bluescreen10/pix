@@ -4,7 +4,7 @@ import (
 	_ "embed"
 	"unsafe"
 
-	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/colors"
 )
 
 //go:embed shaders/build/scene_forward_pbr.frag.spv
@@ -26,13 +26,13 @@ type PBRMaterial struct {
 	store *materialStore
 	ref   Ref
 
-	emissive     glm.RGBA32F
+	emissive     colors.RGB32F
 	transmission float32 // 0 = opaque; >0 = see-through (glass), needs alpha blend
 
 	// Bound maps. The material holds the reference that keeps each texture alive; the
 	// record's bindless index and presence flag are derived from it in Bytes, so they
 	// cannot fall out of step with what is actually bound.
-	color        glm.RGBA32F
+	color        colors.RGBA32F
 	colorMap     Texture
 	colorSampler uint32
 
@@ -61,7 +61,7 @@ func (r *Renderer) NewPBRMaterial() *PBRMaterial {
 		Shader{Forward: pbrForwardSPV, Deferred: pbrDeferredSPV, Lighting: pbrLightingSPV},
 		"PBR Material",
 	)
-	m := &PBRMaterial{color: glm.RGBA32F{1, 1, 1, 1}, roughness: 0.5}
+	m := &PBRMaterial{color: colors.RGBA32F{1, 1, 1, 1}, roughness: 0.5}
 	m.store = st
 	m.ref = st.register(m)
 	return m
@@ -72,8 +72,9 @@ func (r *Renderer) NewPBRMaterial() *PBRMaterial {
 // changing either without changing the shader silently misreads every material.
 func (m *PBRMaterial) Bytes() []byte {
 	rec := struct {
-		color            glm.RGBA32F
-		emissive         glm.RGBA32F
+		color            colors.RGBA32F
+		emissive         colors.RGB32F
+		_                float32 // the shader declares vec4; the 4th channel is unused
 		metallic         float32
 		roughness        float32
 		transmission     float32
@@ -121,11 +122,11 @@ func (m *PBRMaterial) dirty() {
 	m.store.markDirty(m.ref.id)
 }
 
-func (m *PBRMaterial) Color() glm.RGBA32F {
+func (m *PBRMaterial) Color() colors.RGBA32F {
 	return m.color
 }
 
-func (m *PBRMaterial) SetColor(color glm.RGBA32F) {
+func (m *PBRMaterial) SetColor(color colors.RGBA32F) {
 	m.color = color
 	m.dirty()
 }
@@ -134,8 +135,8 @@ func (m *PBRMaterial) Metallic() float32 {
 	return m.metallic
 }
 
-func (m *PBRMaterial) SetMetallic(v float32) {
-	m.metallic = v
+func (m *PBRMaterial) SetMetallic(metallic float32) {
+	m.metallic = metallic
 	m.dirty()
 }
 
@@ -143,8 +144,8 @@ func (m *PBRMaterial) Roughness() float32 {
 	return m.roughness
 }
 
-func (m *PBRMaterial) SetRoughness(v float32) {
-	m.roughness = v
+func (m *PBRMaterial) SetRoughness(roughness float32) {
+	m.roughness = roughness
 	m.dirty()
 }
 
@@ -159,19 +160,22 @@ func (m *PBRMaterial) Transmission() float32 {
 // store transmission, so a transmissive material left opaque would render as solid
 // once deferred rendering is enabled. Never switches back to opaque on its own; call
 // SetBlend(BlendOpaque) explicitly if you clear transmission.
-func (m *PBRMaterial) SetTransmission(v float32) {
-	m.transmission = v
+func (m *PBRMaterial) SetTransmission(transmission float32) {
+	m.transmission = transmission
 	m.dirty()
-	if v > 0 && m.Blend() == BlendOpaque {
+	if transmission > 0 && m.Blend() == BlendOpaque {
 		m.SetBlend(BlendAlpha)
 	}
 }
 
-func (m *PBRMaterial) Emissive() glm.RGBA32F {
+// Emissive is the light the surface emits on its own, added after lighting. It has no
+// alpha: emitted light is not a coverage, and the record's fourth channel is padding
+// the shader never reads.
+func (m *PBRMaterial) Emissive() colors.RGB32F {
 	return m.emissive
 }
 
-func (m *PBRMaterial) SetEmissive(color glm.RGBA32F) {
+func (m *PBRMaterial) SetEmissive(color colors.RGB32F) {
 	m.emissive = color
 	m.dirty()
 }
@@ -183,9 +187,9 @@ func (m *PBRMaterial) ColorMap() Texture {
 
 // SetColorMap binds the base-color (albedo) map; pass a zero Texture to clear it. The
 // material takes its own reference, so the caller may release theirs.
-func (m *PBRMaterial) SetColorMap(t Texture) {
+func (m *PBRMaterial) SetColorMap(texture Texture) {
 	old := m.colorMap
-	m.colorMap = t.Copy()
+	m.colorMap = texture.Copy()
 	old.Release() // after the copy, so rebinding a texture to itself cannot free it
 	m.dirty()
 }
@@ -195,8 +199,8 @@ func (m *PBRMaterial) ColorMapSampler() uint32 {
 	return m.colorSampler
 }
 
-func (m *PBRMaterial) SetColorMapSampler(s uint32) {
-	m.colorSampler = s
+func (m *PBRMaterial) SetColorMapSampler(sampler uint32) {
+	m.colorSampler = sampler
 	m.dirty()
 }
 
@@ -205,9 +209,9 @@ func (m *PBRMaterial) NormalMap() Texture {
 }
 
 // SetNormalMap binds a tangent-space normal map (linear RGB, xyz in [0,1]).
-func (m *PBRMaterial) SetNormalMap(t Texture) {
+func (m *PBRMaterial) SetNormalMap(texture Texture) {
 	old := m.normalMap
-	m.normalMap = t.Copy()
+	m.normalMap = texture.Copy()
 	old.Release() // after the copy, so rebinding a texture to itself cannot free it
 	m.dirty()
 }
@@ -216,8 +220,8 @@ func (m *PBRMaterial) NormalMapSampler() uint32 {
 	return m.normalSampler
 }
 
-func (m *PBRMaterial) SetNormalMapSampler(s uint32) {
-	m.normalSampler = s
+func (m *PBRMaterial) SetNormalMapSampler(sampler uint32) {
+	m.normalSampler = sampler
 	m.dirty()
 }
 
@@ -227,9 +231,9 @@ func (m *PBRMaterial) MetallicMap() Texture {
 
 // SetMetallicMap binds a metallic map; its blue channel modulates the metallic factor
 // (matches the glTF metallic-roughness texture convention, and works for grayscale).
-func (m *PBRMaterial) SetMetallicMap(t Texture) {
+func (m *PBRMaterial) SetMetallicMap(texture Texture) {
 	old := m.metallicMap
-	m.metallicMap = t.Copy()
+	m.metallicMap = texture.Copy()
 	old.Release() // after the copy, so rebinding a texture to itself cannot free it
 	m.dirty()
 }
@@ -238,8 +242,8 @@ func (m *PBRMaterial) MetallicMapSampler() uint32 {
 	return m.metallicSampler
 }
 
-func (m *PBRMaterial) SetMetallicMapSampler(s uint32) {
-	m.metallicSampler = s
+func (m *PBRMaterial) SetMetallicMapSampler(sampler uint32) {
+	m.metallicSampler = sampler
 	m.dirty()
 }
 
@@ -249,9 +253,9 @@ func (m *PBRMaterial) RoughnessMap() Texture {
 
 // SetRoughnessMap binds a roughness map; its green channel modulates the roughness
 // factor (glTF convention; works for grayscale too).
-func (m *PBRMaterial) SetRoughnessMap(t Texture) {
+func (m *PBRMaterial) SetRoughnessMap(texture Texture) {
 	old := m.roughnessMap
-	m.roughnessMap = t.Copy()
+	m.roughnessMap = texture.Copy()
 	old.Release() // after the copy, so rebinding a texture to itself cannot free it
 	m.dirty()
 }
@@ -260,8 +264,8 @@ func (m *PBRMaterial) RoughnessMapSampler() uint32 {
 	return m.roughnessSampler
 }
 
-func (m *PBRMaterial) SetRoughnessMapSampler(s uint32) {
-	m.roughnessSampler = s
+func (m *PBRMaterial) SetRoughnessMapSampler(sampler uint32) {
+	m.roughnessSampler = sampler
 	m.dirty()
 }
 
@@ -272,8 +276,8 @@ func (m *PBRMaterial) TransmissionMap() Texture { return m.transmissionMap }
 // Transmission (glTF KHR_materials_transmission keeps it in the red channel). Use it
 // when only part of a surface is glass — a cabinet's panes, a sign's window — since
 // the scalar alone makes the whole object see-through.
-func (m *PBRMaterial) SetTransmissionMap(t Texture) {
-	newRef := t.Copy()
+func (m *PBRMaterial) SetTransmissionMap(texture Texture) {
+	newRef := texture.Copy()
 	m.transmissionMap.Release()
 	m.transmissionMap = newRef
 	m.dirty()
@@ -281,8 +285,8 @@ func (m *PBRMaterial) SetTransmissionMap(t Texture) {
 
 // SetTransmissionMapSampler sets the heap index of the sampler used for the
 // transmission map.
-func (m *PBRMaterial) SetTransmissionMapSampler(s uint32) {
-	m.transmissionSampler = s
+func (m *PBRMaterial) SetTransmissionMapSampler(sampler uint32) {
+	m.transmissionSampler = sampler
 	m.dirty()
 }
 
@@ -338,13 +342,13 @@ func (m *PBRMaterial) Cull() CullMode {
 }
 
 // SetCull sets which faces are culled (CullNone = double-sided).
-func (m *PBRMaterial) SetCull(c CullMode) {
-	m.store.setCullOf(m.ref.id, c)
+func (m *PBRMaterial) SetCull(mode CullMode) {
+	m.store.setCullOf(m.ref.id, mode)
 }
 
 // SetDoubleSided is a convenience for SetCull(CullNone) / SetCull(CullBack).
-func (m *PBRMaterial) SetDoubleSided(v bool) {
-	if v {
+func (m *PBRMaterial) SetDoubleSided(enabled bool) {
+	if enabled {
 		m.SetCull(CullNone)
 	} else {
 		m.SetCull(CullBack)
@@ -359,8 +363,8 @@ func (m *PBRMaterial) Blend() BlendMode {
 }
 
 // SetBlend sets the material's blend mode (Opaque/Alpha/Additive).
-func (m *PBRMaterial) SetBlend(b BlendMode) {
-	m.store.setBlendOf(m.ref.id, b)
+func (m *PBRMaterial) SetBlend(mode BlendMode) {
+	m.store.setBlendOf(m.ref.id, mode)
 }
 
 // Cached pipeline identities, precomputed per store (see the Material interface).

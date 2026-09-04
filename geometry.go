@@ -10,6 +10,7 @@ import (
 	"sync"
 	"unsafe"
 
+	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
 	"github.com/bluescreen10/pix/internal/mem"
@@ -58,8 +59,8 @@ type Sphere struct {
 // vertexAttributes is the interleaved per-vertex attribute record (16 bytes,
 // scalar-packed). Mirrors the GLSL attribute stream layout.
 type vertexAttributes struct {
-	normal glm.RGB10A2 // unit normal, [-1,1] -> [0,1]
-	color  glm.RGBA8
+	normal glm.Unorm10x3 // unit normal, [-1,1] remapped to the unsigned [0,1]
+	color  colors.RGBA8
 	uv     glm.Vec2f
 }
 
@@ -200,6 +201,10 @@ func (e *entry) vec4(t AttributeType) []glm.Vec4f {
 	return fromBytes[glm.Vec4f](e.attrs[t].data, e.attrs[t].count)
 }
 
+func (e *entry) rgba(t AttributeType) []colors.RGBA32F {
+	return fromBytes[colors.RGBA32F](e.attrs[t].data, e.attrs[t].count)
+}
+
 func (e *entry) vec4u16(t AttributeType) []glm.Vec4[uint16] {
 	return fromBytes[glm.Vec4[uint16]](e.attrs[t].data, e.attrs[t].count)
 }
@@ -269,18 +274,19 @@ func (e *entry) packAttributes() []byte {
 		return nil
 	}
 	n := e.attrs[AttributePosition].count
-	normals, colors, uvs := e.vec3(AttributeNormal), e.vec4(AttributeColor), e.vec2(AttributeUV)
+	normals, vertColors, uvs := e.vec3(AttributeNormal), e.rgba(AttributeColor), e.vec2(AttributeUV)
 	attrs := make([]vertexAttributes, n)
 	for i := 0; i < n; i++ {
-		va := vertexAttributes{color: glm.RGBA8{255, 255, 255, 255}} // default white
+		va := vertexAttributes{color: colors.RGBA8{255, 255, 255, 255}} // default white
 		if i < len(normals) {
-			// RGB10A2 stores unsigned [0,1]; remap the [-1,1] normal so the shader
-			// can decode it back with *2-1.
+			// Unorm10x3 stores unsigned [0,1], so remap the signed normal here. The
+			// other half of this codec is in scene_draw.vert.glsl ("* 2.0 - 1.0");
+			// the two have to stay in step.
 			nn := normals[i]
-			va.normal = glm.Vec3f{nn[0]*0.5 + 0.5, nn[1]*0.5 + 0.5, nn[2]*0.5 + 0.5}.RGB10A2()
+			va.normal = glm.Vec3f{nn[0]*0.5 + 0.5, nn[1]*0.5 + 0.5, nn[2]*0.5 + 0.5}.Unorm10x3()
 		}
-		if i < len(colors) {
-			va.color = colors[i].RGBA8()
+		if i < len(vertColors) {
+			va.color = vertColors[i].RGBA8()
 		}
 		if i < len(uvs) {
 			va.uv = uvs[i]

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix/cameras"
+	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -16,7 +17,7 @@ func TestShowFPS(t *testing.T) {
 	}
 	defer r.Destroy()
 	r.SetClearColor([4]float32{0, 0, 0, 1})
-	r.fontColor = glm.RGBA32F{1, 0.9, 0.35, 1}
+	r.fontColor = colors.RGBA32F{1, 0.9, 0.35, 1}
 	r.ShowFPS(true)
 
 	scene := r.NewScene()

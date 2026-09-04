@@ -9,6 +9,7 @@ import (
 
 	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
+	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -34,8 +35,8 @@ func TestCaptureAnimatedFrames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	scene.SetAmbient(glm.Vec3f{0.35, 0.35, 0.42})
-	light := scene.AddDirectionalLight(glm.Vec3f{-0.5, -1, -0.35}, glm.Vec3f{1, 0.96, 0.9}, 2.0)
+	scene.SetAmbient(colors.RGB32F{0.35, 0.35, 0.42})
+	light := scene.AddDirectionalLight(glm.Vec3f{-0.5, -1, -0.35}, colors.RGB32F{1, 0.96, 0.9}, 2.0)
 	light.SetCastShadow(true)
 
 	mixer := scene.NewAnimationMixer(res.Skeletons[0])

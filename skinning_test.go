@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix/cameras"
+	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -74,7 +75,7 @@ func TestSkinnedMeshBindPose(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	r.SetClearColor(glm.RGBA32F{0, 0, 0, 1})
+	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
 	scene := r.NewScene()
 	defer scene.Destroy()
@@ -111,7 +112,7 @@ func TestSkinnedMeshDeforms(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	r.SetClearColor(glm.RGBA32F{0, 0, 0, 1})
+	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
 	scene := r.NewScene()
 	defer scene.Destroy()

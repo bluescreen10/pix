@@ -55,10 +55,10 @@ func (m *RawMaterial) release() {
 // SetTexture binds a texture into slot, taking a reference that lasts until the slot
 // is rebound or the material is released. Write the texture's Index() into the record
 // yourself (via Bytes) — RawMaterial has no typed record to do it for you.
-func (m *RawMaterial) SetTexture(slot int, t Texture) {
+func (m *RawMaterial) SetTexture(slot int, texture Texture) {
 	old := m.textures[slot]
-	if t.Valid() {
-		m.textures[slot] = t.Copy()
+	if texture.Valid() {
+		m.textures[slot] = texture.Copy()
 	} else {
 		m.textures[slot] = Texture{}
 	}
@@ -120,13 +120,13 @@ func (m *RawMaterial) Cull() CullMode {
 }
 
 // SetCull sets which faces are culled (CullNone = double-sided).
-func (m *RawMaterial) SetCull(c CullMode) {
-	m.store.setCullOf(m.ref.id, c)
+func (m *RawMaterial) SetCull(mode CullMode) {
+	m.store.setCullOf(m.ref.id, mode)
 }
 
 // SetDoubleSided is a convenience for SetCull(CullNone) / SetCull(CullBack).
-func (m *RawMaterial) SetDoubleSided(v bool) {
-	if v {
+func (m *RawMaterial) SetDoubleSided(enabled bool) {
+	if enabled {
 		m.SetCull(CullNone)
 	} else {
 		m.SetCull(CullBack)
@@ -141,8 +141,8 @@ func (m *RawMaterial) Blend() BlendMode {
 }
 
 // SetBlend sets the material's blend mode (Opaque/Alpha/Additive).
-func (m *RawMaterial) SetBlend(b BlendMode) {
-	m.store.setBlendOf(m.ref.id, b)
+func (m *RawMaterial) SetBlend(mode BlendMode) {
+	m.store.setBlendOf(m.ref.id, mode)
 }
 
 // Cached pipeline identities, precomputed per store (see the Material interface).

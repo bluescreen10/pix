@@ -3,7 +3,7 @@
 // per-fragment in the lit shaders — see applyFog in lighting.glsl.
 package pix
 
-import "github.com/bluescreen10/pix/glm"
+import "github.com/bluescreen10/pix/colors"
 
 // Fog modes, mirroring FOG_* in lighting.glsl. The mode travels in the alpha channel
 // of the packed colour, so "no fog" costs no extra field.
@@ -29,7 +29,7 @@ type Fog interface {
 
 // fogState is the packed, shader-facing form of a Fog. Values are in world units.
 type fogState struct {
-	color   glm.Vec3f
+	color   colors.RGB32F
 	mode    uint32
 	near    float32
 	far     float32
@@ -43,39 +43,63 @@ type fogState struct {
 //
 // The fields are exported and read every frame, so they can be animated in place.
 type LinearFog struct {
-	Color glm.Vec3f
+	Color colors.RGB32F
 	Near  float32
 	Far   float32
 }
 
 // NewLinearFog returns a linear fog of colour c between near and far world units.
-func NewLinearFog(c glm.Vec3f, near, far float32) *LinearFog {
-	return &LinearFog{Color: c, Near: near, Far: far}
+func NewLinearFog(color colors.RGB32F, near, far float32) *LinearFog {
+	return &LinearFog{Color: color, Near: near, Far: far}
 }
 
 func (f *LinearFog) fogState() fogState {
 	return fogState{color: f.Color, mode: fogLinear, near: f.Near, far: f.Far}
 }
 
-// Exp2Fog falls off as exp(-(distance*Density)^2), the equivalent of three.js's
-// THREE.FogExp2. Squaring the exponent is what makes this the usual default over a
-// plain exponential: it leaves the foreground clear instead of hazing from the camera
-// outward, then closes in quickly. Density is small — 0.01 fades things out over
-// roughly a hundred world units.
+// exp2VisibleAtDistance is the fraction of a surface still showing through Exp2Fog at
+// its Distance — 10%, i.e. "essentially gone, but not mathematically gone". It fixes
+// the constant that converts a distance into the density the shader wants:
+// exp(-(d*density)^2) = 0.1  =>  density = sqrt(-ln(0.1)) / d.
+const exp2VisibleAtDistance = 0.1
+
+// exp2DensityScale is sqrt(-ln(exp2VisibleAtDistance)), precomputed.
+const exp2DensityScale = 1.5174271
+
+// Exp2Fog falls off as exp(-(d/Distance * k)^2) — three.js's THREE.FogExp2, but
+// parameterized by a distance rather than a raw density.
+//
+// Distance is where the fog has closed in: a surface that far from the camera shows
+// through at about 10%. Nearer geometry keeps its colour, and the falloff is squared
+// rather than plain exponential, so the foreground stays clear instead of hazing from
+// the camera outward.
+//
+// A distance is the knob rather than a density because density is an inverse length,
+// so the usable value depends entirely on how big the scene is: an asset authored in
+// centimetres needs a density three or four orders of magnitude smaller than one
+// authored in metres, and a value that looks reasonable typed out will flatten a large
+// scene to a single colour. A distance is in the same units as everything else you
+// already work in. To port a three.js density, use Distance = 1.5174 / density.
+//
+// A Distance of zero or less disables the fog rather than dividing by it.
 //
 // The fields are exported and read every frame, so they can be animated in place.
 type Exp2Fog struct {
-	Color   glm.Vec3f
-	Density float32
+	Color    colors.RGB32F
+	Distance float32
 }
 
-// NewExp2Fog returns an exponential-squared fog of colour c and the given density.
-func NewExp2Fog(c glm.Vec3f, density float32) *Exp2Fog {
-	return &Exp2Fog{Color: c, Density: density}
+// NewExp2Fog returns an exponential-squared fog of colour c that has closed in at the
+// given distance, in world units.
+func NewExp2Fog(color colors.RGB32F, distance float32) *Exp2Fog {
+	return &Exp2Fog{Color: color, Distance: distance}
 }
 
 func (f *Exp2Fog) fogState() fogState {
-	return fogState{color: f.Color, mode: fogExp2, density: f.Density}
+	if f.Distance <= 0 {
+		return fogState{mode: fogNone}
+	}
+	return fogState{color: f.Color, mode: fogExp2, density: exp2DensityScale / f.Distance}
 }
 
 // stateOf returns the packed state for a Fog, treating nil as "no fog" so callers

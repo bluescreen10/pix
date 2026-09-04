@@ -7,6 +7,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
 	"github.com/bluescreen10/pix/shaders"
@@ -22,7 +23,7 @@ type Renderer struct {
 	backend       gpu.Backend
 	width, height uint32
 	color         gpu.Format
-	clear         glm.RGBA32F
+	clear         colors.RGBA32F
 	depth         gpu.Texture
 
 	// Presentation target: a swapchain (windowed) or a render-target texture (headless).
@@ -82,7 +83,7 @@ type Renderer struct {
 
 	// Stats / debug HUD.
 	stats     *RendererStats
-	fontColor glm.RGBA32F
+	fontColor colors.RGBA32F
 	showFPS   bool
 	overlay   *overlay
 	gpuPool   gpu.QueryPool
@@ -109,8 +110,8 @@ func (r *Renderer) EnableDeferredRendering(on bool) {
 // are fit: a smaller distance packs the shadow map's resolution into the near view for
 // sharper shadows, at the cost of no shadows beyond it. Pass 0 for the automatic
 // default (fit reaches the far side of the scene's bounding sphere).
-func (r *Renderer) SetShadowDistance(d float32) {
-	r.shadowDistance = d
+func (r *Renderer) SetShadowDistance(distance float32) {
+	r.shadowDistance = distance
 }
 
 // NewRenderer creates a renderer from cfg: it selects and initializes a registered
@@ -132,8 +133,8 @@ func NewRenderer(cfg *RendererConfig) (*Renderer, error) {
 	}
 	r := &Renderer{
 		backend:   backend,
-		clear:     glm.RGBA32F{0, 0, 0, 1},      //TODO: extract as constant
-		fontColor: glm.RGBA32F{1, 0.9, 0.35, 1}, //TODO: extract as constant
+		clear:     colors.RGBA32F{0, 0, 0, 1},      //TODO: extract as constant
+		fontColor: colors.RGBA32F{1, 0.9, 0.35, 1}, //TODO: extract as constant
 		// One uploader for the process, not one per frame: its staging arena only
 		// pays off by keeping its memory across frames (see uploader).
 		uploader:   newUploader(backend),
@@ -456,7 +457,7 @@ func (r *Renderer) Aspect() float32 {
 }
 
 // SetClearColor sets the color the framebuffer is cleared to each frame.
-func (r *Renderer) SetClearColor(rgba glm.RGBA32F) {
+func (r *Renderer) SetClearColor(rgba colors.RGBA32F) {
 	r.clear = rgba
 }
 

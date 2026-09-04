@@ -11,6 +11,7 @@ import (
 
 	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
+	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -141,7 +142,7 @@ func TestLoadTriangle(t *testing.T) {
 
 	// Flat white ambient so the unlit base color shows through (this test checks
 	// loading/material/transform, not lighting — and there's no default ambient).
-	scene.SetAmbient(glm.Vec3f{1, 1, 1})
+	scene.SetAmbient(colors.RGB32F{1, 1, 1})
 
 	cam := cameras.NewPerspectiveCamera(50, 1, 0.1, 100)
 	cam.SetPosition(glm.Vec3f{0, 0, 2.5})

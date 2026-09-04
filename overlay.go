@@ -3,6 +3,7 @@ package pix
 import (
 	"unsafe"
 
+	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
 	"github.com/bluescreen10/pix/shaders"
@@ -12,7 +13,7 @@ import (
 // in overlay.vert. rect = x,y (top-left px), z,w (w,h px).
 type overlayQuad struct {
 	rect  glm.Vec4f
-	color glm.RGBA32F
+	color colors.RGBA32F
 }
 
 // overlayRoot matches Root in overlay.vert. Scalar layout: vec2 viewport occupies
@@ -51,7 +52,7 @@ func (o *overlay) reset() { o.quads = o.quads[:0] }
 
 // text rasterizes s at (x,y) top-left in pixels, with glyph height `size` px, into
 // solid quads of the given color.
-func (o *overlay) text(s string, x, y, size float32, color glm.RGBA32F) {
+func (o *overlay) text(s string, x, y, size float32, color colors.RGBA32F) {
 	scale := size / 16
 	cx := x
 	for _, ch := range s {

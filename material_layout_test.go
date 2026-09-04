@@ -5,7 +5,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/colors"
 )
 
 func u32At(t *testing.T, b []byte, off int) uint32 {
@@ -41,8 +41,8 @@ func TestMaterialRecordLayouts(t *testing.T) {
 	t.Run("PBR", func(t *testing.T) {
 		m := r.NewPBRMaterial()
 		defer m.Release()
-		m.SetColor(glm.RGBA32F{0.1, 0.2, 0.3, 0.4})
-		m.SetEmissive(glm.RGBA32F{0.5, 0.6, 0.7, 0.8})
+		m.SetColor(colors.RGBA32F{0.1, 0.2, 0.3, 0.4})
+		m.SetEmissive(colors.RGB32F{0.5, 0.6, 0.7})
 		m.SetMetallic(0.25)
 		m.SetRoughness(0.75)
 		m.SetTransmission(0.5)
@@ -61,7 +61,7 @@ func TestMaterialRecordLayouts(t *testing.T) {
 			want float32
 		}{
 			{"color.r", 0, 0.1}, {"color.a", 12, 0.4},
-			{"emissive.r", 16, 0.5}, {"emissive.a", 28, 0.8},
+			{"emissive.r", 16, 0.5}, {"emissive.b", 24, 0.7},
 			{"metallic", 32, 0.25}, {"roughness", 36, 0.75}, {"transmission", 40, 0.5},
 		}
 		for _, c := range checks {
@@ -92,8 +92,8 @@ func TestMaterialRecordLayouts(t *testing.T) {
 	t.Run("Basic", func(t *testing.T) {
 		m := r.NewBasicMaterial()
 		defer m.Release()
-		m.SetColor(glm.RGBA32F{0.1, 0.2, 0.3, 0.4})
-		m.SetEmissive(glm.RGBA32F{0.5, 0.6, 0.7, 0.8})
+		m.SetColor(colors.RGBA32F{0.1, 0.2, 0.3, 0.4})
+		m.SetEmissive(colors.RGB32F{0.5, 0.6, 0.7})
 		m.SetColorMap(tex)
 		m.SetColorMapSampler(3)
 
@@ -121,8 +121,8 @@ func TestMaterialRecordLayouts(t *testing.T) {
 	t.Run("BlinnPhong", func(t *testing.T) {
 		m := r.NewBlinnPhongMaterial()
 		defer m.Release()
-		m.SetColor(glm.RGBA32F{0.1, 0.2, 0.3, 0.4})
-		m.SetEmissive(glm.RGB32F{0.5, 0.6, 0.7})
+		m.SetColor(colors.RGBA32F{0.1, 0.2, 0.3, 0.4})
+		m.SetEmissive(colors.RGB32F{0.5, 0.6, 0.7})
 		m.SetSpecular(0.25)
 		m.SetShininess(64)
 

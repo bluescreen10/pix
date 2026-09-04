@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix/cameras"
+	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -32,7 +33,7 @@ func TestMaterialEditBetweenFramesReachesGPU(t *testing.T) {
 	cube := r.NewGeometry(normalCube())
 	defer cube.Release()
 	mat := r.NewBasicMaterial() // unlit: pixel is the material color, no lighting
-	mat.SetColor(glm.RGBA32F{1, 0, 0, 1})
+	mat.SetColor(colors.RGBA32F{1, 0, 0, 1})
 	scene.Add(scene.NewMesh(cube, mat))
 
 	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
@@ -44,7 +45,7 @@ func TestMaterialEditBetweenFramesReachesGPU(t *testing.T) {
 	}
 
 	// Change the material and re-render. Nothing else about the scene changes.
-	mat.SetColor(glm.RGBA32F{0, 0, 1, 1})
+	mat.SetColor(colors.RGBA32F{0, 0, 1, 1})
 	r2, _, b2 := renderCube(t, r, scene, cam)
 	if b2 < 200 || r2 > 60 {
 		t.Fatalf("material edit never reached the GPU: want blue, got r=%d b=%d", r2, b2)
@@ -66,7 +67,7 @@ func TestMaterialStoreGrowReuploadsEveryRecord(t *testing.T) {
 	defer cube.Release()
 
 	first := r.NewBasicMaterial()
-	first.SetColor(glm.RGBA32F{1, 0, 0, 1})
+	first.SetColor(colors.RGBA32F{1, 0, 0, 1})
 	scene.Add(scene.NewMesh(cube, first))
 
 	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)

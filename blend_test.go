@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix/cameras"
+	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -20,7 +21,7 @@ func TestTransparency(t *testing.T) {
 	r.SetClearColor([4]float32{0, 0, 0, 1})
 	scene := r.NewScene()
 	defer scene.Destroy()
-	scene.SetAmbient(glm.Vec3f{1, 1, 1}) // full ambient → albedo shows directly
+	scene.SetAmbient(colors.RGB32F{1, 1, 1}) // full ambient → albedo shows directly
 
 	quad := func(z float32) Geometry {
 		return r.NewGeometry(GeometryConfig{
@@ -33,10 +34,10 @@ func TestTransparency(t *testing.T) {
 
 	// Opaque red behind. Add it LAST to prove the sort still draws opaque first.
 	red := r.NewPBRMaterial()
-	red.SetColor(glm.RGBA32F{1, 0, 0, 1})
+	red.SetColor(colors.RGBA32F{1, 0, 0, 1})
 	// Transparent blue in front (added first).
 	blue := r.NewPBRMaterial()
-	blue.SetColor(glm.RGBA32F{0, 0, 1, 0.5})
+	blue.SetColor(colors.RGBA32F{0, 0, 1, 0.5})
 	blue.SetBlend(BlendAlpha)
 	scene.Add(scene.NewMesh(quad(0), blue))   // front, transparent, added first
 	scene.Add(scene.NewMesh(quad(-0.5), red)) // behind, opaque, added last

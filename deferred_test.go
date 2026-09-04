@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix/cameras"
+	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
 )
@@ -18,12 +19,12 @@ func TestDeferredPBRRenders(t *testing.T) {
 	}
 	defer r.Destroy()
 	r.EnableDeferredRendering(true)
-	r.SetClearColor(glm.RGBA32F{0, 0, 0, 1})
+	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
 	scene := r.NewScene()
 	defer scene.Destroy()
-	scene.SetAmbient(glm.Vec3f{0.6, 0.6, 0.6})
-	light := scene.AddDirectionalLight(glm.Vec3f{-0.3, -1, -0.2}, glm.Vec3f{1, 1, 1}, 2)
+	scene.SetAmbient(colors.RGB32F{0.6, 0.6, 0.6})
+	light := scene.AddDirectionalLight(glm.Vec3f{-0.3, -1, -0.2}, colors.RGB32F{1, 1, 1}, 2)
 	_ = light
 
 	cube := r.NewGeometry(normalCube())
@@ -69,7 +70,7 @@ func TestDeferredRenderingOffByDefault(t *testing.T) {
 
 	scene := r.NewScene()
 	defer scene.Destroy()
-	scene.SetAmbient(glm.Vec3f{0.6, 0.6, 0.6})
+	scene.SetAmbient(colors.RGB32F{0.6, 0.6, 0.6})
 
 	cube := r.NewGeometry(normalCube())
 	defer cube.Release()
@@ -96,23 +97,23 @@ func TestDeferredAndForwardMixed(t *testing.T) {
 	}
 	defer r.Destroy()
 	r.EnableDeferredRendering(true)
-	r.SetClearColor(glm.RGBA32F{0, 0, 0, 1})
+	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
 	scene := r.NewScene()
 	defer scene.Destroy()
-	scene.SetAmbient(glm.Vec3f{0.8, 0.8, 0.8})
+	scene.SetAmbient(colors.RGB32F{0.8, 0.8, 0.8})
 
 	cube := r.NewGeometry(normalCube())
 	defer cube.Release()
 
 	pbr := r.NewPBRMaterial()
-	pbr.SetColor(glm.RGBA32F{1, 1, 1, 1})
+	pbr.SetColor(colors.RGBA32F{1, 1, 1, 1})
 	left := scene.NewMesh(cube, pbr)
 	left.SetPosition(glm.Vec3f{-1.2, 0, 0})
 	scene.Add(left)
 
 	basic := r.NewBasicMaterial()
-	basic.SetColor(glm.RGBA32F{0, 1, 0, 1})
+	basic.SetColor(colors.RGBA32F{0, 1, 0, 1})
 	if basic.Deferred() != nil || basic.Lighting() != nil {
 		t.Fatal("BasicMaterial should be forward-only (no Deferred/Lighting)")
 	}
@@ -165,17 +166,17 @@ func TestDeferredEmissiveMatchesForward(t *testing.T) {
 		}
 		defer r.Destroy()
 		r.EnableDeferredRendering(deferred)
-		r.SetClearColor(glm.RGBA32F{0, 0, 0, 1})
+		r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
 		scene := r.NewScene()
 		defer scene.Destroy()
-		scene.SetAmbient(glm.Vec3f{0.25, 0.25, 0.25})
+		scene.SetAmbient(colors.RGB32F{0.25, 0.25, 0.25})
 
 		cube := r.NewGeometry(normalCube())
 		defer cube.Release()
 		mat := r.NewPBRMaterial()
-		mat.SetColor(glm.RGBA32F{1, 1, 1, 1})
-		mat.SetEmissive(glm.RGBA32F{0.25, 0.25, 0.25, 1})
+		mat.SetColor(colors.RGBA32F{1, 1, 1, 1})
+		mat.SetEmissive(colors.RGB32F{0.25, 0.25, 0.25})
 		scene.Add(scene.NewMesh(cube, mat))
 
 		cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
@@ -249,16 +250,16 @@ func TestDeferredBackgroundKeepsClearColor(t *testing.T) {
 	defer r.Destroy()
 	r.EnableDeferredRendering(true)
 	// A distinctive clear color: neither black nor anything the lit cube produces.
-	r.SetClearColor(glm.RGBA32F{0, 0, 1, 1})
+	r.SetClearColor(colors.RGBA32F{0, 0, 1, 1})
 
 	scene := r.NewScene()
 	defer scene.Destroy()
-	scene.SetAmbient(glm.Vec3f{0.9, 0.9, 0.9})
+	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
 
 	cube := r.NewGeometry(normalCube())
 	defer cube.Release()
 	mat := r.NewPBRMaterial()
-	mat.SetColor(glm.RGBA32F{1, 0, 0, 1}) // red cube on a blue background
+	mat.SetColor(colors.RGBA32F{1, 0, 0, 1}) // red cube on a blue background
 	scene.Add(scene.NewMesh(cube, mat))
 
 	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
@@ -298,7 +299,7 @@ func TestDrawListBuffersGrowOnly(t *testing.T) {
 
 	scene := r.NewScene()
 	defer scene.Destroy()
-	scene.SetAmbient(glm.Vec3f{0.8, 0.8, 0.8})
+	scene.SetAmbient(colors.RGB32F{0.8, 0.8, 0.8})
 
 	cube := r.NewGeometry(normalCube())
 	defer cube.Release()

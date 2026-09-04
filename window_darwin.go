@@ -3,7 +3,7 @@ package pix
 import (
 	"unsafe"
 
-	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/gpu"
 )
 
@@ -30,6 +30,6 @@ func (r *Renderer) attachWindow(w *Window, width, height uint32) {
 	r.swapchain = r.backend.CreateSwapchain(surface, width, height)
 	sw, sh := ms.SwapchainSize(r.swapchain)
 	r.hasTarget = false
-	r.clear = glm.RGBA32F{}
+	r.clear = colors.RGBA32F{}
 	r.configure(sw, sh, r.backend.SwapchainFormat(r.swapchain))
 }

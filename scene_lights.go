@@ -5,6 +5,7 @@ package pix
 import (
 	"unsafe"
 
+	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
 )
@@ -51,13 +52,13 @@ type gpuSpotLight struct {
 
 // gpuLights is the whole light table (scalar; matches LightBuf in scene_lit.frag).
 type gpuLights struct {
-	ambient [4]float32
+	ambient colors.RGBA32F
 	// fogColor is rgb + the fog mode in w; fogParams is (near, far, density, _).
 	// Fog rides in the light table rather than in each root because both the forward
 	// and the deferred lighting passes already carry the table, and neither push
 	// constant has to grow.
-	fogColor  [4]float32
-	fogParams [4]float32
+	fogColor  colors.RGBA32F
+	fogParams colors.RGBA32F
 	numDir    uint32
 	numPoint  uint32
 	numSpot   uint32
@@ -101,9 +102,9 @@ func NewLights(b gpu.Backend) *Lights {
 // are mutable), but it only marks the buffer dirty when the derived table actually
 // changed, so a static scene re-uploads nothing. Lights past the fixed caps
 // (MaxDirLights/MaxPointLights/MaxSpotLights) are dropped.
-func (l *Lights) rebuild(ambient glm.Vec3f, fog Fog, dirs []*DirectionalLight, points []*PointLight, spots []*SpotLight) {
+func (l *Lights) rebuild(ambient colors.RGB32F, fog Fog, dirs []*DirectionalLight, points []*PointLight, spots []*SpotLight) {
 	var next gpuLights
-	next.ambient = [4]float32{ambient[0], ambient[1], ambient[2], 0}
+	next.ambient = ambient.RGBA()
 	fs := stateOf(fog)
 	next.fogColor = [4]float32{fs.color[0], fs.color[1], fs.color[2], float32(fs.mode)}
 	next.fogParams = [4]float32{fs.near, fs.far, fs.density, 0}

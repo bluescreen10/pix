@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix/cameras"
+	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -23,11 +24,11 @@ func TestMaterialClasses(t *testing.T) {
 
 	cube := r.NewGeometry(normalCube())
 	basic := r.NewBasicMaterial()
-	basic.SetColor(glm.RGBA32F{0.8, 0.8, 0.8, 1})
+	basic.SetColor(colors.RGBA32F{0.8, 0.8, 0.8, 1})
 	phong := r.NewBlinnPhongMaterial()
-	phong.SetColor(glm.RGBA32F{0.8, 0.8, 0.8, 1})
+	phong.SetColor(colors.RGBA32F{0.8, 0.8, 0.8, 1})
 	pbr := r.NewPBRMaterial()
-	pbr.SetColor(glm.RGBA32F{0.8, 0.8, 0.8, 1})
+	pbr.SetColor(colors.RGBA32F{0.8, 0.8, 0.8, 1})
 
 	place := func(mat Material, x float32) {
 		m := scene.NewMesh(cube, mat)
@@ -39,8 +40,8 @@ func TestMaterialClasses(t *testing.T) {
 	place(phong, 0)
 	place(pbr, 1.4)
 
-	scene.SetAmbient(glm.Vec3f{0.15, 0.15, 0.15})
-	scene.AddDirectionalLight(glm.Vec3f{-1, -0.3, -0.6}, glm.Vec3f{1, 1, 1}, 1.0)
+	scene.SetAmbient(colors.RGB32F{0.15, 0.15, 0.15})
+	scene.AddDirectionalLight(glm.Vec3f{-1, -0.3, -0.6}, colors.RGB32F{1, 1, 1}, 1.0)
 
 	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 1000)
 	cam.SetPosition(glm.Vec3f{0, 0.5, 5})
