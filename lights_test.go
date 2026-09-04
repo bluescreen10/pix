@@ -6,6 +6,7 @@ import (
 
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -19,7 +20,7 @@ func rotY(a float32) glm.Mat4f {
 
 // normalCube returns a cube with 24 vertices (4 per face) so each face carries a
 // constant outward normal — required for per-face lighting to vary.
-func normalCube() GeometryConfig {
+func normalCube() geometries.GeometryConfig {
 	type face struct {
 		n       glm.Vec3f
 		corners [4]glm.Vec3f
@@ -43,10 +44,10 @@ func normalCube() GeometryConfig {
 		}
 		indices = append(indices, base, base+1, base+2, base, base+2, base+3)
 	}
-	return GeometryConfig{
-		Attributes: []Attribute{
-			NewAttribute(AttributePosition, Float32x3, positions),
-			NewAttribute(AttributeNormal, Float32x3, normals),
+	return geometries.GeometryConfig{
+		Attributes: []geometries.Attribute{
+			geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, positions),
+			geometries.NewAttribute(geometries.AttributeNormal, geometries.Float32x3, normals),
 		},
 		Indices: indices,
 	}
@@ -62,7 +63,7 @@ func TestDirectionalLighting(t *testing.T) {
 	scene := r.NewScene()
 	defer scene.Destroy()
 
-	cube := r.NewGeometry(normalCube())
+	cube := r.GeometryStore.Create(normalCube())
 	mat := r.NewBlinnPhongMaterial()
 	m := scene.NewMesh(cube, mat)
 	m.SetRotationQuat(glm.NewQuat(float32(0.6), glm.Vec3f{0, 1, 0})) // rotate so +X and +Z faces both show

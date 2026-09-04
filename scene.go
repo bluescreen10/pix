@@ -458,7 +458,7 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []Material) {
 		out = append(out, gpuDrawable{
 			bounds:      [4]float32{md.bounds.Center[0], md.bounds.Center[1], md.bounds.Center[2], md.bounds.Radius},
 			transformID: md.ownerNode,
-			geometryID:  md.geometry.id(),
+			geometryID:  md.geometry.ID(),
 			materialID:  md.material.materialID(),
 			flags:       flags,
 		})
@@ -481,7 +481,7 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []Material) {
 		out = append(out, gpuDrawable{
 			bounds:      [4]float32{sm.bounds.Center[0], sm.bounds.Center[1], sm.bounds.Center[2], sm.bounds.Radius},
 			transformID: root,
-			geometryID:  sm.outputGeo.id(),
+			geometryID:  sm.outputGeo.ID(),
 			materialID:  sm.material.materialID(),
 			flags:       flags,
 		})

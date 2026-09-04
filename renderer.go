@@ -8,6 +8,7 @@ import (
 	"unsafe"
 
 	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
 	"github.com/bluescreen10/pix/shaders"
@@ -36,9 +37,13 @@ type Renderer struct {
 
 	// Renderer-owned shared resources + GPU-driven pipelines. The material stores are
 	// owned by the material system, not the renderer.
-	geometries *geometrySystem
-	materials  *materialSystem
-	textures   *textureSystem
+	//
+	// GeometryStore is exported (unlike materials/textures) so callers create
+	// geometry directly — r.GeometryStore.Create(cfg) — with no per-renderer wrapper
+	// method to keep in sync.
+	GeometryStore *geometries.Store
+	materials     *materialSystem
+	textures      *textureSystem
 	// uploader is shared by every subsystem that stages into device memory; it
 	// lives as long as the renderer so its staging arena is reused across frames.
 	uploader *uploader
@@ -137,11 +142,11 @@ func NewRenderer(cfg *RendererConfig) (*Renderer, error) {
 		fontColor: colors.RGBA32F{1, 0.9, 0.35, 1}, //TODO: extract as constant
 		// One uploader for the process, not one per frame: its staging arena only
 		// pays off by keeping its memory across frames (see uploader).
-		uploader:   newUploader(backend),
-		geometries: newGeometrySystem(backend),
-		materials:  newMaterialSystem(backend),
-		textures:   newTextureSystem(backend),
-		stats:      newRendererStats(60),
+		uploader:      newUploader(backend),
+		GeometryStore: geometries.NewStore(backend),
+		materials:     newMaterialSystem(backend),
+		textures:      newTextureSystem(backend),
+		stats:         newRendererStats(60),
 	}
 
 	switch {
@@ -414,11 +419,6 @@ func (r *Renderer) pipelineForMaterial(m Material) uint32 {
 func sameKey(a, b materialPipeline) bool {
 	return a.pass == b.pass && a.shaderHash == b.shaderHash &&
 		a.cull == b.cull && a.blend == b.blend && a.lightingIdx == b.lightingIdx
-}
-
-// NewGeometry uploads mesh data and returns a ref-counted geometry handle.
-func (r *Renderer) NewGeometry(cfg GeometryConfig) Geometry {
-	return r.geometries.newHandle(cfg)
 }
 
 // The named material constructors (NewBasicMaterial, NewBlinnPhongMaterial,
@@ -719,7 +719,7 @@ func (r *Renderer) syncScene(scene *Scene, cam Camera, cmd gpu.CommandBuffer) {
 	}
 	up := r.uploader
 	up.Begin(cmd)
-	r.geometries.Sync(up)
+	r.GeometryStore.Sync(up)
 	r.materials.Sync(up)
 	scene.Sync()
 	up.End(cmd)
@@ -738,7 +738,7 @@ func (r *Renderer) syncScene(scene *Scene, cam Camera, cmd gpu.CommandBuffer) {
 	}
 	if scene.drawableDirty || !slices.Equal(dl.pipeBuf, dl.batchedPipelines) {
 		drawables, materials := scene.collectDrawables()
-		dl.rebuild(drawables, dl.pipeBuf, materials, r.geometries)
+		dl.rebuild(drawables, dl.pipeBuf, materials, r.GeometryStore)
 		scene.drawableDirty = false
 	}
 }
@@ -1015,7 +1015,7 @@ func (r *Renderer) skinCommands(scene *Scene) []skinCmd {
 	for _, sm := range scene.skinnedMeshes.All() {
 		sk := scene.skeletons.Get(sm.skeleton)
 		r.skinScratch = append(r.skinScratch, skinCmd{
-			srcDesc: sm.srcGeometry.id(), dstDesc: sm.outputGeo.id(),
+			srcDesc: sm.srcGeometry.ID(), dstDesc: sm.outputGeo.ID(),
 			jointBase: sk.jointBase, vertexCount: sm.vertCount,
 		})
 	}
@@ -1028,8 +1028,8 @@ func (r *Renderer) skinCommands(scene *Scene) []skinCmd {
 // mesh, sized to its vertex count. See scene_skin.comp.
 func (r *Renderer) dispatchSkinning(cmd gpu.CommandBuffer, dl *drawList, cmds []skinCmd, jointsAddr uint64) {
 	roots := unsafe.Slice((*skinRoot)(dl.skinRootBuf.Ptr), len(cmds))
-	posAddr, attrAddr := r.geometries.PositionsAddr(), r.geometries.AttributesAddr()
-	skinAddr, descAddr := r.geometries.SkinAddr(), r.geometries.DescriptorsAddr()
+	posAddr, attrAddr := r.GeometryStore.PositionsAddr(), r.GeometryStore.AttributesAddr()
+	skinAddr, descAddr := r.GeometryStore.SkinAddr(), r.GeometryStore.DescriptorsAddr()
 	cmd.SetPipeline(r.skinPipeline)
 	for i, c := range cmds {
 		roots[i] = skinRoot{
@@ -1049,8 +1049,8 @@ func (r *Renderer) recordShadowDepth(cmd gpu.CommandBuffer, dl *drawList, v *dra
 	size := sv.size
 	*(*shadowRoot)(v.drawRootBuf.Ptr) = shadowRoot{
 		viewProj:  sv.cam.ViewProjection(),
-		pos:       r.geometries.PositionsAddr(),
-		descs:     r.geometries.DescriptorsAddr(),
+		pos:       r.GeometryStore.PositionsAddr(),
+		descs:     r.GeometryStore.DescriptorsAddr(),
 		models:    dl.worldBuf.Addr,
 		drawables: dl.drawableBuf.Addr,
 		visible:   v.visibleBuf.Addr,
@@ -1062,7 +1062,7 @@ func (r *Renderer) recordShadowDepth(cmd gpu.CommandBuffer, dl *drawList, v *dra
 	cmd.Scissor(0, 0, int32(size), int32(size))
 	cmd.SetPipeline(r.shadowPipeline)
 	cmd.Root(v.drawRootBuf.Addr)
-	cmd.DrawIndexedIndirect(r.geometries.IndexBuffer(), v.indirectBuf, 0, uint32(dl.batchCount()), indirectSize)
+	cmd.DrawIndexedIndirect(r.GeometryStore.IndexBuffer(), v.indirectBuf, 0, uint32(dl.batchCount()), indirectSize)
 	cmd.EndRenderPass()
 }
 
@@ -1079,9 +1079,9 @@ func (r *Renderer) fillDrawRoots(dl *drawList, viewProj glm.Mat4f, eye glm.Vec3f
 		run := &dl.runs[ri]
 		roots[ri] = drawRoot{
 			viewProj:      viewProj,
-			pos:           r.geometries.PositionsAddr(),
-			attr:          r.geometries.AttributesAddr(),
-			descs:         r.geometries.DescriptorsAddr(),
+			pos:           r.GeometryStore.PositionsAddr(),
+			attr:          r.GeometryStore.AttributesAddr(),
+			descs:         r.GeometryStore.DescriptorsAddr(),
 			models:        dl.worldBuf.Addr,
 			drawables:     dl.drawableBuf.Addr,
 			visible:       dl.visibleBuf.Addr,
@@ -1101,7 +1101,7 @@ func (r *Renderer) issueDraws(cmd gpu.CommandBuffer, dl *drawList, p pass) {
 	if len(dl.runs) == 0 {
 		return
 	}
-	idx := r.geometries.IndexBuffer()
+	idx := r.GeometryStore.IndexBuffer()
 	for ri := range dl.runs {
 		run := &dl.runs[ri]
 		if r.drawPipelineKeys[run.pipeline].pass != p {
@@ -1240,10 +1240,10 @@ func (r *Renderer) Destroy() {
 	if r.readback.Valid() {
 		r.backend.Free(r.readback)
 	}
-	r.geometries.Destroy()
+	r.GeometryStore.Destroy()
 	r.materials.Destroy()
 	r.textures.Destroy()
-	r.uploader.destroy()
+	r.uploader.Destroy()
 	r.backend.Destroy()
 }
 

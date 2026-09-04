@@ -3,6 +3,7 @@ package pix
 import (
 	"sort"
 
+	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
 )
@@ -81,7 +82,7 @@ func (d *drawList) sync(world []glm.Mat4f) {
 // template (indexCount/firstIndex from the geometry, firstInstance = the region base),
 // resizes buffers, and uploads the drawable + region tables. Called on structural
 // change. pipelines[i] is drawables[i]'s draw pipeline.
-func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, materials []Material, geo *geometrySystem) {
+func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, materials []Material, geometryStore *geometries.Store) {
 	type key struct{ pipeline, geo uint32 }
 
 	// First pass: unique (pipeline, geometry) batches + their instance counts, and a
@@ -140,9 +141,8 @@ func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, material
 		b.regionCap = padded
 		d.batches = append(d.batches, b)
 		d.regions = append(d.regions, base)
-		desc := geo.Desc(b.geometryID)
 		d.template = append(d.template, indirectCmd{
-			indexCount: desc.IndexCount, firstIndex: desc.IndexBase, firstInstance: base,
+			indexCount: geometryStore.IndexCount(b.geometryID), firstIndex: geometryStore.IndexBase(b.geometryID), firstInstance: base,
 		})
 		// Extend or start a pipeline run.
 		if n := len(d.runs); n > 0 && d.runs[n-1].pipeline == b.pipeline {

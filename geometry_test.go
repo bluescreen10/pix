@@ -3,6 +3,7 @@ package pix
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -17,16 +18,16 @@ func TestAttributeRoundTrip(t *testing.T) {
 
 	positions := []glm.Vec3f{{-1, -1, 0}, {1, -1, 0}, {0, 1, 0}}
 	uvs := []glm.Vec2f{{0, 0}, {1, 0}, {0.5, 1}}
-	geo := r.NewGeometry(GeometryConfig{
-		Attributes: []Attribute{
-			NewAttribute(AttributePosition, Float32x3, positions),
-			NewAttribute(AttributeUV, Float32x2, uvs),
+	geo := r.GeometryStore.Create(geometries.GeometryConfig{
+		Attributes: []geometries.Attribute{
+			geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, positions),
+			geometries.NewAttribute(geometries.AttributeUV, geometries.Float32x2, uvs),
 		},
 		Indices: []uint32{0, 1, 2},
 	})
 	defer geo.Release()
 
-	got := geo.GetAttributeData[glm.Vec3f](AttributePosition)
+	got := geo.GetAttributeData[glm.Vec3f](geometries.AttributePosition)
 	if len(got) != len(positions) {
 		t.Fatalf("position len = %d, want %d", len(got), len(positions))
 	}
@@ -37,14 +38,14 @@ func TestAttributeRoundTrip(t *testing.T) {
 	}
 
 	// Absent attribute → nil.
-	if n := geo.GetAttributeData[glm.Vec4f](AttributeColor); n != nil {
+	if n := geo.GetAttributeData[glm.Vec4f](geometries.AttributeColor); n != nil {
 		t.Fatalf("absent color attribute = %v, want nil", n)
 	}
 
 	// Replace positions in place and read them back.
 	moved := []glm.Vec3f{{-2, -2, 1}, {2, -2, 1}, {0, 2, 1}}
-	geo.SetAttributeData(AttributePosition, moved)
-	back := geo.GetAttributeData[glm.Vec3f](AttributePosition)
+	geo.SetAttributeData(geometries.AttributePosition, moved)
+	back := geo.GetAttributeData[glm.Vec3f](geometries.AttributePosition)
 	for i := range moved {
 		if back[i] != moved[i] {
 			t.Fatalf("after set: position[%d] = %v, want %v", i, back[i], moved[i])

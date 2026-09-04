@@ -3,6 +3,7 @@ package pix
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -14,7 +15,7 @@ import (
 func TestPrimitiveWindingIsOutward(t *testing.T) {
 	cases := []struct {
 		name string
-		cfg  GeometryConfig
+		cfg  geometries.GeometryConfig
 	}{
 		{"box", BoxGeometry(2, 3, 4)},
 		{"plane", PlaneGeometry(4, 6, 3, 5)},
@@ -25,8 +26,8 @@ func TestPrimitiveWindingIsOutward(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			pos := attrData[glm.Vec3f](t, tc.cfg, AttributePosition)
-			nrm := attrData[glm.Vec3f](t, tc.cfg, AttributeNormal)
+			pos := attrData[glm.Vec3f](t, tc.cfg, geometries.AttributePosition)
+			nrm := attrData[glm.Vec3f](t, tc.cfg, geometries.AttributeNormal)
 			if len(pos) != len(nrm) {
 				t.Fatalf("positions %d != normals %d", len(pos), len(nrm))
 			}
@@ -55,7 +56,7 @@ func TestPrimitiveWindingIsOutward(t *testing.T) {
 func TestPrimitiveExtents(t *testing.T) {
 	cases := []struct {
 		name                string
-		cfg                 GeometryConfig
+		cfg                 geometries.GeometryConfig
 		wantW, wantH, wantD float32
 	}{
 		{"box", BoxGeometry(2, 3, 4), 2, 3, 4},
@@ -66,7 +67,7 @@ func TestPrimitiveExtents(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			pos := attrData[glm.Vec3f](t, tc.cfg, AttributePosition)
+			pos := attrData[glm.Vec3f](t, tc.cfg, geometries.AttributePosition)
 			var lo, hi glm.Vec3f
 			for i, p := range pos {
 				if i == 0 {
@@ -93,12 +94,12 @@ func TestPrimitiveExtents(t *testing.T) {
 	}
 }
 
-// attrData pulls one attribute's typed data back out of a GeometryConfig.
-func attrData[T any](t *testing.T, cfg GeometryConfig, want AttributeType) []T {
+// attrData pulls one attribute's typed data back out of a geometries.GeometryConfig.
+func attrData[T any](t *testing.T, cfg geometries.GeometryConfig, want geometries.AttributeType) []T {
 	t.Helper()
 	for _, a := range cfg.Attributes {
-		if a.attrType == want {
-			return fromBytes[T](a.data, a.count)
+		if a.Type() == want {
+			return geometries.AttributeData[T](a)
 		}
 	}
 	t.Fatalf("geometry has no attribute %d", want)

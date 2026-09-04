@@ -5,6 +5,7 @@ import (
 
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -23,10 +24,10 @@ func TestTransparency(t *testing.T) {
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{1, 1, 1}) // full ambient → albedo shows directly
 
-	quad := func(z float32) Geometry {
-		return r.NewGeometry(GeometryConfig{
-			Attributes: []Attribute{
-				NewAttribute(AttributePosition, Float32x3, []glm.Vec3f{{-0.8, -0.8, z}, {0.8, -0.8, z}, {0.8, 0.8, z}, {-0.8, 0.8, z}}),
+	quad := func(z float32) geometries.Geometry {
+		return r.GeometryStore.Create(geometries.GeometryConfig{
+			Attributes: []geometries.Attribute{
+				geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, []glm.Vec3f{{-0.8, -0.8, z}, {0.8, -0.8, z}, {0.8, 0.8, z}, {-0.8, 0.8, z}}),
 			},
 			Indices: []uint32{0, 1, 2, 0, 2, 3},
 		})

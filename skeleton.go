@@ -248,7 +248,7 @@ func maxColumnLength(m glm.Mat4f) float32 {
 // 0 marks an unused joint — see computeJointRadii), radius covers every used
 // joint's current position plus its bind-space influence radius scaled by the
 // joint's current pose scale.
-func skinnedBounds(pos []glm.Vec3f, scale []float32, radii []float32) Sphere {
+func skinnedBounds(pos []glm.Vec3f, scale []float32, radii []float32) glm.Sphere {
 	var center glm.Vec3f
 	n := 0
 	for i, r := range radii {
@@ -259,7 +259,7 @@ func skinnedBounds(pos []glm.Vec3f, scale []float32, radii []float32) Sphere {
 		n++
 	}
 	if n == 0 {
-		return Sphere{Radius: 0.01}
+		return glm.Sphere{Radius: 0.01}
 	}
 	center = center.Scale(1.0 / float32(n))
 	var radius float32
@@ -272,5 +272,5 @@ func skinnedBounds(pos []glm.Vec3f, scale []float32, radii []float32) Sphere {
 			radius = d
 		}
 	}
-	return Sphere{Center: center, Radius: radius}
+	return glm.Sphere{Center: center, Radius: radius}
 }

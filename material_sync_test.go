@@ -30,7 +30,7 @@ func TestMaterialEditBetweenFramesReachesGPU(t *testing.T) {
 	defer r.Destroy()
 
 	scene := r.NewScene()
-	cube := r.NewGeometry(normalCube())
+	cube := r.GeometryStore.Create(normalCube())
 	defer cube.Release()
 	mat := r.NewBasicMaterial() // unlit: pixel is the material color, no lighting
 	mat.SetColor(colors.RGBA32F{1, 0, 0, 1})
@@ -63,7 +63,7 @@ func TestMaterialStoreGrowReuploadsEveryRecord(t *testing.T) {
 	defer r.Destroy()
 
 	scene := r.NewScene()
-	cube := r.NewGeometry(normalCube())
+	cube := r.GeometryStore.Create(normalCube())
 	defer cube.Release()
 
 	first := r.NewBasicMaterial()

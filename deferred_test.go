@@ -27,7 +27,7 @@ func TestDeferredPBRRenders(t *testing.T) {
 	light := scene.AddDirectionalLight(glm.Vec3f{-0.3, -1, -0.2}, colors.RGB32F{1, 1, 1}, 2)
 	_ = light
 
-	cube := r.NewGeometry(normalCube())
+	cube := r.GeometryStore.Create(normalCube())
 	defer cube.Release()
 	mat := r.NewPBRMaterial()
 	if mat.Blend() != BlendOpaque {
@@ -72,7 +72,7 @@ func TestDeferredRenderingOffByDefault(t *testing.T) {
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.6, 0.6, 0.6})
 
-	cube := r.NewGeometry(normalCube())
+	cube := r.GeometryStore.Create(normalCube())
 	defer cube.Release()
 	mat := r.NewPBRMaterial()
 	scene.Add(scene.NewMesh(cube, mat))
@@ -103,7 +103,7 @@ func TestDeferredAndForwardMixed(t *testing.T) {
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.8, 0.8, 0.8})
 
-	cube := r.NewGeometry(normalCube())
+	cube := r.GeometryStore.Create(normalCube())
 	defer cube.Release()
 
 	pbr := r.NewPBRMaterial()
@@ -172,7 +172,7 @@ func TestDeferredEmissiveMatchesForward(t *testing.T) {
 		defer scene.Destroy()
 		scene.SetAmbient(colors.RGB32F{0.25, 0.25, 0.25})
 
-		cube := r.NewGeometry(normalCube())
+		cube := r.GeometryStore.Create(normalCube())
 		defer cube.Release()
 		mat := r.NewPBRMaterial()
 		mat.SetColor(colors.RGBA32F{1, 1, 1, 1})
@@ -256,7 +256,7 @@ func TestDeferredBackgroundKeepsClearColor(t *testing.T) {
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
 
-	cube := r.NewGeometry(normalCube())
+	cube := r.GeometryStore.Create(normalCube())
 	defer cube.Release()
 	mat := r.NewPBRMaterial()
 	mat.SetColor(colors.RGBA32F{1, 0, 0, 1}) // red cube on a blue background
@@ -301,7 +301,7 @@ func TestDrawListBuffersGrowOnly(t *testing.T) {
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.8, 0.8, 0.8})
 
-	cube := r.NewGeometry(normalCube())
+	cube := r.GeometryStore.Create(normalCube())
 	defer cube.Release()
 	mat := r.NewPBRMaterial()
 	scene.Add(scene.NewMesh(cube, mat))

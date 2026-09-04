@@ -1,5 +1,10 @@
 package pix
 
+import (
+	"github.com/bluescreen10/pix/geometries"
+	"github.com/bluescreen10/pix/glm"
+)
+
 // Mesh is a typed node handle for a renderable mesh (geometry + material at a node).
 // It embeds Node, so all hierarchy and transform methods are available directly.
 type Mesh struct{ Node }
@@ -7,9 +12,9 @@ type Mesh struct{ Node }
 // meshData is the per-mesh payload stored in Scene.meshes. It holds ref-counted
 // handles to renderer-owned resources plus the cached local bounds.
 type meshData struct {
-	geometry  Geometry
+	geometry  geometries.Geometry
 	material  Material
-	bounds    Sphere
+	bounds    glm.Sphere
 	ownerNode uint32
 }
 
@@ -18,7 +23,7 @@ func (m Mesh) data() *meshData {
 }
 
 // Geometry returns the mesh's geometry handle.
-func (m Mesh) Geometry() Geometry { return m.data().geometry }
+func (m Mesh) Geometry() geometries.Geometry { return m.data().geometry }
 
 // Material returns the mesh's material handle.
 func (m Mesh) Material() Material { return m.data().material }
@@ -34,11 +39,11 @@ func (m Mesh) SetMaterial(mat Material) {
 }
 
 // BoundingSphere returns the mesh's local bounding sphere.
-func (m Mesh) BoundingSphere() Sphere { return m.data().bounds }
+func (m Mesh) BoundingSphere() glm.Sphere { return m.data().bounds }
 
 // NewMesh creates a mesh node from a geometry + material (both renderer-owned). The
 // scene takes its own references (Copy), so the caller may Release theirs.
-func (s *Scene) NewMesh(geo Geometry, mat Material) Mesh {
+func (s *Scene) NewMesh(geo geometries.Geometry, mat Material) Mesh {
 	id := s.allocNode(KindMesh)
 	payloadIdx := uint32(len(s.meshes))
 	s.meshes = append(s.meshes, meshData{

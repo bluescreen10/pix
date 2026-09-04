@@ -22,7 +22,7 @@ func TestMaterialClasses(t *testing.T) {
 	scene := r.NewScene()
 	defer scene.Destroy()
 
-	cube := r.NewGeometry(normalCube())
+	cube := r.GeometryStore.Create(normalCube())
 	basic := r.NewBasicMaterial()
 	basic.SetColor(colors.RGBA32F{0.8, 0.8, 0.8, 1})
 	phong := r.NewBlinnPhongMaterial()

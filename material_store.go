@@ -172,7 +172,7 @@ func (s *materialStore) Sync(u *uploader) {
 		parts = append(parts, scatterPart{dstOffset: id * s.stride, data: scratch[lo:]})
 	}
 	for _, p := range parts {
-		u.copy(s.buf, p.dstOffset, p.data)
+		u.Copy(s.buf, p.dstOffset, p.data)
 	}
 	s.scratch, s.parts = scratch, parts[:0]
 	clear(s.dirty)

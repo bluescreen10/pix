@@ -24,7 +24,7 @@ func TestDirectionalShadowMapAllocated(t *testing.T) {
 	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 1)
 	light.SetCastShadow(true)
 
-	cube := r.NewGeometry(normalCube())
+	cube := r.GeometryStore.Create(normalCube())
 	defer cube.Release()
 	scene.Add(scene.NewMesh(cube, r.NewPBRMaterial()))
 
@@ -66,7 +66,7 @@ func TestDirectionalShadowDepthPass(t *testing.T) {
 	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 2)
 	light.SetCastShadow(true)
 
-	cube := r.NewGeometry(normalCube())
+	cube := r.GeometryStore.Create(normalCube())
 	defer cube.Release()
 	mesh := scene.NewMesh(cube, r.NewPBRMaterial())
 	mesh.SetCastShadow(true) // so the shadow view's castersOnly cull keeps it
@@ -141,7 +141,7 @@ func TestSpotShadowDarkensReceiver(t *testing.T) {
 		spot := scene.AddSpotLight(pos, dir, colors.RGB32F{1, 1, 1}, 6, 30, 0.7, 0.2)
 		spot.SetCastShadow(true)
 
-		cube := r.NewGeometry(normalCube())
+		cube := r.GeometryStore.Create(normalCube())
 		defer cube.Release()
 
 		ground := scene.NewMesh(cube, r.NewPBRMaterial())
@@ -195,7 +195,7 @@ func TestPointShadowDarkensReceiver(t *testing.T) {
 		pl := scene.AddPointLight(glm.Vec3f{3, 5, 2}, colors.RGB32F{1, 1, 1}, 8, 40)
 		pl.SetCastShadow(true)
 
-		cube := r.NewGeometry(normalCube())
+		cube := r.GeometryStore.Create(normalCube())
 		defer cube.Release()
 
 		ground := scene.NewMesh(cube, r.NewPBRMaterial())
@@ -258,7 +258,7 @@ func TestDirectionalShadowDarkensReceiver(t *testing.T) {
 		light := scene.AddDirectionalLight(glm.Vec3f{0.15, -1, 0.15}, colors.RGB32F{1, 1, 1}, 3)
 		light.SetCastShadow(true)
 
-		cube := r.NewGeometry(normalCube())
+		cube := r.GeometryStore.Create(normalCube())
 		defer cube.Release()
 
 		ground := scene.NewMesh(cube, r.NewPBRMaterial())
@@ -309,7 +309,7 @@ func TestShadowSetSizeReallocatesMap(t *testing.T) {
 	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 1)
 	light.SetCastShadow(true)
 
-	cube := r.NewGeometry(normalCube())
+	cube := r.GeometryStore.Create(normalCube())
 	defer cube.Release()
 	scene.Add(scene.NewMesh(cube, r.NewPBRMaterial()))
 

@@ -25,6 +25,7 @@ import (
 
 	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -244,7 +245,7 @@ func (l *loader) addMesh(parent pix.Node, meshIdx int, skinIdx *int) {
 		if len(data.Attributes) == 0 {
 			continue
 		}
-		geo := l.renderer.NewGeometry(data)
+		geo := l.renderer.GeometryStore.Create(data)
 		mat := l.materialFor(prim.Material)
 		if hasSkel && skinned {
 			sm := l.scene.NewSkinnedMesh(geo, mat, skel)
@@ -264,7 +265,7 @@ func (l *loader) addMesh(parent pix.Node, meshIdx int, skinIdx *int) {
 // componentType UNSIGNED_BYTE or UNSIGNED_SHORT; WEIGHTS_0 FLOAT — normalized
 // UBYTE/USHORT weights are not supported) — addMesh uses it to decide Mesh vs
 // SkinnedMesh independent of whether the owning node even references a skin.
-func (l *loader) buildData(prim primitive) (pix.GeometryConfig, bool) {
+func (l *loader) buildData(prim primitive) (geometries.GeometryConfig, bool) {
 	var positions, normals []glm.Vec3f
 	var colors []glm.Vec4f
 	var uvs []glm.Vec2f
@@ -303,24 +304,24 @@ func (l *loader) buildData(prim primitive) (pix.GeometryConfig, bool) {
 		}
 	}
 	if len(positions) == 0 {
-		return pix.GeometryConfig{}, false
+		return geometries.GeometryConfig{}, false
 	}
-	attrs := []pix.Attribute{pix.NewAttribute(pix.AttributePosition, pix.Float32x3, positions)}
+	attrs := []geometries.Attribute{geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, positions)}
 	if len(normals) > 0 {
-		attrs = append(attrs, pix.NewAttribute(pix.AttributeNormal, pix.Float32x3, normals))
+		attrs = append(attrs, geometries.NewAttribute(geometries.AttributeNormal, geometries.Float32x3, normals))
 	}
 	if len(colors) > 0 {
-		attrs = append(attrs, pix.NewAttribute(pix.AttributeColor, pix.Float32x4, colors))
+		attrs = append(attrs, geometries.NewAttribute(geometries.AttributeColor, geometries.Float32x4, colors))
 	}
 	if len(uvs) > 0 {
-		attrs = append(attrs, pix.NewAttribute(pix.AttributeUV, pix.Float32x2, uvs))
+		attrs = append(attrs, geometries.NewAttribute(geometries.AttributeUV, geometries.Float32x2, uvs))
 	}
 	skinned := len(joints) == len(positions) && len(weights) == len(positions) && len(positions) > 0
 	if skinned {
-		attrs = append(attrs, pix.NewAttribute(pix.AttributeSkinIndex, pix.Uint16x4, joints))
-		attrs = append(attrs, pix.NewAttribute(pix.AttributeSkinWeight, pix.Float32x4, weights))
+		attrs = append(attrs, geometries.NewAttribute(geometries.AttributeSkinIndex, geometries.Uint16x4, joints))
+		attrs = append(attrs, geometries.NewAttribute(geometries.AttributeSkinWeight, geometries.Float32x4, weights))
 	}
-	return pix.GeometryConfig{Attributes: attrs, Indices: indices}, skinned
+	return geometries.GeometryConfig{Attributes: attrs, Indices: indices}, skinned
 }
 
 // ---- skinning ----

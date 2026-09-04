@@ -1,11 +1,12 @@
 package pix
 
 import (
+	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/chewxy/math32"
 )
 
-// Primitive geometry generators. Each returns a GeometryConfig (plain CPU data, no
+// Primitive geometry generators. Each returns a geometries.GeometryConfig (plain CPU data, no
 // GPU resources) so it can be inspected or edited before upload; the matching
 // Renderer.New*Geometry method is the one-line shorthand that uploads it.
 //
@@ -32,7 +33,7 @@ type latheRow struct {
 // (-cos φ, 0, sin φ) and quads emit as (a, c, b), (c, d, b), which together put the
 // front face outward. Every primitive below inherits that, so none of them can get
 // it individually wrong.
-func revolve(rows []latheRow, radialSegments int) GeometryConfig {
+func revolve(rows []latheRow, radialSegments int) geometries.GeometryConfig {
 	if radialSegments < 3 {
 		radialSegments = 3
 	}
@@ -83,11 +84,11 @@ func revolve(rows []latheRow, radialSegments int) GeometryConfig {
 		}
 	}
 
-	return GeometryConfig{
-		Attributes: []Attribute{
-			NewAttribute(AttributePosition, Float32x3, positions),
-			NewAttribute(AttributeNormal, Float32x3, normals),
-			NewAttribute(AttributeUV, Float32x2, uvs),
+	return geometries.GeometryConfig{
+		Attributes: []geometries.Attribute{
+			geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, positions),
+			geometries.NewAttribute(geometries.AttributeNormal, geometries.Float32x3, normals),
+			geometries.NewAttribute(geometries.AttributeUV, geometries.Float32x2, uvs),
 		},
 		Indices: indices,
 	}
@@ -95,7 +96,7 @@ func revolve(rows []latheRow, radialSegments int) GeometryConfig {
 
 // BoxGeometry is an axis-aligned box centered on the origin, with flat per-face
 // normals (24 vertices — the corners are not shared, so each face shades flat).
-func BoxGeometry(width, height, depth float32) GeometryConfig {
+func BoxGeometry(width, height, depth float32) geometries.GeometryConfig {
 	hw, hh, hd := width/2, height/2, depth/2
 
 	// One entry per face: its outward normal and its four corners, wound
@@ -124,11 +125,11 @@ func BoxGeometry(width, height, depth float32) GeometryConfig {
 		indices = append(indices, base, base+1, base+2, base, base+2, base+3)
 	}
 
-	return GeometryConfig{
-		Attributes: []Attribute{
-			NewAttribute(AttributePosition, Float32x3, positions),
-			NewAttribute(AttributeNormal, Float32x3, normals),
-			NewAttribute(AttributeUV, Float32x2, uvs),
+	return geometries.GeometryConfig{
+		Attributes: []geometries.Attribute{
+			geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, positions),
+			geometries.NewAttribute(geometries.AttributeNormal, geometries.Float32x3, normals),
+			geometries.NewAttribute(geometries.AttributeUV, geometries.Float32x2, uvs),
 		},
 		Indices: indices,
 	}
@@ -141,7 +142,7 @@ func BoxGeometry(width, height, depth float32) GeometryConfig {
 // Two triangles would represent a plane exactly; the subdivision is there for what
 // consumes vertices rather than pixels — vertex displacement, terrain, or anything
 // that wants interior vertices to move.
-func PlaneGeometry(width, depth float32, widthSegments, depthSegments int) GeometryConfig {
+func PlaneGeometry(width, depth float32, widthSegments, depthSegments int) geometries.GeometryConfig {
 	widthSegments = max(widthSegments, 1)
 	depthSegments = max(depthSegments, 1)
 	cols, rows := widthSegments+1, depthSegments+1
@@ -172,11 +173,11 @@ func PlaneGeometry(width, depth float32, widthSegments, depthSegments int) Geome
 		}
 	}
 
-	return GeometryConfig{
-		Attributes: []Attribute{
-			NewAttribute(AttributePosition, Float32x3, positions),
-			NewAttribute(AttributeNormal, Float32x3, normals),
-			NewAttribute(AttributeUV, Float32x2, uvs),
+	return geometries.GeometryConfig{
+		Attributes: []geometries.Attribute{
+			geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, positions),
+			geometries.NewAttribute(geometries.AttributeNormal, geometries.Float32x3, normals),
+			geometries.NewAttribute(geometries.AttributeUV, geometries.Float32x2, uvs),
 		},
 		Indices: indices,
 	}
@@ -184,7 +185,7 @@ func PlaneGeometry(width, depth float32, widthSegments, depthSegments int) Geome
 
 // SphereGeometry is a UV sphere centered on the origin: widthSegments around the
 // equator, heightSegments from pole to pole.
-func SphereGeometry(radius float32, widthSegments, heightSegments int) GeometryConfig {
+func SphereGeometry(radius float32, widthSegments, heightSegments int) geometries.GeometryConfig {
 	if heightSegments < 2 {
 		heightSegments = 2
 	}
@@ -204,7 +205,7 @@ func SphereGeometry(radius float32, widthSegments, heightSegments int) GeometryC
 // CylinderGeometry is a capped cylinder (or truncated cone, when the two radii
 // differ) centered on the origin and running along Y. A radius of 0 at one end
 // makes a cone.
-func CylinderGeometry(radiusTop, radiusBottom, height float32, radialSegments, heightSegments int) GeometryConfig {
+func CylinderGeometry(radiusTop, radiusBottom, height float32, radialSegments, heightSegments int) geometries.GeometryConfig {
 	if heightSegments < 1 {
 		heightSegments = 1
 	}
@@ -246,7 +247,7 @@ func CylinderGeometry(radiusTop, radiusBottom, height float32, radialSegments, h
 // CapsuleGeometry is a cylinder of the given length along Y with a hemispherical
 // cap of the given radius on each end, centered on the origin (so its total height
 // is length + 2*radius). capSegments is the number of rings per hemisphere.
-func CapsuleGeometry(radius, length float32, capSegments, radialSegments int) GeometryConfig {
+func CapsuleGeometry(radius, length float32, capSegments, radialSegments int) geometries.GeometryConfig {
 	if capSegments < 1 {
 		capSegments = 1
 	}
@@ -281,26 +282,26 @@ func CapsuleGeometry(radius, length float32, capSegments, radialSegments int) Ge
 }
 
 // NewBoxGeometry uploads a BoxGeometry and returns its handle.
-func (r *Renderer) NewBoxGeometry(width, height, depth float32) Geometry {
-	return r.NewGeometry(BoxGeometry(width, height, depth))
+func (r *Renderer) NewBoxGeometry(width, height, depth float32) geometries.Geometry {
+	return r.GeometryStore.Create(BoxGeometry(width, height, depth))
 }
 
 // NewPlaneGeometry uploads a PlaneGeometry and returns its handle.
-func (r *Renderer) NewPlaneGeometry(width, depth float32, widthSegments, depthSegments int) Geometry {
-	return r.NewGeometry(PlaneGeometry(width, depth, widthSegments, depthSegments))
+func (r *Renderer) NewPlaneGeometry(width, depth float32, widthSegments, depthSegments int) geometries.Geometry {
+	return r.GeometryStore.Create(PlaneGeometry(width, depth, widthSegments, depthSegments))
 }
 
 // NewSphereGeometry uploads a SphereGeometry and returns its handle.
-func (r *Renderer) NewSphereGeometry(radius float32, widthSegments, heightSegments int) Geometry {
-	return r.NewGeometry(SphereGeometry(radius, widthSegments, heightSegments))
+func (r *Renderer) NewSphereGeometry(radius float32, widthSegments, heightSegments int) geometries.Geometry {
+	return r.GeometryStore.Create(SphereGeometry(radius, widthSegments, heightSegments))
 }
 
 // NewCylinderGeometry uploads a CylinderGeometry and returns its handle.
-func (r *Renderer) NewCylinderGeometry(radiusTop, radiusBottom, height float32, radialSegments, heightSegments int) Geometry {
-	return r.NewGeometry(CylinderGeometry(radiusTop, radiusBottom, height, radialSegments, heightSegments))
+func (r *Renderer) NewCylinderGeometry(radiusTop, radiusBottom, height float32, radialSegments, heightSegments int) geometries.Geometry {
+	return r.GeometryStore.Create(CylinderGeometry(radiusTop, radiusBottom, height, radialSegments, heightSegments))
 }
 
 // NewCapsuleGeometry uploads a CapsuleGeometry and returns its handle.
-func (r *Renderer) NewCapsuleGeometry(radius, length float32, capSegments, radialSegments int) Geometry {
-	return r.NewGeometry(CapsuleGeometry(radius, length, capSegments, radialSegments))
+func (r *Renderer) NewCapsuleGeometry(radius, length float32, capSegments, radialSegments int) geometries.Geometry {
+	return r.GeometryStore.Create(CapsuleGeometry(radius, length, capSegments, radialSegments))
 }

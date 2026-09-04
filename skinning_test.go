@@ -5,13 +5,14 @@ import (
 
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 )
 
 // riggedQuad returns a narrow 2-unit-tall quad in skeleton-local space, standing on
 // the origin: its bottom two vertices are fully weighted to joint 0, its top two to
 // joint 1. Meant to be paired with a two-bone skeleton whose joint 1 sits at (0,2,0).
-func riggedQuad() GeometryConfig {
+func riggedQuad() geometries.GeometryConfig {
 	positions := []glm.Vec3f{
 		{-0.4, 0, 0}, {0.4, 0, 0}, // bottom (joint 0)
 		{-0.4, 2, 0}, {0.4, 2, 0}, // top (joint 1)
@@ -24,11 +25,11 @@ func riggedQuad() GeometryConfig {
 		{1, 0, 0, 0}, {1, 0, 0, 0},
 		{1, 0, 0, 0}, {1, 0, 0, 0},
 	}
-	return GeometryConfig{
-		Attributes: []Attribute{
-			NewAttribute(AttributePosition, Float32x3, positions),
-			NewAttribute(AttributeSkinIndex, Uint16x4, joints),
-			NewAttribute(AttributeSkinWeight, Float32x4, weights),
+	return geometries.GeometryConfig{
+		Attributes: []geometries.Attribute{
+			geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, positions),
+			geometries.NewAttribute(geometries.AttributeSkinIndex, geometries.Uint16x4, joints),
+			geometries.NewAttribute(geometries.AttributeSkinWeight, geometries.Float32x4, weights),
 		},
 		// Both windings, so the quad is visible regardless of which way it faces
 		// after bending — this test cares about silhouette movement, not culling.
@@ -80,7 +81,7 @@ func TestSkinnedMeshBindPose(t *testing.T) {
 	scene := r.NewScene()
 	defer scene.Destroy()
 
-	geo := r.NewGeometry(riggedQuad())
+	geo := r.GeometryStore.Create(riggedQuad())
 	defer geo.Release()
 	mat := r.NewBasicMaterial()
 	mat.SetCull(CullNone)
@@ -117,7 +118,7 @@ func TestSkinnedMeshDeforms(t *testing.T) {
 	scene := r.NewScene()
 	defer scene.Destroy()
 
-	geo := r.NewGeometry(riggedQuad())
+	geo := r.GeometryStore.Create(riggedQuad())
 	defer geo.Release()
 	mat := r.NewBasicMaterial()
 	mat.SetCull(CullNone)

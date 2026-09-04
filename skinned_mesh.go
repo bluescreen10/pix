@@ -1,6 +1,9 @@
 package pix
 
-import "github.com/bluescreen10/pix/glm"
+import (
+	"github.com/bluescreen10/pix/geometries"
+	"github.com/bluescreen10/pix/glm"
+)
 
 // skinWeightEpsilon is the minimum blend weight that counts as "this joint
 // influences this vertex" — below it, floating-point noise in an authored weight
@@ -14,13 +17,13 @@ const skinWeightEpsilon = 1e-4
 // bind-space influence radius (negative = joint unused by this mesh — see
 // computeJointRadii); bounds is recomputed every Sync in skeleton-local space.
 type skinnedMeshData struct {
-	srcGeometry Geometry
-	outputGeo   Geometry
+	srcGeometry geometries.Geometry
+	outputGeo   geometries.Geometry
 	material    Material
 	skeleton    uint32 // slab id into Scene.skeletons
 	vertCount   uint32
 	radii       []float32
-	bounds      Sphere
+	bounds      glm.Sphere
 	ownerNode   uint32
 }
 
@@ -35,7 +38,7 @@ func (m SkinnedMesh) data() *skinnedMeshData {
 
 // SourceGeometry returns the mesh's un-skinned source geometry (the one carrying
 // skin index/weight attributes).
-func (m SkinnedMesh) SourceGeometry() Geometry { return m.data().srcGeometry }
+func (m SkinnedMesh) SourceGeometry() geometries.Geometry { return m.data().srcGeometry }
 
 // Material returns the mesh's material handle.
 func (m SkinnedMesh) Material() Material { return m.data().material }
@@ -59,7 +62,7 @@ func (m SkinnedMesh) Skeleton() Skeleton {
 
 // BoundingSphere returns the mesh's current skeleton-local bounding sphere (valid
 // after Sync — i.e. after the first Render call following any pose change).
-func (m SkinnedMesh) BoundingSphere() Sphere { return m.data().bounds }
+func (m SkinnedMesh) BoundingSphere() glm.Sphere { return m.data().bounds }
 
 // NewSkinnedMesh creates a compute-skinned mesh bound to skel: geo must carry
 // AttributeSkinIndex/AttributeSkinWeight (indices relative to skel's joint order).
@@ -70,7 +73,7 @@ func (m SkinnedMesh) BoundingSphere() Sphere { return m.data().bounds }
 // theirs. Destroy every SkinnedMesh bound to a Skeleton before destroying the
 // Skeleton itself — a SkinnedMesh does not hold a reference on its skeleton, so
 // destroying the skeleton first leaves it pointing at a freed slot.
-func (s *Scene) NewSkinnedMesh(geo Geometry, mat Material, skel Skeleton) SkinnedMesh {
+func (s *Scene) NewSkinnedMesh(geo geometries.Geometry, mat Material, skel Skeleton) SkinnedMesh {
 	s.validate(skel.id)
 	if s.kind[skel.slot()] != KindSkeleton {
 		panic("pix: NewSkinnedMesh requires a Skeleton")
@@ -78,7 +81,7 @@ func (s *Scene) NewSkinnedMesh(geo Geometry, mat Material, skel Skeleton) Skinne
 	skelIdx := s.payload[skel.slot()]
 	sk := s.skeletons.Get(skelIdx)
 
-	positions := geo.GetAttributeData[glm.Vec3f](AttributePosition)
+	positions := geo.GetAttributeData[glm.Vec3f](geometries.AttributePosition)
 	radii, bindPos := computeJointRadii(geo, sk.invBind, positions)
 	unitScale := make([]float32, len(bindPos))
 	for i := range unitScale {
@@ -88,7 +91,7 @@ func (s *Scene) NewSkinnedMesh(geo Geometry, mat Material, skel Skeleton) Skinne
 	id := s.allocNode(KindSkinnedMesh)
 	payloadIdx, _ := s.skinnedMeshes.Alloc(skinnedMeshData{
 		srcGeometry: geo.Copy(),
-		outputGeo:   geo.skinOutput(),
+		outputGeo:   geo.SkinOutput(),
 		material:    mat.Copy(),
 		skeleton:    skelIdx,
 		vertCount:   uint32(len(positions)),
@@ -116,9 +119,9 @@ func (s *Scene) freeSkinnedMesh(payloadIdx uint32) {
 // bind-pose position (also returned, as bindPos) — one O(vertices × 4) pass over
 // the geometry's skin data. A joint radii[j] stays negative if no vertex ever
 // weights it (skinnedBounds skips those when building the mesh's bounding sphere).
-func computeJointRadii(geo Geometry, invBind []glm.Mat4f, positions []glm.Vec3f) (radii []float32, bindPos []glm.Vec3f) {
-	joints := geo.GetAttributeData[glm.Vec4[uint16]](AttributeSkinIndex)
-	weights := geo.GetAttributeData[glm.Vec4f](AttributeSkinWeight)
+func computeJointRadii(geo geometries.Geometry, invBind []glm.Mat4f, positions []glm.Vec3f) (radii []float32, bindPos []glm.Vec3f) {
+	joints := geo.GetAttributeData[glm.Vec4[uint16]](geometries.AttributeSkinIndex)
+	weights := geo.GetAttributeData[glm.Vec4f](geometries.AttributeSkinWeight)
 	if joints == nil || weights == nil {
 		panic("pix: NewSkinnedMesh requires geometry with skin index and skin weight attributes")
 	}
