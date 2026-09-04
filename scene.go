@@ -36,7 +36,6 @@ const (
 	flagCastShadow
 	flagReceiveShadow
 	flagDirty
-	flagStatic
 	flagLocalVisible
 	flagVisibleDirty
 	flagVisible
@@ -253,6 +252,13 @@ func (s *Scene) reparent(child, newParent NodeID) {
 	s.lastChildren[newParent.index] = child
 	s.flags[child.index] |= flagDirty
 	s.topoDirty = true
+	// Reparenting can change flagAttached for child (and everything under it) once
+	// flushTopoIfDirty runs — which shifts every OTHER attached mesh's position in
+	// whatever collectDrawables produces next, not just child's own. Both dirty
+	// flags are unconditional here for the same reason destroyNode's is: cheap to
+	// over-trigger, and a narrower "only if this specific node..." check would miss
+	// the reindexing risk to unrelated meshes.
+	s.drawableDirty = true
 }
 
 func (s *Scene) detachFromParent(child NodeID) {
@@ -276,6 +282,10 @@ func (s *Scene) detachFromParent(child NodeID) {
 	s.prevSiblings[child.index] = NodeID{}
 	s.nextSiblings[child.index] = NodeID{}
 	s.topoDirty = true
+	// See reparent's comment: detaching (whether standalone via Node.Remove, or as
+	// reparent's first step) can drop child out of flagAttached, reindexing every
+	// OTHER attached mesh in collectDrawables' next output.
+	s.drawableDirty = true
 }
 
 func (s *Scene) wouldCycle(child, newParent NodeID) bool {
@@ -320,6 +330,7 @@ func (s *Scene) destroyNode(id NodeID) {
 	s.generation[idx]++
 	s.parents[idx] = NodeID{index: s.freeHead}
 	s.freeHead = idx
+	//TODO: in the future detect if drawable needs to be rebuilt
 	s.drawableDirty = true
 	s.topoDirty = true
 }
@@ -362,10 +373,11 @@ func (s *Scene) flushTopoIfDirty() {
 	s.topoDirty = false
 }
 
-// UpdateTransforms recomputes local + world matrices for dirty nodes in topological
-// (parent-before-child) order. Returns true if anything changed.
-func (s *Scene) UpdateTransforms() bool {
-	s.flushTopoIfDirty()
+// updateTransforms recomputes local + world matrices for dirty nodes in topological
+// (parent-before-child) order. Returns true if anything changed. Called only from
+// Sync, which flushes topology once up front — this assumes topoOrder/flagAttached
+// are already current and does not flush them itself.
+func (s *Scene) updateTransforms() bool {
 	anyDirty := false
 	for _, i := range s.topoOrder {
 		if s.flags[i]&flagDirty == 0 {
@@ -400,7 +412,9 @@ func (s *Scene) UpdateTransforms() bool {
 // renderer drives geometry/pipeline syncing (which do need staging, into shared
 // MemoryDevice buffers) and the draw-list rebuild separately.
 func (s *Scene) Sync() {
-	if dirty := s.UpdateTransforms(); dirty {
+	// updateTransforms walks topoOrder, so attachment must be current first.
+	s.flushTopoIfDirty()
+	if dirty := s.updateTransforms(); dirty {
 		s.drawList.sync(s.world) // host-visible, direct write (not staged)
 	}
 	s.syncSkinning()
@@ -420,7 +434,7 @@ func (s *Scene) Sync() {
 //
 // Only nodes attached to the scene draw. Creating a mesh does NOT attach it —
 // scene.Add (or parenting it under something attached) does. An unattached node is
-// never visited by UpdateTransforms, so its world matrix would still be the identity
+// never visited by updateTransforms, so its world matrix would still be the identity
 // it was born with: drawing it anyway would silently place it at the origin,
 // ignoring every transform set on it. Skipping it instead makes the omission
 // obvious — the mesh is simply missing until it is added.
@@ -480,7 +494,7 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []Material) {
 func (s *Scene) MeshCount() int { return len(s.meshes) }
 
 // FrameSphere returns a robust center + radius for the mesh nodes' world-space
-// bounds (median center, percentile-of-center-distances). Run UpdateTransforms first.
+// bounds (median center, percentile-of-center-distances). Run Sync first.
 func (s *Scene) FrameSphere(pct float32) (center glm.Vec3f, radius float32) {
 	n := len(s.meshes) + s.skinnedMeshes.Len()
 	if n == 0 {

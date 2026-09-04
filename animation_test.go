@@ -36,14 +36,14 @@ func TestAnimationMixerDrivesNode(t *testing.T) {
 	action.SetLoop(LoopOnce).Play()
 
 	mixer.Update(1) // halfway through the 2-second track
-	scene.UpdateTransforms()
+	scene.Sync()
 	pos := n.Position()
 	if pos[0] < 4.9 || pos[0] > 5.1 {
 		t.Fatalf("position.X at t=1 = %v, want ~5 (halfway through 0->10)", pos[0])
 	}
 
 	mixer.Update(5) // run well past the end; LoopOnce should clamp and stop
-	scene.UpdateTransforms()
+	scene.Sync()
 	pos = n.Position()
 	if pos[0] < 9.9 || pos[0] > 10.1 {
 		t.Fatalf("position.X after overshoot = %v, want ~10 (clamped)", pos[0])
@@ -81,7 +81,7 @@ func TestAnimationMixerLoopRepeat(t *testing.T) {
 	action.SetLoop(LoopRepeat).Play()
 
 	mixer.Update(1.25) // wraps: 1.25 mod 1 = 0.25
-	scene.UpdateTransforms()
+	scene.Sync()
 	pos := n.Position()
 	if pos[0] < 2.0 || pos[0] > 3.0 {
 		t.Fatalf("position.X after wrap = %v, want ~2.5 (25%% through the loop)", pos[0])
@@ -120,7 +120,7 @@ func TestAnimationMixerBlendsTwoActions(t *testing.T) {
 	b.SetWeight(0.5).Play()
 
 	mixer.Update(0)
-	scene.UpdateTransforms()
+	scene.Sync()
 	pos := n.Position()
 	if pos[0] < 4.9 || pos[0] > 5.1 {
 		t.Fatalf("blended position.X = %v, want ~5 (midpoint of 0 and 10 at equal weight)", pos[0])

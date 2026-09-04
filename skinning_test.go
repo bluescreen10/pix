@@ -169,11 +169,11 @@ func TestSkinnedMeshBoneAttachment(t *testing.T) {
 	prop := scene.NewGroup()
 	skel.Bone(1).Add(prop)
 
-	scene.UpdateTransforms()
+	scene.Sync()
 	before := prop.WorldTransform()
 
 	skel.Bone(1).SetPosition(glm.Vec3f{5, 2, 0})
-	scene.UpdateTransforms()
+	scene.Sync()
 	after := prop.WorldTransform()
 
 	if before == after {

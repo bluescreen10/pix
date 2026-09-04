@@ -153,13 +153,11 @@ func NewAttribute[T any](attrType AttributeType, dataType DataType, data []T) At
 }
 
 // GeometryConfig is a geometry's source data: a set of vertex attributes (Position
-// required, others optional and matching the position count), an optional index
-// list (nil → generated 0..n-1), and a Static hint. Static has no effect today; it
-// is reserved for a future acceleration structure (BVH for collision / lighting).
+// required, others optional and matching the position count), and an optional index
+// list (nil → generated 0..n-1).
 type GeometryConfig struct {
 	Attributes []Attribute
 	Indices    []uint32
-	Static     bool
 }
 
 // entry is the source of truth for one geometry. Attributes hold the original CPU
@@ -176,11 +174,11 @@ type GeometryConfig struct {
 type entry struct {
 	attrs          [attributeCount]Attribute
 	indices        []uint32
-	static         bool
 	derived        bool
 	derivedHasAttr bool
 	allocs         [streamCount]mem.Allocation
-	bounds         Sphere
+
+	boundingSphere Sphere
 }
 
 // has reports whether an attribute is present (non-empty).
@@ -427,9 +425,9 @@ func (g *geometrySystem) Desc(id uint32) GeometryDesc {
 	return g.descs[id]
 }
 
-// Bounds returns a geometry's local bounding sphere.
-func (g *geometrySystem) Bounds(id uint32) Sphere {
-	return g.entries.Get(id).bounds
+// BoundingSphere returns a geometry's local bounding sphere.
+func (g *geometrySystem) BoundingSphere(id uint32) Sphere {
+	return g.entries.Get(id).boundingSphere
 }
 
 // Generation returns the current generation of a geometry id (for stale checks).
@@ -443,13 +441,13 @@ func (g *geometrySystem) Generation(id uint32) uint32 {
 // surrender ownership with Release() (the geometry is freed at refcount 0). It caches
 // the local bounding sphere so scenes/loaders can frame without the geometry system.
 type Geometry struct {
-	ref    Ref
-	bounds Sphere
+	ref            Ref
+	boundingSphere Sphere
 }
 
 // Copy returns another handle to the same geometry, bumping the refcount.
 func (g Geometry) Copy() Geometry {
-	return Geometry{ref: g.ref.Copy(), bounds: g.bounds}
+	return Geometry{ref: g.ref.Copy(), boundingSphere: g.boundingSphere}
 }
 
 // Release drops this handle's reference; the geometry is freed when the last is released.
@@ -493,7 +491,7 @@ func (g Geometry) SetAttributeData[T any](t AttributeType, data []T) {
 
 // BoundingSphere returns the geometry's local-space bounding sphere.
 func (g Geometry) BoundingSphere() Sphere {
-	return g.bounds
+	return g.boundingSphere
 }
 
 // id is the geometry's slot in the system (used by drawables).
@@ -512,7 +510,7 @@ func (g Geometry) skinOutput() Geometry {
 	}
 	id, gen := sys.createSkinOutput(g.ref.id)
 	rc := int32(1)
-	return Geometry{ref: Ref{id: id, gen: gen, refCount: &rc, owner: sys}, bounds: sys.Bounds(id)}
+	return Geometry{ref: Ref{id: id, gen: gen, refCount: &rc, owner: sys}, boundingSphere: sys.BoundingSphere(id)}
 }
 
 // attribute returns a pointer to a geometry's stored attribute (nil if the id is
@@ -549,7 +547,7 @@ func (g *geometrySystem) setAttribute(id uint32, t AttributeType, data []byte, c
 	// Re-upload the affected stream into its existing suballocation.
 	if t == AttributePosition {
 		g.writeStream(streamPos, e.allocs[streamPos].Offset(), e.bytes(streamPos))
-		e.bounds = boundingSphereOf(e.vec3(AttributePosition))
+		e.boundingSphere = boundingSphereOf(e.vec3(AttributePosition))
 	} else {
 		g.writeStream(streamAttr, e.allocs[streamAttr].Offset(), e.bytes(streamAttr))
 	}
@@ -568,7 +566,7 @@ func (g *geometrySystem) generation(id uint32) uint32 {
 func (g *geometrySystem) newHandle(cfg GeometryConfig) Geometry {
 	id, gen := g.Create(cfg)
 	rc := int32(1)
-	return Geometry{ref: Ref{id: id, gen: gen, refCount: &rc, owner: g}, bounds: g.Bounds(id)}
+	return Geometry{ref: Ref{id: id, gen: gen, refCount: &rc, owner: g}, boundingSphere: g.BoundingSphere(id)}
 }
 
 // Create allocates a generation-stamped geometry id from cfg, uploads its streams,
@@ -577,7 +575,6 @@ func (g *geometrySystem) newHandle(cfg GeometryConfig) Geometry {
 // list is generated 0..n-1.
 func (g *geometrySystem) Create(cfg GeometryConfig) (id, gen uint32) {
 	var e entry
-	e.static = cfg.Static
 	for _, a := range cfg.Attributes {
 		if a.attrType >= attributeCount {
 			panic(fmt.Sprintf("render: unknown attribute type %d", a.attrType))
@@ -608,7 +605,7 @@ func (g *geometrySystem) Create(cfg GeometryConfig) (id, gen uint32) {
 			e.indices[i] = uint32(i)
 		}
 	}
-	e.bounds = boundingSphereOf(e.vec3(AttributePosition))
+	e.boundingSphere = boundingSphereOf(e.vec3(AttributePosition))
 
 	var d GeometryDesc
 	d.Flags = e.flags()

@@ -176,7 +176,7 @@ func (m *AnimationMixer) StopAll() {
 // Update advances every playing action's local time by dt, blends their tracks
 // per touched node (weighted sum for position/scale, weighted slerp for
 // rotation), and applies the result via SetPosition/SetRotationQuat/SetScale —
-// which is what marks the node dirty for the next UpdateTransforms. A node with
+// which is what marks the node dirty for the next updateTransforms. A node with
 // zero total weight this frame is left untouched (it keeps its last-applied
 // value rather than reverting to bind pose — a v1 simplification).
 func (m *AnimationMixer) Update(dt float32) {

@@ -71,11 +71,11 @@ func TestLoadSkinnedAnimatedAsset(t *testing.T) {
 	action := mixer.Action(clip)
 	action.SetLoop(pix.LoopRepeat).Play()
 
-	scene.UpdateTransforms()
+	scene.Sync()
 	before := hips.WorldTransform()
 
 	mixer.Update(0.5)
-	scene.UpdateTransforms()
+	scene.Sync()
 	after := hips.WorldTransform()
 
 	if before == after {
