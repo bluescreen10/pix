@@ -27,6 +27,7 @@ import (
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/materials"
 	"github.com/bluescreen10/pix/textures"
 )
 
@@ -103,7 +104,7 @@ type loader struct {
 
 	texCache  map[texKey]textures.Texture // (gltf texture, usage) -> uploaded texture
 	allTex    []textures.Texture          // every uploaded texture, for release after build
-	materials []*pix.PBRMaterial          // [0]=default; gltf material i -> [i+1]
+	materials []*materials.PBRMaterial    // [0]=default; gltf material i -> [i+1]
 	nodes     []pix.Node                  // per gltf node
 	added     int
 
@@ -618,7 +619,7 @@ func (l *loader) loadMaterials() {
 	// glTF materials are metallic-roughness PBR → load them as PBR materials with
 	// their base-color, normal, and metallic-roughness maps.
 	samp := l.renderer.TextureStore.DefaultSampler()
-	l.materials = make([]*pix.PBRMaterial, len(l.doc.Materials)+1)
+	l.materials = make([]*materials.PBRMaterial, len(l.doc.Materials)+1)
 	def := l.renderer.NewPBRMaterial()
 	def.SetRoughness(1)
 	l.materials[0] = def
@@ -628,7 +629,7 @@ func (l *loader) loadMaterials() {
 		m.SetRoughness(1)
 		// alphaMode BLEND → transparent (src-alpha over); OPAQUE/MASK stay opaque.
 		if gm.AlphaMode == "BLEND" {
-			m.SetBlend(pix.BlendAlpha)
+			m.SetBlend(materials.BlendAlpha)
 		}
 		// KHR_materials_transmission (glass): approximate as alpha-blended, diffuse
 		// suppressed. A transmission factor > 0 makes the surface see-through.
@@ -639,7 +640,7 @@ func (l *loader) loadMaterials() {
 			}
 			if tf > 0 {
 				m.SetTransmission(tf)
-				m.SetBlend(pix.BlendAlpha)
+				m.SetBlend(materials.BlendAlpha)
 				// The mask matters more than the factor for most assets: these
 				// materials are usually declared OPAQUE with a factor of 1 and a
 				// texture that is glass in only a few places. Loading the factor
@@ -693,7 +694,7 @@ func (l *loader) loadMaterials() {
 
 // materialFor returns the (embedded) Material for a glTF material index; NewMesh
 // takes its own copy, and the loader releases these builders after building.
-func (l *loader) materialFor(ptr *int) pix.Material {
+func (l *loader) materialFor(ptr *int) materials.Material {
 	if ptr == nil || *ptr+1 >= len(l.materials) {
 		return l.materials[0]
 	}

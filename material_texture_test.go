@@ -1,6 +1,8 @@
 package pix
 
-import "testing"
+import (
+	"testing"
+)
 import "github.com/bluescreen10/pix/textures"
 
 // Reproduces what loaders/gltf does: one cached texture handed to two map slots.

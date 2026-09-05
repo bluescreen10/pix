@@ -7,6 +7,7 @@ import (
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
 	"github.com/bluescreen10/pix/internal/mem"
+	"github.com/bluescreen10/pix/materials"
 )
 
 const invalidIdx = ^uint32(0)
@@ -438,11 +439,11 @@ func (s *Scene) Sync() {
 // it was born with: drawing it anyway would silently place it at the origin,
 // ignoring every transform set on it. Skipping it instead makes the omission
 // obvious — the mesh is simply missing until it is added.
-func (s *Scene) collectDrawables() ([]gpuDrawable, []Material) {
+func (s *Scene) collectDrawables() ([]gpuDrawable, []materials.Material) {
 	s.flushTopoIfDirty() // attachment is derived from the topological walk
 	n := len(s.meshes) + s.skinnedMeshes.Len()
 	out := make([]gpuDrawable, 0, n)
-	materials := make([]Material, 0, n)
+	materials := make([]materials.Material, 0, n)
 	for i := range s.meshes {
 		md := &s.meshes[i]
 		if s.flags[md.ownerNode]&flagAttached == 0 {
@@ -459,7 +460,7 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []Material) {
 			bounds:      [4]float32{md.bounds.Center[0], md.bounds.Center[1], md.bounds.Center[2], md.bounds.Radius},
 			transformID: md.ownerNode,
 			geometryID:  md.geometry.ID(),
-			materialID:  md.material.materialID(),
+			materialID:  md.material.ID(),
 			flags:       flags,
 		})
 		materials = append(materials, md.material)
@@ -482,7 +483,7 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []Material) {
 			bounds:      [4]float32{sm.bounds.Center[0], sm.bounds.Center[1], sm.bounds.Center[2], sm.bounds.Radius},
 			transformID: root,
 			geometryID:  sm.outputGeo.ID(),
-			materialID:  sm.material.materialID(),
+			materialID:  sm.material.ID(),
 			flags:       flags,
 		})
 		materials = append(materials, sm.material)

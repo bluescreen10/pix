@@ -3,6 +3,7 @@ package pix
 import (
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/materials"
 )
 
 // skinWeightEpsilon is the minimum blend weight that counts as "this joint
@@ -19,7 +20,7 @@ const skinWeightEpsilon = 1e-4
 type skinnedMeshData struct {
 	srcGeometry geometries.Geometry
 	outputGeo   geometries.Geometry
-	material    Material
+	material    materials.Material
 	skeleton    uint32 // slab id into Scene.skeletons
 	vertCount   uint32
 	radii       []float32
@@ -41,11 +42,11 @@ func (m SkinnedMesh) data() *skinnedMeshData {
 func (m SkinnedMesh) SourceGeometry() geometries.Geometry { return m.data().srcGeometry }
 
 // Material returns the mesh's material handle.
-func (m SkinnedMesh) Material() Material { return m.data().material }
+func (m SkinnedMesh) Material() materials.Material { return m.data().material }
 
 // SetMaterial swaps the mesh's material (the cached materialID changes, so the
 // scene's drawables are rebuilt).
-func (m SkinnedMesh) SetMaterial(mat Material) {
+func (m SkinnedMesh) SetMaterial(mat materials.Material) {
 	md := m.data()
 	newRef := mat.Copy()
 	md.material.Release()
@@ -73,7 +74,7 @@ func (m SkinnedMesh) BoundingSphere() glm.Sphere { return m.data().bounds }
 // theirs. Destroy every SkinnedMesh bound to a Skeleton before destroying the
 // Skeleton itself — a SkinnedMesh does not hold a reference on its skeleton, so
 // destroying the skeleton first leaves it pointing at a freed slot.
-func (s *Scene) NewSkinnedMesh(geo geometries.Geometry, mat Material, skel Skeleton) SkinnedMesh {
+func (s *Scene) NewSkinnedMesh(geo geometries.Geometry, mat materials.Material, skel Skeleton) SkinnedMesh {
 	s.validate(skel.id)
 	if s.kind[skel.slot()] != KindSkeleton {
 		panic("pix: NewSkinnedMesh requires a Skeleton")

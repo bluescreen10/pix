@@ -17,12 +17,13 @@
 //   - Scene pipeline: scene_cull (GPU frustum cull + batch compaction), scene_draw
 //     (vertex-pull), scene_shadow (depth-only shadow pass) and fullscreen (the
 //     deferred lighting pass's fullscreen triangle).
+//
 //   - Overlay: overlay.vert/.frag (the debug HUD).
 //
-// The per-material fragment shaders are compiled here (the rules below) but embedded
-// by the material that owns them — see the //go:embed in basic_material.go,
-// blinn_phong_material.go and pbr_material.go, so a material's shaders are visible
-// where the material is.
+//   - Per-material fragment shaders: the built-in materials in the materials
+//     package (scene_basic, scene_lit, and PBR's forward/deferred/lighting trio).
+//     They are embedded here rather than beside the material that owns them because
+//     //go:embed cannot reach outside its own package directory.
 //
 // The backend RHI smoke-test shaders (triangle, mesh, instanced, fill_indirect,
 // textured) are NOT here — they are test fixtures under gpu/testdata, embedded by
@@ -65,6 +66,25 @@ var SceneShadowFrag []byte
 
 //go:embed build/fullscreen.vert.spv
 var FullscreenVert []byte
+
+// --- built-in material fragment shaders (see the materials package) ---
+
+//go:embed build/scene_basic.frag.spv
+var BasicForward []byte
+
+//go:embed build/scene_lit.frag.spv
+var BlinnPhongForward []byte
+
+// PBR's three render paths, all compiled from src/scene_pbr.frag.glsl via -D.
+
+//go:embed build/scene_forward_pbr.frag.spv
+var PBRForward []byte
+
+//go:embed build/scene_deferred_pbr.frag.spv
+var PBRDeferred []byte
+
+//go:embed build/scene_lighting_pbr.frag.spv
+var PBRLighting []byte
 
 // --- overlay (debug HUD) ---
 

@@ -1,4 +1,8 @@
-package pix
+package materials
+
+import (
+	"github.com/bluescreen10/pix/internal/ref"
+)
 
 import "github.com/bluescreen10/pix/textures"
 
@@ -8,8 +12,8 @@ import "github.com/bluescreen10/pix/textures"
 // (interpret them however your fragment shader does). Ideal for particles or any
 // custom material where a typed accessor struct isn't warranted.
 type RawMaterial struct {
-	store *materialStore
-	ref   Ref
+	pool *Pool
+	ref  ref.Ref
 
 	// The material's own texture references, one per slot requested at construction.
 	// These keep the textures alive; the record holds whatever bindless indices the
@@ -24,18 +28,18 @@ type RawMaterial struct {
 // NewRawMaterial creates a material whose fragment shader is `shader.Fragment` and
 // whose per-instance record is dataSize bytes (with textureSlots bindless texture slots).
 // Materials sharing a fragment shader share a store automatically.
-func (r *Renderer) NewRawMaterial(shader Shader, dataSize, textureSlots int) *RawMaterial {
-	st := r.materials.store(shader, "Custom Materials")
+func NewRawMaterial(store *Store, shader Shader, dataSize, textureSlots int) *RawMaterial {
+	st := store.Pool(shader, "Custom Materials")
 	m := &RawMaterial{
 		textures: make([]textures.Texture, textureSlots),
 		data:     make([]byte, dataSize),
 	}
-	m.store = st
-	m.ref = st.register(m)
+	m.pool = st
+	m.ref = st.Create(m)
 	return m
 }
 
-// Bytes implements materialInstance. It is the read side, used by Sync — call Record
+// Bytes implements Instance. It is the read side, used by Sync — call Record
 // to write, or the change is never uploaded.
 func (m *RawMaterial) Bytes() []byte { return m.data }
 
@@ -43,12 +47,12 @@ func (m *RawMaterial) Bytes() []byte { return m.data }
 // your uniform fields here — and marks it for upload in the next Sync. Interpret the
 // bytes however your fragment shader does.
 func (m *RawMaterial) Record() []byte {
-	m.store.markDirty(m.ref.id)
+	m.pool.MarkDirty(m.ref.ID())
 	return m.data
 }
 
-// release implements materialInstance: drop every texture this material bound.
-func (m *RawMaterial) release() {
+// Dispose implements Instance: drop every texture this material bound.
+func (m *RawMaterial) Dispose() {
 	for _, t := range m.textures {
 		t.Release()
 	}
@@ -65,7 +69,7 @@ func (m *RawMaterial) SetTexture(slot int, texture textures.Texture) {
 		m.textures[slot] = textures.Texture{}
 	}
 	old.Release() // after the copy, so rebinding a texture to itself cannot free it
-	m.store.markDirty(m.ref.id)
+	m.pool.MarkDirty(m.ref.ID())
 }
 
 // textures.Texture returns the texture bound in slot (or a zero handle).
@@ -81,7 +85,7 @@ func (m *RawMaterial) Texture(slot int) textures.Texture { return m.textures[slo
 // own record, so there is exactly one RawMaterial per instance and this returns the
 // same pointer — every handle observes the same record and textures.
 func (m *RawMaterial) Copy() Material {
-	m.ref.Copy() // bumps the shared count; the Ref it returns is identical to m.ref
+	m.ref.Copy() // bumps the shared count; the ref.Ref it returns is identical to m.ref
 	return m
 }
 
@@ -98,32 +102,32 @@ func (m *RawMaterial) Valid() bool {
 
 // Vertex is nil for the built-in materials: they use the default vertex-pull shader.
 func (m *RawMaterial) Vertex() []byte {
-	return m.store.shader().Vertex
+	return m.pool.Shader().Vertex
 }
 
 // Forward is the always-present single-pass shader (surface + lighting).
 func (m *RawMaterial) Forward() []byte {
-	return m.store.shader().Forward
+	return m.pool.Shader().Forward
 }
 
 // Deferred fills the G-buffer; nil means this material always renders forward.
 func (m *RawMaterial) Deferred() []byte {
-	return m.store.shader().Deferred
+	return m.pool.Shader().Deferred
 }
 
 // Lighting shades the G-buffer in a fullscreen pass; nil means always forward.
 func (m *RawMaterial) Lighting() []byte {
-	return m.store.shader().Lighting
+	return m.pool.Shader().Lighting
 }
 
 // Cull reports which triangle faces are discarded.
 func (m *RawMaterial) Cull() CullMode {
-	return m.store.cullOf(m.ref.id)
+	return m.pool.Cull(m.ref.ID())
 }
 
 // SetCull sets which faces are culled (CullNone = double-sided).
 func (m *RawMaterial) SetCull(mode CullMode) {
-	m.store.setCullOf(m.ref.id, mode)
+	m.pool.SetCull(m.ref.ID(), mode)
 }
 
 // SetDoubleSided is a convenience for SetCull(CullNone) / SetCull(CullBack).
@@ -139,33 +143,32 @@ func (m *RawMaterial) SetDoubleSided(enabled bool) {
 // material to the forward path — the G-buffer holds one surface per pixel, so it
 // cannot represent a fragment that composites over what is behind it.
 func (m *RawMaterial) Blend() BlendMode {
-	return m.store.blendOf(m.ref.id)
+	return m.pool.Blend(m.ref.ID())
 }
 
 // SetBlend sets the material's blend mode (Opaque/Alpha/Additive).
 func (m *RawMaterial) SetBlend(mode BlendMode) {
-	m.store.setBlendOf(m.ref.id, mode)
+	m.pool.SetBlend(m.ref.ID(), mode)
 }
 
-// Cached pipeline identities, precomputed per store (see the Material interface).
-func (m *RawMaterial) shaderHash() uint32 {
-	return m.store.pipeHash
+// Pool returns the pool this material's records live in — its shader, pipeline
+// identity and record buffer.
+func (m *RawMaterial) Pool() *Pool {
+	return m.pool
 }
 
-func (m *RawMaterial) deferredHash() uint32 {
-	return m.store.deferHash
+// Hash is this material type's pipeline identity: its pool's, since these
+// materials vary only by shader.
+func (m *RawMaterial) Hash() uint32 {
+	return m.pool.Hash()
 }
 
-func (m *RawMaterial) lightingHash() uint32 {
-	return m.store.lightHash
-}
-
-// materialID is the instance's index within its store; materialsAddr is the store's
+// ID is the instance's index within its store; RecordsAddr is the store's
 // record buffer address, resolved at draw time because it moves when the store grows.
-func (m *RawMaterial) materialID() uint32 {
-	return m.ref.id
+func (m *RawMaterial) ID() uint32 {
+	return m.ref.ID()
 }
 
-func (m *RawMaterial) materialsAddr() uint64 {
-	return m.store.bufAddr()
+func (m *RawMaterial) RecordsAddr() uint64 {
+	return m.pool.RecordsAddr()
 }

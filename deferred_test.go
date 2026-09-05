@@ -7,6 +7,8 @@ import (
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
+	"github.com/bluescreen10/pix/materials"
+	"github.com/bluescreen10/pix/shaders"
 )
 
 // TestDeferredPBRRenders is the smoke test for the G-buffer path: an opaque PBR mesh
@@ -30,11 +32,11 @@ func TestDeferredPBRRenders(t *testing.T) {
 	cube := r.GeometryStore.Create(normalCube())
 	defer cube.Release()
 	mat := r.NewPBRMaterial()
-	if mat.Blend() != BlendOpaque {
-		t.Fatalf("PBRMaterial default blend = %v, want BlendOpaque", mat.Blend())
+	if mat.Blend() != materials.BlendOpaque {
+		t.Fatalf("materials.PBRMaterial default blend = %v, want materials.BlendOpaque", mat.Blend())
 	}
 	if mat.Deferred() == nil || mat.Lighting() == nil {
-		t.Fatal("PBRMaterial should provide Deferred()+Lighting() (eligible for the G-buffer path)")
+		t.Fatal("materials.PBRMaterial should provide Deferred()+Lighting() (eligible for the G-buffer path)")
 	}
 	scene.Add(scene.NewMesh(cube, mat))
 
@@ -87,7 +89,7 @@ func TestDeferredRenderingOffByDefault(t *testing.T) {
 }
 
 // TestDeferredAndForwardMixed renders a deferred PBR cube (left) alongside a
-// forward-only BasicMaterial cube (right, unlit) in the same frame, proving the
+// forward-only materials.BasicMaterial cube (right, unlit) in the same frame, proving the
 // G-buffer pass and the forward pass correctly share one color+depth target: the
 // forward pass must load (not clear) what the G-buffer + lighting passes wrote.
 func TestDeferredAndForwardMixed(t *testing.T) {
@@ -115,7 +117,7 @@ func TestDeferredAndForwardMixed(t *testing.T) {
 	basic := r.NewBasicMaterial()
 	basic.SetColor(colors.RGBA32F{0, 1, 0, 1})
 	if basic.Deferred() != nil || basic.Lighting() != nil {
-		t.Fatal("BasicMaterial should be forward-only (no Deferred/Lighting)")
+		t.Fatal("materials.BasicMaterial should be forward-only (no Deferred/Lighting)")
 	}
 	right := scene.NewMesh(cube, basic)
 	right.SetPosition(glm.Vec3f{1.2, 0, 0})
@@ -128,7 +130,7 @@ func TestDeferredAndForwardMixed(t *testing.T) {
 	px := r.Pixels()
 	w, h := 160, 80
 	// Left half should show the lit (deferred) PBR cube (white-ish, R≈G≈B); right half
-	// the unlit green (forward) BasicMaterial cube (G only) — scan each half for its
+	// the unlit green (forward) materials.BasicMaterial cube (G only) — scan each half for its
 	// expected color rather than probing one pixel, since the cube's exact silhouette
 	// at this camera distance isn't worth hand-computing.
 	var leftWhite, rightGreen int
@@ -208,7 +210,7 @@ func TestDeferredEmissiveMatchesForward(t *testing.T) {
 }
 
 // TestMaterialStoreDedupsOnWholeShader checks that stores are keyed on the entire
-// Shader, not just Forward. Sharing a store means sharing its Shader with every
+// materials.Shader, not just Forward. Sharing a store means sharing its materials.Shader with every
 // instance, so matching on Forward alone would hand a forward-only material another
 // Shader's Deferred/Lighting (routing it through the G-buffer against a record layout
 // it never declared) — or strip PBR's deferred path, depending on creation order.
@@ -219,19 +221,19 @@ func TestMaterialStoreDedupsOnWholeShader(t *testing.T) {
 	}
 	defer r.Destroy()
 
-	full := r.materials.store(
-		Shader{Forward: pbrForwardSPV, Deferred: pbrDeferredSPV, Lighting: pbrLightingSPV},
+	full := r.MaterialStore.Pool(
+		materials.Shader{Forward: shaders.PBRForward, Deferred: shaders.PBRDeferred, Lighting: shaders.PBRLighting},
 		"full")
 	// Same Forward shader, but no deferred path — must NOT share the store above.
-	forwardOnly := r.materials.store(Shader{Forward: pbrForwardSPV}, "forward-only")
+	forwardOnly := r.MaterialStore.Pool(materials.Shader{Forward: shaders.PBRForward}, "forward-only")
 
 	if full == forwardOnly {
 		t.Fatal("stores with different Deferred/Lighting shaders were deduped together")
 	}
-	if forwardOnly.sh.Deferred != nil || forwardOnly.sh.Lighting != nil {
+	if forwardOnly.Shader().Deferred != nil || forwardOnly.Shader().Lighting != nil {
 		t.Fatal("forward-only store inherited another Shader's deferred path")
 	}
-	if full.sh.Deferred == nil || full.sh.Lighting == nil {
+	if full.Shader().Deferred == nil || full.Shader().Lighting == nil {
 		t.Fatal("PBR store lost its deferred path")
 	}
 }
@@ -317,7 +319,7 @@ func TestDrawListBuffersGrowOnly(t *testing.T) {
 	}
 
 	// Force a rebuild (new pipeline assignment) that needs no extra space.
-	mat.SetBlend(BlendAlpha)
+	mat.SetBlend(materials.BlendAlpha)
 	r.Render(scene, cam)
 
 	after := [...]gpu.Handle{

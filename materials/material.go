@@ -1,4 +1,4 @@
-package pix
+package materials
 
 import (
 	"bytes"
@@ -8,8 +8,9 @@ import (
 	"github.com/bluescreen10/pix/textures"
 )
 
-// noTextureIndex is the shader sentinel heap index for "no bound texture".
-const noTextureIndex uint32 = 0xFFFFFFFF
+// NoTextureIndex is the shader sentinel heap index for "no bound texture". A custom
+// material writes it into its record for every map it has not bound.
+const NoTextureIndex uint32 = 0xFFFFFFFF
 
 // Material flag bits (mirror the per-type material structs in the shaders).
 const (
@@ -67,12 +68,11 @@ type Shader struct {
 // renderer needs to build its pipelines — the vertex/forward/deferred/lighting shaders
 // and the rasterization state (cull/blend) — plus where its record lives.
 //
-// The interface is sealed: it has unexported methods, so only this package implements
-// it. Each material type spells out every method itself, against its own store+ref
-// fields, so a material type is entirely readable in its own file — see
-// basic_material.go, blinn_phong_material.go, pbr_material.go and raw_material.go.
-// A custom material outside this package is built on NewRawMaterial, not by
-// implementing Material.
+// The interface is NOT sealed — implement it from any package to add a material type
+// of your own. The built-ins each spell out every method themselves, against their own
+// pool+ref fields, so a material type is entirely readable in its own file (basic.go,
+// blinn_phong.go, pbr.go, raw.go) and doubles as a worked example. RawMaterial is the
+// shortcut when you only need custom shaders + record bytes, not custom Go accessors.
 type Material interface {
 	// Copy returns another handle to the same instance (refcount++). Since a material
 	// now *is* its own record, every handle is the same object: an edit through one is
@@ -101,61 +101,23 @@ type Material interface {
 	Cull() CullMode
 	Blend() BlendMode
 
-	// Cached 32-bit shader identities the renderer keys pipelines on instead of
-	// comparing SPIR-V every frame (this is called once per mesh every frame).
-	// shaderHash is (Vertex,Forward); deferredHash is (Vertex,Deferred) (0 if none);
-	// lightingHash is Lighting alone (0 if none — it's a fullscreen pass, no vertex).
-	shaderHash() uint32
-	deferredHash() uint32
-	lightingHash() uint32
+	// Hash is this material's pipeline identity: the renderer keys its pipeline cache
+	// on it instead of comparing SPIR-V every frame (this runs once per mesh per
+	// frame). What goes into it is the implementation's call — whatever distinguishes
+	// one of its pipelines from another. Anything the built-ins vary, their shaders,
+	// is covered by hashing the whole Shader (see Pool.Hash); a material that also
+	// varies on flags or specialization constants folds those in here too.
+	//
+	// The contract is only this: two materials returning the same Hash must be
+	// interchangeable in every pass. Return a constant, or leave out something that
+	// really does change the pipeline, and the renderer will quietly draw one of them
+	// with the other's shaders.
+	Hash() uint32
 
-	// Renderer-facing: the instance's index within its store, and the store's record
-	// buffer address (resolved at draw time — it moves when the store grows).
-	materialID() uint32
-	materialsAddr() uint64
-}
-
-// materialSystem OWNS every material store (the renderer owns pipelines and issues
-// draws, never a store). Stores are byte-based and created automatically, one per
-// material kind (keyed by fragment shader): a material declares its shader + data
-// size, and the system allocates storage — no hand-written per-type store.
-type materialSystem struct {
-	backend gpu.Backend
-	stores  []*materialStore
-}
-
-func newMaterialSystem(backend gpu.Backend) *materialSystem {
-	return &materialSystem{backend: backend}
-}
-
-// store returns the store for a material kind, creating it on first use. The kind is
-// keyed by the fragment shader, which fixes the record layout; the record size comes
-// from the first material registered. Textures are not the store's concern — each
-// material holds its own references.
-func (s *materialSystem) store(sh Shader, label string) *materialStore {
-	// Fast path. Every built-in constructor hands us the same //go:embed slices on
-	// every call, so matching slice headers settle it outright — worth a special case
-	// because the slow path below hashes ~19KB of SPIR-V, which measured as ~99% of
-	// the cost of creating a material (and a glTF scene creates hundreds).
-	for _, st := range s.stores {
-		if sameShaderData(st.sh, sh) {
-			return st
-		}
-	}
-	h := hashSPIRV(sh.Forward)
-	for _, st := range s.stores {
-		// The forward-shader hash fixes the record layout, but the whole Shader must
-		// match before sharing a store: a store hands its own sh to every instance, so
-		// matching on Forward alone would silently give a caller another Shader's
-		// Deferred/Lighting (routing it through the G-buffer against a record layout it
-		// never asked for, or losing its deferred path — depending on creation order).
-		if st.forwardHash == h && sameShader(st.sh, sh) {
-			return st
-		}
-	}
-	st := newMaterialStore(s.backend, sh, label)
-	s.stores = append(s.stores, st)
-	return st
+	// Renderer-facing: the instance's index within its pool, and the pool's record
+	// buffer address (resolved at draw time — it moves when the pool grows).
+	ID() uint32
+	RecordsAddr() uint64
 }
 
 // Every material type implements Material by hand against its own store+ref, so a
@@ -168,18 +130,18 @@ var (
 	_ Material = (*RawMaterial)(nil)
 )
 
-// mapIndex is the bindless heap index a material writes into its record for a bound
-// texture, or the "unbound" sentinel. mapFlag is the matching presence bit. Deriving
-// both from the Texture in Bytes keeps a record from ever disagreeing with what the
-// material actually holds.
-func mapIndex(t textures.Texture) uint32 {
+// MapIndex is the bindless heap index a material writes into its record for a bound
+// texture, or the "unbound" sentinel. MapFlag is the matching presence bit. Derive
+// both from the Texture inside Bytes, as the built-ins do, and a record can never
+// disagree with what the material actually holds.
+func MapIndex(t textures.Texture) uint32 {
 	if t.Valid() {
 		return t.Index()
 	}
-	return noTextureIndex
+	return NoTextureIndex
 }
 
-func mapFlag(t textures.Texture, flag uint32) uint32 {
+func MapFlag(t textures.Texture, flag uint32) uint32 {
 	if t.Valid() {
 		return flag
 	}
@@ -191,11 +153,14 @@ func mapFlag(t textures.Texture, flag uint32) uint32 {
 // reading any of it. Distinct arrays holding equal bytes return false — that is a
 // miss, not an error, and falls through to the hash + compare path.
 func sameShaderData(a, b Shader) bool {
-	return sameSPIRVData(a.Vertex, b.Vertex) && sameSPIRVData(a.Forward, b.Forward) &&
-		sameSPIRVData(a.Deferred, b.Deferred) && sameSPIRVData(a.Lighting, b.Lighting)
+	return SameSPIRV(a.Vertex, b.Vertex) && SameSPIRV(a.Forward, b.Forward) &&
+		SameSPIRV(a.Deferred, b.Deferred) && SameSPIRV(a.Lighting, b.Lighting)
 }
 
-func sameSPIRVData(a, b []byte) bool {
+// SameSPIRV reports whether two SPIR-V slices are the very same bytes (same backing
+// array and length), which settles identity without reading any of it. Distinct
+// arrays holding equal bytes return false — a miss, not an error.
+func SameSPIRV(a, b []byte) bool {
 	return len(a) == len(b) && unsafe.SliceData(a) == unsafe.SliceData(b)
 }
 
@@ -205,41 +170,36 @@ func sameShader(a, b Shader) bool {
 		bytes.Equal(a.Deferred, b.Deferred) && bytes.Equal(a.Lighting, b.Lighting)
 }
 
-// hashSPIRV is FNV-1a over SPIR-V bytes. Computed once per store, so shader identity
-// checks (store dedup, draw-pipeline dedup) are a uint32 compare, not a slice scan.
-func hashSPIRV(b []byte) uint32 {
+// Uploader is the minimal capability Sync needs to stage a copy into device memory.
+// Declared here, by the consumer, rather than imported from wherever an
+// implementation lives — this package takes no dependency on that package at all;
+// anything with a matching Copy method satisfies it for free.
+type Uploader interface {
+	Copy(dst gpu.Buffer, dstOffset uint32, data []byte)
+}
+
+// hashShader folds every stage of a Shader into one pipeline identity — the default
+// Material.Hash for anything whose pipelines vary only by shader (see Pool.Hash).
+func hashShader(sh Shader) uint32 {
+	const prime = uint32(16777619)
+	h := HashSPIRV(sh.Vertex)
+	for _, b := range [][]byte{sh.Forward, sh.Deferred, sh.Lighting} {
+		for _, c := range b {
+			h = (h ^ uint32(c)) * prime
+		}
+		h = (h ^ 0xFF) * prime // stage separator, so concatenations can't alias
+	}
+	return h
+}
+
+// HashSPIRV is FNV-1a over SPIR-V bytes. Computed once per pool, so shader identity
+// checks (pool dedup, draw-pipeline dedup) are a uint32 compare, not a slice scan.
+// Exported as a building block for a custom Material's Hash.
+func HashSPIRV(b []byte) uint32 {
 	const offset, prime = uint32(2166136261), uint32(16777619)
 	h := offset
 	for _, c := range b {
 		h = (h ^ uint32(c)) * prime
 	}
 	return h
-}
-
-// shaderHashOf combines a vertex + fragment SPIR-V pair into one 32-bit pipeline
-// identity (nil vertex → the default vertex-pull shader, folded in as empty).
-func shaderHashOf(vertex, fragment []byte) uint32 {
-	const prime = uint32(16777619)
-	h := hashSPIRV(vertex)
-	for _, c := range fragment {
-		h = (h ^ uint32(c)) * prime
-	}
-	return h
-}
-
-// Sync uploads every store's changed records into device memory. Material records are
-// device-local, so accessor writes only touch a host shadow until this runs; call once
-// per frame before recording draws. The caller flushes the uploader.
-func (s *materialSystem) Sync(u *uploader) {
-	for _, st := range s.stores {
-		st.Sync(u)
-	}
-}
-
-// Destroy releases every store.
-func (s *materialSystem) Destroy() {
-	for _, st := range s.stores {
-		st.destroy()
-	}
-	s.stores = nil
 }

@@ -20,7 +20,7 @@ func renderCube(t *testing.T, r *Renderer, scene *Scene, cam Camera) (byte, byte
 }
 
 // TestMaterialEditBetweenFramesReachesGPU is the core guard for device-local material
-// records. Records live in MemoryDevice and are written only by materialStore.Sync, so
+// records. Records live in MemoryDevice and are written only by materials.Pool.Sync, so
 // an accessor that forgets to mark its record dirty updates the host shadow and the
 // GPU never sees it — the frame would silently keep rendering the old value.
 func TestMaterialEditBetweenFramesReachesGPU(t *testing.T) {
@@ -77,10 +77,10 @@ func TestMaterialStoreGrowReuploadsEveryRecord(t *testing.T) {
 		t.Fatalf("first frame: want red, got r=%d", red)
 	}
 
-	// Force several grows of the store. first's record moves to a new device buffer
-	// without ever being touched again.
-	st := first.store
-	for st.cap < 16 {
+	// Force several grows of the pool (capacity doubles from 1, so this is four of
+	// them). first's record moves to a new device buffer without ever being touched
+	// again.
+	for range 16 {
 		extra := r.NewBasicMaterial()
 		defer extra.Release()
 	}

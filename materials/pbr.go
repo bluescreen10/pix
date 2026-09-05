@@ -1,21 +1,13 @@
-package pix
+package materials
 
 import (
-	_ "embed"
 	"unsafe"
 
 	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/internal/ref"
+	"github.com/bluescreen10/pix/shaders"
 	"github.com/bluescreen10/pix/textures"
 )
-
-//go:embed shaders/build/scene_forward_pbr.frag.spv
-var pbrForwardSPV []byte
-
-//go:embed shaders/build/scene_deferred_pbr.frag.spv
-var pbrDeferredSPV []byte
-
-//go:embed shaders/build/scene_lighting_pbr.frag.spv
-var pbrLightingSPV []byte
 
 // PBRMaterial is a metallic-roughness physically-based material (Cook-Torrance) with
 // optional base-color, normal, metallic and roughness maps.
@@ -24,8 +16,8 @@ var pbrLightingSPV []byte
 // serializes them on demand. Every setter must call dirty(), or the change is never
 // uploaded.
 type PBRMaterial struct {
-	store *materialStore
-	ref   Ref
+	pool *Pool
+	ref  ref.Ref
 
 	emissive     colors.RGB32F
 	transmission float32 // 0 = opaque; >0 = see-through (glass), needs alpha blend
@@ -57,18 +49,18 @@ type PBRMaterial struct {
 
 // NewPBRMaterial creates a PBR material with four unbound maps: color, normal,
 // metallic and roughness.
-func (r *Renderer) NewPBRMaterial() *PBRMaterial {
-	st := r.materials.store(
-		Shader{Forward: pbrForwardSPV, Deferred: pbrDeferredSPV, Lighting: pbrLightingSPV},
+func NewPBRMaterial(store *Store) *PBRMaterial {
+	st := store.Pool(
+		Shader{Forward: shaders.PBRForward, Deferred: shaders.PBRDeferred, Lighting: shaders.PBRLighting},
 		"PBR Material",
 	)
 	m := &PBRMaterial{color: colors.RGBA32F{1, 1, 1, 1}, roughness: 0.5}
-	m.store = st
-	m.ref = st.register(m)
+	m.pool = st
+	m.ref = st.Create(m)
 	return m
 }
 
-// Bytes implements materialInstance: the 88-byte record matching the Material struct
+// Bytes implements Instance: the 88-byte record matching the Material struct
 // in shaders/src/scene_pbr.frag.glsl. Field order and padding here ARE the GPU layout —
 // changing either without changing the shader silently misreads every material.
 func (m *PBRMaterial) Bytes() []byte {
@@ -96,20 +88,20 @@ func (m *PBRMaterial) Bytes() []byte {
 		metallic:     m.metallic,
 		roughness:    m.roughness,
 		transmission: m.transmission,
-		flags: mapFlag(m.colorMap, MatColorMap) | mapFlag(m.normalMap, MatNormalMap) |
-			mapFlag(m.metallicMap, MatMetalMap) | mapFlag(m.roughnessMap, MatRoughMap) |
-			mapFlag(m.transmissionMap, MatTransMap),
-		colorMap: mapIndex(m.colorMap), colorSampler: m.colorSampler,
-		normalMap: mapIndex(m.normalMap), normalSampler: m.normalSampler,
-		metallicMap: mapIndex(m.metallicMap), metallicSampler: m.metallicSampler,
-		roughnessMap: mapIndex(m.roughnessMap), roughnessSampler: m.roughnessSampler,
-		transMap: mapIndex(m.transmissionMap), transSampler: m.transmissionSampler,
+		flags: MapFlag(m.colorMap, MatColorMap) | MapFlag(m.normalMap, MatNormalMap) |
+			MapFlag(m.metallicMap, MatMetalMap) | MapFlag(m.roughnessMap, MatRoughMap) |
+			MapFlag(m.transmissionMap, MatTransMap),
+		colorMap: MapIndex(m.colorMap), colorSampler: m.colorSampler,
+		normalMap: MapIndex(m.normalMap), normalSampler: m.normalSampler,
+		metallicMap: MapIndex(m.metallicMap), metallicSampler: m.metallicSampler,
+		roughnessMap: MapIndex(m.roughnessMap), roughnessSampler: m.roughnessSampler,
+		transMap: MapIndex(m.transmissionMap), transSampler: m.transmissionSampler,
 	}
 	return unsafe.Slice((*byte)(unsafe.Pointer(&rec)), unsafe.Sizeof(rec))
 }
 
-// release implements materialInstance: drop every texture this material bound.
-func (m *PBRMaterial) release() {
+// Dispose implements Instance: drop every texture this material bound.
+func (m *PBRMaterial) Dispose() {
 	m.colorMap.Release()
 	m.normalMap.Release()
 	m.metallicMap.Release()
@@ -120,7 +112,7 @@ func (m *PBRMaterial) release() {
 // dirty marks the record for re-upload in the next Sync. Every setter must call it;
 // one that does not leaves the GPU rendering the previous value indefinitely.
 func (m *PBRMaterial) dirty() {
-	m.store.markDirty(m.ref.id)
+	m.pool.MarkDirty(m.ref.ID())
 }
 
 func (m *PBRMaterial) Color() colors.RGBA32F {
@@ -302,7 +294,7 @@ func (m *PBRMaterial) SetTransmissionMapSampler(sampler uint32) {
 // own record, so there is exactly one PBRMaterial per instance and this returns the
 // same pointer — every handle observes the same fields and the same bound textures.
 func (m *PBRMaterial) Copy() Material {
-	m.ref.Copy() // bumps the shared count; the Ref it returns is identical to m.ref
+	m.ref.Copy() // bumps the shared count; the ref.Ref it returns is identical to m.ref
 	return m
 }
 
@@ -319,32 +311,32 @@ func (m *PBRMaterial) Valid() bool {
 
 // Vertex is nil for the built-in materials: they use the default vertex-pull shader.
 func (m *PBRMaterial) Vertex() []byte {
-	return m.store.shader().Vertex
+	return m.pool.Shader().Vertex
 }
 
 // Forward is the always-present single-pass shader (surface + lighting).
 func (m *PBRMaterial) Forward() []byte {
-	return m.store.shader().Forward
+	return m.pool.Shader().Forward
 }
 
 // Deferred fills the G-buffer; nil means this material always renders forward.
 func (m *PBRMaterial) Deferred() []byte {
-	return m.store.shader().Deferred
+	return m.pool.Shader().Deferred
 }
 
 // Lighting shades the G-buffer in a fullscreen pass; nil means always forward.
 func (m *PBRMaterial) Lighting() []byte {
-	return m.store.shader().Lighting
+	return m.pool.Shader().Lighting
 }
 
 // Cull reports which triangle faces are discarded.
 func (m *PBRMaterial) Cull() CullMode {
-	return m.store.cullOf(m.ref.id)
+	return m.pool.Cull(m.ref.ID())
 }
 
 // SetCull sets which faces are culled (CullNone = double-sided).
 func (m *PBRMaterial) SetCull(mode CullMode) {
-	m.store.setCullOf(m.ref.id, mode)
+	m.pool.SetCull(m.ref.ID(), mode)
 }
 
 // SetDoubleSided is a convenience for SetCull(CullNone) / SetCull(CullBack).
@@ -360,33 +352,32 @@ func (m *PBRMaterial) SetDoubleSided(enabled bool) {
 // material to the forward path — the G-buffer holds one surface per pixel, so it
 // cannot represent a fragment that composites over what is behind it.
 func (m *PBRMaterial) Blend() BlendMode {
-	return m.store.blendOf(m.ref.id)
+	return m.pool.Blend(m.ref.ID())
 }
 
 // SetBlend sets the material's blend mode (Opaque/Alpha/Additive).
 func (m *PBRMaterial) SetBlend(mode BlendMode) {
-	m.store.setBlendOf(m.ref.id, mode)
+	m.pool.SetBlend(m.ref.ID(), mode)
 }
 
-// Cached pipeline identities, precomputed per store (see the Material interface).
-func (m *PBRMaterial) shaderHash() uint32 {
-	return m.store.pipeHash
+// Pool returns the pool this material's records live in — its shader, pipeline
+// identity and record buffer.
+func (m *PBRMaterial) Pool() *Pool {
+	return m.pool
 }
 
-func (m *PBRMaterial) deferredHash() uint32 {
-	return m.store.deferHash
+// Hash is this material type's pipeline identity: its pool's, since these
+// materials vary only by shader.
+func (m *PBRMaterial) Hash() uint32 {
+	return m.pool.Hash()
 }
 
-func (m *PBRMaterial) lightingHash() uint32 {
-	return m.store.lightHash
-}
-
-// materialID is the instance's index within its store; materialsAddr is the store's
+// ID is the instance's index within its store; RecordsAddr is the store's
 // record buffer address, resolved at draw time because it moves when the store grows.
-func (m *PBRMaterial) materialID() uint32 {
-	return m.ref.id
+func (m *PBRMaterial) ID() uint32 {
+	return m.ref.ID()
 }
 
-func (m *PBRMaterial) materialsAddr() uint64 {
-	return m.store.bufAddr()
+func (m *PBRMaterial) RecordsAddr() uint64 {
+	return m.pool.RecordsAddr()
 }

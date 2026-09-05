@@ -4,6 +4,7 @@ import (
 	"unsafe"
 
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/materials"
 )
 
 // regionAlign is the per-batch granularity in the visible buffer, in u32 entries.
@@ -117,7 +118,7 @@ type lightingRoot struct {
 }
 
 // batch is one indirect command: a run of drawables sharing a (pipeline, geometry)
-// pair. Material is NOT a batch key — per-drawable materialID selects the record in
+// pair. materials.Material is NOT a batch key — per-drawable materialID selects the record in
 // the pipeline's store, so all materials of a type sharing a geometry draw together.
 // Its region in the visible buffer is [regionBase, regionBase+regionCap).
 type batch struct {
@@ -134,7 +135,7 @@ type pipelineRun struct {
 	pipeline   uint32
 	firstBatch uint32
 	count      uint32
-	mat        Material
+	mat        materials.Material
 }
 
 var (

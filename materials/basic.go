@@ -1,15 +1,13 @@
-package pix
+package materials
 
 import (
-	_ "embed"
 	"unsafe"
 
 	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/internal/ref"
+	"github.com/bluescreen10/pix/shaders"
 	"github.com/bluescreen10/pix/textures"
 )
-
-//go:embed shaders/build/scene_basic.frag.spv
-var basicForwardSPV []byte
 
 // BasicMaterial is an unlit material: base color × vertex color × color map (+
 // emissive), ignoring lights.
@@ -18,8 +16,8 @@ var basicForwardSPV []byte
 // serializes them on demand. Every setter must call dirty(), or the change is never
 // uploaded.
 type BasicMaterial struct {
-	store *materialStore
-	ref   Ref
+	pool *Pool
+	ref  ref.Ref
 
 	emissive colors.RGB32F
 
@@ -32,17 +30,17 @@ type BasicMaterial struct {
 }
 
 // NewBasicMaterial creates an unlit material with an unbound color map.
-func (r *Renderer) NewBasicMaterial() *BasicMaterial {
+func NewBasicMaterial(store *Store) *BasicMaterial {
 	// Forward-only: unlit shading has no surface to hand a deferred lighting pass, so
 	// it supplies neither Deferred nor Lighting and always renders through Forward().
-	st := r.materials.store(Shader{Forward: basicForwardSPV}, "Basic Material")
+	st := store.Pool(Shader{Forward: shaders.BasicForward}, "Basic Material")
 	m := &BasicMaterial{color: colors.RGBA32F{1, 1, 1, 1}}
-	m.store = st
-	m.ref = st.register(m)
+	m.pool = st
+	m.ref = st.Create(m)
 	return m
 }
 
-// Bytes implements materialInstance: the 48-byte record matching the Material struct
+// Bytes implements Instance: the 48-byte record matching the Material struct
 // in shaders/src/scene_basic.frag.glsl. Field order and padding here ARE the GPU
 // layout — changing either without changing the shader silently misreads every
 // material.
@@ -58,22 +56,22 @@ func (m *BasicMaterial) Bytes() []byte {
 	}{
 		color:        m.color,
 		emissive:     m.emissive,
-		colorMap:     mapIndex(m.colorMap),
+		colorMap:     MapIndex(m.colorMap),
 		colorSampler: m.colorSampler,
-		flags:        mapFlag(m.colorMap, MatColorMap),
+		flags:        MapFlag(m.colorMap, MatColorMap),
 	}
 	return unsafe.Slice((*byte)(unsafe.Pointer(&rec)), unsafe.Sizeof(rec))
 }
 
-// release implements materialInstance: drop every texture this material bound.
-func (m *BasicMaterial) release() {
+// Dispose implements Instance: drop every texture this material bound.
+func (m *BasicMaterial) Dispose() {
 	m.colorMap.Release()
 }
 
 // dirty marks the record for re-upload in the next Sync. Every setter must call it;
 // one that does not leaves the GPU rendering the previous value indefinitely.
 func (m *BasicMaterial) dirty() {
-	m.store.markDirty(m.ref.id)
+	m.pool.MarkDirty(m.ref.ID())
 }
 
 func (m *BasicMaterial) Color() colors.RGBA32F {
@@ -132,7 +130,7 @@ func (m *BasicMaterial) SetColorMapSampler(sampler uint32) {
 // own record, so there is exactly one BasicMaterial per instance and this returns the
 // same pointer — every handle observes the same fields.
 func (m *BasicMaterial) Copy() Material {
-	m.ref.Copy() // bumps the shared count; the Ref it returns is identical to m.ref
+	m.ref.Copy() // bumps the shared count; the ref.Ref it returns is identical to m.ref
 	return m
 }
 
@@ -149,32 +147,32 @@ func (m *BasicMaterial) Valid() bool {
 
 // Vertex is nil for the built-in materials: they use the default vertex-pull shader.
 func (m *BasicMaterial) Vertex() []byte {
-	return m.store.shader().Vertex
+	return m.pool.Shader().Vertex
 }
 
 // Forward is the always-present single-pass shader (surface + lighting).
 func (m *BasicMaterial) Forward() []byte {
-	return m.store.shader().Forward
+	return m.pool.Shader().Forward
 }
 
 // Deferred fills the G-buffer; nil means this material always renders forward.
 func (m *BasicMaterial) Deferred() []byte {
-	return m.store.shader().Deferred
+	return m.pool.Shader().Deferred
 }
 
 // Lighting shades the G-buffer in a fullscreen pass; nil means always forward.
 func (m *BasicMaterial) Lighting() []byte {
-	return m.store.shader().Lighting
+	return m.pool.Shader().Lighting
 }
 
 // Cull reports which triangle faces are discarded.
 func (m *BasicMaterial) Cull() CullMode {
-	return m.store.cullOf(m.ref.id)
+	return m.pool.Cull(m.ref.ID())
 }
 
 // SetCull sets which faces are culled (CullNone = double-sided).
 func (m *BasicMaterial) SetCull(mode CullMode) {
-	m.store.setCullOf(m.ref.id, mode)
+	m.pool.SetCull(m.ref.ID(), mode)
 }
 
 // SetDoubleSided is a convenience for SetCull(CullNone) / SetCull(CullBack).
@@ -190,33 +188,32 @@ func (m *BasicMaterial) SetDoubleSided(enabled bool) {
 // material to the forward path — the G-buffer holds one surface per pixel, so it
 // cannot represent a fragment that composites over what is behind it.
 func (m *BasicMaterial) Blend() BlendMode {
-	return m.store.blendOf(m.ref.id)
+	return m.pool.Blend(m.ref.ID())
 }
 
 // SetBlend sets the material's blend mode (Opaque/Alpha/Additive).
 func (m *BasicMaterial) SetBlend(mode BlendMode) {
-	m.store.setBlendOf(m.ref.id, mode)
+	m.pool.SetBlend(m.ref.ID(), mode)
 }
 
-// Cached pipeline identities, precomputed per store (see the Material interface).
-func (m *BasicMaterial) shaderHash() uint32 {
-	return m.store.pipeHash
+// Pool returns the pool this material's records live in — its shader, pipeline
+// identity and record buffer.
+func (m *BasicMaterial) Pool() *Pool {
+	return m.pool
 }
 
-func (m *BasicMaterial) deferredHash() uint32 {
-	return m.store.deferHash
+// Hash is this material type's pipeline identity: its pool's, since these
+// materials vary only by shader.
+func (m *BasicMaterial) Hash() uint32 {
+	return m.pool.Hash()
 }
 
-func (m *BasicMaterial) lightingHash() uint32 {
-	return m.store.lightHash
-}
-
-// materialID is the instance's index within its store; materialsAddr is the store's
+// ID is the instance's index within its store; RecordsAddr is the store's
 // record buffer address, resolved at draw time because it moves when the store grows.
-func (m *BasicMaterial) materialID() uint32 {
-	return m.ref.id
+func (m *BasicMaterial) ID() uint32 {
+	return m.ref.ID()
 }
 
-func (m *BasicMaterial) materialsAddr() uint64 {
-	return m.store.bufAddr()
+func (m *BasicMaterial) RecordsAddr() uint64 {
+	return m.pool.RecordsAddr()
 }

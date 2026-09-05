@@ -1,15 +1,13 @@
-package pix
+package materials
 
 import (
-	_ "embed"
 	"unsafe"
 
 	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/internal/ref"
+	"github.com/bluescreen10/pix/shaders"
 	"github.com/bluescreen10/pix/textures"
 )
-
-//go:embed shaders/build/scene_lit.frag.spv
-var blinnPhongForwardSPV []byte
 
 // BlinnPhongMaterial is ambient + diffuse (N·L) + Blinn-Phong specular.
 //
@@ -17,8 +15,8 @@ var blinnPhongForwardSPV []byte
 // serializes them on demand. Every setter must call dirty(), or the change is never
 // uploaded.
 type BlinnPhongMaterial struct {
-	store *materialStore
-	ref   Ref
+	pool *Pool
+	ref  ref.Ref
 
 	emissive  colors.RGB32F
 	specular  float32
@@ -34,18 +32,18 @@ type BlinnPhongMaterial struct {
 
 // NewBlinnPhongMaterial creates a Blinn-Phong material with an unbound color map.
 // Defaults to white with a soft highlight.
-func (r *Renderer) NewBlinnPhongMaterial() *BlinnPhongMaterial {
+func NewBlinnPhongMaterial(store *Store) *BlinnPhongMaterial {
 	// Forward-only for now: a deferred path means a Deferred pass that packs
 	// (specular, shininess) into the G-buffer's model-defined material channel, plus a
 	// matching Lighting pass. See shaders/src/gbuffer.glsl.
-	st := r.materials.store(Shader{Forward: blinnPhongForwardSPV}, "BlinnPhong Material")
+	st := store.Pool(Shader{Forward: shaders.BlinnPhongForward}, "BlinnPhong Material")
 	m := &BlinnPhongMaterial{color: colors.RGBA32F{1, 1, 1, 1}, specular: 0.3, shininess: 32}
-	m.store = st
-	m.ref = st.register(m)
+	m.pool = st
+	m.ref = st.Create(m)
 	return m
 }
 
-// Bytes implements materialInstance: the 64-byte record matching the Material struct
+// Bytes implements Instance: the 64-byte record matching the Material struct
 // in shaders/src/scene_lit.frag.glsl. Field order and padding here ARE the GPU layout —
 // changing either without changing the shader silently misreads every material.
 func (m *BlinnPhongMaterial) Bytes() []byte {
@@ -64,22 +62,22 @@ func (m *BlinnPhongMaterial) Bytes() []byte {
 		emissive:     m.emissive,
 		specular:     m.specular,
 		shininess:    m.shininess,
-		colorMap:     mapIndex(m.colorMap),
+		colorMap:     MapIndex(m.colorMap),
 		colorSampler: m.colorSampler,
-		flags:        mapFlag(m.colorMap, MatColorMap),
+		flags:        MapFlag(m.colorMap, MatColorMap),
 	}
 	return unsafe.Slice((*byte)(unsafe.Pointer(&rec)), unsafe.Sizeof(rec))
 }
 
-// release implements materialInstance: drop every texture this material bound.
-func (m *BlinnPhongMaterial) release() {
+// Dispose implements Instance: drop every texture this material bound.
+func (m *BlinnPhongMaterial) Dispose() {
 	m.colorMap.Release()
 }
 
 // dirty marks the record for re-upload in the next Sync. Every setter must call it;
 // one that does not leaves the GPU rendering the previous value indefinitely.
 func (m *BlinnPhongMaterial) dirty() {
-	m.store.markDirty(m.ref.id)
+	m.pool.MarkDirty(m.ref.ID())
 }
 
 func (m *BlinnPhongMaterial) Color() colors.RGBA32F {
@@ -156,7 +154,7 @@ func (m *BlinnPhongMaterial) SetColorMapSampler(sampler uint32) {
 // own record, so there is exactly one BlinnPhongMaterial per instance and this returns
 // the same pointer — every handle observes the same fields.
 func (m *BlinnPhongMaterial) Copy() Material {
-	m.ref.Copy() // bumps the shared count; the Ref it returns is identical to m.ref
+	m.ref.Copy() // bumps the shared count; the ref.Ref it returns is identical to m.ref
 	return m
 }
 
@@ -173,32 +171,32 @@ func (m *BlinnPhongMaterial) Valid() bool {
 
 // Vertex is nil for the built-in materials: they use the default vertex-pull shader.
 func (m *BlinnPhongMaterial) Vertex() []byte {
-	return m.store.shader().Vertex
+	return m.pool.Shader().Vertex
 }
 
 // Forward is the always-present single-pass shader (surface + lighting).
 func (m *BlinnPhongMaterial) Forward() []byte {
-	return m.store.shader().Forward
+	return m.pool.Shader().Forward
 }
 
 // Deferred fills the G-buffer; nil means this material always renders forward.
 func (m *BlinnPhongMaterial) Deferred() []byte {
-	return m.store.shader().Deferred
+	return m.pool.Shader().Deferred
 }
 
 // Lighting shades the G-buffer in a fullscreen pass; nil means always forward.
 func (m *BlinnPhongMaterial) Lighting() []byte {
-	return m.store.shader().Lighting
+	return m.pool.Shader().Lighting
 }
 
 // Cull reports which triangle faces are discarded.
 func (m *BlinnPhongMaterial) Cull() CullMode {
-	return m.store.cullOf(m.ref.id)
+	return m.pool.Cull(m.ref.ID())
 }
 
 // SetCull sets which faces are culled (CullNone = double-sided).
 func (m *BlinnPhongMaterial) SetCull(mode CullMode) {
-	m.store.setCullOf(m.ref.id, mode)
+	m.pool.SetCull(m.ref.ID(), mode)
 }
 
 // SetDoubleSided is a convenience for SetCull(CullNone) / SetCull(CullBack).
@@ -214,33 +212,32 @@ func (m *BlinnPhongMaterial) SetDoubleSided(enabled bool) {
 // material to the forward path — the G-buffer holds one surface per pixel, so it
 // cannot represent a fragment that composites over what is behind it.
 func (m *BlinnPhongMaterial) Blend() BlendMode {
-	return m.store.blendOf(m.ref.id)
+	return m.pool.Blend(m.ref.ID())
 }
 
 // SetBlend sets the material's blend mode (Opaque/Alpha/Additive).
 func (m *BlinnPhongMaterial) SetBlend(mode BlendMode) {
-	m.store.setBlendOf(m.ref.id, mode)
+	m.pool.SetBlend(m.ref.ID(), mode)
 }
 
-// Cached pipeline identities, precomputed per store (see the Material interface).
-func (m *BlinnPhongMaterial) shaderHash() uint32 {
-	return m.store.pipeHash
+// Pool returns the pool this material's records live in — its shader, pipeline
+// identity and record buffer.
+func (m *BlinnPhongMaterial) Pool() *Pool {
+	return m.pool
 }
 
-func (m *BlinnPhongMaterial) deferredHash() uint32 {
-	return m.store.deferHash
+// Hash is this material type's pipeline identity: its pool's, since these
+// materials vary only by shader.
+func (m *BlinnPhongMaterial) Hash() uint32 {
+	return m.pool.Hash()
 }
 
-func (m *BlinnPhongMaterial) lightingHash() uint32 {
-	return m.store.lightHash
-}
-
-// materialID is the instance's index within its store; materialsAddr is the store's
+// ID is the instance's index within its store; RecordsAddr is the store's
 // record buffer address, resolved at draw time because it moves when the store grows.
-func (m *BlinnPhongMaterial) materialID() uint32 {
-	return m.ref.id
+func (m *BlinnPhongMaterial) ID() uint32 {
+	return m.ref.ID()
 }
 
-func (m *BlinnPhongMaterial) materialsAddr() uint64 {
-	return m.store.bufAddr()
+func (m *BlinnPhongMaterial) RecordsAddr() uint64 {
+	return m.pool.RecordsAddr()
 }

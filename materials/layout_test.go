@@ -1,4 +1,4 @@
-package pix
+package materials
 
 import (
 	"encoding/binary"
@@ -30,17 +30,15 @@ func f32At(t *testing.T, b []byte, off int) float32 {
 //	Basic       shaders/src/scene_basic.frag.glsl
 //	BlinnPhong  shaders/src/scene_lit.frag.glsl
 func TestMaterialRecordLayouts(t *testing.T) {
-	r, err := NewOffscreenRenderer(16, 16)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Destroy()
+	store, backend := testStore(t)
+	texStore := textures.NewStore(backend)
+	defer texStore.Destroy()
 
-	tex := r.TextureStore.Create([]byte{255, 255, 255, 255}, 1, 1, textures.Linear)
+	tex := texStore.Create([]byte{255, 255, 255, 255}, 1, 1, textures.Linear)
 	defer tex.Release()
 
 	t.Run("PBR", func(t *testing.T) {
-		m := r.NewPBRMaterial()
+		m := NewPBRMaterial(store)
 		defer m.Release()
 		m.SetColor(colors.RGBA32F{0.1, 0.2, 0.3, 0.4})
 		m.SetEmissive(colors.RGB32F{0.5, 0.6, 0.7})
@@ -73,7 +71,7 @@ func TestMaterialRecordLayouts(t *testing.T) {
 		if want := MatNormalMap | MatTransMap; u32At(t, b, 44) != want {
 			t.Errorf("flags at byte 44 = %#x, want MatNormalMap|MatTransMap (%#x)", u32At(t, b, 44), want)
 		}
-		if got := u32At(t, b, 48); got != noTextureIndex {
+		if got := u32At(t, b, 48); got != NoTextureIndex {
 			t.Errorf("unbound colorMap at byte 48 = %d, want the no-texture sentinel", got)
 		}
 		if got := u32At(t, b, 56); got != tex.Index() {
@@ -91,7 +89,7 @@ func TestMaterialRecordLayouts(t *testing.T) {
 	})
 
 	t.Run("Basic", func(t *testing.T) {
-		m := r.NewBasicMaterial()
+		m := NewBasicMaterial(store)
 		defer m.Release()
 		m.SetColor(colors.RGBA32F{0.1, 0.2, 0.3, 0.4})
 		m.SetEmissive(colors.RGB32F{0.5, 0.6, 0.7})
@@ -120,7 +118,7 @@ func TestMaterialRecordLayouts(t *testing.T) {
 	})
 
 	t.Run("BlinnPhong", func(t *testing.T) {
-		m := r.NewBlinnPhongMaterial()
+		m := NewBlinnPhongMaterial(store)
 		defer m.Release()
 		m.SetColor(colors.RGBA32F{0.1, 0.2, 0.3, 0.4})
 		m.SetEmissive(colors.RGB32F{0.5, 0.6, 0.7})
@@ -143,7 +141,7 @@ func TestMaterialRecordLayouts(t *testing.T) {
 		if got := f32At(t, b, 36); got != 64 {
 			t.Errorf("shininess at byte 36 = %v, want 64", got)
 		}
-		if got := u32At(t, b, 40); got != noTextureIndex {
+		if got := u32At(t, b, 40); got != NoTextureIndex {
 			t.Errorf("unbound colorMap at byte 40 = %d, want the no-texture sentinel", got)
 		}
 	})
@@ -153,15 +151,13 @@ func TestMaterialRecordLayouts(t *testing.T) {
 // Bytes marked the record dirty (as an earlier RawMaterial.Bytes did) every material
 // would re-upload every frame forever.
 func TestMaterialBytesHasNoSideEffects(t *testing.T) {
-	r, err := NewOffscreenRenderer(16, 16)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Destroy()
+	store, backend := testStore(t)
+	texStore := textures.NewStore(backend)
+	defer texStore.Destroy()
 
-	m := r.NewPBRMaterial()
+	m := NewPBRMaterial(store)
 	defer m.Release()
-	st := m.store
+	st := m.pool
 	clear(st.dirty)
 	st.allDirty = false
 
@@ -175,13 +171,11 @@ func TestMaterialBytesHasNoSideEffects(t *testing.T) {
 // the same object. Two objects sharing one slot would mean Sync serializes whichever
 // one the store happens to hold, silently dropping edits made through the other.
 func TestMaterialCopyIsTheSameInstance(t *testing.T) {
-	r, err := NewOffscreenRenderer(16, 16)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Destroy()
+	store, backend := testStore(t)
+	texStore := textures.NewStore(backend)
+	defer texStore.Destroy()
 
-	m := r.NewPBRMaterial()
+	m := NewPBRMaterial(store)
 	dup, ok := m.Copy().(*PBRMaterial)
 	if !ok || dup != m {
 		t.Fatal("Copy returned a different object; edits through one handle would be lost")

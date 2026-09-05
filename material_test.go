@@ -6,6 +6,7 @@ import (
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/materials"
 )
 
 // TestMaterialClasses renders the same geometry with three different material
@@ -30,7 +31,7 @@ func TestMaterialClasses(t *testing.T) {
 	pbr := r.NewPBRMaterial()
 	pbr.SetColor(colors.RGBA32F{0.8, 0.8, 0.8, 1})
 
-	place := func(mat Material, x float32) {
+	place := func(mat materials.Material, x float32) {
 		m := scene.NewMesh(cube, mat)
 		m.SetPosition(glm.Vec3f{x, 0, 0})
 		m.SetRotationQuat(glm.NewQuat(float32(0.6), glm.Vec3f{0, 1, 0}))

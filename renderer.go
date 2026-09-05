@@ -11,6 +11,7 @@ import (
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
+	"github.com/bluescreen10/pix/materials"
 	"github.com/bluescreen10/pix/shaders"
 	"github.com/bluescreen10/pix/textures"
 )
@@ -36,8 +37,10 @@ type Renderer struct {
 	readback   gpu.Buffer
 	pixels     []byte
 
-	// Renderer-owned shared resources + GPU-driven pipelines. The material stores are
-	// owned by the material system, not the renderer.
+	// Renderer-owned shared resources + GPU-driven pipelines. All three stores are
+	// exported: callers create resources on them directly (GeometryStore.Create,
+	// TextureStore.Create, r.NewPBRMaterial()) rather than
+	// through per-renderer wrapper methods that would have to be kept in sync.
 	//
 	// GeometryStore and TextureStore are exported (unlike materials) so callers
 	// create those resources directly — r.GeometryStore.Create(cfg),
@@ -45,7 +48,7 @@ type Renderer struct {
 	// method to keep in sync.
 	GeometryStore *geometries.Store
 	TextureStore  *textures.Store
-	materials     *materialSystem
+	MaterialStore *materials.Store
 	// uploader is shared by every subsystem that stages into device memory; it
 	// lives as long as the renderer so its staging arena is reused across frames.
 	uploader *uploader
@@ -147,7 +150,7 @@ func NewRenderer(cfg *RendererConfig) (*Renderer, error) {
 		uploader:      newUploader(backend),
 		GeometryStore: geometries.NewStore(backend),
 		TextureStore:  textures.NewStore(backend),
-		materials:     newMaterialSystem(backend),
+		MaterialStore: materials.NewStore(backend),
 		stats:         newRendererStats(60),
 	}
 
@@ -290,8 +293,8 @@ type materialPipeline struct {
 	pass             pass
 	shaderHash       uint32 // cached (vertex,fragment) identity — the dedup key
 	vertex, fragment []byte // kept only to build the pipeline
-	cull             CullMode
-	blend            BlendMode
+	cull             materials.CullMode
+	blend            materials.BlendMode
 	lightingIdx      uint32 // valid iff pass == passGBuffer
 }
 
@@ -316,14 +319,14 @@ func (r *Renderer) buildDrawPipe(k materialPipeline) gpu.Pipeline {
 	}
 	var blend []gpu.BlendState
 	switch k.blend {
-	case BlendAlpha:
+	case materials.BlendAlpha:
 		blend = []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}}}
-	case BlendAdditive:
+	case materials.BlendAdditive:
 		blend = []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOne, Op: gpu.BlendAdd}}}
 	}
 	// Transparent (blended) materials test depth against opaque geometry but do NOT
 	// write depth, so they don't occlude each other and blend correctly.
-	depthWrite := k.blend == BlendOpaque
+	depthWrite := k.blend == materials.BlendOpaque
 	return r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
 		VertexShader: vert, FragmentShader: k.fragment,
 		Topology: gpu.TopologyTriangles, ColorFormats: []gpu.Format{r.color},
@@ -364,9 +367,22 @@ type lightingPipelineKey struct {
 }
 
 // lightingPipelineFor resolves a material's Lighting() shader to a lighting-pipeline
-// index, building and caching it the first time a given hash is seen (one fullscreen
+// index, building and caching it the first time a given shader is seen (one fullscreen
 // pipeline per unique shading model, shared by every material using that Lighting()).
-func (r *Renderer) lightingPipelineFor(lightingShader []byte, hash uint32) uint32 {
+//
+// This deliberately keys on the shader rather than on Material.Hash: two different
+// material TYPES that share a shading model must share one fullscreen pass, and their
+// Hashes differ (each covers its own forward/deferred shaders too). Identity is a
+// slice-header compare first — every built-in hands over the same //go:embed slice on
+// every call, so that hits without reading any SPIR-V — falling back to a byte hash
+// only for a distinct slice, which is then cached on the key.
+func (r *Renderer) lightingPipelineFor(lightingShader []byte) uint32 {
+	for i := range r.lightingKeys {
+		if materials.SameSPIRV(r.lightingKeys[i].fragment, lightingShader) {
+			return uint32(i)
+		}
+	}
+	hash := materials.HashSPIRV(lightingShader)
 	for i := range r.lightingKeys {
 		if r.lightingKeys[i].hash == hash {
 			return uint32(i)
@@ -399,17 +415,17 @@ func (r *Renderer) pipelineFor(k materialPipeline) uint32 {
 // (blended, deferred disabled, or opaque missing either shader) renders forward.
 // Blended materials are forced forward: the G-buffer holds one surface per pixel, so
 // it cannot represent a fragment that composites over what is behind it.
-func (r *Renderer) pipelineForMaterial(m Material) uint32 {
-	if r.deferredEnabled && m.Blend() == BlendOpaque {
+func (r *Renderer) pipelineForMaterial(m materials.Material) uint32 {
+	if r.deferredEnabled && m.Blend() == materials.BlendOpaque {
 		if def, lit := m.Deferred(), m.Lighting(); def != nil && lit != nil {
 			return r.pipelineFor(materialPipeline{
-				pass: passGBuffer, shaderHash: m.deferredHash(), vertex: m.Vertex(), fragment: def,
-				cull: m.Cull(), lightingIdx: r.lightingPipelineFor(lit, m.lightingHash()),
+				pass: passGBuffer, shaderHash: m.Hash(), vertex: m.Vertex(), fragment: def,
+				cull: m.Cull(), lightingIdx: r.lightingPipelineFor(lit),
 			})
 		}
 	}
 	return r.pipelineFor(materialPipeline{
-		pass: passForward, shaderHash: m.shaderHash(), vertex: m.Vertex(), fragment: m.Forward(), cull: m.Cull(), blend: m.Blend(),
+		pass: passForward, shaderHash: m.Hash(), vertex: m.Vertex(), fragment: m.Forward(), cull: m.Cull(), blend: m.Blend(),
 	})
 }
 
@@ -424,7 +440,7 @@ func sameKey(a, b materialPipeline) bool {
 }
 
 // The named material constructors (NewBasicMaterial, NewBlinnPhongMaterial,
-// NewPBRMaterial) live in their respective *_material.go files.
+// NewPBRMaterial, NewRawMaterial) are shortcuts onto MaterialStore — see materials.go.
 
 // NewScene creates a scene bound to this renderer's backend.
 func (r *Renderer) NewScene() *Scene {
@@ -710,7 +726,7 @@ func (r *Renderer) syncScene(scene *Scene, cam Camera, cmd gpu.CommandBuffer) {
 	up := r.uploader
 	up.Begin(cmd)
 	r.GeometryStore.Sync(up)
-	r.materials.Sync(up)
+	r.MaterialStore.Sync(up)
 	scene.Sync()
 	up.End(cmd)
 
@@ -1075,7 +1091,7 @@ func (r *Renderer) fillDrawRoots(dl *drawList, viewProj glm.Mat4f, eye glm.Vec3f
 			models:        dl.worldBuf.Addr,
 			drawables:     dl.drawableBuf.Addr,
 			visible:       dl.visibleBuf.Addr,
-			materials:     run.mat.materialsAddr(),
+			materials:     run.mat.RecordsAddr(),
 			lights:        lightsAddr,
 			eye:           glm.Vec4f{eye[0], eye[1], eye[2], 1},
 			shadowSampler: r.shadowSampler.Index,
@@ -1231,7 +1247,7 @@ func (r *Renderer) Destroy() {
 		r.backend.Free(r.readback)
 	}
 	r.GeometryStore.Destroy()
-	r.materials.Destroy()
+	r.MaterialStore.Destroy()
 	r.TextureStore.Destroy()
 	r.uploader.Destroy()
 	r.backend.Destroy()

@@ -1,6 +1,7 @@
 package pix
 
 import (
+	"github.com/bluescreen10/pix/materials"
 	"testing"
 )
 
@@ -19,7 +20,7 @@ func TestMaterialSyncStagesManyDirtyWithoutAllocating(t *testing.T) {
 	defer r.Destroy()
 
 	const n = 64
-	mats := make([]*PBRMaterial, n)
+	mats := make([]*materials.PBRMaterial, n)
 	for i := range mats {
 		mats[i] = r.NewPBRMaterial()
 	}
@@ -37,17 +38,13 @@ func TestMaterialSyncStagesManyDirtyWithoutAllocating(t *testing.T) {
 		up.End(cmd)
 		r.backend.Wait(r.backend.Submit(cmd))
 	}
-	drain(func() { mats[0].store.Sync(up) }) // the dirtying register() did above
+	drain(func() { mats[0].Pool().Sync(up) }) // the dirtying register() did above
 
 	for i := 0; i < n; i += 2 { // scattered, not a contiguous run
 		mats[i].SetRoughness(0.9)
 	}
 
-	st := mats[0].store
-	if len(st.dirty) != n/2 {
-		t.Fatalf("dirty set has %d ids, want %d", len(st.dirty), n/2)
-	}
-
+	st := mats[0].Pool()
 	arenasBefore := up.ArenaCount()
 	drain(func() { st.Sync(up) })
 	if got := up.ArenaCount(); got != arenasBefore {

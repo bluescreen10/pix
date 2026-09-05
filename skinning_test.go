@@ -7,6 +7,7 @@ import (
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/materials"
 )
 
 // riggedQuad returns a narrow 2-unit-tall quad in skeleton-local space, standing on
@@ -84,7 +85,7 @@ func TestSkinnedMeshBindPose(t *testing.T) {
 	geo := r.GeometryStore.Create(riggedQuad())
 	defer geo.Release()
 	mat := r.NewBasicMaterial()
-	mat.SetCull(CullNone)
+	mat.SetCull(materials.CullNone)
 
 	skel := scene.NewSkeleton(twoBoneSkeleton())
 	scene.Add(skel)
@@ -121,7 +122,7 @@ func TestSkinnedMeshDeforms(t *testing.T) {
 	geo := r.GeometryStore.Create(riggedQuad())
 	defer geo.Release()
 	mat := r.NewBasicMaterial()
-	mat.SetCull(CullNone)
+	mat.SetCull(materials.CullNone)
 
 	skel := scene.NewSkeleton(twoBoneSkeleton())
 	scene.Add(skel)

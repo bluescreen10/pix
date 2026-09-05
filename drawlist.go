@@ -6,6 +6,7 @@ import (
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
+	"github.com/bluescreen10/pix/materials"
 )
 
 // drawList is a Scene's per-scene GPU draw/cull state: the world-matrix buffer, the
@@ -82,19 +83,19 @@ func (d *drawList) sync(world []glm.Mat4f) {
 // template (indexCount/firstIndex from the geometry, firstInstance = the region base),
 // resizes buffers, and uploads the drawable + region tables. Called on structural
 // change. pipelines[i] is drawables[i]'s draw pipeline.
-func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, materials []Material, geometryStore *geometries.Store) {
+func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, mats []materials.Material, geometryStore *geometries.Store) {
 	type key struct{ pipeline, geo uint32 }
 
 	// First pass: unique (pipeline, geometry) batches + their instance counts, and a
 	// representative material per pipeline (any drawable using that pipeline).
 	index := map[key]uint32{}
-	rep := map[uint32]Material{}
+	rep := map[uint32]materials.Material{}
 	var raw []batch
 	var counts []uint32
 	for i := range drawables {
 		k := key{pipelines[i], drawables[i].geometryID}
 		if _, ok := rep[k.pipeline]; !ok {
-			rep[k.pipeline] = materials[i]
+			rep[k.pipeline] = mats[i]
 		}
 		bid, ok := index[k]
 		if !ok {
@@ -112,7 +113,7 @@ func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, material
 	// Order batches: opaque pipelines before transparent (blended) ones so blending
 	// composites over the opaque scene; within each group, by pipeline (so a pipeline's
 	// commands stay contiguous for one MDI call).
-	transparent := func(pid uint32) bool { return rep[pid].Blend() != BlendOpaque }
+	transparent := func(pid uint32) bool { return rep[pid].Blend() != materials.BlendOpaque }
 	order := make([]uint32, len(raw))
 	for i := range order {
 		order[i] = uint32(i)

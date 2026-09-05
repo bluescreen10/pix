@@ -7,6 +7,7 @@ import (
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/materials"
 )
 
 // TestTransparency renders an opaque red quad behind a 50%-alpha blue quad in front.
@@ -39,7 +40,7 @@ func TestTransparency(t *testing.T) {
 	// Transparent blue in front (added first).
 	blue := r.NewPBRMaterial()
 	blue.SetColor(colors.RGBA32F{0, 0, 1, 0.5})
-	blue.SetBlend(BlendAlpha)
+	blue.SetBlend(materials.BlendAlpha)
 	scene.Add(scene.NewMesh(quad(0), blue))   // front, transparent, added first
 	scene.Add(scene.NewMesh(quad(-0.5), red)) // behind, opaque, added last
 
