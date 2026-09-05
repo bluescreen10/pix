@@ -30,4 +30,14 @@ type RendererConfig struct {
 
 	// Power hints GPU device selection (honored when the backend supports it).
 	Power PowerPreference
+
+	// Scale is framebuffer pixels per logical point — 2 on a HiDPI/Retina display,
+	// 1 elsewhere. Width/Height are in framebuffer pixels, so without this the
+	// renderer cannot tell a 2400px-wide Retina window from a 2400px 1x one, and
+	// everything it sizes for a human to read (the debug HUD, the console) comes out
+	// half as large as intended. GLFW reports it as GetContentScale, or derive it as
+	// framebufferWidth/windowWidth.
+	//
+	// 0 means 1: correct for a plain 1x display, and a safe default everywhere else.
+	Scale float32
 }

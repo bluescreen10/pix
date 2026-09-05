@@ -8,6 +8,7 @@ import (
 	"unsafe"
 
 	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/console"
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
@@ -25,6 +26,7 @@ import (
 type Renderer struct {
 	backend       gpu.Backend
 	width, height uint32
+	scale         float32 // framebuffer pixels per logical point (see RendererConfig.Scale)
 	color         gpu.Format
 	clear         colors.RGBA32F
 	depth         gpu.Texture
@@ -91,6 +93,10 @@ type Renderer struct {
 	shadowPipeline gpu.Pipeline
 	shadowDistance float32
 
+	// Console: nil until EnableConsole. It shares the debug overlay with the FPS HUD,
+	// so either one being active is what keeps the overlay alive.
+	console *console.Console
+
 	// Stats / debug HUD.
 	stats     *RendererStats
 	fontColor colors.RGBA32F
@@ -115,6 +121,44 @@ func (r *Renderer) EnableShadows(on bool) {
 func (r *Renderer) EnableDeferredRendering(on bool) {
 	r.deferredEnabled = on
 }
+
+// Scale is framebuffer pixels per logical point (see RendererConfig.Scale). Sizes the
+// renderer draws for a human to read — the HUD, the console — are given in logical
+// points and multiplied by this, so they stay the same physical size on any display.
+func (r *Renderer) Scale() float32 { return r.scale }
+
+// SetScale updates the display scale, for a window moved between displays of
+// different densities. Values <= 0 are ignored.
+func (r *Renderer) SetScale(s float32) {
+	if s > 0 {
+		r.scale = s
+		if r.overlay != nil {
+			r.overlay.scale = s
+		}
+	}
+}
+
+// ShadowsEnabled, DeferredEnabled and ShadowDistance report the current setting of
+// the matching Enable*/Set* call. They exist so these toggles can be bound to
+// something that has to read them back — a console variable, a settings panel —
+// without the caller keeping its own shadow copy in sync.
+func (r *Renderer) ShadowsEnabled() bool { return r.shadowsEnabled }
+
+func (r *Renderer) DeferredEnabled() bool { return r.deferredEnabled }
+
+func (r *Renderer) ShadowDistance() float32 { return r.shadowDistance }
+
+// StatsVisible reports whether the debug HUD is showing (see ShowFPS).
+func (r *Renderer) StatsVisible() bool { return r.showFPS }
+
+// ClearColor is the colour the frame is cleared to (see SetClearColor).
+func (r *Renderer) ClearColor() colors.RGBA32F { return r.clear }
+
+// FontColor is the colour the debug HUD's text is drawn in.
+func (r *Renderer) FontColor() colors.RGBA32F { return r.fontColor }
+
+// SetFontColor sets the colour of the debug HUD's text.
+func (r *Renderer) SetFontColor(rgba colors.RGBA32F) { r.fontColor = rgba }
 
 // SetShadowDistance caps how far along the camera's view frustum directional shadows
 // are fit: a smaller distance packs the shadow map's resolution into the near view for
@@ -141,8 +185,13 @@ func NewRenderer(cfg *RendererConfig) (*Renderer, error) {
 	if err := backend.Init(); err != nil {
 		return nil, fmt.Errorf("render: init backend: %w", err)
 	}
+	scale := cfg.Scale
+	if scale <= 0 {
+		scale = 1
+	}
 	r := &Renderer{
 		backend:   backend,
+		scale:     scale,
 		clear:     colors.RGBA32F{0, 0, 0, 1},      //TODO: extract as constant
 		fontColor: colors.RGBA32F{1, 0.9, 0.35, 1}, //TODO: extract as constant
 		// One uploader for the process, not one per frame: its staging arena only
@@ -272,7 +321,7 @@ func (r *Renderer) buildPipelines() {
 	r.pipelinesReady = true
 	if r.overlay != nil {
 		r.overlay.destroy()
-		r.overlay = newOverlay(r.backend, r.color, gpu.FormatDepth32F)
+		r.overlay = newOverlay(r.backend, r.TextureStore, r.scale, r.color, gpu.FormatDepth32F)
 	}
 }
 
@@ -471,13 +520,80 @@ func (r *Renderer) SetClearColor(rgba colors.RGBA32F) {
 func (r *Renderer) ShowFPS(on bool) {
 	r.showFPS = on
 	if on {
-		if r.overlay == nil && r.pipelinesReady {
-			r.overlay = newOverlay(r.backend, r.color, gpu.FormatDepth32F)
-		}
+		r.ensureOverlay()
 		if !r.gpuPool.Valid() {
 			r.gpuPool = r.backend.CreateTimestampPool(2)
 		}
 	}
+}
+
+// ensureOverlay creates the shared debug overlay if a consumer (the FPS HUD or the
+// console) needs it and the pipelines it depends on exist yet. It is deferred rather
+// than created up front because a renderer that never shows either should not pay for
+// the pipeline.
+func (r *Renderer) ensureOverlay() {
+	if r.overlay == nil && r.pipelinesReady {
+		r.overlay = newOverlay(r.backend, r.TextureStore, r.scale, r.color, gpu.FormatDepth32F)
+	}
+}
+
+// overlayActive reports whether anything wants the overlay drawn this frame.
+func (r *Renderer) overlayActive() bool {
+	return r.showFPS || r.IsConsoleOpen()
+}
+
+// IsConsoleOpen reports whether the console is enabled and currently open. It is the
+// check an application makes to stand its own input down:
+//
+//	if !r.IsConsoleOpen() {
+//	    controls.Update()
+//	}
+//
+// The console captures typed text but cannot stop anything else from polling the same
+// keys, so without this the camera flies around while the user types `set`. Safe on a
+// renderer that never enabled a console — it is simply false, so a caller need not
+// know whether one exists.
+func (r *Renderer) IsConsoleOpen() bool {
+	return r.console != nil && r.console.Visible()
+}
+
+// EnableConsole turns on the developer console, reading from in, and returns it so
+// values can be registered:
+//
+//	c := r.EnableConsole(glfwinput.New(win))
+//	console.Bind(c, "shadow.distance", &shadowDistance, "directional shadow fit")
+//
+// The console starts hidden; the user opens it with its toggle key (` by default).
+// The renderer's own switches (shadows, deferred, stats, the clear and HUD colours,
+// and the read-only size/aspect) are registered automatically, so `list` is useful
+// before the application binds anything of its own.
+//
+// Calling this again returns the existing console rather than replacing it, so the
+// registrations survive.
+//
+// The application is responsible for not acting on input the console is consuming:
+// check IsConsoleOpen before running camera controls, or the camera will fly around
+// while the user types. The renderer drives Console.Update itself, one frame
+// before that check is read; an application that wants the toggle to take effect
+// within the same frame can call Update itself first — the renderer's later call then
+// finds the buffers already drained and does nothing.
+func (r *Renderer) EnableConsole(in console.Input) *console.Console {
+	if r.console == nil {
+		r.console = console.New(in)
+		r.registerBuiltins(r.console)
+	}
+	r.ensureOverlay()
+	return r.console
+}
+
+// DisableConsole detaches the console; its registrations are dropped with it.
+func (r *Renderer) DisableConsole() {
+	r.console = nil
+}
+
+// Console returns the console, or nil if EnableConsole was never called.
+func (r *Renderer) Console() *console.Console {
+	return r.console
 }
 
 // Render draws the scene from cam into the configured target (swapchain or texture).
@@ -501,7 +617,10 @@ func (r *Renderer) Render(scene *Scene, cam Camera) {
 	planes := FrustumPlanes(vp)
 	drawVP := flipClipY(vp)
 	eye := cam.Position()
-	if r.showFPS {
+	if r.console != nil {
+		r.console.Update()
+	}
+	if r.overlayActive() {
 		r.buildOverlay()
 	}
 	cpu := time.Since(prepStart)
@@ -645,7 +764,7 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 	cmd.Viewport(0, 0, float32(r.width), float32(r.height), 0, 1)
 	cmd.Scissor(0, 0, int32(r.width), int32(r.height))
 	r.issueDraws(cmd, dl, passForward)
-	if r.showFPS && r.overlay != nil {
+	if r.overlayActive() && r.overlay != nil {
 		r.overlay.draw(cmd, float32(r.width), float32(r.height))
 	}
 	cmd.EndRenderPass()
@@ -720,6 +839,10 @@ func (r *Renderer) syncScene(scene *Scene, cam Camera, cmd gpu.CommandBuffer) {
 	// and lights, and writes those straight to MemoryHost buffers (see Scene.Sync),
 	// so a frame where only scene-owned state changed (a refit shadow camera, an
 	// animated pose) stages nothing at all and End skips even the barrier.
+	// The light table encodes each light's shadow map for the shader, so the scene
+	// needs the global toggle before it rebuilds that table — otherwise disabling
+	// shadows only stops refreshing the maps and the shader samples the last one.
+	scene.shadowsEnabled = r.shadowsEnabled
 	if r.shadowsEnabled {
 		r.prepareShadows(scene, cam)
 	}
@@ -1178,16 +1301,30 @@ func (r *Renderer) recordLighting(cmd gpu.CommandBuffer, dl *drawList, target gp
 	}
 }
 
+// buildOverlay composes this frame's overlay from everything that draws into it: the
+// FPS HUD and the console, in that order (the console panel covers the HUD when open).
 func (r *Renderer) buildOverlay() {
+	r.ensureOverlay()
 	if r.overlay == nil {
 		return
 	}
 	r.overlay.reset()
-	ms := func(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
-	r.overlay.text(fmt.Sprintf("FPS %.0f", r.stats.FPS()), 12, 12, 26, r.fontColor)
-	r.overlay.text(fmt.Sprintf("CPU %.2f ms", ms(r.stats.AvgCPUTime())), 12, 44, 26, r.fontColor)
-	if r.gpuValid {
-		r.overlay.text(fmt.Sprintf("GPU %.2f ms", ms(r.stats.AvgGPUTime())), 12, 76, 26, r.fontColor)
+	if r.showFPS {
+		// Logical points, scaled and snapped by the overlay (which rounds down to a
+		// whole multiple of the font's cell, so this is an upper bound, not exact).
+		const pt, gap, inset = 12, 15, 8
+		size := r.scale * pt
+		ms := func(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
+		x, y := r.scale*inset, r.scale*inset
+		step := r.scale * gap
+		r.overlay.text(fmt.Sprintf("FPS %.0f", r.stats.FPS()), x, y, size, r.fontColor)
+		r.overlay.text(fmt.Sprintf("CPU %.2f ms", ms(r.stats.AvgCPUTime())), x, y+step, size, r.fontColor)
+		if r.gpuValid {
+			r.overlay.text(fmt.Sprintf("GPU %.2f ms", ms(r.stats.AvgGPUTime())), x, y+2*step, size, r.fontColor)
+		}
+	}
+	if r.console != nil {
+		r.console.Draw(consolePainter{r.overlay}, float32(r.width), float32(r.height))
 	}
 }
 

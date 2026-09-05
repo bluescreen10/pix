@@ -349,3 +349,67 @@ func TestShadowSetSizeReallocatesMap(t *testing.T) {
 		t.Fatal("map invalid after resize")
 	}
 }
+
+// TestEnableShadowsTogglesAtRuntime covers turning shadows off on a renderer that has
+// already drawn with them on — what a console `set shadows off` does, and what every
+// other test in this file misses by building a fresh renderer per configuration.
+//
+// The failure it guards is specific: disabling shadows stops preparing and rendering
+// the shadow maps, but the per-light GPU records still carried the heap index of the
+// last map drawn, so the lighting shader kept sampling it. Shadows froze on screen
+// instead of disappearing.
+func TestEnableShadowsTogglesAtRuntime(t *testing.T) {
+	r, err := NewOffscreenRenderer(160, 160)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
+
+	scene := r.NewScene()
+	defer scene.Destroy()
+	scene.SetAmbient(colors.RGB32F{0.04, 0.04, 0.04})
+	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 3)
+	light.SetCastShadow(true)
+
+	cube := r.GeometryStore.Create(normalCube())
+	defer cube.Release()
+
+	ground := scene.NewMesh(cube, r.NewPBRMaterial())
+	ground.SetScale(glm.Vec3f{6, 0.2, 6})
+	scene.Add(ground)
+
+	occluder := scene.NewMesh(cube, r.NewPBRMaterial())
+	occluder.SetPosition(glm.Vec3f{0, 1.5, 0})
+	occluder.SetScale(glm.Vec3f{0.8, 0.8, 0.8})
+	occluder.SetCastShadow(true)
+	scene.Add(occluder)
+
+	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam.SetPosition(glm.Vec3f{0, 5, 6})
+	cam.SetTarget(glm.Vec3f{0, 0, 0})
+
+	frame := func() int64 {
+		r.Render(scene, cam)
+		return sceneLuma(r.Pixels())
+	}
+
+	r.EnableShadows(true)
+	frame() // first frame allocates and fills the map
+	on := frame()
+
+	r.EnableShadows(false)
+	off := frame()
+
+	if off <= on {
+		t.Fatalf("EnableShadows(false) did not remove the shadow: luma on=%d off=%d "+
+			"(off must be brighter once the receiver is no longer occluded)", on, off)
+	}
+
+	// And back on again, so the toggle is not one-way.
+	r.EnableShadows(true)
+	frame()
+	if again := frame(); again >= off {
+		t.Fatalf("re-enabling shadows did not darken the frame: off=%d back-on=%d", off, again)
+	}
+}

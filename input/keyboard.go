@@ -139,3 +139,36 @@ const (
 type KeyBoardInput interface {
 	GetKey(key Key) KeyAction
 }
+
+// ModifierKey is a bitmask of the modifiers held when a key event fired.
+type ModifierKey uint8
+
+const (
+	ModShift ModifierKey = 1 << iota
+	ModControl
+	ModAlt
+	ModSuper
+	ModCapsLock
+	ModNumLock
+)
+
+// KeyEvent is one key transition, as the platform reported it.
+type KeyEvent struct {
+	Key    Key
+	Action KeyAction // KeyPress, KeyRelease, or KeyRepeat
+	Mods   ModifierKey
+}
+
+// KeyEvents is edge-triggered keyboard input, as opposed to KeyBoardInput's "is it
+// down right now" polling.
+//
+// Two things polling cannot do, both of which a text UI needs: auto-repeat at the
+// rate the user configured in their OS (a held Backspace arrives as KeyPress then a
+// stream of KeyRepeat), and keys pressed and released within a single frame, which
+// polling simply misses.
+type KeyEvents interface {
+	// Keys returns the key transitions since the previous call, in order, and clears
+	// the buffer. Callers must drain it every frame, for the same reason as
+	// TextInput.Chars.
+	Keys() []KeyEvent
+}

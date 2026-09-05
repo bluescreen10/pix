@@ -65,14 +65,14 @@ func TestFogLightTableLayout(t *testing.T) {
 // re-dirties the buffer — the table is only re-uploaded when rebuild sees a change.
 func TestFogRebuild(t *testing.T) {
 	l := &Lights{}
-	l.rebuild(colors.RGB32F{}, nil, nil, nil, nil)
+	l.rebuild(colors.RGB32F{}, nil, nil, nil, nil, false)
 	if l.data.fogColor[3] != float32(fogNone) {
 		t.Fatalf("nil fog wrote mode %v, want %d", l.data.fogColor[3], fogNone)
 	}
 	l.dirty = false
 
 	fog := NewExp2Fog(colors.RGB32F{0.4, 0.5, 0.6}, 500)
-	l.rebuild(colors.RGB32F{}, fog, nil, nil, nil)
+	l.rebuild(colors.RGB32F{}, fog, nil, nil, nil, false)
 	if !l.dirty {
 		t.Error("setting fog did not dirty the table")
 	}
@@ -87,7 +87,7 @@ func TestFogRebuild(t *testing.T) {
 	// precisely so they can be animated.
 	l.dirty = false
 	fog.Distance = 200
-	l.rebuild(colors.RGB32F{}, fog, nil, nil, nil)
+	l.rebuild(colors.RGB32F{}, fog, nil, nil, nil, false)
 	if want := exp2Density(200); !l.dirty || l.data.fogParams[2] != want {
 		t.Errorf("in-place distance change not picked up: dirty=%v params=%v", l.dirty, l.data.fogParams)
 	}

@@ -111,7 +111,13 @@ type Scene struct {
 	lights      *Lights
 
 	drawableDirty bool
-	drawList      *drawList
+
+	// shadowsEnabled mirrors the renderer's global shadow toggle, written by the
+	// renderer each frame before Sync (it owns the toggle; the light table is what
+	// consumes it). False on a Scene synced without a renderer, which is the safe
+	// reading: publish no shadow maps rather than stale ones.
+	shadowsEnabled bool
+	drawList       *drawList
 
 	// FrameSphere scratch, retained because it runs every frame (see prepareShadows).
 	frameCenters []glm.Vec3f
@@ -424,7 +430,7 @@ func (s *Scene) Sync() {
 	// this and drawList.sync above write straight to MemoryHost buffers — nothing
 	// scene-owned goes through the shared uploader, so a frame where nothing but
 	// (say) an animated character's pose changed stages/submits nothing extra.
-	s.lights.rebuild(s.ambient, s.fog, s.dirLights, s.pointLights, s.spotLights)
+	s.lights.rebuild(s.ambient, s.fog, s.dirLights, s.pointLights, s.spotLights, s.shadowsEnabled)
 	s.lights.Sync()
 }
 

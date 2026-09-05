@@ -1,9 +1,13 @@
 package pix
 
-var font = map[int]struct {
+// glyph is one bitmap character: `width` is its advance in font units (the font is
+// proportional) and `data` is 16 rows of 16 bits, LSB leftmost.
+type glyph struct {
 	width int
 	data  []int16
-}{
+}
+
+var font = map[int]glyph{
 	33: {width: 7, data: []int16{
 		0b0000000000011100,
 		0b0000000000011100,

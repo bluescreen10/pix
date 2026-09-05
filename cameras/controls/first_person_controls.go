@@ -76,6 +76,13 @@ func NewFirstPerson(camera camera, in fpsInput) *FirstPersonControls {
 	}
 }
 
+// MoveSpeed is the fly speed in units/second; LookSpeed is mouse sensitivity in
+// radians/pixel. Provided so a caller that has to read a setting back — a console
+// variable, a settings UI — does not have to mirror it.
+func (c *FirstPersonControls) MoveSpeed() float32 { return c.moveSpeed }
+
+func (c *FirstPersonControls) LookSpeed() float32 { return c.lookSpeed }
+
 // SetMoveSpeed sets fly speed in units/second.
 func (c *FirstPersonControls) SetMoveSpeed(speed float32) {
 	c.moveSpeed = speed

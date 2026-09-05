@@ -102,7 +102,12 @@ func NewLights(b gpu.Backend) *Lights {
 // are mutable), but it only marks the buffer dirty when the derived table actually
 // changed, so a static scene re-uploads nothing. Lights past the fixed caps
 // (MaxDirLights/MaxPointLights/MaxSpotLights) are dropped.
-func (l *Lights) rebuild(ambient colors.RGB32F, fog Fog, dirs []*DirectionalLight, points []*PointLight, spots []*SpotLight) {
+// shadows reports whether shadow maps may be advertised to the shader at all. It is
+// the renderer's global toggle, threaded through because the table is what the
+// lighting shader reads: a light whose map is still allocated but no longer being
+// re-rendered must publish noShadowMap, or the shader keeps sampling a frozen map and
+// the shadow stays on screen after it was turned off.
+func (l *Lights) rebuild(ambient colors.RGB32F, fog Fog, dirs []*DirectionalLight, points []*PointLight, spots []*SpotLight, shadows bool) {
 	var next gpuLights
 	next.ambient = ambient.RGBA()
 	fs := stateOf(fog)
@@ -120,7 +125,7 @@ func (l *Lights) rebuild(ambient colors.RGB32F, fog Fog, dirs []*DirectionalLigh
 		}
 		// A casting light with an allocated map contributes its view-projection (the
 		// un-flipped matrix the depth pass used) and heap index for shader sampling.
-		if d.shadow != nil && d.shadow.Map.Valid() {
+		if shadows && d.shadow != nil && d.shadow.Map.Valid() {
 			gl.shadowVP = d.shadow.Camera.ViewProjection()
 			gl.shadowMap = d.shadow.Map.Index()
 			gl.shadowBias = d.shadow.ndcBias
@@ -139,7 +144,7 @@ func (l *Lights) rebuild(ambient colors.RGB32F, fog Fog, dirs []*DirectionalLigh
 		for f := range gp.shadowMap {
 			gp.shadowMap[f] = noShadowMap
 		}
-		if s := p.shadow; s != nil {
+		if s := p.shadow; shadows && s != nil {
 			gp.shadowBias = s.ndcBias
 			for f := range s.faces {
 				if s.faces[f].m.Valid() {
@@ -165,7 +170,7 @@ func (l *Lights) rebuild(ambient colors.RGB32F, fog Fog, dirs []*DirectionalLigh
 			cosInner:  cosInner,
 			shadowMap: noShadowMap,
 		}
-		if sp.shadow != nil && sp.shadow.Map.Valid() {
+		if shadows && sp.shadow != nil && sp.shadow.Map.Valid() {
 			gs.shadowVP = sp.shadow.Camera.ViewProjection()
 			gs.shadowMap = sp.shadow.Map.Index()
 			gs.shadowBias = sp.shadow.ndcBias
