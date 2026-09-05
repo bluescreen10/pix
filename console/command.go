@@ -33,6 +33,22 @@ func cmdHelp(c *Console, _ []string) {
 	c.Print("  set <name> <value> assign one variable")
 	c.Print("  clear              clear the scrollback")
 	c.Print("  help               this")
+	if len(c.cmdOrder) > 0 {
+		names := append([]string(nil), c.cmdOrder...)
+		sort.Strings(names)
+		width := 0
+		for _, n := range names {
+			width = max(width, len(n))
+		}
+		c.Print("registered:")
+		for _, n := range names {
+			line := "  " + n + strings.Repeat(" ", width-len(n))
+			if d := c.cmds[n].desc; d != "" {
+				line += "  " + d
+			}
+			c.Print(line)
+		}
+	}
 	c.Print("a bare `<name>` prints a variable and `<name> <value>` assigns it.")
 	c.Print("keys: tab completes, up/down recall, pgup/pgdn scroll, ctrl-u clears, esc closes.")
 }
@@ -106,4 +122,34 @@ func cmdSet(c *Console, args []string) {
 func cmdClear(c *Console, _ []string) {
 	c.lines = c.lines[:0]
 	c.scroll = 0
+}
+
+// command is an application-registered action: something that happens once, as opposed
+// to a variable that holds a value.
+type command struct {
+	name string
+	desc string
+	run  func(args []string) error
+}
+
+// Command registers an action callable by name. Anything the console should *do* — take
+// a screenshot, reload a scene, dump state — is a command; anything it should read or
+// write is a variable (see Bind).
+//
+// Arguments arrive already tokenized, with quoted runs kept together. A returned error
+// is printed to the scrollback prefixed with the command name, so an implementation can
+// just return it rather than formatting its own message.
+//
+// Built-in names (help, list, get, set, clear) cannot be overridden.
+func (c *Console) Command(name, desc string, run func(args []string) error) {
+	if run == nil {
+		panic("console: Command needs a function to run")
+	}
+	if _, builtin := commands[name]; builtin {
+		panic("console: " + name + " is a built-in command")
+	}
+	if _, dup := c.cmds[name]; !dup {
+		c.cmdOrder = append(c.cmdOrder, name)
+	}
+	c.cmds[name] = &command{name: name, desc: desc, run: run}
 }

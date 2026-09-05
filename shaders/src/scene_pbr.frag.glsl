@@ -67,7 +67,7 @@ layout(buffer_reference, scalar) readonly buffer LightingRoot {
     uint emissiveTexture;
     uint depthTexture;
     vec2 screen;
-    uint pad0;
+    uint debugView; // unused here; the G-buffer debug pass shares this layout
 };
 layout(push_constant) uniform PC { LightingRoot root; } pc;
 #endif

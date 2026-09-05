@@ -84,6 +84,11 @@ type Renderer struct {
 	lightingKeys      []lightingPipelineKey
 	lightingScratch   []uint32
 
+	// debugView displays one G-buffer target instead of the shaded frame; its pipeline
+	// is built on first use since most frames never need it (see debug_view.go).
+	debugView     DebugView
+	debugPipeline gpu.Pipeline
+
 	// Shadows: global toggle + the shared PCF comparison sampler (created lazily) +
 	// the position-only depth-pass pipeline (rebuilt with the others on format change).
 	// shadowDistance caps how far down the view frustum directional shadows are fit
@@ -92,6 +97,10 @@ type Renderer struct {
 	shadowSampler  gpu.Sampler
 	shadowPipeline gpu.Pipeline
 	shadowDistance float32
+
+	// pendingShot is a queued frame capture, recorded into the frame being built (see
+	// screenshot.go).
+	pendingShot *screenshot
 
 	// Console: nil until EnableConsole. It shares the debug overlay with the FPS HUD,
 	// so either one being active is what keeps the overlay alive.
@@ -581,6 +590,7 @@ func (r *Renderer) EnableConsole(in console.Input) *console.Console {
 	if r.console == nil {
 		r.console = console.New(in)
 		r.registerBuiltins(r.console)
+		r.registerCommands(r.console)
 	}
 	r.ensureOverlay()
 	return r.console
@@ -633,6 +643,9 @@ func (r *Renderer) Render(scene *Scene, cam Camera) {
 	}
 	encStart := time.Now()
 	r.encode(cmd, target, scene, planes, drawVP, eye)
+	// Recorded after everything is drawn but before the frame is submitted, so a
+	// windowed capture reads the image while it is still ours (see screenshot.go).
+	r.recordScreenshot(cmd, target)
 	cpu += time.Since(encStart)
 	r.stats.AddCPUTime(cpu)
 
@@ -643,6 +656,9 @@ func (r *Renderer) Render(scene *Scene, cam Camera) {
 	} else {
 		r.backend.Present(r.swapchain, cmd)
 	}
+
+	// Both paths above drain the queue, so the readback buffer holds finished pixels.
+	r.writeScreenshot()
 
 	r.readGPU()
 	r.stats.EndFrame()
@@ -723,6 +739,9 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 	// pass with the right pipeline set.
 	r.fillDrawRoots(dl, drawVP, eye, scene.lights.Addr())
 	gbufferActive := r.hasGBufferRuns(dl)
+	// A debug view needs the G-buffer to have actually been filled; with nothing
+	// rendering deferred there is nothing to show, so the frame shades normally.
+	debugShown := gbufferActive && r.debugViewActive()
 
 	// 4. G-buffer fill + deferred lighting, only when something renders that way.
 	if gbufferActive {
@@ -746,7 +765,20 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 		cmd.PrepareSampled(r.materialTexture, gpu.StageFragment)
 		cmd.PrepareSampled(r.emissiveTexture, gpu.StageFragment)
 		cmd.PrepareSampled(r.depth, gpu.StageFragment)
-		r.recordLighting(cmd, dl, target, drawVP, eye, scene.lights.Addr())
+		if debugShown {
+			// Show one G-buffer target instead of shading it. The geometry pass above
+			// ran either way, so toggling a view changes only what reaches the screen.
+			//
+			// This REPLACES the lighting pass but must not short-circuit the rest of
+			// encode: the forward pass below still has to run for the overlay, and the
+			// closing GPU timestamp still has to be written. Returning early here reset
+			// a timestamp query and never wrote it, and the next frame's blocking read
+			// hung the process.
+			r.ensureGBufferSampler()
+			r.recordDebugView(cmd, dl, target, drawVP, eye, scene.lights.Addr())
+		} else {
+			r.recordLighting(cmd, dl, target, drawVP, eye, scene.lights.Addr())
+		}
 	}
 
 	// 5. Forward pass: transparents, and any Opaque material that did not
@@ -763,7 +795,12 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 	})
 	cmd.Viewport(0, 0, float32(r.width), float32(r.height), 0, 1)
 	cmd.Scissor(0, 0, int32(r.width), int32(r.height))
-	r.issueDraws(cmd, dl, passForward)
+	// Forward geometry is suppressed while a G-buffer view is up: the point is to see
+	// that target on its own, not transparents composited over it. The pass itself
+	// still runs — it is what draws the overlay and closes the frame.
+	if !debugShown {
+		r.issueDraws(cmd, dl, passForward)
+	}
 	if r.overlayActive() && r.overlay != nil {
 		r.overlay.draw(cmd, float32(r.width), float32(r.height))
 	}
@@ -1250,21 +1287,28 @@ func (r *Renderer) issueDraws(cmd gpu.CommandBuffer, dl *drawList, p pass) {
 // every pass (no per-model masking yet — fine while PBR is the only built-in deferred
 // model; a real fix, e.g. a model-id compare or a stencil mask written during the
 // G-buffer pass, is needed before a second one ships).
-func (r *Renderer) recordLighting(cmd gpu.CommandBuffer, dl *drawList, target gpu.Texture, viewProj glm.Mat4f, eye glm.Vec3f, lightsAddr uint64) {
-	if r.gbufferSampler.H == 0 {
-		// Plain (non-comparison) sampler for reading the G-buffer + depth back as
-		// textures — distinct from shadowSampler, which is compare-mode-only and
-		// would return comparison results instead of raw values if reused here.
-		//
-		// Point filtering, deliberately: this pass reads texel-for-texel, and the data
-		// is not filterable — interpolating an octahedral normal, a packed model id or
-		// a depth value between texels is meaningless. Linear filtering on a D32_SFLOAT
-		// image is also not guaranteed to be supported.
-		r.gbufferSampler = r.backend.CreateSampler(gpu.SamplerDescriptor{
-			AddressU: gpu.AddressClamp, AddressV: gpu.AddressClamp,
-			Label: "gbuffer-read",
-		})
+// ensureGBufferSampler creates the sampler both fullscreen passes read the G-buffer
+// with, on first use.
+//
+// Plain (non-comparison), unlike shadowSampler, which is compare-mode-only and would
+// return comparison results instead of raw values if reused here.
+//
+// Point filtering, deliberately: these passes read texel-for-texel, and the data is
+// not filterable — interpolating an octahedral normal, a packed model id or a depth
+// value between texels is meaningless. Linear filtering on a D32_SFLOAT image is also
+// not guaranteed to be supported.
+func (r *Renderer) ensureGBufferSampler() {
+	if r.gbufferSampler.H != 0 {
+		return
 	}
+	r.gbufferSampler = r.backend.CreateSampler(gpu.SamplerDescriptor{
+		AddressU: gpu.AddressClamp, AddressV: gpu.AddressClamp,
+		Label: "gbuffer-read",
+	})
+}
+
+func (r *Renderer) recordLighting(cmd gpu.CommandBuffer, dl *drawList, target gpu.Texture, viewProj glm.Mat4f, eye glm.Vec3f, lightsAddr uint64) {
+	r.ensureGBufferSampler()
 	invViewProj := viewProj.Inv()
 	*(*lightingRoot)(dl.lightingRootBuf.Ptr) = lightingRoot{
 		invViewProj:     invViewProj,

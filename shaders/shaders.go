@@ -48,6 +48,7 @@ import _ "embed"
 //go:generate glslc -fshader-stage=fragment --target-env=vulkan1.4 -O -DPIX_PASS_LIGHTING src/scene_pbr.frag.glsl -o build/scene_lighting_pbr.frag.spv
 
 //go:generate glslc -fshader-stage=vertex --target-env=vulkan1.4 -O src/fullscreen.vert.glsl -o build/fullscreen.vert.spv
+//go:generate glslc -fshader-stage=fragment --target-env=vulkan1.4 -O src/gbuffer_debug.frag.glsl -o build/gbuffer_debug.frag.spv
 
 //go:embed build/scene_cull.comp.spv
 var SceneCull []byte
@@ -66,6 +67,12 @@ var SceneShadowFrag []byte
 
 //go:embed build/fullscreen.vert.spv
 var FullscreenVert []byte
+
+// GBufferDebug shows one G-buffer target fullscreen instead of the shaded result
+// (see Renderer.SetDebugView). Shares the deferred lighting pass's root struct.
+//
+//go:embed build/gbuffer_debug.frag.spv
+var GBufferDebug []byte
 
 // --- built-in material fragment shaders (see the materials package) ---
 

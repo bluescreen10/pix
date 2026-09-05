@@ -52,7 +52,14 @@ static VkResult vkbCreateSwapchain(VkPhysicalDevice phys, VkDevice dev, VkSurfac
     ci.imageColorSpace = chosen.colorSpace;
     ci.imageExtent = ext;
     ci.imageArrayLayers = 1;
+    // TRANSFER_SRC lets the frame be copied back out (screenshots). It is optional:
+    // the spec only guarantees COLOR_ATTACHMENT, so ask for it only where the surface
+    // reports it, and a driver that refuses simply means no screenshots rather than a
+    // failed swapchain.
     ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    if (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) {
+        ci.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    }
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ci.preTransform = caps.currentTransform;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;

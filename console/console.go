@@ -48,6 +48,9 @@ type Console struct {
 	vars  map[string]*variable
 	order []string // registration order, so `list` is stable
 
+	cmds     map[string]*command
+	cmdOrder []string
+
 	lines    []string // scrollback, oldest first, capped at MaxLines
 	MaxLines int
 
@@ -88,6 +91,7 @@ func New(in Input) *Console {
 	c := &Console{
 		in:         in,
 		vars:       map[string]*variable{},
+		cmds:       map[string]*command{},
 		MaxLines:   DefaultMaxLines,
 		MaxHistory: DefaultMaxHistory,
 		ToggleKey:  DefaultToggleKey,
@@ -294,6 +298,11 @@ func (c *Console) complete() {
 			hits = append(hits, name)
 		}
 	}
+	for _, name := range c.cmdOrder {
+		if strings.HasPrefix(name, word) {
+			hits = append(hits, name)
+		}
+	}
 	if len(hits) == 0 {
 		return
 	}
@@ -341,8 +350,15 @@ func (c *Console) Exec(line string) {
 	if len(args) == 0 {
 		return
 	}
+	// Built-ins first, so `help` and friends cannot be shadowed by a registration.
 	if cmd, ok := commands[args[0]]; ok {
 		cmd(c, args[1:])
+		return
+	}
+	if cmd, ok := c.cmds[args[0]]; ok {
+		if err := cmd.run(args[1:]); err != nil {
+			c.Printf("%s: %v", cmd.name, err)
+		}
 		return
 	}
 	// Quake-style bare forms: `name` prints, `name value` assigns.

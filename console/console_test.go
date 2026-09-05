@@ -499,3 +499,71 @@ func abs32(f float32) float32 {
 	}
 	return f
 }
+
+// TestCommandRunsWithArgs: a command is the "do something" half of the console, so it
+// must receive its tokenized arguments and be reachable by name.
+func TestCommandRunsWithArgs(t *testing.T) {
+	c, _ := newTest(t)
+	var got []string
+	c.Command("shot", "take one", func(args []string) error {
+		got = args
+		return nil
+	})
+
+	c.Exec(`shot "my file.png" 2`)
+	if len(got) != 2 || got[0] != "my file.png" || got[1] != "2" {
+		t.Fatalf("command received %q, want [\"my file.png\" \"2\"]", got)
+	}
+}
+
+// TestCommandErrorIsReported: a command returning an error must say so in the
+// scrollback, prefixed with its name — silently failing is the thing a debug console
+// can least afford.
+func TestCommandErrorIsReported(t *testing.T) {
+	c, _ := newTest(t)
+	c.Command("boom", "", func([]string) error { return errTest })
+
+	c.Exec("boom")
+	if got := lastLine(c); !strings.Contains(got, "boom") || !strings.Contains(got, "kaboom") {
+		t.Fatalf("line = %q, want the command name and its error", got)
+	}
+}
+
+// TestCommandsAreCompletedAndListed: a registered command has to be discoverable the
+// same way variables are, or nobody finds it.
+func TestCommandsAreCompletedAndListed(t *testing.T) {
+	c, _ := newTest(t)
+	c.Command("screenshot", "save a PNG", func([]string) error { return nil })
+
+	c.edit = []rune("scre")
+	c.cursor = 4
+	c.complete()
+	if got := string(c.edit); got != "screenshot" {
+		t.Fatalf("completion = %q, want screenshot", got)
+	}
+
+	c.lines = c.lines[:0]
+	c.Exec("help")
+	if joined := strings.Join(c.Lines(), "\n"); !strings.Contains(joined, "screenshot") ||
+		!strings.Contains(joined, "save a PNG") {
+		t.Fatalf("help did not mention the registered command:\n%s", joined)
+	}
+}
+
+// TestBuiltinCommandsCannotBeOverridden: shadowing `help` would strand a user with no
+// way to discover anything.
+func TestBuiltinCommandsCannotBeOverridden(t *testing.T) {
+	c, _ := newTest(t)
+	defer func() {
+		if recover() == nil {
+			t.Fatal("overriding a built-in was allowed")
+		}
+	}()
+	c.Command("help", "", func([]string) error { return nil })
+}
+
+var errTest = errKaboom{}
+
+type errKaboom struct{}
+
+func (errKaboom) Error() string { return "kaboom" }

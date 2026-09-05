@@ -114,7 +114,10 @@ type lightingRoot struct {
 	emissiveTexture uint32
 	depthTexture    uint32
 	screen          [2]float32
-	pad0            uint32
+	// debugView is the G-buffer target the debug pass shows (see DebugView). The
+	// lighting pass ignores it; it sits in what was the struct's tail padding, so it
+	// costs nothing and both fullscreen passes keep one root layout.
+	debugView uint32
 }
 
 // batch is one indirect command: a run of drawables sharing a (pipeline, geometry)

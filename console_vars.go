@@ -2,6 +2,7 @@ package pix
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/console"
@@ -37,12 +38,52 @@ func (r *Renderer) registerBuiltins(c *console.Console) {
 	bindColor(c, "clear.color", r.ClearColor, r.SetClearColor,
 		"background colour, \"r g b a\" in [0,1]")
 
+	// The G-buffer view is an enum, so it goes through Register with its own names
+	// rather than Bind — "set gbuffer normal" reads better than a magic number, and
+	// the error lists what is valid.
+	c.Register("gbuffer", "show one G-buffer target instead of the shaded frame: "+
+		strings.Join(DebugViewNames(), "/")+" (needs `deferred on`)",
+		func() string { return r.DebugView().String() },
+		func(v string) error {
+			view, ok := ParseDebugView(v)
+			if !ok {
+				return fmt.Errorf("unknown view %q; want one of %s", v, strings.Join(DebugViewNames(), ", "))
+			}
+			if view != DebugOff && !r.DeferredEnabled() {
+				return fmt.Errorf("deferred rendering is off, so there is no G-buffer to show — `set deferred on` first")
+			}
+			r.SetDebugView(view)
+			return nil
+		})
+
 	// Read-only: no setter, so the console reports them rather than pretending they
 	// can be assigned. Resizing is driven by the window, not by a variable.
 	c.Register("size", "framebuffer size in pixels",
 		func() string { w, h := r.Size(); return fmt.Sprintf("%dx%d", w, h) }, nil)
 	c.Register("aspect", "framebuffer aspect ratio",
 		func() string { return fmt.Sprintf("%.4f", r.Aspect()) }, nil)
+}
+
+// registerCommands adds the console commands that act on the renderer. Unlike a
+// variable, these do something once rather than holding a value.
+func (r *Renderer) registerCommands(c *console.Console) {
+	c.Command("screenshot", "save a PNG of this frame; defaults to a timestamped name",
+		func(args []string) error {
+			path := ""
+			if len(args) > 0 {
+				path = strings.Join(args, " ")
+			}
+			// The capture happens at the end of this very frame, so the result is
+			// reported from the callback rather than returned.
+			r.Screenshot(path, func(p string, err error) {
+				if err != nil {
+					c.Printf("screenshot failed: %v", err)
+					return
+				}
+				c.Printf("wrote %s", p)
+			})
+			return nil
+		})
 }
 
 // bindColor binds a colour through the console's untyped Register, since a colour is
