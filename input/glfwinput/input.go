@@ -42,6 +42,14 @@ func (i *Input) GetKey(key input.Key) input.KeyAction {
 	return input.KeyAction(state)
 }
 
+func (i *Input) DisableCursor() {
+	i.window.SetInputMode(glfw.CursorMode, glfw.CursorDisabled)
+}
+
+func (i *Input) EnableCursor() {
+	i.window.SetInputMode(glfw.CursorMode, glfw.CursorNormal)
+}
+
 func (i *Input) scrollCallback(_ *glfw.Window, xoff, yoff float64) {
 	i.scrollX = xoff
 	i.scrollY = yoff
