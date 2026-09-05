@@ -12,6 +12,7 @@ import (
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
 	"github.com/bluescreen10/pix/shaders"
+	"github.com/bluescreen10/pix/textures"
 )
 
 // Renderer is the single entry point. It obtains a gpu backend from the registry
@@ -38,12 +39,13 @@ type Renderer struct {
 	// Renderer-owned shared resources + GPU-driven pipelines. The material stores are
 	// owned by the material system, not the renderer.
 	//
-	// GeometryStore is exported (unlike materials/textures) so callers create
-	// geometry directly — r.GeometryStore.Create(cfg) — with no per-renderer wrapper
+	// GeometryStore and TextureStore are exported (unlike materials) so callers
+	// create those resources directly — r.GeometryStore.Create(cfg),
+	// r.TextureStore.Create(pixels, w, h, format) — with no per-renderer wrapper
 	// method to keep in sync.
 	GeometryStore *geometries.Store
+	TextureStore  *textures.Store
 	materials     *materialSystem
-	textures      *textureSystem
 	// uploader is shared by every subsystem that stages into device memory; it
 	// lives as long as the renderer so its staging arena is reused across frames.
 	uploader *uploader
@@ -144,8 +146,8 @@ func NewRenderer(cfg *RendererConfig) (*Renderer, error) {
 		// pays off by keeping its memory across frames (see uploader).
 		uploader:      newUploader(backend),
 		GeometryStore: geometries.NewStore(backend),
+		TextureStore:  textures.NewStore(backend),
 		materials:     newMaterialSystem(backend),
-		textures:      newTextureSystem(backend),
 		stats:         newRendererStats(60),
 	}
 
@@ -424,18 +426,6 @@ func sameKey(a, b materialPipeline) bool {
 // The named material constructors (NewBasicMaterial, NewBlinnPhongMaterial,
 // NewPBRMaterial) live in their respective *_material.go files.
 
-// NewTexture uploads an RGBA8 image into the bindless heap and returns a handle.
-// format selects the color space (TextureSRGB for color maps, TextureLinear for
-// data maps like normals/roughness).
-func (r *Renderer) NewTexture(pixels []byte, w, h int, format TextureFormat) Texture {
-	return r.textures.upload(pixels, w, h, format)
-}
-
-// DefaultSampler returns the heap index of the default linear/repeat sampler.
-func (r *Renderer) DefaultSampler() uint32 {
-	return r.textures.DefaultSampler()
-}
-
 // NewScene creates a scene bound to this renderer's backend.
 func (r *Renderer) NewScene() *Scene {
 	return NewScene(r.backend)
@@ -590,7 +580,7 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 		r.recordShadowDepth(cmd, dl, &dl.shadowViews[i], views[i])
 		//FIXME: use VK_KHR_unified_image_layouts
 		// this should remove the PreparedSampled from the RHI API
-		cmd.PrepareSampled(r.textures.gpu(views[i].m), gpu.StageFragment)
+		cmd.PrepareSampled(r.TextureStore.GPU(views[i].m), gpu.StageFragment)
 	}
 
 	// 3. Every run's drawRoot is filled once regardless of pass (same camera either
@@ -666,7 +656,7 @@ func (r *Renderer) hasGBufferRuns(dl *drawList) bool {
 // GPU-driven path.
 type shadowView struct {
 	cam  Camera
-	m    Texture
+	m    textures.Texture
 	size uint32
 }
 
@@ -761,7 +751,7 @@ func (r *Renderer) prepareShadows(scene *Scene, cam Camera) {
 		if s == nil {
 			continue
 		}
-		aimPointShadow(r.textures, s, l)
+		aimPointShadow(r.TextureStore, s, l)
 	}
 	if len(scene.dirLights) == 0 && len(scene.spotLights) == 0 {
 		return
@@ -773,7 +763,7 @@ func (r *Renderer) prepareShadows(scene *Scene, cam Camera) {
 		if s == nil {
 			continue
 		}
-		s.ensureMap(r.textures)
+		s.ensureMap(r.TextureStore)
 		r.fitDirectionalShadow(s, l.Direction, cam.Position(), corners, sceneCenter, sceneRadius)
 	}
 	for _, l := range scene.spotLights {
@@ -781,16 +771,16 @@ func (r *Renderer) prepareShadows(scene *Scene, cam Camera) {
 		if s == nil {
 			continue
 		}
-		s.ensureMap(r.textures)
+		s.ensureMap(r.TextureStore)
 		aimSpotShadow(s, l)
 	}
 }
 
 // aimPointShadow allocates (once) and re-aims a point light's six cube-face shadow
 // cameras from the light's current position and range.
-func aimPointShadow(tex *textureSystem, s *LightShadow, l *PointLight) {
+func aimPointShadow(textureStore *textures.Store, s *LightShadow, l *PointLight) {
 	s.updateLocalBias(l.Range)
-	s.ensureFaceMaps(tex)
+	s.ensureFaceMaps(textureStore)
 	for i := range s.faces {
 		f := &s.faces[i]
 		c, ok := f.cam.(interface {
@@ -1056,7 +1046,7 @@ func (r *Renderer) recordShadowDepth(cmd gpu.CommandBuffer, dl *drawList, v *dra
 		visible:   v.visibleBuf.Addr,
 	}
 	cmd.BeginRenderPass(gpu.RenderTargets{
-		Depth: &gpu.DepthAttachment{Texture: r.textures.gpu(sv.m), Load: gpu.LoadClear, Clear: 0.0},
+		Depth: &gpu.DepthAttachment{Texture: r.TextureStore.GPU(sv.m), Load: gpu.LoadClear, Clear: 0.0},
 	})
 	cmd.Viewport(0, 0, float32(size), float32(size), 0, 1)
 	cmd.Scissor(0, 0, int32(size), int32(size))
@@ -1242,7 +1232,7 @@ func (r *Renderer) Destroy() {
 	}
 	r.GeometryStore.Destroy()
 	r.materials.Destroy()
-	r.textures.Destroy()
+	r.TextureStore.Destroy()
 	r.uploader.Destroy()
 	r.backend.Destroy()
 }

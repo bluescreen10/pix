@@ -5,6 +5,7 @@ import (
 	"unsafe"
 
 	"github.com/bluescreen10/pix/gpu"
+	"github.com/bluescreen10/pix/textures"
 )
 
 // noTextureIndex is the shader sentinel heap index for "no bound texture".
@@ -171,14 +172,14 @@ var (
 // texture, or the "unbound" sentinel. mapFlag is the matching presence bit. Deriving
 // both from the Texture in Bytes keeps a record from ever disagreeing with what the
 // material actually holds.
-func mapIndex(t Texture) uint32 {
+func mapIndex(t textures.Texture) uint32 {
 	if t.Valid() {
-		return t.index
+		return t.Index()
 	}
 	return noTextureIndex
 }
 
-func mapFlag(t Texture, flag uint32) uint32 {
+func mapFlag(t textures.Texture, flag uint32) uint32 {
 	if t.Valid() {
 		return flag
 	}

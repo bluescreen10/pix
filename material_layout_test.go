@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/textures"
 )
 
 func u32At(t *testing.T, b []byte, off int) uint32 {
@@ -35,7 +36,7 @@ func TestMaterialRecordLayouts(t *testing.T) {
 	}
 	defer r.Destroy()
 
-	tex := r.NewTexture([]byte{255, 255, 255, 255}, 1, 1, TextureLinear)
+	tex := r.TextureStore.Create([]byte{255, 255, 255, 255}, 1, 1, textures.Linear)
 	defer tex.Release()
 
 	t.Run("PBR", func(t *testing.T) {

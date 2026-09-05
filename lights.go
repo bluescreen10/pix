@@ -7,6 +7,7 @@ import (
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/textures"
 )
 
 // defaultShadowSize is the default shadow-map resolution (per side).
@@ -28,7 +29,7 @@ const defaultLocalShadowBias float32 = 0.0015
 // which a bare field could not maintain.
 type LightShadow struct {
 	Camera Camera
-	Map    Texture
+	Map    textures.Texture
 
 	size uint32  // requested resolution per side
 	bias float32 // extra depth offset, in WORLD units
@@ -70,20 +71,20 @@ func (s *LightShadow) SetBias(bias float32) { s.bias = bias }
 
 // ensureMap allocates the depth map, or reallocates it when SetSize changed the
 // requested resolution. Point lights use ensureFaceMaps instead.
-func (s *LightShadow) ensureMap(tex *textureSystem) {
+func (s *LightShadow) ensureMap(textureStore *textures.Store) {
 	if s.Map.Valid() && s.mapSize == s.size {
 		return
 	}
 	if s.Map.Valid() {
 		s.Map.Release()
 	}
-	s.Map = tex.createDepthTarget(s.size, s.size)
+	s.Map = textureStore.CreateDepthTarget(s.size, s.size)
 	s.mapSize = s.size
 }
 
 // ensureFaceMaps is ensureMap for a point light's six cube faces, which share one
 // resolution.
-func (s *LightShadow) ensureFaceMaps(tex *textureSystem) {
+func (s *LightShadow) ensureFaceMaps(textureStore *textures.Store) {
 	stale := s.mapSize != s.size
 	for i := range s.faces {
 		f := &s.faces[i]
@@ -93,7 +94,7 @@ func (s *LightShadow) ensureFaceMaps(tex *textureSystem) {
 		if f.m.Valid() {
 			f.m.Release()
 		}
-		f.m = tex.createDepthTarget(s.size, s.size)
+		f.m = textureStore.CreateDepthTarget(s.size, s.size)
 	}
 	s.mapSize = s.size
 }
@@ -102,7 +103,7 @@ func (s *LightShadow) ensureFaceMaps(tex *textureSystem) {
 // down a ±axis and the depth map it renders into.
 type pointFace struct {
 	cam Camera
-	m   Texture
+	m   textures.Texture
 }
 
 func newLightShadow(cam Camera) *LightShadow {

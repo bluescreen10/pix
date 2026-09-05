@@ -4,13 +4,14 @@ import (
 	"fmt"
 
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/internal/ref"
 )
 
 // Geometry is a ref-counted handle to a renderer-owned geometry. Clone with Copy();
 // surrender ownership with Release() (the geometry is freed at refcount 0). It caches
 // the local bounding sphere so scenes/loaders can frame without the geometry store.
 type Geometry struct {
-	ref            ref
+	ref            ref.Ref
 	store          *Store
 	boundingSphere glm.Sphere
 }
@@ -38,7 +39,7 @@ func (g Geometry) GetAttributeData[T any](t AttributeType) []T {
 	if g.store == nil {
 		return nil
 	}
-	a := g.store.attribute(g.ref.id, t)
+	a := g.store.attribute(g.ref.ID(), t)
 	if a == nil {
 		return nil
 	}
@@ -54,7 +55,7 @@ func (g Geometry) SetAttributeData[T any](t AttributeType, data []T) {
 	if g.store == nil {
 		return
 	}
-	g.store.setAttribute(g.ref.id, t, toBytes(data), len(data))
+	g.store.setAttribute(g.ref.ID(), t, toBytes(data), len(data))
 }
 
 // BoundingSphere returns the geometry's local-space bounding sphere.
@@ -64,7 +65,7 @@ func (g Geometry) BoundingSphere() glm.Sphere {
 
 // id is the geometry's slot in the store (used by drawables).
 func (g Geometry) ID() uint32 {
-	return g.ref.id
+	return g.ref.ID()
 }
 
 // skinOutput allocates a derived output geometry that receives this geometry's
@@ -75,9 +76,9 @@ func (g Geometry) SkinOutput() Geometry {
 	if g.store == nil {
 		panic("render: SkinOutput on a geometry with no owning store")
 	}
-	id, gen := g.store.createSkinOutput(g.ref.id)
+	id, gen := g.store.createSkinOutput(g.ref.ID())
 	return Geometry{
-		ref:            newRef(id, gen, g.store.dispose, g.store.validate),
+		ref:            ref.New(id, gen, g.store.dispose, g.store.validate),
 		store:          g.store,
 		boundingSphere: g.store.BoundingSphere(id),
 	}

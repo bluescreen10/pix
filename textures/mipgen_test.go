@@ -1,4 +1,4 @@
-package pix
+package textures
 
 import (
 	"math"
@@ -105,16 +105,16 @@ func TestNormalMipsStayUnitLength(t *testing.T) {
 // lets callers hand every texture over as RGBA8 regardless of its GPU format.
 func TestRepackNarrowsChannels(t *testing.T) {
 	rgba := []byte{10, 20, 30, 40, 50, 60, 70, 80}
-	if got := TextureNormal.repack(rgba, 2, 1); string(got) != string([]byte{10, 20, 50, 60}) {
-		t.Fatalf("TextureNormal.repack = %v, want [10 20 50 60]", got)
+	if got := Normal.repack(rgba, 2, 1); string(got) != string([]byte{10, 20, 50, 60}) {
+		t.Fatalf("Normal.repack = %v, want [10 20 50 60]", got)
 	}
-	if got := TextureGrayscale.repack(rgba, 2, 1); string(got) != string([]byte{10, 50}) {
-		t.Fatalf("TextureGrayscale.repack = %v, want [10 50]", got)
+	if got := Grayscale.repack(rgba, 2, 1); string(got) != string([]byte{10, 50}) {
+		t.Fatalf("Grayscale.repack = %v, want [10 50]", got)
 	}
-	if got := TextureSRGB.repack(rgba, 2, 1); &got[0] != &rgba[0] {
-		t.Fatal("TextureSRGB.repack should pass RGBA through without copying")
+	if got := SRGB.repack(rgba, 2, 1); &got[0] != &rgba[0] {
+		t.Fatal("SRGB.repack should pass RGBA through without copying")
 	}
-	if TextureNormal.channels() != 2 || TextureGrayscale.channels() != 1 || TextureSRGB.channels() != 4 {
+	if Normal.channels() != 2 || Grayscale.channels() != 1 || SRGB.channels() != 4 {
 		t.Fatal("channel counts do not match the formats")
 	}
 }

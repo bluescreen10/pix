@@ -4,6 +4,10 @@ import "sync/atomic"
 
 // Disposer is the release callback interface for renderer-owned resources.
 // Unexported methods restrict implementation to this package.
+//
+// materialStore is the last remaining user: geometries and textures moved to their
+// own packages and onto internal/ref, whose closure-based Ref carries no
+// same-package restriction. This pair goes away when materials follow them out.
 type Disposer interface {
 	dispose(id uint32)
 	generation(id uint32) uint32

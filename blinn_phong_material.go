@@ -5,6 +5,7 @@ import (
 	"unsafe"
 
 	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/textures"
 )
 
 //go:embed shaders/build/scene_lit.frag.spv
@@ -27,7 +28,7 @@ type BlinnPhongMaterial struct {
 	// record's bindless index and presence flag are derived from it in Bytes, so they
 	// cannot fall out of step with what is actually bound.
 	color        colors.RGBA32F
-	colorMap     Texture
+	colorMap     textures.Texture
 	colorSampler uint32
 }
 
@@ -121,13 +122,13 @@ func (m *BlinnPhongMaterial) SetEmissive(color colors.RGB32F) {
 }
 
 // The bound textures (or a zero handle).
-func (m *BlinnPhongMaterial) ColorMap() Texture {
+func (m *BlinnPhongMaterial) ColorMap() textures.Texture {
 	return m.colorMap
 }
 
-// SetColorMap binds the base-color map; pass a zero Texture to clear it. The material
+// SetColorMap binds the base-color map; pass a zero textures.Texture to clear it. The material
 // takes its own reference, so the caller may release theirs.
-func (m *BlinnPhongMaterial) SetColorMap(texture Texture) {
+func (m *BlinnPhongMaterial) SetColorMap(texture textures.Texture) {
 	old := m.colorMap
 	m.colorMap = texture.Copy()
 	old.Release() // after the copy, so rebinding a texture to itself cannot free it

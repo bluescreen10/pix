@@ -6,6 +6,7 @@ import (
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/textures"
 )
 
 // renderCube draws one unlit cube filling the view and returns the centre pixel.
@@ -100,7 +101,7 @@ func TestMaterialTextureRefsAreHeldByTheHandle(t *testing.T) {
 	}
 	defer r.Destroy()
 
-	tex := r.NewTexture([]byte{255, 255, 255, 255}, 1, 1, TextureLinear)
+	tex := r.TextureStore.Create([]byte{255, 255, 255, 255}, 1, 1, textures.Linear)
 	mat := r.NewPBRMaterial()
 	mat.SetColorMap(tex)
 	tex.Release() // the material holds the only remaining reference

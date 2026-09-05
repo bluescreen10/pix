@@ -11,6 +11,7 @@ import (
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/gpu"
 	"github.com/bluescreen10/pix/internal/mem"
+	"github.com/bluescreen10/pix/internal/ref"
 )
 
 // Stream indices. Position and index are their own buffers (so position-only
@@ -190,7 +191,7 @@ func (g *Store) validate(id, gen uint32) bool {
 // Create allocates a geometry from cfg and returns a fresh single-ref handle.
 func (g *Store) Create(cfg GeometryConfig) Geometry {
 	id, gen := g.alloc(cfg)
-	return Geometry{ref: newRef(id, gen, g.dispose, g.validate), store: g, boundingSphere: g.BoundingSphere(id)}
+	return Geometry{ref: ref.New(id, gen, g.dispose, g.validate), store: g, boundingSphere: g.BoundingSphere(id)}
 }
 
 // alloc allocates a generation-stamped geometry id from cfg, uploads its streams,

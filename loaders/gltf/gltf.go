@@ -27,6 +27,7 @@ import (
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/textures"
 )
 
 // Load reads a .gltf or .glb file, creates its geometries/materials/textures on the
@@ -90,7 +91,7 @@ func LoadFull(r *pix.Renderer, scene *pix.Scene, path string) (LoadResult, error
 // different mip filtering).
 type texKey struct {
 	index int
-	usage pix.TextureFormat
+	usage textures.Format
 }
 
 type loader struct {
@@ -100,10 +101,10 @@ type loader struct {
 	buffers  [][]byte
 	baseDir  string
 
-	texCache  map[texKey]pix.Texture // (gltf texture, usage) -> uploaded texture
-	allTex    []pix.Texture          // every uploaded texture, for release after build
-	materials []*pix.PBRMaterial     // [0]=default; gltf material i -> [i+1]
-	nodes     []pix.Node             // per gltf node
+	texCache  map[texKey]textures.Texture // (gltf texture, usage) -> uploaded texture
+	allTex    []textures.Texture          // every uploaded texture, for release after build
+	materials []*pix.PBRMaterial          // [0]=default; gltf material i -> [i+1]
+	nodes     []pix.Node                  // per gltf node
 	added     int
 
 	// Skinning: parent[i] is node i's glTF parent index, or -1 (built once by
@@ -122,7 +123,7 @@ type loader struct {
 }
 
 func (l *loader) build() (int, error) {
-	l.texCache = map[texKey]pix.Texture{}
+	l.texCache = map[texKey]textures.Texture{}
 	l.loadMaterials()
 	l.loadSkins()
 
@@ -588,10 +589,10 @@ func (l *loader) animTarget(nodeIdx int) (pix.SceneNode, bool) {
 // Usage — not just color space — is what the loader has to decide here, because it
 // determines the GPU format: only the call site knows an image is a normal map, and
 // a normal map wants two channels with Z reconstructed in the shader rather than a
-// wasted third. See pix.TextureFormat.
-func (l *loader) texture(idx int, usage pix.TextureFormat) pix.Texture {
+// wasted third. See textures.Format.
+func (l *loader) texture(idx int, usage textures.Format) textures.Texture {
 	if idx < 0 || idx >= len(l.doc.Textures) {
-		return pix.Texture{}
+		return textures.Texture{}
 	}
 	key := texKey{idx, usage}
 	if t, ok := l.texCache[key]; ok {
@@ -599,15 +600,15 @@ func (l *loader) texture(idx int, usage pix.TextureFormat) pix.Texture {
 	}
 	gt := l.doc.Textures[idx]
 	if gt.Source == nil {
-		l.texCache[key] = pix.Texture{}
-		return pix.Texture{}
+		l.texCache[key] = textures.Texture{}
+		return textures.Texture{}
 	}
 	pixels, w, h, err := l.decodeImage(*gt.Source)
 	if err != nil {
-		l.texCache[key] = pix.Texture{}
-		return pix.Texture{}
+		l.texCache[key] = textures.Texture{}
+		return textures.Texture{}
 	}
-	t := l.renderer.NewTexture(pixels, w, h, usage)
+	t := l.renderer.TextureStore.Create(pixels, w, h, usage)
 	l.texCache[key] = t
 	l.allTex = append(l.allTex, t)
 	return t
@@ -616,7 +617,7 @@ func (l *loader) texture(idx int, usage pix.TextureFormat) pix.Texture {
 func (l *loader) loadMaterials() {
 	// glTF materials are metallic-roughness PBR → load them as PBR materials with
 	// their base-color, normal, and metallic-roughness maps.
-	samp := l.renderer.DefaultSampler()
+	samp := l.renderer.TextureStore.DefaultSampler()
 	l.materials = make([]*pix.PBRMaterial, len(l.doc.Materials)+1)
 	def := l.renderer.NewPBRMaterial()
 	def.SetRoughness(1)
@@ -646,7 +647,7 @@ func (l *loader) loadMaterials() {
 				if tt := ext.Transmission.TransmissionTexture; tt != nil {
 					// Single-channel data (the extension reads red), so upload it
 					// as R8 rather than paying for four channels.
-					if t := l.texture(tt.Index, pix.TextureGrayscale); t.Valid() {
+					if t := l.texture(tt.Index, textures.Grayscale); t.Valid() {
 						m.SetTransmissionMap(t)
 						m.SetTransmissionMapSampler(samp)
 					}
@@ -654,7 +655,7 @@ func (l *loader) loadMaterials() {
 			}
 		}
 		if gm.NormalTexture != nil {
-			if t := l.texture(gm.NormalTexture.Index, pix.TextureNormal); t.Valid() {
+			if t := l.texture(gm.NormalTexture.Index, textures.Normal); t.Valid() {
 				m.SetNormalMap(t)
 				m.SetNormalMapSampler(samp)
 			}
@@ -670,7 +671,7 @@ func (l *loader) loadMaterials() {
 				m.SetRoughness(*pbr.RoughnessFactor)
 			}
 			if pbr.BaseColorTexture != nil {
-				if t := l.texture(pbr.BaseColorTexture.Index, pix.TextureSRGB); t.Valid() {
+				if t := l.texture(pbr.BaseColorTexture.Index, textures.SRGB); t.Valid() {
 					m.SetColorMap(t)
 					m.SetColorMapSampler(samp)
 				}
@@ -678,7 +679,7 @@ func (l *loader) loadMaterials() {
 			// One combined metallic-roughness texture (glTF: .b metallic, .g roughness)
 			// feeds both independent map slots.
 			if pbr.MetallicRoughnessTexture != nil {
-				if t := l.texture(pbr.MetallicRoughnessTexture.Index, pix.TextureLinear); t.Valid() {
+				if t := l.texture(pbr.MetallicRoughnessTexture.Index, textures.Linear); t.Valid() {
 					m.SetMetallicMap(t)
 					m.SetMetallicMapSampler(samp)
 					m.SetRoughnessMap(t)

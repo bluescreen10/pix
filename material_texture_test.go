@@ -1,13 +1,14 @@
 package pix
 
 import "testing"
+import "github.com/bluescreen10/pix/textures"
 
 // Reproduces what loaders/gltf does: one cached texture handed to two map slots.
 func TestSharedTextureOwnership(t *testing.T) {
 	r, _ := NewOffscreenRenderer(16, 16)
 	defer r.Destroy()
 
-	tex := r.NewTexture([]byte{255, 255, 255, 255}, 1, 1, TextureLinear)
+	tex := r.TextureStore.Create([]byte{255, 255, 255, 255}, 1, 1, textures.Linear)
 	m := r.NewPBRMaterial()
 	m.SetMetallicMap(tex)
 	m.SetRoughnessMap(tex) // same handle into a second slot
@@ -33,7 +34,7 @@ func TestSetMapSelfRebind(t *testing.T) {
 	}
 	defer r.Destroy()
 
-	tex := r.NewTexture([]byte{255, 255, 255, 255}, 1, 1, TextureLinear)
+	tex := r.TextureStore.Create([]byte{255, 255, 255, 255}, 1, 1, textures.Linear)
 	m := r.NewBasicMaterial()
 	m.SetColorMap(tex)
 	tex.Release() // the material should hold the only remaining reference
@@ -57,13 +58,13 @@ func TestSetMapSelfRebindThenReleaseIsSafe(t *testing.T) {
 	}
 	defer r.Destroy()
 
-	tex := r.NewTexture([]byte{255, 255, 255, 255}, 1, 1, TextureLinear)
+	tex := r.TextureStore.Create([]byte{255, 255, 255, 255}, 1, 1, textures.Linear)
 	m := r.NewBasicMaterial()
 	m.SetColorMap(tex)
 	tex.Release()
 	m.SetColorMap(m.ColorMap())
 
-	other := r.NewTexture([]byte{0, 0, 0, 255}, 1, 1, TextureLinear)
+	other := r.TextureStore.Create([]byte{0, 0, 0, 255}, 1, 1, textures.Linear)
 	defer other.Release()
 
 	m.Release()

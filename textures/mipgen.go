@@ -1,4 +1,4 @@
-package pix
+package textures
 
 import "github.com/chewxy/math32"
 

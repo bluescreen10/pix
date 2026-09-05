@@ -5,6 +5,7 @@ import (
 	"unsafe"
 
 	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/textures"
 )
 
 //go:embed shaders/build/scene_forward_pbr.frag.spv
@@ -33,24 +34,24 @@ type PBRMaterial struct {
 	// record's bindless index and presence flag are derived from it in Bytes, so they
 	// cannot fall out of step with what is actually bound.
 	color        colors.RGBA32F
-	colorMap     Texture
+	colorMap     textures.Texture
 	colorSampler uint32
 
-	normalMap     Texture
+	normalMap     textures.Texture
 	normalSampler uint32
 
 	metallic        float32
-	metallicMap     Texture
+	metallicMap     textures.Texture
 	metallicSampler uint32
 
 	roughness        float32
-	roughnessMap     Texture
+	roughnessMap     textures.Texture
 	roughnessSampler uint32
 
 	// transmissionMap scales transmission per texel (glTF KHR_materials_transmission
 	// stores it in red). Without it a partly-glass object — a cabinet with panes, a
 	// sign with a glass front — becomes uniformly transparent.
-	transmissionMap     Texture
+	transmissionMap     textures.Texture
 	transmissionSampler uint32
 }
 
@@ -181,13 +182,13 @@ func (m *PBRMaterial) SetEmissive(color colors.RGB32F) {
 }
 
 // The bound textures (or a zero handle).
-func (m *PBRMaterial) ColorMap() Texture {
+func (m *PBRMaterial) ColorMap() textures.Texture {
 	return m.colorMap
 }
 
-// SetColorMap binds the base-color (albedo) map; pass a zero Texture to clear it. The
+// SetColorMap binds the base-color (albedo) map; pass a zero textures.Texture to clear it. The
 // material takes its own reference, so the caller may release theirs.
-func (m *PBRMaterial) SetColorMap(texture Texture) {
+func (m *PBRMaterial) SetColorMap(texture textures.Texture) {
 	old := m.colorMap
 	m.colorMap = texture.Copy()
 	old.Release() // after the copy, so rebinding a texture to itself cannot free it
@@ -204,12 +205,12 @@ func (m *PBRMaterial) SetColorMapSampler(sampler uint32) {
 	m.dirty()
 }
 
-func (m *PBRMaterial) NormalMap() Texture {
+func (m *PBRMaterial) NormalMap() textures.Texture {
 	return m.normalMap
 }
 
 // SetNormalMap binds a tangent-space normal map (linear RGB, xyz in [0,1]).
-func (m *PBRMaterial) SetNormalMap(texture Texture) {
+func (m *PBRMaterial) SetNormalMap(texture textures.Texture) {
 	old := m.normalMap
 	m.normalMap = texture.Copy()
 	old.Release() // after the copy, so rebinding a texture to itself cannot free it
@@ -225,13 +226,13 @@ func (m *PBRMaterial) SetNormalMapSampler(sampler uint32) {
 	m.dirty()
 }
 
-func (m *PBRMaterial) MetallicMap() Texture {
+func (m *PBRMaterial) MetallicMap() textures.Texture {
 	return m.metallicMap
 }
 
 // SetMetallicMap binds a metallic map; its blue channel modulates the metallic factor
 // (matches the glTF metallic-roughness texture convention, and works for grayscale).
-func (m *PBRMaterial) SetMetallicMap(texture Texture) {
+func (m *PBRMaterial) SetMetallicMap(texture textures.Texture) {
 	old := m.metallicMap
 	m.metallicMap = texture.Copy()
 	old.Release() // after the copy, so rebinding a texture to itself cannot free it
@@ -247,13 +248,13 @@ func (m *PBRMaterial) SetMetallicMapSampler(sampler uint32) {
 	m.dirty()
 }
 
-func (m *PBRMaterial) RoughnessMap() Texture {
+func (m *PBRMaterial) RoughnessMap() textures.Texture {
 	return m.roughnessMap
 }
 
 // SetRoughnessMap binds a roughness map; its green channel modulates the roughness
 // factor (glTF convention; works for grayscale too).
-func (m *PBRMaterial) SetRoughnessMap(texture Texture) {
+func (m *PBRMaterial) SetRoughnessMap(texture textures.Texture) {
 	old := m.roughnessMap
 	m.roughnessMap = texture.Copy()
 	old.Release() // after the copy, so rebinding a texture to itself cannot free it
@@ -270,13 +271,13 @@ func (m *PBRMaterial) SetRoughnessMapSampler(sampler uint32) {
 }
 
 // TransmissionMap returns the bound transmission map.
-func (m *PBRMaterial) TransmissionMap() Texture { return m.transmissionMap }
+func (m *PBRMaterial) TransmissionMap() textures.Texture { return m.transmissionMap }
 
 // SetTransmissionMap binds a per-texel transmission mask, multiplied with the scalar
 // Transmission (glTF KHR_materials_transmission keeps it in the red channel). Use it
 // when only part of a surface is glass — a cabinet's panes, a sign's window — since
 // the scalar alone makes the whole object see-through.
-func (m *PBRMaterial) SetTransmissionMap(texture Texture) {
+func (m *PBRMaterial) SetTransmissionMap(texture textures.Texture) {
 	newRef := texture.Copy()
 	m.transmissionMap.Release()
 	m.transmissionMap = newRef

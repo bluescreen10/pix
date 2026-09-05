@@ -1,5 +1,7 @@
 package pix
 
+import "github.com/bluescreen10/pix/textures"
+
 // RawMaterial is a self-describing, one-off material: you provide the shader and the
 // per-instance data size, and the material system auto-allocates storage (a "uniform"
 // buffer) from that — no hand-written typed store. Write the record bytes via Bytes()
@@ -12,7 +14,7 @@ type RawMaterial struct {
 	// The material's own texture references, one per slot requested at construction.
 	// These keep the textures alive; the record holds whatever bindless indices the
 	// caller writes into it, which is all the shader reads.
-	textures []Texture
+	textures []textures.Texture
 
 	// The record bytes. RawMaterial has no typed fields to serialize from, so it holds
 	// the record itself and Bytes hands it straight to the store.
@@ -25,7 +27,7 @@ type RawMaterial struct {
 func (r *Renderer) NewRawMaterial(shader Shader, dataSize, textureSlots int) *RawMaterial {
 	st := r.materials.store(shader, "Custom Materials")
 	m := &RawMaterial{
-		textures: make([]Texture, textureSlots),
+		textures: make([]textures.Texture, textureSlots),
 		data:     make([]byte, dataSize),
 	}
 	m.store = st
@@ -55,19 +57,19 @@ func (m *RawMaterial) release() {
 // SetTexture binds a texture into slot, taking a reference that lasts until the slot
 // is rebound or the material is released. Write the texture's Index() into the record
 // yourself (via Bytes) — RawMaterial has no typed record to do it for you.
-func (m *RawMaterial) SetTexture(slot int, texture Texture) {
+func (m *RawMaterial) SetTexture(slot int, texture textures.Texture) {
 	old := m.textures[slot]
 	if texture.Valid() {
 		m.textures[slot] = texture.Copy()
 	} else {
-		m.textures[slot] = Texture{}
+		m.textures[slot] = textures.Texture{}
 	}
 	old.Release() // after the copy, so rebinding a texture to itself cannot free it
 	m.store.markDirty(m.ref.id)
 }
 
-// Texture returns the texture bound in slot (or a zero handle).
-func (m *RawMaterial) Texture(slot int) Texture { return m.textures[slot] }
+// textures.Texture returns the texture bound in slot (or a zero handle).
+func (m *RawMaterial) Texture(slot int) textures.Texture { return m.textures[slot] }
 
 // --- Material ---
 //
