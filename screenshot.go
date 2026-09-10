@@ -9,7 +9,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/bluescreen10/pix/gpu"
+	"github.com/bluescreen10/gamekit/gpu"
 )
 
 // screenshot is a queued frame capture: the renderer records the copy into the frame

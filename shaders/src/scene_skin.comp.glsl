@@ -30,7 +30,7 @@ layout(buffer_reference, scalar) readonly buffer SkinBuf { uint v[]; };
 layout(buffer_reference, scalar) readonly buffer DescBuf { GeoDesc v[]; };
 layout(buffer_reference, scalar) readonly buffer JointBuf { mat4 v[]; };
 
-layout(buffer_reference, scalar) readonly buffer SkinRoot {
+layout(push_constant, scalar) uniform PC {
     PosBuf pos;
     AttrBuf attr;
     SkinBuf skin;
@@ -40,8 +40,7 @@ layout(buffer_reference, scalar) readonly buffer SkinRoot {
     uint dstDesc;
     uint jointBase;
     uint vertexCount;
-};
-layout(push_constant) uniform PC { SkinRoot root; } pc;
+} pc;
 
 const uint FLAG_NORMAL = 1u;
 const uint FLAG_UV = 2u;
@@ -49,41 +48,41 @@ const uint FLAG_COLOR = 4u;
 
 void main() {
     uint vi = gl_GlobalInvocationID.x;
-    if (vi >= pc.root.vertexCount) return;
+    if (vi >= pc.vertexCount) return;
 
-    GeoDesc src = pc.root.descs.v[pc.root.srcDesc];
-    GeoDesc dst = pc.root.descs.v[pc.root.dstDesc];
+    GeoDesc src = pc.descs.v[pc.srcDesc];
+    GeoDesc dst = pc.descs.v[pc.dstDesc];
 
     // Skin record: 4 words — joints packed two-per-word, then unorm16 weights two-
     // per-word (mirrors geometry.go's vertexSkin packing).
     uint sb = src.skinBase * 4u + vi * 4u;
-    uint w0 = pc.root.skin.v[sb];
-    uint w1 = pc.root.skin.v[sb + 1u];
-    uint w2 = pc.root.skin.v[sb + 2u];
-    uint w3 = pc.root.skin.v[sb + 3u];
+    uint w0 = pc.skin.v[sb];
+    uint w1 = pc.skin.v[sb + 1u];
+    uint w2 = pc.skin.v[sb + 2u];
+    uint w3 = pc.skin.v[sb + 3u];
     uvec4 j = uvec4(w0 & 0xFFFFu, w0 >> 16, w1 & 0xFFFFu, w1 >> 16);
     vec4 wt = vec4(float(w2 & 0xFFFFu), float(w2 >> 16), float(w3 & 0xFFFFu), float(w3 >> 16)) / 65535.0;
 
-    mat4 m = wt.x * pc.root.joints.v[pc.root.jointBase + j.x]
-           + wt.y * pc.root.joints.v[pc.root.jointBase + j.y]
-           + wt.z * pc.root.joints.v[pc.root.jointBase + j.z]
-           + wt.w * pc.root.joints.v[pc.root.jointBase + j.w];
+    mat4 m = wt.x * pc.joints.v[pc.jointBase + j.x]
+           + wt.y * pc.joints.v[pc.jointBase + j.y]
+           + wt.z * pc.joints.v[pc.jointBase + j.z]
+           + wt.w * pc.joints.v[pc.jointBase + j.w];
 
     uint spb = src.positionBase + vi * 3u;
-    vec3 p = vec3(pc.root.pos.v[spb], pc.root.pos.v[spb + 1u], pc.root.pos.v[spb + 2u]);
+    vec3 p = vec3(pc.pos.v[spb], pc.pos.v[spb + 1u], pc.pos.v[spb + 2u]);
     vec3 outp = (m * vec4(p, 1.0)).xyz;
 
     uint dpb = dst.positionBase + vi * 3u;
-    pc.root.pos.v[dpb] = outp.x;
-    pc.root.pos.v[dpb + 1u] = outp.y;
-    pc.root.pos.v[dpb + 2u] = outp.z;
+    pc.pos.v[dpb] = outp.x;
+    pc.pos.v[dpb + 1u] = outp.y;
+    pc.pos.v[dpb + 2u] = outp.z;
 
     // Attributes: normal is rotated by the blended matrix's upper 3x3; color/uv
     // (if present) copy through unchanged — skinning never touches them.
     if ((src.flags & (FLAG_NORMAL | FLAG_UV | FLAG_COLOR)) != 0u) {
         uint sab = src.attributeBase * 4u + vi * 4u;
         uint dab = dst.attributeBase * 4u + vi * 4u;
-        uint w = pc.root.attr.v[sab];
+        uint w = pc.attr.v[sab];
         if ((src.flags & FLAG_NORMAL) != 0u) {
             vec3 n = vec3(float(w & 0x3FFu), float((w >> 10) & 0x3FFu), float((w >> 20) & 0x3FFu)) / 1023.0 * 2.0 - 1.0;
             vec3 outn = normalize(mat3(m) * n);
@@ -93,9 +92,9 @@ void main() {
             uint ez = uint(enc.z * 1023.0 + 0.5);
             w = ex | (ey << 10) | (ez << 20);
         }
-        pc.root.attr.v[dab] = w;
-        pc.root.attr.v[dab + 1u] = pc.root.attr.v[sab + 1u];
-        pc.root.attr.v[dab + 2u] = pc.root.attr.v[sab + 2u];
-        pc.root.attr.v[dab + 3u] = pc.root.attr.v[sab + 3u];
+        pc.attr.v[dab] = w;
+        pc.attr.v[dab + 1u] = pc.attr.v[sab + 1u];
+        pc.attr.v[dab + 2u] = pc.attr.v[sab + 2u];
+        pc.attr.v[dab + 3u] = pc.attr.v[sab + 3u];
     }
 }

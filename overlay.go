@@ -4,9 +4,10 @@ import (
 	"math"
 	"unsafe"
 
+	"github.com/bluescreen10/gamekit/gpu"
+	"github.com/bluescreen10/gamekit/utils"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/gpu"
 	"github.com/bluescreen10/pix/shaders"
 	"github.com/bluescreen10/pix/textures"
 )
@@ -42,13 +43,12 @@ type overlay struct {
 	quads   []overlayQuad
 	quadBuf gpu.Buffer
 	quadCap int
-	rootBuf gpu.Buffer
 }
 
 func newOverlay(b gpu.Backend, texStore *textures.Store, scale float32, colorFormat, depthFormat gpu.Format) *overlay {
 	o := &overlay{backend: b, atlas: buildFontAtlas(texStore), scale: scale}
 	o.pipe = b.CreateGraphicsPipeline(gpu.PipelineDescriptor{
-		VertexShader: shaders.OverlayVert, FragmentShader: shaders.OverlayFrag,
+		VertexShader: shaders.ForBackend(b, shaders.OverlayVert), FragmentShader: shaders.ForBackend(b, shaders.OverlayFrag),
 		Topology: gpu.TopologyTriangles, ColorFormats: []gpu.Format{colorFormat},
 		DepthFormat: depthFormat, DepthTest: false, DepthWrite: false, CullMode: gpu.CullNone,
 		// Alpha blending, for two things that both need it: a translucent panel behind
@@ -59,7 +59,6 @@ func newOverlay(b gpu.Backend, texStore *textures.Store, scale float32, colorFor
 			ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd},
 		}},
 	})
-	o.rootBuf = b.Alloc(uint64(unsafe.Sizeof(overlayRoot{})), gpu.MemoryHost, "overlay-root")
 	return o
 }
 
@@ -167,7 +166,7 @@ func (o *overlay) draw(cmd gpu.CommandBuffer, vpW, vpH float32) {
 		o.quadBuf = o.backend.Alloc(uint64(o.quadCap)*uint64(unsafe.Sizeof(overlayQuad{})), gpu.MemoryHost, "overlay-quads")
 	}
 	copy(unsafe.Slice((*overlayQuad)(o.quadBuf.Ptr), n), o.quads)
-	*(*overlayRoot)(o.rootBuf.Ptr) = overlayRoot{
+	root := overlayRoot{
 		viewport: glm.Vec2f{vpW, vpH},
 		atlas:    o.atlas.tex.Index(),
 		sampler:  o.atlas.sampler,
@@ -175,8 +174,7 @@ func (o *overlay) draw(cmd gpu.CommandBuffer, vpW, vpH float32) {
 	}
 
 	cmd.SetPipeline(o.pipe)
-	cmd.Root(o.rootBuf.Addr)
-	cmd.Draw(6, uint32(n), 0, 0)
+	cmd.Draw(utils.ToBytes(&root), 6, uint32(n), 0, 0)
 }
 
 func (o *overlay) destroy() {
@@ -186,9 +184,6 @@ func (o *overlay) destroy() {
 	}
 	if o.quadBuf.Valid() {
 		o.backend.Free(o.quadBuf)
-	}
-	if o.rootBuf.Valid() {
-		o.backend.Free(o.rootBuf)
 	}
 	o.backend.DestroyPipeline(o.pipe)
 }

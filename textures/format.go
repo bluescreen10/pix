@@ -1,6 +1,6 @@
 package textures
 
-import "github.com/bluescreen10/pix/gpu"
+import "github.com/bluescreen10/gamekit/gpu"
 
 // Format is what a texture is *for*, which is what decides both its GPU format and
 // how its mips must be filtered. It is not a raw format enum: callers know they have

@@ -5,9 +5,9 @@ package pix
 import (
 	"unsafe"
 
+	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/gpu"
 )
 
 // Light-count limits (mirror scene_lit.frag).

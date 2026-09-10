@@ -32,27 +32,30 @@ layout(buffer_reference, scalar) readonly buffer ModelBuf { mat4 v[]; };
 layout(buffer_reference, scalar) readonly buffer DrawableBuf { Drawable v[]; };
 layout(buffer_reference, scalar) readonly buffer VisibleBuf { uint v[]; };
 
-layout(buffer_reference, scalar) readonly buffer ShadowRoot {
+// Pushed inline rather than behind a device address: it fits in push constants on
+// every backend, so the shader reads its parameters directly instead of chasing a
+// pointer to reach them. Fields that are themselves addresses stay addresses — those
+// point at unbounded arrays, so that indirection is inherent.
+layout(push_constant, scalar) uniform PC {
     mat4 viewProj;
     PosBuf pos;
     DescBuf descs;
     ModelBuf models;
     DrawableBuf drawables;
     VisibleBuf visible;
-};
-layout(push_constant) uniform PC { ShadowRoot root; } pc;
+} pc;
 
 void main() {
     // firstInstance = the batch's region base, so gl_InstanceIndex already indexes
     // the compacted visible buffer directly (see scene_draw.vert).
-    uint di = pc.root.visible.v[uint(gl_InstanceIndex)];
-    Drawable d = pc.root.drawables.v[di];
-    GeoDesc g = pc.root.descs.v[d.geometryID];
-    mat4 m = pc.root.models.v[d.transformID];
+    uint di = pc.visible.v[uint(gl_InstanceIndex)];
+    Drawable d = pc.drawables.v[di];
+    GeoDesc g = pc.descs.v[d.geometryID];
+    mat4 m = pc.models.v[d.transformID];
 
     uint vi = uint(gl_VertexIndex);
     uint pb = g.positionBase + vi * 3u;
-    vec3 p = vec3(pc.root.pos.v[pb], pc.root.pos.v[pb + 1u], pc.root.pos.v[pb + 2u]);
+    vec3 p = vec3(pc.pos.v[pb], pc.pos.v[pb + 1u], pc.pos.v[pb + 2u]);
 
-    gl_Position = pc.root.viewProj * (m * vec4(p, 1.0));
+    gl_Position = pc.viewProj * (m * vec4(p, 1.0));
 }

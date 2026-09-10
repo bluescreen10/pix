@@ -31,7 +31,7 @@ const (
 
 // Input is what a console needs to read: typed characters plus key transitions.
 // Declared here, by the consumer, so this package depends on the input interfaces
-// rather than any particular backend — *glfwinput.Input satisfies it for free.
+// rather than any particular backend — *gamekitinput.Input satisfies it for free.
 type Input interface {
 	input.TextInput
 	input.KeyEvents

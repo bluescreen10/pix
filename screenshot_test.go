@@ -121,8 +121,8 @@ func TestScreenshotDefaultsToATimestampedName(t *testing.T) {
 	})
 	r.Render(scene, cam)
 
-	if !strings.HasPrefix(gotPath, "pix-") || !strings.HasSuffix(gotPath, ".png") {
-		t.Fatalf("default name = %q, want a pix-*.png", gotPath)
+	if !strings.HasPrefix(gotPath, "screenshot-") || !strings.HasSuffix(gotPath, ".png") {
+		t.Fatalf("default name = %q, want a screenshot-*.png", gotPath)
 	}
 	if _, err := os.Stat(filepath.Join(dir, gotPath)); err != nil {
 		t.Fatalf("default-named file missing: %v", err)

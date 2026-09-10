@@ -3,7 +3,7 @@ package materials
 import (
 	"fmt"
 
-	"github.com/bluescreen10/pix/gpu"
+	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/pix/internal/mem"
 	"github.com/bluescreen10/pix/internal/ref"
 )

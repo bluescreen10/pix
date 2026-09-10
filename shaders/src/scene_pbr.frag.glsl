@@ -55,7 +55,11 @@ layout(location = 0) out vec4 outColor;
 
 #ifdef PIX_PASS_LIGHTING
 // LightingRoot mirrors pix.lightingRoot.
-layout(buffer_reference, scalar) readonly buffer LightingRoot {
+// Pushed inline rather than behind a device address: it fits in push constants on
+// every backend, so the shader reads its parameters directly instead of chasing a
+// pointer to reach them. Fields that are themselves addresses stay addresses — those
+// point at unbounded arrays, so that indirection is inherent.
+layout(push_constant, scalar) uniform PC {
     mat4 invViewProj;
     vec4 eye;
     LightBuf lights;
@@ -68,8 +72,7 @@ layout(buffer_reference, scalar) readonly buffer LightingRoot {
     uint depthTexture;
     vec2 screen;
     uint debugView; // unused here; the G-buffer debug pass shares this layout
-};
-layout(push_constant) uniform PC { LightingRoot root; } pc;
+} pc;
 #endif
 
 // ---------------------------------------------------------------------------
@@ -205,11 +208,11 @@ vec3 cookTorrance(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float meta
 // shadeSurface accumulates every light in the table onto a Surface and returns the
 // LINEAR result (ambient + direct + emissive) — the caller encodes it once. receives
 // lets the forward path honour a drawable's receive-shadow flag.
-// (The light table is read from pc.root rather than passed in: a buffer_reference
+// (The light table is read from the push constants rather than passed in: a buffer_reference
 // can't cross a function parameter without dropping its readonly qualifier, and both
-// passes that compile this function expose it as pc.root.lights.)
+// passes that compile this function expose it as pc.lights.)
 vec3 shadeSurface(Surface s, vec3 worldPos, vec3 V, uint shadowSamp, float diffuseScale, bool receives) {
-    LightBuf L = pc.root.lights;
+    LightBuf L = pc.lights;
     vec3 lo = vec3(0.0);
     for (uint i = 0u; i < L.numDir; i++) {
         DirLight dl = L.dirs[i];
@@ -248,7 +251,7 @@ void main() {
 #if defined(PIX_PASS_DEFERRED)
     // Surface -> G-buffer. No lighting here, and no transmission: a transmissive
     // instance is Transparent and renders forward, never reaching this pass.
-    Material m = MatBuf(pc.root.materials).v[vMat];
+    Material m = MatBuf(pc.materials).v[vMat];
     float baseAlpha;
     Surface s = materialSurface(m, baseAlpha);
 
@@ -259,7 +262,7 @@ void main() {
     outEmissive = g.emissive;
 
 #elif defined(PIX_PASS_FORWARD)
-    Material m = MatBuf(pc.root.materials).v[vMat];
+    Material m = MatBuf(pc.materials).v[vMat];
     float baseAlpha;
     Surface s = materialSurface(m, baseAlpha);
 
@@ -273,14 +276,14 @@ void main() {
     float transmission = m.transmission;
     if ((m.flags & MAT_TRANS_MAP) != 0u) transmission *= tex(m.transMap, m.transSampler).r;
     float diffuseScale = 1.0 - transmission;
-    vec3 V = normalize(pc.root.eye.xyz - vWorldPos);
+    vec3 V = normalize(pc.eye.xyz - vWorldPos);
     bool receives = (vFlags & FLAG_RECEIVES_SHADOW) != 0u;
 
-    vec3 lit = shadeSurface(s, vWorldPos, V, pc.root.shadowSampler, diffuseScale, receives);
+    vec3 lit = shadeSurface(s, vWorldPos, V, pc.shadowSampler, diffuseScale, receives);
     // Fogged before the alpha below reads its luminance: a distant window should
     // derive its coverage from what it actually contributes to the frame, not from
     // an unfogged highlight it never shows.
-    lit = applyFog(lit, vWorldPos, pc.root.eye.xyz, pc.root.lights.fogColor, pc.root.lights.fogParams);
+    lit = applyFog(lit, vWorldPos, pc.eye.xyz, pc.lights.fogColor, pc.lights.fogParams);
 
     float alpha = baseAlpha;
     if (transmission > 0.0) {
@@ -298,7 +301,7 @@ void main() {
         // Fresnel alone would turn the silhouette opaque black. Stand the ambient
         // term in for the surroundings: it is what an environment would contribute
         // if we had one, and it keeps the rim additive rather than a dark outline.
-        lit += fres * transmission * pc.root.lights.ambient.rgb;
+        lit += fres * transmission * pc.lights.ambient.rgb;
         float refl = max(fres * fres, dot(lit, vec3(0.2126, 0.7152, 0.0722)));
         alpha = clamp(baseAlpha * mix(1.0, refl, transmission), 0.04, 1.0);
     }
@@ -309,24 +312,24 @@ void main() {
     // (CompareGreater vs the far-plane triangle), so everything reaching this shader
     // has real geometry behind it. Depth is still sampled — position reconstruction
     // needs the value, not just the pass/fail.
-    uint samp = pc.root.gbufferSampler;
-    vec2 uv = gl_FragCoord.xy / pc.root.screen;
-    float depth = texture(sampler2D(gTextures[nonuniformEXT(pc.root.depthTexture)], gSamplers[nonuniformEXT(samp)]), uv).r;
+    uint samp = pc.gbufferSampler;
+    vec2 uv = gl_FragCoord.xy / pc.screen;
+    float depth = texture(sampler2D(gTextures[nonuniformEXT(pc.depthTexture)], gSamplers[nonuniformEXT(samp)]), uv).r;
 
-    vec4 diffuse = texture(sampler2D(gTextures[nonuniformEXT(pc.root.diffuseTexture)], gSamplers[nonuniformEXT(samp)]), uv);
-    vec2 normal = texture(sampler2D(gTextures[nonuniformEXT(pc.root.normalTexture)], gSamplers[nonuniformEXT(samp)]), uv).rg;
-    vec4 material = texture(sampler2D(gTextures[nonuniformEXT(pc.root.materialTexture)], gSamplers[nonuniformEXT(samp)]), uv);
-    vec4 emissive = texture(sampler2D(gTextures[nonuniformEXT(pc.root.emissiveTexture)], gSamplers[nonuniformEXT(samp)]), uv);
+    vec4 diffuse = texture(sampler2D(gTextures[nonuniformEXT(pc.diffuseTexture)], gSamplers[nonuniformEXT(samp)]), uv);
+    vec2 normal = texture(sampler2D(gTextures[nonuniformEXT(pc.normalTexture)], gSamplers[nonuniformEXT(samp)]), uv).rg;
+    vec4 material = texture(sampler2D(gTextures[nonuniformEXT(pc.materialTexture)], gSamplers[nonuniformEXT(samp)]), uv);
+    vec4 emissive = texture(sampler2D(gTextures[nonuniformEXT(pc.emissiveTexture)], gSamplers[nonuniformEXT(samp)]), uv);
     Surface s = unpackGBuffer(diffuse, normal, material, emissive);
 
-    vec3 worldPos = worldFromDepth(gl_FragCoord.xy, pc.root.screen, depth, pc.root.invViewProj);
-    vec3 V = normalize(pc.root.eye.xyz - worldPos);
+    vec3 worldPos = worldFromDepth(gl_FragCoord.xy, pc.screen, depth, pc.invViewProj);
+    vec3 V = normalize(pc.eye.xyz - worldPos);
 
     // diffuseScale 1.0 (transmission is forward-only) and receives=true: the
     // receive-shadow flag isn't carried through the G-buffer, so deferred surfaces
     // always receive. Emissive is summed in LINEAR space and encoded once.
-    vec3 lit = shadeSurface(s, worldPos, V, pc.root.shadowSampler, 1.0, true);
-    lit = applyFog(lit, worldPos, pc.root.eye.xyz, pc.root.lights.fogColor, pc.root.lights.fogParams);
+    vec3 lit = shadeSurface(s, worldPos, V, pc.shadowSampler, 1.0, true);
+    lit = applyFog(lit, worldPos, pc.eye.xyz, pc.lights.fogColor, pc.lights.fogParams);
     outColor = vec4(linearToSrgb(lit), 1.0);
 #endif
 }

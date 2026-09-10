@@ -2,8 +2,10 @@
 
 package pix
 
-// On macOS the default GPU backend is Vulkan (via KosmicKrisp). Registering it is a
-// blank import in this build-tagged file so the renderer core never references a
-// concrete backend — swap this file (or add a build tag) when a native Metal backend
-// lands, and platforms without Vulkan simply don't compile it.
-import _ "github.com/bluescreen10/pix/gpu/vulkan"
+// Register native Metal. It is the sole default backend on darwin — Vulkan (through
+// MoltenVK or KosmicKrisp) is opt-in only, via the gamekit_vulkan build tag; see
+// backend_darwin_vulkan.go. RendererConfig.Backend or PIX_GPU_BACKEND still selects
+// explicitly among whatever is registered.
+import (
+	_ "github.com/bluescreen10/gamekit/gpu/metal"
+)

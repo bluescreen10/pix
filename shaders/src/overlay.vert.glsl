@@ -13,13 +13,16 @@
 struct Quad { vec4 rect; vec4 uv; vec4 color; };
 layout(buffer_reference, scalar) readonly buffer QuadBuf { Quad v[]; };
 
-layout(buffer_reference, scalar) readonly buffer Root {
+// The root is pushed inline rather than behind a device address: it is small enough to
+// fit in push constants on every backend, so there is no reason to make the shader
+// chase a pointer to reach it. `quads` stays an address because the quad array is
+// unbounded — that indirection is inherent, the root's was not.
+layout(push_constant, scalar) uniform PC {
     vec2 viewport; // framebuffer size in pixels
     uint atlas;    // bindless index of the glyph atlas
     uint samp;     // bindless index of its sampler
     QuadBuf quads;
-};
-layout(push_constant) uniform PC { Root root; } pc;
+} pc;
 
 layout(location = 0) out vec4 vColor;
 layout(location = 1) out vec2 vUV;
@@ -30,11 +33,11 @@ const vec2 CORNERS[6] = vec2[](
     vec2(0, 0), vec2(1, 1), vec2(0, 1));
 
 void main() {
-    Quad q = pc.root.quads.v[gl_InstanceIndex];
+    Quad q = pc.quads.v[gl_InstanceIndex];
     vec2 corner = CORNERS[gl_VertexIndex];
     vec2 px = q.rect.xy + corner * q.rect.zw;
     // Vulkan NDC is Y-down, so top-left pixel (0,0) maps directly to (-1,-1).
-    vec2 ndc = px / pc.root.viewport * 2.0 - 1.0;
+    vec2 ndc = px / pc.viewport * 2.0 - 1.0;
     gl_Position = vec4(ndc, 0.0, 1.0);
     vColor = q.color;
     vUV = mix(q.uv.xy, q.uv.zw, corner);

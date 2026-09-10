@@ -3,10 +3,10 @@ package pix
 import (
 	"testing"
 
+	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/gpu"
 	"github.com/bluescreen10/pix/materials"
 	"github.com/bluescreen10/pix/shaders"
 )
@@ -279,7 +279,7 @@ func TestDeferredBackgroundKeepsClearColor(t *testing.T) {
 			redLit++
 		}
 	}
-	t.Logf("background(blue) px=%d lit(red) px=%d", blueBg, redLit)
+	t.Logf("background(blue) px=%d lit(red) px=%d center=%v", blueBg, redLit, px[(48*96+48)*4:(48*96+48)*4+4])
 	if blueBg == 0 {
 		t.Fatal("background lost its clear color — the lighting pass shaded pixels with no geometry")
 	}
@@ -315,7 +315,6 @@ func TestDrawListBuffersGrowOnly(t *testing.T) {
 	dl := scene.drawList
 	before := [...]gpu.Handle{
 		dl.drawableBuf.H, dl.indirectBuf.H, dl.regionBuf.H, dl.visibleBuf.H,
-		dl.drawRootBuf.H, dl.cullRootBuf.H, dl.lightingRootBuf.H,
 	}
 
 	// Force a rebuild (new pipeline assignment) that needs no extra space.
@@ -324,9 +323,8 @@ func TestDrawListBuffersGrowOnly(t *testing.T) {
 
 	after := [...]gpu.Handle{
 		dl.drawableBuf.H, dl.indirectBuf.H, dl.regionBuf.H, dl.visibleBuf.H,
-		dl.drawRootBuf.H, dl.cullRootBuf.H, dl.lightingRootBuf.H,
 	}
-	names := [...]string{"drawable", "indirect", "region", "visible", "drawRoot", "cullRoot", "lightingRoot"}
+	names := [...]string{"drawable", "indirect", "region", "visible"}
 	for i := range before {
 		if before[i] != after[i] {
 			t.Errorf("%s buffer was reallocated on a rebuild that needed no more room", names[i])

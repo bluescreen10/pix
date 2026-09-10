@@ -40,6 +40,14 @@ type indirectCmd struct {
 	firstInstance uint32
 }
 
+// The *Root types below are the push-constant roots handed to a draw or dispatch.
+// Each must be at least as large as the shader's corresponding struct, and MSL rounds
+// a struct's size up to its alignment — 16 bytes if any member is a vec4 or mat4, else
+// 8 — where Go stops at 8. Pad every root to a multiple of 16 rather than working out
+// which members force the alignment; the spare bytes are never read. The Metal backend
+// checks this against pipeline reflection and panics on a short root, so a mistake here
+// surfaces as an error rather than as a shader reading past the data.
+
 // cullRoot matches CullRoot in scene_cull.comp (scalar; pointers-first).
 type cullRoot struct {
 	drawables   uint64
@@ -81,6 +89,11 @@ type shadowRoot struct {
 	models    uint64
 	drawables uint64
 	visible   uint64
+	// The mat4 gives the struct 16-byte alignment, and MSL rounds a struct's size up
+	// to its alignment: the shader's argument is 112 bytes, not the 104 Go packs to.
+	// Without this the Metal backend hands setBytes a short buffer and the shader
+	// reads eight bytes past it (drawRoot pads for the same reason).
+	pad0, pad1 uint32
 }
 
 // skinCmd is one SkinnedMesh's compute-skinning dispatch, built by
@@ -142,11 +155,6 @@ type pipelineRun struct {
 }
 
 var (
-	drawableSize     = uint32(unsafe.Sizeof(gpuDrawable{}))
-	indirectSize     = uint32(unsafe.Sizeof(indirectCmd{}))
-	drawRootSize     = uint64(unsafe.Sizeof(drawRoot{}))
-	cullRootSize     = uint64(unsafe.Sizeof(cullRoot{}))
-	shadowRootSize   = uint64(unsafe.Sizeof(shadowRoot{}))
-	lightingRootSize = uint64(unsafe.Sizeof(lightingRoot{}))
-	skinRootSize     = uint64(unsafe.Sizeof(skinRoot{}))
+	drawableSize = uint32(unsafe.Sizeof(gpuDrawable{}))
+	indirectSize = uint32(unsafe.Sizeof(indirectCmd{}))
 )

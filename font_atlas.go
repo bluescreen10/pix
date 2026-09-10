@@ -3,7 +3,7 @@ package pix
 import (
 	"sort"
 
-	"github.com/bluescreen10/pix/gpu"
+	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/pix/textures"
 )
 

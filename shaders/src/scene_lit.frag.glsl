@@ -34,15 +34,15 @@ vec3 blinnPhong(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float specSt
 }
 
 void main() {
-    Material m = MatBuf(pc.root.materials).v[vMat];
+    Material m = MatBuf(pc.materials).v[vMat];
     vec4 base = sampleBase(m.color, m.flags, m.colorMap, m.samp);
     vec3 albedo = base.rgb;
 
-    LightBuf L = pc.root.lights;
+    LightBuf L = pc.lights;
     vec3 N = normalize(vNormal);
-    vec3 V = normalize(pc.root.eye.xyz - vWorldPos);
+    vec3 V = normalize(pc.eye.xyz - vWorldPos);
 
-    uint shadowSamp = pc.root.shadowSampler;
+    uint shadowSamp = pc.shadowSampler;
     bool receives = (vFlags & FLAG_RECEIVES_SHADOW) != 0u;
 
     vec3 lit = L.ambient.rgb * albedo;
@@ -72,6 +72,6 @@ void main() {
         lit += sh * blinnPhong(N, V, Ldir, sl.color.rgb * sl.color.w * atten, albedo, m.specular, m.shininess);
     }
 
-    lit = applyFog(lit + m.emissive.rgb, vWorldPos, pc.root.eye.xyz, L.fogColor, L.fogParams);
+    lit = applyFog(lit + m.emissive.rgb, vWorldPos, pc.eye.xyz, L.fogColor, L.fogParams);
     outColor = vec4(linearToSrgb(lit), base.a);
 }

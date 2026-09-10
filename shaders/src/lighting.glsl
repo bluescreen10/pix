@@ -10,6 +10,10 @@
 
 // Bindless heap (set 0): sampled images at binding 0, samplers at binding 2.
 layout(set = 0, binding = 0) uniform texture2D gTextures[];
+// Alias the same heap with a distinct shader variable for comparison sampling.
+// SPIRV-Cross otherwise promotes every gTextures sample to depth2d's scalar
+// return type, losing the G-buffer/base-color green and blue channels on Metal.
+layout(set = 0, binding = 0) uniform texture2D gShadowTextures[];
 layout(set = 0, binding = 2) uniform sampler gSamplers[];
 
 const uint MAX_DIR = 4u;
@@ -64,7 +68,7 @@ float shadowFactor(mat4 shadowVP, uint shadowMap, vec3 worldPos, uint shadowSamp
     // conventional depth buffer would subtract. The comparison sampler is
     // GreaterEqual to match (see Renderer.prepareShadows).
     float ref = ndc.z + bias;
-    return texture(sampler2DShadow(gTextures[nonuniformEXT(shadowMap)], gSamplers[nonuniformEXT(shadowSamp)]), vec3(uv, ref));
+    return texture(sampler2DShadow(gShadowTextures[nonuniformEXT(shadowMap)], gSamplers[nonuniformEXT(shadowSamp)]), vec3(uv, ref));
 }
 
 // pointShadowFactor picks the cube face for the light→fragment direction (dominant
@@ -109,7 +113,7 @@ vec3 linearToSrgb(vec3 c) {
 //
 // fogColor/fogParams are passed by value rather than the LightBuf itself: a
 // buffer_reference cannot cross a function parameter without dropping its readonly
-// qualifier, the same reason shadeSurface reads the table from pc.root directly.
+// qualifier, the same reason shadeSurface reads the table from the push constants directly.
 vec3 applyFog(vec3 lit, vec3 worldPos, vec3 eye, vec4 fogColor, vec4 fogParams) {
     uint mode = uint(fogColor.w);
     if (mode == FOG_NONE) return lit;

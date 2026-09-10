@@ -3,9 +3,9 @@ package gltf
 import (
 	"testing"
 
+	_ "github.com/bluescreen10/gamekit/gpu/vulkan"
 	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
-	_ "github.com/bluescreen10/pix/gpu/vulkan"
 )
 
 const capoeiraAsset = "../../examples/skinning/assets/capoeira.gltf"

@@ -3,7 +3,7 @@ package pix
 import (
 	"unsafe"
 
-	"github.com/bluescreen10/pix/gpu"
+	"github.com/bluescreen10/gamekit/gpu"
 )
 
 // writeAt copies data into a host-mapped buffer at a byte offset.

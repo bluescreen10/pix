@@ -149,9 +149,11 @@ func (c *OrbitControls) Update() {
 		c.isPanning = false
 	}
 
-	// zoom
-	if c.scroll.Y() != float32(newScroll.Y()) {
-		radius *= glm.Clamp(1-float32(newScroll.Y())*c.zoomSpeed, 0.1, 100)
+	// GameKit reports a running scroll total so multiple consumers can observe it.
+	// Apply only the amount accumulated since this controller's previous update.
+	scrollDelta := newScroll.Y() - c.scroll.Y()
+	if scrollDelta != 0 {
+		radius *= glm.Clamp(1-scrollDelta*c.zoomSpeed, 0.1, 100)
 		offset = offset.Normalize().Scale(radius)
 	}
 

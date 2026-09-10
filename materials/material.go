@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"unsafe"
 
-	"github.com/bluescreen10/pix/gpu"
+	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/pix/textures"
 )
 
@@ -48,15 +48,15 @@ const (
 // types may supply any combination — see the Material interface's Deferred/Lighting
 // docs for the eligibility rule.
 type Shader struct {
-	Vertex   []byte // SPIR-V; nil => the default scene vertex-pull shader
-	Forward  []byte // SPIR-V; required — surface + lighting in one pass, outputs color
-	Deferred []byte // SPIR-V; optional — fills the G-buffer (Surface only, no lighting)
-	Lighting []byte // SPIR-V; optional — fullscreen deferred lighting pass for this model
+	Vertex   []byte // Backend-native bytes; nil => the default scene vertex-pull shader
+	Forward  []byte // Backend-native bytes; required — surface + lighting in one pass, outputs color
+	Deferred []byte // Backend-native bytes; optional — fills the G-buffer (Surface only, no lighting)
+	Lighting []byte // Backend-native bytes; optional — fullscreen deferred lighting pass for this model
 }
 
-// Each built-in material builds its own Shader inside its constructor, from SPIR-V
-// embedded in the same file — see basic_material.go, blinn_phong_material.go and
-// pbr_material.go.
+// Built-ins identify shaders from the shaders package. Store.Pool selects the
+// embedded backend-native variant before computing pipeline identity. Custom
+// shaders must already be supplied in the selected backend's format.
 
 // Alpha-testing (a "masked" material) has no representation yet: the G-buffer shaders
 // do not discard on alpha, so a masked material routed deferred would silently render

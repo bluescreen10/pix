@@ -4,7 +4,7 @@
 //
 // It reuses the deferred lighting pass's root struct verbatim (every target, the
 // sampler and invViewProj are already there), so it is a second fragment shader over
-// the same data rather than any new plumbing. pc.root.debugView picks the target.
+// the same data rather than any new plumbing. pc.debugView picks the target.
 #version 460
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference2 : require
@@ -17,7 +17,11 @@
 #include "gbuffer.glsl"
 
 // Mirrors pix.lightingRoot; debugView mirrors pix.DebugView.
-layout(buffer_reference, scalar) readonly buffer LightingRoot {
+// Pushed inline rather than behind a device address: it fits in push constants on
+// every backend, so the shader reads its parameters directly instead of chasing a
+// pointer to reach them. Fields that are themselves addresses stay addresses — those
+// point at unbounded arrays, so that indirection is inherent.
+layout(push_constant, scalar) uniform PC {
     mat4 invViewProj;
     vec4 eye;
     LightBuf lights;
@@ -30,8 +34,7 @@ layout(buffer_reference, scalar) readonly buffer LightingRoot {
     uint depthTexture;
     vec2 screen;
     uint debugView;
-};
-layout(push_constant) uniform PC { LightingRoot root; } pc;
+} pc;
 
 const uint VIEW_ALBEDO = 1u;
 const uint VIEW_NORMAL = 2u;
@@ -44,48 +47,48 @@ layout(location = 0) out vec4 outColor;
 
 vec4 fetch(uint tex, vec2 uv) {
     return texture(sampler2D(gTextures[nonuniformEXT(tex)],
-                             gSamplers[nonuniformEXT(pc.root.gbufferSampler)]), uv);
+                             gSamplers[nonuniformEXT(pc.gbufferSampler)]), uv);
 }
 
 void main() {
-    vec2 uv = gl_FragCoord.xy / pc.root.screen;
+    vec2 uv = gl_FragCoord.xy / pc.screen;
     vec3 c;
 
-    switch (pc.root.debugView) {
+    switch (pc.debugView) {
     case VIEW_NORMAL: {
         // Octahedral-encoded, so decode before display, then remap [-1,1] to [0,1] —
         // the familiar pastel normal map. Raw RG would show only two channels of it.
-        vec3 n = decodeOct(fetch(pc.root.normalTexture, uv).rg);
+        vec3 n = decodeOct(fetch(pc.normalTexture, uv).rg);
         c = n * 0.5 + 0.5;
         break;
     }
     case VIEW_MATERIAL: {
         // Metallic/roughness/occlusion live in separate channels; showing them as RGB
         // makes each one readable on its own.
-        c = fetch(pc.root.materialTexture, uv).rgb;
+        c = fetch(pc.materialTexture, uv).rgb;
         break;
     }
     case VIEW_EMISSIVE:
-        c = linearToSrgb(fetch(pc.root.emissiveTexture, uv).rgb);
+        c = linearToSrgb(fetch(pc.emissiveTexture, uv).rgb);
         break;
     case VIEW_DEPTH: {
         // Reversed-Z: 1 is the near plane and 0 is the far one, so invert to get the
         // conventional "near is dark" ramp. The raw values crowd against 1 near the
         // camera, so a sqrt spreads the useful range out.
-        float d = fetch(pc.root.depthTexture, uv).r;
+        float d = fetch(pc.depthTexture, uv).r;
         c = vec3(sqrt(1.0 - d));
         break;
     }
     case VIEW_POSITION: {
         // World position reconstructed from depth — the fractional part, so the scene
         // reads as a 1-unit grid and any discontinuity in the reconstruction shows up.
-        float d = fetch(pc.root.depthTexture, uv).r;
-        vec3 world = worldFromDepth(gl_FragCoord.xy, pc.root.screen, d, pc.root.invViewProj);
+        float d = fetch(pc.depthTexture, uv).r;
+        vec3 world = worldFromDepth(gl_FragCoord.xy, pc.screen, d, pc.invViewProj);
         c = fract(world);
         break;
     }
     default: // VIEW_ALBEDO
-        c = fetch(pc.root.diffuseTexture, uv).rgb;
+        c = fetch(pc.diffuseTexture, uv).rgb;
         break;
     }
     outColor = vec4(c, 1.0);

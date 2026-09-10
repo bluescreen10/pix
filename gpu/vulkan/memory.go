@@ -13,6 +13,7 @@ static VkResult vkbAllocBuffer(VkDevice dev, VkPhysicalDevice phys, VkDeviceSize
     VkBufferCreateInfo bi = {0};
     bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bi.size = size;
+    //TODO: revisit the buffer usage flags, maybe request
     bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
                VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
                VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
@@ -123,7 +124,8 @@ func (b *Backend) Alloc(size uint64, mem gpu.MemoryType, label string) gpu.Buffe
 		panic(fmt.Sprintf("vulkan: Alloc(%d bytes, %q) failed (%d)", size, label, int(r)))
 	}
 
-	h := b.nextID.Add(1)
+	h := b.nextH
+	b.nextH++
 	b.buffers[h] = bufferEntry{buf: buf, mem: dmem}
 	return gpu.Buffer{Addr: uint64(addr), Ptr: ptr, Size: size, H: gpu.Handle(h)}
 }

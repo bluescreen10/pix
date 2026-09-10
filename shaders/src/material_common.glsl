@@ -19,7 +19,11 @@ const uint FLAG_RECEIVES_SHADOW = 4u; // Drawable flag (mirrors pix.DrawableRece
 // uses pos/attr/descs/models/drawables/visible; the fragment stage casts `materials`
 // to its own per-type record buffer and reads `lights`). There is no regionBase:
 // each indirect command sets firstInstance, so gl_InstanceIndex indexes visible[].
-layout(buffer_reference, scalar) readonly buffer DrawRoot {
+// Pushed inline rather than behind a device address: it fits in push constants on
+// every backend, so the shader reads its parameters directly instead of chasing a
+// pointer to reach them. Fields that are themselves addresses stay addresses — those
+// point at unbounded arrays, so that indirection is inherent.
+layout(push_constant, scalar) uniform PC {
     mat4 viewProj;
     uint64_t pos;
     uint64_t attr;
@@ -34,8 +38,7 @@ layout(buffer_reference, scalar) readonly buffer DrawRoot {
     uint spad0;
     uint spad1;
     uint spad2;
-};
-layout(push_constant) uniform PC { DrawRoot root; } pc;
+} pc;
 
 // Vertex → fragment varyings (produced by scene_draw.vert).
 layout(location = 0) in vec3 vColor;

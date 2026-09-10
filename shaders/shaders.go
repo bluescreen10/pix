@@ -1,4 +1,4 @@
-// Package shaders embeds the SPIR-V used by the renderer.
+// Package shaders embeds SPIR-V and native Metal libraries used by the renderer.
 //
 // Layout:
 //
@@ -10,7 +10,8 @@
 //   - build/ the compiled .spv, embedded from here. Checked in, so building pix needs
 //     no shader toolchain — only editing a shader does.
 //
-// Regenerate with `go generate ./shaders` after editing a source (requires glslc).
+// Regenerate with `go generate ./shaders` after editing a source. This requires
+// glslc, spirv-cross, and Xcode with the Metal Toolchain installed.
 //
 // The shaders fall into three groups:
 //
@@ -25,9 +26,8 @@
 //     They are embedded here rather than beside the material that owns them because
 //     //go:embed cannot reach outside its own package directory.
 //
-// The backend RHI smoke-test shaders (triangle, mesh, instanced, fill_indirect,
-// textured) are NOT here — they are test fixtures under gpu/testdata, embedded by
-// the backend-agnostic conformance tests. This package holds only shipped shaders.
+// Low-level backend conformance shaders live in GameKit. This package holds only
+// shaders shipped by Pix's renderer.
 package shaders
 
 import _ "embed"
@@ -35,20 +35,32 @@ import _ "embed"
 // --- scene pipeline ---
 
 //go:generate glslc -fshader-stage=compute --target-env=vulkan1.4 -O src/scene_cull.comp.glsl -o build/scene_cull.comp.spv
+//go:generate go run ../cmd/metalshader -in build/scene_cull.comp.spv -out build/scene_cull.comp.metalbin -metallib
 //go:generate glslc -fshader-stage=compute --target-env=vulkan1.4 -O src/scene_skin.comp.glsl -o build/scene_skin.comp.spv
+//go:generate go run ../cmd/metalshader -in build/scene_skin.comp.spv -out build/scene_skin.comp.metalbin -metallib
 //go:generate glslc -fshader-stage=vertex --target-env=vulkan1.4 -O src/scene_draw.vert.glsl -o build/scene_draw.vert.spv
+//go:generate go run ../cmd/metalshader -in build/scene_draw.vert.spv -out build/scene_draw.vert.metalbin -metallib
 //go:generate glslc -fshader-stage=vertex --target-env=vulkan1.4 -O src/scene_shadow.vert.glsl -o build/scene_shadow.vert.spv
+//go:generate go run ../cmd/metalshader -in build/scene_shadow.vert.spv -out build/scene_shadow.vert.metalbin -metallib
 //go:generate glslc -fshader-stage=fragment --target-env=vulkan1.4 -O src/scene_shadow.frag.glsl -o build/scene_shadow.frag.spv
+//go:generate go run ../cmd/metalshader -in build/scene_shadow.frag.spv -out build/scene_shadow.frag.metalbin -metallib
 //go:generate glslc -fshader-stage=fragment --target-env=vulkan1.4 -O src/scene_basic.frag.glsl -o build/scene_basic.frag.spv
+//go:generate go run ../cmd/metalshader -in build/scene_basic.frag.spv -out build/scene_basic.frag.metalbin -metallib
 //go:generate glslc -fshader-stage=fragment --target-env=vulkan1.4 -O src/scene_lit.frag.glsl -o build/scene_lit.frag.spv
+//go:generate go run ../cmd/metalshader -in build/scene_lit.frag.spv -out build/scene_lit.frag.metalbin -metallib
 
 // PBRMaterial's three render paths all come from one source, selected by -D.
 //go:generate glslc -fshader-stage=fragment --target-env=vulkan1.4 -O -DPIX_PASS_FORWARD src/scene_pbr.frag.glsl -o build/scene_forward_pbr.frag.spv
+//go:generate go run ../cmd/metalshader -in build/scene_forward_pbr.frag.spv -out build/scene_forward_pbr.frag.metalbin -metallib
 //go:generate glslc -fshader-stage=fragment --target-env=vulkan1.4 -O -DPIX_PASS_DEFERRED src/scene_pbr.frag.glsl -o build/scene_deferred_pbr.frag.spv
+//go:generate go run ../cmd/metalshader -in build/scene_deferred_pbr.frag.spv -out build/scene_deferred_pbr.frag.metalbin -metallib
 //go:generate glslc -fshader-stage=fragment --target-env=vulkan1.4 -O -DPIX_PASS_LIGHTING src/scene_pbr.frag.glsl -o build/scene_lighting_pbr.frag.spv
+//go:generate go run ../cmd/metalshader -in build/scene_lighting_pbr.frag.spv -out build/scene_lighting_pbr.frag.metalbin -metallib
 
 //go:generate glslc -fshader-stage=vertex --target-env=vulkan1.4 -O src/fullscreen.vert.glsl -o build/fullscreen.vert.spv
+//go:generate go run ../cmd/metalshader -in build/fullscreen.vert.spv -out build/fullscreen.vert.metalbin -metallib
 //go:generate glslc -fshader-stage=fragment --target-env=vulkan1.4 -O src/gbuffer_debug.frag.glsl -o build/gbuffer_debug.frag.spv
+//go:generate go run ../cmd/metalshader -in build/gbuffer_debug.frag.spv -out build/gbuffer_debug.frag.metalbin -metallib
 
 //go:embed build/scene_cull.comp.spv
 var SceneCull []byte
@@ -96,7 +108,9 @@ var PBRLighting []byte
 // --- overlay (debug HUD) ---
 
 //go:generate glslc -fshader-stage=vertex --target-env=vulkan1.4 -O src/overlay.vert.glsl -o build/overlay.vert.spv
+//go:generate go run ../cmd/metalshader -in build/overlay.vert.spv -out build/overlay.vert.metalbin -metallib
 //go:generate glslc -fshader-stage=fragment --target-env=vulkan1.4 -O src/overlay.frag.glsl -o build/overlay.frag.spv
+//go:generate go run ../cmd/metalshader -in build/overlay.frag.spv -out build/overlay.frag.metalbin -metallib
 
 //go:embed build/overlay.vert.spv
 var OverlayVert []byte

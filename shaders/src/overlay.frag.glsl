@@ -10,13 +10,12 @@ layout(set = 0, binding = 0) uniform texture2D gTextures[];
 layout(set = 0, binding = 2) uniform sampler gSamplers[];
 
 layout(buffer_reference, scalar) readonly buffer QuadBuf { vec4 v[]; };
-layout(buffer_reference, scalar) readonly buffer Root {
+layout(push_constant, scalar) uniform PC {
     vec2 viewport;
     uint atlas;
     uint samp;
     QuadBuf quads;
-};
-layout(push_constant) uniform PC { Root root; } pc;
+} pc;
 
 layout(location = 0) in vec4 vColor;
 layout(location = 1) in vec2 vUV;
@@ -26,7 +25,7 @@ void main() {
     // The atlas is single-channel coverage: 1 inside a glyph, 0 outside, filtered in
     // between. It modulates alpha only, so the text keeps its colour and antialiases
     // against whatever is behind it.
-    float cov = texture(sampler2D(gTextures[nonuniformEXT(pc.root.atlas)],
-                                  gSamplers[nonuniformEXT(pc.root.samp)]), vUV).r;
+    float cov = texture(sampler2D(gTextures[nonuniformEXT(pc.atlas)],
+                                  gSamplers[nonuniformEXT(pc.samp)]), vUV).r;
     outColor = vec4(vColor.rgb, vColor.a * cov);
 }

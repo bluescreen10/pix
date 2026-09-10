@@ -1,5 +1,7 @@
 package pix
 
+import "github.com/bluescreen10/gamekit"
+
 // PowerPreference hints which GPU to select when the backend/system exposes a
 // choice (e.g. integrated vs discrete). Honored only when the backend supports it.
 type PowerPreference uint8
@@ -15,17 +17,15 @@ const (
 // (SetClearColor). The zero value is a headless renderer with no target yet — set
 // one via SetRenderTarget, or provide Width/Height for an internally-owned one.
 type RendererConfig struct {
-	// Window is the platform window to present to; nil for headless. Its concrete
-	// fields are platform-specific (see window_<os>.go — e.g. NSWindow on macOS,
-	// HWND/HInstance on Windows).
-	Window *Window
+	// Window is the GameKit window to present to; nil for headless rendering.
+	Window *gamekit.Window
 
 	// Width, Height size the internal offscreen target when Window is nil, and act
 	// as a swapchain extent hint when a Window is set.
 	Width, Height uint32
 
-	// Backend selects a registered backend by name (e.g. "vulkan"); "" picks the
-	// highest-priority registered backend.
+	// Backend selects a registered backend ("vulkan" or "metal"). Empty uses
+	// PIX_GPU_BACKEND, then the highest-priority registered backend.
 	Backend string
 
 	// Power hints GPU device selection (honored when the backend supports it).
@@ -35,8 +35,8 @@ type RendererConfig struct {
 	// 1 elsewhere. Width/Height are in framebuffer pixels, so without this the
 	// renderer cannot tell a 2400px-wide Retina window from a 2400px 1x one, and
 	// everything it sizes for a human to read (the debug HUD, the console) comes out
-	// half as large as intended. GLFW reports it as GetContentScale, or derive it as
-	// framebufferWidth/windowWidth.
+	// half as large as intended. Derive it from the GameKit window's framebuffer and
+	// logical sizes.
 	//
 	// 0 means 1: correct for a plain 1x display, and a safe default everywhere else.
 	Scale float32

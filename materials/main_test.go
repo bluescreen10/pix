@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/bluescreen10/pix/gpu"
+	"github.com/bluescreen10/gamekit/gpu"
 )
 
 // TestMain skips this package's tests when no gpu backend is registered for the

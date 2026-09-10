@@ -26,7 +26,11 @@ layout(buffer_reference, scalar) buffer IndirectBuf { IndirectCmd v[]; };
 layout(buffer_reference, scalar) readonly buffer RegionBuf { uint v[]; };
 layout(buffer_reference, scalar) buffer VisibleBuf { uint v[]; };
 
-layout(buffer_reference, scalar) readonly buffer CullRoot {
+// Pushed inline rather than behind a device address: it fits in push constants on
+// every backend, so the shader reads its parameters directly instead of chasing a
+// pointer to reach them. Fields that are themselves addresses stay addresses — those
+// point at unbounded arrays, so that indirection is inherent.
+layout(push_constant, scalar) uniform PC {
     DrawableBuf drawables;
     ModelBuf models;
     IndirectBuf indirect;
@@ -35,27 +39,26 @@ layout(buffer_reference, scalar) readonly buffer CullRoot {
     uint count;
     uint castersOnly;
     vec4 planes[6];
-};
-layout(push_constant) uniform PC { CullRoot root; } pc;
+} pc;
 
 const uint FLAG_CASTS_SHADOW = 2u;
 
 void main() {
     uint i = gl_GlobalInvocationID.x;
-    if (i >= pc.root.count) return;
-    Drawable d = pc.root.drawables.v[i];
-    if (pc.root.castersOnly != 0u && (d.flags & FLAG_CASTS_SHADOW) == 0u) return;
+    if (i >= pc.count) return;
+    Drawable d = pc.drawables.v[i];
+    if (pc.castersOnly != 0u && (d.flags & FLAG_CASTS_SHADOW) == 0u) return;
 
-    mat4 m = pc.root.models.v[d.transformID];
+    mat4 m = pc.models.v[d.transformID];
     vec3 center = (m * vec4(d.bounds.xyz, 1.0)).xyz;
     float s = max(length(m[0].xyz), max(length(m[1].xyz), length(m[2].xyz)));
     float radius = d.bounds.w * s;
     for (int p = 0; p < 6; p++) {
-        vec4 pl = pc.root.planes[p];
+        vec4 pl = pc.planes[p];
         if (dot(pl.xyz, center) + pl.w < -radius) return;
     }
 
     uint bid = d.batchID;
-    uint slot = atomicAdd(pc.root.indirect.v[bid].instanceCount, 1u);
-    pc.root.visible.v[pc.root.regions.v[bid] + slot] = i;
+    uint slot = atomicAdd(pc.indirect.v[bid].instanceCount, 1u);
+    pc.visible.v[pc.regions.v[bid] + slot] = i;
 }

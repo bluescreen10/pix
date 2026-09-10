@@ -3,8 +3,8 @@ package pix
 import (
 	"unsafe"
 
+	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/gpu"
 	"github.com/bluescreen10/pix/internal/mem"
 )
 

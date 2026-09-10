@@ -9,7 +9,8 @@
 package materials
 
 import (
-	"github.com/bluescreen10/pix/gpu"
+	"github.com/bluescreen10/gamekit/gpu"
+	"github.com/bluescreen10/pix/shaders"
 )
 
 // Store owns every material Pool (the renderer owns pipelines and issues draws, never
@@ -30,6 +31,10 @@ func NewStore(backend gpu.Backend) *Store {
 // first material registered. Textures are not the pool's concern — each material
 // holds its own references.
 func (s *Store) Pool(sh Shader, label string) *Pool {
+	sh.Vertex = shaders.ForBackend(s.backend, sh.Vertex)
+	sh.Forward = shaders.ForBackend(s.backend, sh.Forward)
+	sh.Deferred = shaders.ForBackend(s.backend, sh.Deferred)
+	sh.Lighting = shaders.ForBackend(s.backend, sh.Lighting)
 	// Fast path. Every built-in constructor hands us the same //go:embed slices on
 	// every call, so matching slice headers settle it outright — worth a special case
 	// because the slow path below hashes ~19KB of SPIR-V, which measured as ~99% of

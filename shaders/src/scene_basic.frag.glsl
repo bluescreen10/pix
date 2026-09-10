@@ -23,10 +23,10 @@ struct Material {
 layout(buffer_reference, scalar) readonly buffer MatBuf { Material v[]; };
 
 void main() {
-    Material m = MatBuf(pc.root.materials).v[vMat];
+    Material m = MatBuf(pc.materials).v[vMat];
     vec4 base = sampleBase(m.color, m.flags, m.colorMap, m.samp);
     // Unlit, but still fogged: an unlit surface that ignored fog would hang in
     // front of the haze while everything around it receded into it.
-    vec3 c = applyFog(base.rgb + m.emissive.rgb, vWorldPos, pc.root.eye.xyz, pc.root.lights.fogColor, pc.root.lights.fogParams);
+    vec3 c = applyFog(base.rgb + m.emissive.rgb, vWorldPos, pc.eye.xyz, pc.lights.fogColor, pc.lights.fogParams);
     outColor = vec4(linearToSrgb(c), base.a);
 }

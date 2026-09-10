@@ -3,9 +3,9 @@ package pix
 import (
 	"math"
 
+	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/gpu"
 	"github.com/bluescreen10/pix/internal/mem"
 	"github.com/bluescreen10/pix/materials"
 )
@@ -27,6 +27,7 @@ const (
 	KindDirectionalLight
 	KindSpotLight
 	KindPointLight
+	KindParticleContainer
 )
 
 // NodeFlags is the per-node flag bitset.
@@ -87,6 +88,8 @@ type Scene struct {
 	root      NodeID
 
 	meshes []meshData
+
+	particleContainers []particleData
 
 	// Skinning: skeletons (bone hierarchies + inverse binds) and skinned meshes
 	// (a source geometry + a compute-derived output geometry, bound to a skeleton).
@@ -332,6 +335,8 @@ func (s *Scene) destroyNode(id NodeID) {
 		s.freeSkinnedMesh(s.payload[idx])
 	case KindSkeleton:
 		s.freeSkeleton(s.payload[idx])
+	case KindParticleContainer:
+		s.swapRemoveParticles(s.payload[idx])
 	}
 	s.flags[idx] &^= flagAlive
 	s.generation[idx]++

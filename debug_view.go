@@ -1,8 +1,9 @@
 package pix
 
 import (
+	"github.com/bluescreen10/gamekit/gpu"
+	"github.com/bluescreen10/gamekit/utils"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/gpu"
 	"github.com/bluescreen10/pix/shaders"
 )
 
@@ -81,9 +82,14 @@ func (r *Renderer) debugViewActive() bool {
 // anyway — nothing about the geometry pass changes when a view is on.
 func (r *Renderer) recordDebugView(cmd gpu.CommandBuffer, dl *drawList, target gpu.Texture, viewProj glm.Mat4f, eye glm.Vec3f, lightsAddr uint64) {
 	if r.debugPipeline.H == 0 {
-		r.debugPipeline = r.buildLightingPipe(shaders.GBufferDebug)
+		r.debugPipeline = r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
+			VertexShader:   shaders.ForBackend(r.backend, shaders.FullscreenVert),
+			FragmentShader: shaders.ForBackend(r.backend, shaders.GBufferDebug),
+			Topology:       gpu.TopologyTriangles, ColorFormats: []gpu.Format{r.color},
+			CullMode: gpu.CullNone, Label: "gbuffer-debug",
+		})
 	}
-	*(*lightingRoot)(dl.lightingRootBuf.Ptr) = lightingRoot{
+	lr := lightingRoot{
 		invViewProj:     viewProj.Inv(),
 		eye:             glm.Vec4f{eye[0], eye[1], eye[2], 1},
 		lights:          lightsAddr,
@@ -101,12 +107,11 @@ func (r *Renderer) recordDebugView(cmd gpu.CommandBuffer, dl *drawList, target g
 	// it, and the depth test is disabled for the same reason — a G-buffer target is
 	// screen-space data, not geometry to be occluded.
 	cmd.BeginRenderPass(gpu.RenderTargets{
-		Color: []gpu.ColorAttachment{{Texture: target, Load: gpu.LoadClear, Clear: r.clear}},
+		Color: []gpu.ColorAttachment{{Texture: target, Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: r.clear}},
 	})
-	cmd.Viewport(0, 0, float32(r.width), float32(r.height), 0, 1)
-	cmd.Scissor(0, 0, int32(r.width), int32(r.height))
+	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
+	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
 	cmd.SetPipeline(r.debugPipeline)
-	cmd.Root(dl.lightingRootBuf.Addr)
-	cmd.Draw(3, 1, 0, 0)
+	cmd.Draw(utils.ToBytes(&lr), 3, 1, 0, 0)
 	cmd.EndRenderPass()
 }

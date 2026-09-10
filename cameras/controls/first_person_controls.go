@@ -26,7 +26,7 @@ var DefaultKeyMapping = KeyMapping{
 // fpsInput is the input capability FirstPersonControls needs: mouse-look plus
 // fly-movement keys. Declared here, by the consumer, rather than requiring a
 // caller-specific concrete type — anything satisfying both input.MouseInput and
-// input.KeyBoardInput (e.g. *glfwinput.Input) works for free.
+// input.KeyBoardInput (e.g. *gamekitinput.Input) works for free.
 type fpsInput interface {
 	input.MouseInput
 	input.KeyBoardInput

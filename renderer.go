@@ -3,15 +3,17 @@ package pix
 import (
 	"fmt"
 	"math"
+	"os"
 	"slices"
 	"time"
 	"unsafe"
 
+	"github.com/bluescreen10/gamekit/gpu"
+	"github.com/bluescreen10/gamekit/utils"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/console"
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/gpu"
 	"github.com/bluescreen10/pix/materials"
 	"github.com/bluescreen10/pix/shaders"
 	"github.com/bluescreen10/pix/textures"
@@ -186,11 +188,20 @@ func NewRenderer(cfg *RendererConfig) (*Renderer, error) {
 	if cfg == nil {
 		cfg = &RendererConfig{}
 	}
-	var name *string
-	if cfg.Backend != "" {
-		name = &cfg.Backend
+	name := cfg.Backend
+	if name == "" {
+		name = os.Getenv("PIX_GPU_BACKEND")
 	}
-	backend := gpu.Instance(name)
+	var backend gpu.Backend
+	if name != "" {
+		var ok bool
+		backend, ok = gpu.Lookup(name)
+		if !ok {
+			return nil, fmt.Errorf("render: unknown backend %q", name)
+		}
+	} else {
+		backend = gpu.Instance(nil)
+	}
 	if err := backend.Init(); err != nil {
 		return nil, fmt.Errorf("render: init backend: %w", err)
 	}
@@ -214,7 +225,10 @@ func NewRenderer(cfg *RendererConfig) (*Renderer, error) {
 
 	switch {
 	case cfg.Window != nil:
-		r.attachWindow(cfg.Window, cfg.Width, cfg.Height) // platform-specific
+		if err := r.attachWindow(cfg.Window, cfg.Width, cfg.Height); err != nil {
+			r.Destroy()
+			return nil, fmt.Errorf("render: attach window: %w", err)
+		}
 	case cfg.Width > 0 && cfg.Height > 0:
 		r.attatchTexture(cfg.Width, cfg.Height)
 	}
@@ -311,12 +325,12 @@ func (r *Renderer) buildPipelines() {
 			r.backend.DestroyPipeline(p)
 		}
 	}
-	r.cullPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.SceneCull, Entry: "main", Label: "scene-cull"})
-	r.skinPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.SceneSkin, Entry: "main", Label: "scene-skin"})
+	r.cullPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.SceneCull), Entry: "main", Label: "scene-cull"})
+	r.skinPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.SceneSkin), Entry: "main", Label: "scene-skin"})
 	// Shadow depth pass: position-only vertex-pull, no color attachment, writes depth.
 	// Cull is disabled so thin geometry still occludes from the light's view.
 	r.shadowPipeline = r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
-		VertexShader: shaders.SceneShadowVert, FragmentShader: shaders.SceneShadowFrag,
+		VertexShader: shaders.ForBackend(r.backend, shaders.SceneShadowVert), FragmentShader: shaders.ForBackend(r.backend, shaders.SceneShadowFrag),
 		Topology: gpu.TopologyTriangles, DepthFormat: gpu.FormatDepth32F,
 		DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareGreater,
 		CullMode: gpu.CullNone, Label: "scene-shadow",
@@ -368,7 +382,7 @@ func (r *Renderer) buildDrawPipe(k materialPipeline) gpu.Pipeline {
 	}
 	if k.pass == passGBuffer {
 		return r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
-			VertexShader: vert, FragmentShader: k.fragment,
+			VertexShader: shaders.ForBackend(r.backend, vert), FragmentShader: shaders.ForBackend(r.backend, k.fragment),
 			Topology:     gpu.TopologyTriangles,
 			ColorFormats: []gpu.Format{gpu.FormatRGBA8Unorm, gpu.FormatRG16F, gpu.FormatRGBA8Unorm, gpu.FormatRGBA8Unorm},
 			DepthFormat:  gpu.FormatDepth32F, DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareGreater,
@@ -386,7 +400,7 @@ func (r *Renderer) buildDrawPipe(k materialPipeline) gpu.Pipeline {
 	// write depth, so they don't occlude each other and blend correctly.
 	depthWrite := k.blend == materials.BlendOpaque
 	return r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
-		VertexShader: vert, FragmentShader: k.fragment,
+		VertexShader: shaders.ForBackend(r.backend, vert), FragmentShader: shaders.ForBackend(r.backend, k.fragment),
 		Topology: gpu.TopologyTriangles, ColorFormats: []gpu.Format{r.color},
 		DepthFormat: gpu.FormatDepth32F, DepthTest: true, DepthWrite: depthWrite, DepthCompare: gpu.CompareGreater,
 		// The renderer flips clip-space Y (Vulkan NDC is Y-down), which reverses
@@ -409,7 +423,7 @@ func (r *Renderer) buildDrawPipe(k materialPipeline) gpu.Pipeline {
 // in the viewport pays for an invocation and a depth sample just to discard.
 func (r *Renderer) buildLightingPipe(fragment []byte) gpu.Pipeline {
 	return r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
-		VertexShader: shaders.FullscreenVert, FragmentShader: fragment,
+		VertexShader: shaders.ForBackend(r.backend, shaders.FullscreenVert), FragmentShader: shaders.ForBackend(r.backend, fragment),
 		Topology: gpu.TopologyTriangles, ColorFormats: []gpu.Format{r.color},
 		DepthFormat: gpu.FormatDepth32F, DepthTest: true, DepthWrite: false, DepthCompare: gpu.CompareLess,
 		CullMode: gpu.CullNone,
@@ -569,7 +583,7 @@ func (r *Renderer) IsConsoleOpen() bool {
 // EnableConsole turns on the developer console, reading from in, and returns it so
 // values can be registered:
 //
-//	c := r.EnableConsole(glfwinput.New(win))
+//	c := r.EnableConsole(gamekitinput.New(win))
 //	console.Bind(c, "shadow.distance", &shadowDistance, "directional shadow fit")
 //
 // The console starts hidden; the user opens it with its toggle key (` by default).
@@ -692,7 +706,7 @@ func (r *Renderer) Pixels() []byte { return r.Capture() }
 // All compute culls run first (outside any render pass), share one barrier, then the
 // shadow depth passes and the main color pass consume their results.
 func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scene, planes [6][4]float32, drawVP glm.Mat4f, eye glm.Vec3f) {
-	if r.showFPS {
+	if r.showFPS && r.gpuPool.Valid() {
 		cmd.ResetTimestamps(r.gpuPool, 2)
 		cmd.WriteTimestamp(r.gpuPool, 0, gpu.StageNone)
 	}
@@ -714,15 +728,14 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 	// after both covers everything.
 	if dl.batchCount() > 0 {
 		if cmds := r.skinCommands(scene); len(cmds) > 0 {
-			dl.ensureSkinRoots(len(cmds))
 			r.dispatchSkinning(cmd, dl, cmds, scene.jointBuf.Addr)
 		}
 		for i := range views {
 			v := &dl.shadowViews[i]
 			sp := FrustumPlanes(views[i].cam.ViewProjection())
-			r.cullInto(cmd, dl, v.indirectBuf, v.visibleBuf, v.cullRootBuf, sp, 1)
+			r.cullInto(cmd, dl, v.indirectBuf, v.visibleBuf, sp, 1)
 		}
-		r.cullInto(cmd, dl, dl.indirectBuf, dl.visibleBuf, dl.cullRootBuf, planes, 0)
+		r.cullInto(cmd, dl, dl.indirectBuf, dl.visibleBuf, planes, 0)
 		cmd.Barrier(gpu.StageCompute, gpu.StageIndirect|gpu.StageVertex, 0)
 	}
 
@@ -748,15 +761,15 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 		r.ensureGBuffer()
 		cmd.BeginRenderPass(gpu.RenderTargets{
 			Color: []gpu.ColorAttachment{
-				{Texture: r.diffuseTexture, Load: gpu.LoadClear},
-				{Texture: r.normalTexture, Load: gpu.LoadClear},
-				{Texture: r.materialTexture, Load: gpu.LoadClear},
-				{Texture: r.emissiveTexture, Load: gpu.LoadClear},
+				{Texture: r.diffuseTexture, Load: gpu.LoadClear, Store: gpu.StoreKeep},
+				{Texture: r.normalTexture, Load: gpu.LoadClear, Store: gpu.StoreKeep},
+				{Texture: r.materialTexture, Load: gpu.LoadClear, Store: gpu.StoreKeep},
+				{Texture: r.emissiveTexture, Load: gpu.LoadClear, Store: gpu.StoreKeep},
 			},
-			Depth: &gpu.DepthAttachment{Texture: r.depth, Load: gpu.LoadClear, Clear: 0.0},
+			Depth: &gpu.DepthAttachment{Texture: r.depth, Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: 0.0},
 		})
-		cmd.Viewport(0, 0, float32(r.width), float32(r.height), 0, 1)
-		cmd.Scissor(0, 0, int32(r.width), int32(r.height))
+		cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
+		cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
 		r.issueDraws(cmd, dl, passGBuffer)
 		cmd.EndRenderPass()
 
@@ -790,11 +803,11 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 		colorLoad, depthLoad = gpu.LoadKeep, gpu.LoadKeep
 	}
 	cmd.BeginRenderPass(gpu.RenderTargets{
-		Color: []gpu.ColorAttachment{{Texture: target, Load: colorLoad, Clear: r.clear}},
-		Depth: &gpu.DepthAttachment{Texture: r.depth, Load: depthLoad, Clear: 0.0},
+		Color: []gpu.ColorAttachment{{Texture: target, Load: colorLoad, Store: gpu.StoreKeep, Clear: r.clear}},
+		Depth: &gpu.DepthAttachment{Texture: r.depth, Load: depthLoad, Store: gpu.StoreKeep, Clear: 0.0},
 	})
-	cmd.Viewport(0, 0, float32(r.width), float32(r.height), 0, 1)
-	cmd.Scissor(0, 0, int32(r.width), int32(r.height))
+	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
+	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
 	// Forward geometry is suppressed while a G-buffer view is up: the point is to see
 	// that target on its own, not transparents composited over it. The pass itself
 	// still runs — it is what draws the overlay and closes the frame.
@@ -805,7 +818,7 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 		r.overlay.draw(cmd, float32(r.width), float32(r.height))
 	}
 	cmd.EndRenderPass()
-	if r.showFPS {
+	if r.showFPS && r.gpuPool.Valid() {
 		cmd.WriteTimestamp(r.gpuPool, 1, gpu.StageColorOutput)
 	}
 }
@@ -1156,16 +1169,15 @@ func snap(x, step float32) float32 {
 // instanceCount), points a cull root at this view's buffers (the drawable/world/region
 // tables are shared), and dispatches one thread per instance. castersOnly=1 restricts
 // the view to shadow casters. No barrier — the caller batches all views behind one.
-func (r *Renderer) cullInto(cmd gpu.CommandBuffer, dl *drawList, indirect, visible, root gpu.Buffer, planes [6][4]float32, castersOnly uint32) {
+func (r *Renderer) cullInto(cmd gpu.CommandBuffer, dl *drawList, indirect, visible gpu.Buffer, planes [6][4]float32, castersOnly uint32) {
 	writeAt(indirect, 0, toBytes(dl.template))
-	*(*cullRoot)(root.Ptr) = cullRoot{
+	cr := cullRoot{
 		drawables: dl.drawableBuf.Addr, models: dl.worldBuf.Addr, indirect: indirect.Addr,
 		regions: dl.regionBuf.Addr, visible: visible.Addr, count: dl.numInst,
 		castersOnly: castersOnly, planes: planes,
 	}
 	cmd.SetPipeline(r.cullPipeline)
-	cmd.Root(root.Addr)
-	cmd.Dispatch((dl.numInst+63)/64, 1, 1)
+	cmd.Dispatch(utils.ToBytes(&cr), (dl.numInst+63)/64, 1, 1)
 }
 
 // skinCommands builds this frame's compute-skinning dispatch list, one entry per
@@ -1193,17 +1205,15 @@ func (r *Renderer) skinCommands(scene *Scene) []skinCmd {
 // srcDesc/dstDesc/jointBase/vertexCount vary per mesh) and issues one Dispatch per
 // mesh, sized to its vertex count. See scene_skin.comp.
 func (r *Renderer) dispatchSkinning(cmd gpu.CommandBuffer, dl *drawList, cmds []skinCmd, jointsAddr uint64) {
-	roots := unsafe.Slice((*skinRoot)(dl.skinRootBuf.Ptr), len(cmds))
 	posAddr, attrAddr := r.GeometryStore.PositionsAddr(), r.GeometryStore.AttributesAddr()
 	skinAddr, descAddr := r.GeometryStore.SkinAddr(), r.GeometryStore.DescriptorsAddr()
 	cmd.SetPipeline(r.skinPipeline)
-	for i, c := range cmds {
-		roots[i] = skinRoot{
+	for _, c := range cmds {
+		sr := skinRoot{
 			pos: posAddr, attr: attrAddr, skin: skinAddr, descs: descAddr, joints: jointsAddr,
 			srcDesc: c.srcDesc, dstDesc: c.dstDesc, jointBase: c.jointBase, vertexCount: c.vertexCount,
 		}
-		cmd.Root(dl.skinRootBuf.Addr + uint64(i)*skinRootSize)
-		cmd.Dispatch((c.vertexCount+63)/64, 1, 1)
+		cmd.Dispatch(utils.ToBytes(&sr), (c.vertexCount+63)/64, 1, 1)
 	}
 }
 
@@ -1213,7 +1223,7 @@ func (r *Renderer) dispatchSkinning(cmd gpu.CommandBuffer, dl *drawList, cmds []
 // for depth, so all batches draw with the one shadow pipeline.
 func (r *Renderer) recordShadowDepth(cmd gpu.CommandBuffer, dl *drawList, v *drawView, sv shadowView) {
 	size := sv.size
-	*(*shadowRoot)(v.drawRootBuf.Ptr) = shadowRoot{
+	sr := shadowRoot{
 		viewProj:  sv.cam.ViewProjection(),
 		pos:       r.GeometryStore.PositionsAddr(),
 		descs:     r.GeometryStore.DescriptorsAddr(),
@@ -1222,13 +1232,12 @@ func (r *Renderer) recordShadowDepth(cmd gpu.CommandBuffer, dl *drawList, v *dra
 		visible:   v.visibleBuf.Addr,
 	}
 	cmd.BeginRenderPass(gpu.RenderTargets{
-		Depth: &gpu.DepthAttachment{Texture: r.TextureStore.GPU(sv.m), Load: gpu.LoadClear, Clear: 0.0},
+		Depth: &gpu.DepthAttachment{Texture: r.TextureStore.GPU(sv.m), Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: 0.0},
 	})
-	cmd.Viewport(0, 0, float32(size), float32(size), 0, 1)
-	cmd.Scissor(0, 0, int32(size), int32(size))
+	cmd.SetViewport(0, 0, float32(size), float32(size), 0, 1)
+	cmd.SetScissor(0, 0, int32(size), int32(size))
 	cmd.SetPipeline(r.shadowPipeline)
-	cmd.Root(v.drawRootBuf.Addr)
-	cmd.DrawIndexedIndirect(r.GeometryStore.IndexBuffer(), v.indirectBuf, 0, uint32(dl.batchCount()), indirectSize)
+	cmd.DrawIndexedIndirect(utils.ToBytes(&sr), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, v.indirectBuf, 0, uint32(dl.batchCount()), indirectSize)
 	cmd.EndRenderPass()
 }
 
@@ -1240,7 +1249,12 @@ func (r *Renderer) fillDrawRoots(dl *drawList, viewProj glm.Mat4f, eye glm.Vec3f
 	if len(dl.runs) == 0 {
 		return
 	}
-	roots := unsafe.Slice((*drawRoot)(dl.drawRootBuf.Ptr), len(dl.runs))
+	// Roots now travel inline with each draw, so they live in a plain slice the draw
+	// list reuses rather than in a GPU buffer.
+	if cap(dl.roots) < len(dl.runs) {
+		dl.roots = make([]drawRoot, len(dl.runs))
+	}
+	roots := dl.roots[:len(dl.runs)]
 	for ri := range dl.runs {
 		run := &dl.runs[ri]
 		roots[ri] = drawRoot{
@@ -1274,8 +1288,7 @@ func (r *Renderer) issueDraws(cmd gpu.CommandBuffer, dl *drawList, p pass) {
 			continue
 		}
 		cmd.SetPipeline(r.drawPipelines[run.pipeline])
-		cmd.Root(dl.drawRootBuf.Addr + uint64(ri)*drawRootSize)
-		cmd.DrawIndexedIndirect(idx, dl.indirectBuf, uint64(run.firstBatch)*uint64(indirectSize), run.count, indirectSize)
+		cmd.DrawIndexedIndirect(utils.ToBytes(&dl.roots[ri]), idx, gpu.IndexUint32, dl.indirectBuf, uint64(run.firstBatch)*uint64(indirectSize), run.count, indirectSize)
 	}
 }
 
@@ -1310,7 +1323,7 @@ func (r *Renderer) ensureGBufferSampler() {
 func (r *Renderer) recordLighting(cmd gpu.CommandBuffer, dl *drawList, target gpu.Texture, viewProj glm.Mat4f, eye glm.Vec3f, lightsAddr uint64) {
 	r.ensureGBufferSampler()
 	invViewProj := viewProj.Inv()
-	*(*lightingRoot)(dl.lightingRootBuf.Ptr) = lightingRoot{
+	lr := lightingRoot{
 		invViewProj:     invViewProj,
 		eye:             glm.Vec4f{eye[0], eye[1], eye[2], 1},
 		lights:          lightsAddr,
@@ -1333,14 +1346,13 @@ func (r *Renderer) recordLighting(cmd gpu.CommandBuffer, dl *drawList, target gp
 		}
 		r.lightingScratch = append(r.lightingScratch, k.lightingIdx)
 		cmd.BeginRenderPass(gpu.RenderTargets{
-			Color: []gpu.ColorAttachment{{Texture: target, Load: gpu.LoadClear, Clear: r.clear}},
-			Depth: &gpu.DepthAttachment{Texture: r.depth, Load: gpu.LoadKeep, ReadOnly: true},
+			Color: []gpu.ColorAttachment{{Texture: target, Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: r.clear}},
+			Depth: &gpu.DepthAttachment{Texture: r.depth, Load: gpu.LoadKeep, Store: gpu.StoreKeep, ReadOnly: true},
 		})
-		cmd.Viewport(0, 0, float32(r.width), float32(r.height), 0, 1)
-		cmd.Scissor(0, 0, int32(r.width), int32(r.height))
+		cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
+		cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
 		cmd.SetPipeline(r.lightingPipelines[k.lightingIdx])
-		cmd.Root(dl.lightingRootBuf.Addr)
-		cmd.Draw(3, 1, 0, 0)
+		cmd.Draw(utils.ToBytes(&lr), 3, 1, 0, 0)
 		cmd.EndRenderPass()
 	}
 }

@@ -321,12 +321,12 @@ func TestShadowSetSizeReallocatesMap(t *testing.T) {
 	if s.Size() != defaultShadowSize {
 		t.Fatalf("default size = %d, want %d", s.Size(), defaultShadowSize)
 	}
-	first := s.Map.Index()
+	first := r.TextureStore.GPU(s.Map).H
 
 	// Same size: the map must be left alone.
 	s.SetSize(defaultShadowSize)
 	r.Render(scene, cam)
-	if s.Map.Index() != first {
+	if r.TextureStore.GPU(s.Map).H != first {
 		t.Error("map reallocated even though the size did not change")
 	}
 
@@ -342,7 +342,7 @@ func TestShadowSetSizeReallocatesMap(t *testing.T) {
 	if s.Size() != 512 {
 		t.Fatalf("size = %d after SetSize(512)", s.Size())
 	}
-	if s.Map.Index() == first {
+	if r.TextureStore.GPU(s.Map).H == first {
 		t.Fatal("map was not reallocated after SetSize changed the resolution")
 	}
 	if !s.Map.Valid() {
