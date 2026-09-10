@@ -68,6 +68,15 @@ var metalOverlayVert []byte
 //go:embed build/overlay.frag.metalbin
 var metalOverlayFrag []byte
 
+//go:embed build/particle_update.comp.metalbin
+var metalParticleUpdate []byte
+
+//go:embed build/particle_draw.vert.metalbin
+var metalParticleDraw []byte
+
+//go:embed build/particle_basic.frag.metalbin
+var metalParticleBasicForward []byte
+
 var metalVariants = []struct{ spirv, metal []byte }{
 	{SceneCull, metalSceneCull},
 	{SceneSkin, metalSceneSkin},
@@ -83,4 +92,7 @@ var metalVariants = []struct{ spirv, metal []byte }{
 	{PBRLighting, metalPBRLighting},
 	{OverlayVert, metalOverlayVert},
 	{OverlayFrag, metalOverlayFrag},
+	{ParticleUpdate, metalParticleUpdate},
+	{ParticleDraw, metalParticleDraw},
+	{ParticleBasicForward, metalParticleBasicForward},
 }

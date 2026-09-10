@@ -128,6 +128,7 @@ var (
 	_ Material = (*BlinnPhongMaterial)(nil)
 	_ Material = (*PBRMaterial)(nil)
 	_ Material = (*RawMaterial)(nil)
+	_ Material = (*BasicParticleMaterial)(nil)
 )
 
 // MapIndex is the bindless heap index a material writes into its record for a bound

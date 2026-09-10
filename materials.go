@@ -17,6 +17,12 @@ func (r *Renderer) NewBasicMaterial() *materials.BasicMaterial {
 	return materials.NewBasicMaterial(r.MaterialStore)
 }
 
+// NewBasicParticleMaterial creates an unlit particle material with an unbound color
+// map — the only material type ParticleConfig.Material accepts (see NewParticleContainer).
+func (r *Renderer) NewBasicParticleMaterial() *materials.BasicParticleMaterial {
+	return materials.NewBasicParticleMaterial(r.MaterialStore)
+}
+
 // NewBlinnPhongMaterial creates a Blinn-Phong material with an unbound color map.
 func (r *Renderer) NewBlinnPhongMaterial() *materials.BlinnPhongMaterial {
 	return materials.NewBlinnPhongMaterial(r.MaterialStore)

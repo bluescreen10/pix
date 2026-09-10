@@ -61,6 +61,48 @@ type particleRecord struct {
 
 var particleRecordSize = uint32(unsafe.Sizeof(particleRecord{}))
 
+// particleUpdateRoot matches PC in particle_update.comp.glsl (scalar; pointers
+// first, then plain fields). One per container per frame — see dispatchParticleUpdate.
+type particleUpdateRoot struct {
+	src, dst, pending, indirect uint64
+	capacity, pendingCount      uint32
+	dt                          float32
+	gravity                     glm.Vec3f
+	drag                        float32
+	sizeEnabled                 uint32
+	sizeStart, sizeEnd          float32
+	opacityEnabled              uint32
+	opacityStart, opacityEnd    float32
+	// Padded to a multiple of 16 for the same reason drawable.go's *Root types are:
+	// MSL rounds a struct's size up to its alignment, and a mismatch there makes the
+	// Metal backend hand the shader a short root.
+	pad0, pad1, pad2 uint32
+}
+
+// particleDrawRoot matches PC in particle_common.glsl / particle_draw.vert.glsl
+// (scalar; mat4, then pointers, then plain fields). Particles have their own
+// push-constant contract, not a reuse of drawRoot: geometryID/materialID/
+// transformID are named fields here (a container has exactly one of each for the
+// whole draw), and the fragment side's vColor carries the particle's real color+
+// alpha — see particle_common.glsl's comment on why that couldn't ride the mesh
+// path's shared contract. One per container per frame — see drawParticles.
+type particleDrawRoot struct {
+	viewProj               glm.Mat4f
+	pos, attr, descs       uint64
+	models, particles      uint64
+	materials, lights      uint64
+	eye                    glm.Vec4f
+	geometryID, materialID uint32
+	transformID            uint32
+	// Padded to a multiple of 16 for the same reason drawable.go's *Root types are:
+	// MSL rounds a struct's size up to its alignment.
+	pad0, pad1 uint32
+}
+
+var particleDrawRootSize = uint32(unsafe.Sizeof(particleDrawRoot{}))
+
+var particleUpdateRootSize = uint32(unsafe.Sizeof(particleUpdateRoot{}))
+
 func toParticleRecord(p *Particle) particleRecord {
 	return particleRecord{
 		position:     p.Position,
@@ -151,7 +193,14 @@ const (
 // the emitter list, and the update kernel are fixed at construction in this version.
 type ParticleConfig struct {
 	Geometry geometries.Geometry
-	Material materials.Material
+	// Material is a *materials.BasicParticleMaterial — its own dedicated material
+	// type, carrying pix's particle shaders (shaders.ParticleDraw/ParticleBasicForward)
+	// directly rather than a mesh material's Forward(). Concrete rather than an
+	// interface: a particle-safe shader pair can't be discovered structurally
+	// (BlinnPhongMaterial/PBRMaterial expose the same Color()/Emissive()/ColorMap()
+	// accessor names but write unrelated GPU records), so the type itself is the
+	// guarantee.
+	Material *materials.BasicParticleMaterial
 	Facing   ParticleFacing
 	Sort     ParticleSort
 	Emitters []ParticleEmitter
@@ -190,12 +239,20 @@ type particleData struct {
 	// kernel reads one frame's compacted survivors from one and writes the next
 	// frame's compacted survivors to the other, since — unlike culling's stateless
 	// per-frame visibility compaction — particle state must persist across frames.
-	buffers      [2]gpu.Buffer
-	current      int // which of buffers[2] holds the last compacted state
-	indirectBuf  gpu.Buffer
-	countBuf     gpu.Buffer // GPU-written compacted alive count, read by the indirect args
+	buffers     [2]gpu.Buffer
+	current     int // which of buffers[2] holds the last compacted state
+	indirectBuf gpu.Buffer
+	// pendingBuf holds this frame's staged newborns (host-visible, grown to fit
+	// len(pending)); the update kernel's tail range reads it directly, so newborns
+	// reach the compacted buffer through the same atomic append survivors use,
+	// without the CPU ever needing to know the GPU's running alive count.
+	pendingBuf   gpu.Buffer
 	ownerNode    uint32
 	buffersReady bool
+	// pipelineIdx caches this container's draw-pipeline index (see
+	// Renderer.pipelineForMaterial), resolved on first use.
+	pipelineIdx   uint32
+	pipelineValid bool
 }
 
 // ParticleContainer is a typed node handle for a GPU-simulated particle system. It
@@ -215,6 +272,10 @@ func (c ParticleContainer) data() *particleData {
 //
 // ParticleFaceCamera, ParticleSortBackToFront, and a non-nil Update.Shader are not
 // yet implemented in this version and panic here rather than silently degrading.
+//
+// config.Material is a *materials.BasicParticleMaterial (see ParticleConfig's doc
+// comment) — its own dedicated type carrying pix's particle shaders directly,
+// enforced at compile time by the field's type rather than a runtime check.
 func (s *Scene) NewParticleContainer(config ParticleConfig, capacity int) ParticleContainer {
 	if capacity < 0 {
 		panic("pix: particle capacity must not be negative")
@@ -349,8 +410,8 @@ func (s *Scene) swapRemoveParticles(payloadIdx uint32) {
 	if d.indirectBuf.Valid() {
 		s.backend.Free(d.indirectBuf)
 	}
-	if d.countBuf.Valid() {
-		s.backend.Free(d.countBuf)
+	if d.pendingBuf.Valid() {
+		s.backend.Free(d.pendingBuf)
 	}
 	last := uint32(len(s.particleContainers) - 1)
 	if payloadIdx != last {

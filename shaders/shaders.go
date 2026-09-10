@@ -62,6 +62,15 @@ import _ "embed"
 //go:generate glslc -fshader-stage=fragment --target-env=vulkan1.4 -O src/gbuffer_debug.frag.glsl -o build/gbuffer_debug.frag.spv
 //go:generate go run ../cmd/metalshader -in build/gbuffer_debug.frag.spv -out build/gbuffer_debug.frag.metalbin -metallib
 
+// --- particles ---
+
+//go:generate glslc -fshader-stage=compute --target-env=vulkan1.4 -O src/particle_update.comp.glsl -o build/particle_update.comp.spv
+//go:generate go run ../cmd/metalshader -in build/particle_update.comp.spv -out build/particle_update.comp.metalbin -metallib
+//go:generate glslc -fshader-stage=vertex --target-env=vulkan1.4 -O src/particle_draw.vert.glsl -o build/particle_draw.vert.spv
+//go:generate go run ../cmd/metalshader -in build/particle_draw.vert.spv -out build/particle_draw.vert.metalbin -metallib
+//go:generate glslc -fshader-stage=fragment --target-env=vulkan1.4 -O src/particle_basic.frag.glsl -o build/particle_basic.frag.spv
+//go:generate go run ../cmd/metalshader -in build/particle_basic.frag.spv -out build/particle_basic.frag.metalbin -metallib
+
 //go:embed build/scene_cull.comp.spv
 var SceneCull []byte
 
@@ -117,3 +126,14 @@ var OverlayVert []byte
 
 //go:embed build/overlay.frag.spv
 var OverlayFrag []byte
+
+// --- particles ---
+
+//go:embed build/particle_update.comp.spv
+var ParticleUpdate []byte
+
+//go:embed build/particle_draw.vert.spv
+var ParticleDraw []byte
+
+//go:embed build/particle_basic.frag.spv
+var ParticleBasicForward []byte

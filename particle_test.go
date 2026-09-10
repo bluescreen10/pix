@@ -35,7 +35,7 @@ func newParticleTestScene(t *testing.T) (*Renderer, *Scene, ParticleConfig) {
 	t.Cleanup(scene.Destroy)
 
 	quad := r.NewPlaneGeometry(1, 1, 1, 1)
-	mat := r.NewBasicMaterial()
+	mat := r.NewBasicParticleMaterial()
 	config := ParticleConfig{
 		Geometry: quad,
 		Material: mat,
@@ -51,7 +51,7 @@ func newParticleTestScene(t *testing.T) (*Renderer, *Scene, ParticleConfig) {
 // import a package that imports it back).
 type spawnFunc func(*Particle)
 
-func (f spawnFunc) Spawn(p *Particle) { f(p) }
+func (f spawnFunc) Spawn(p *Particle)                { f(p) }
 func SpawnFuncFor(f func(*Particle)) ParticleSpawner { return spawnFunc(f) }
 
 func TestParticleContainerDefaults(t *testing.T) {

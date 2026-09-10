@@ -57,8 +57,9 @@ type Renderer struct {
 	// lives as long as the renderer so its staging arena is reused across frames.
 	uploader *uploader
 
-	cullPipeline gpu.Pipeline
-	skinPipeline gpu.Pipeline // compute pre-skinning (scene_skin.comp) — see dispatchSkinning
+	cullPipeline           gpu.Pipeline
+	skinPipeline           gpu.Pipeline // compute pre-skinning (scene_skin.comp) — see dispatchSkinning
+	particleUpdatePipeline gpu.Pipeline // compute particle simulation (particle_update.comp) — see dispatchParticleUpdate
 	// skinScratch collects the frame's compute-skinning dispatches (see skinCommands);
 	// reused every frame rather than reallocated.
 	skinScratch []skinCmd
@@ -317,6 +318,7 @@ func (r *Renderer) buildPipelines() {
 	if r.pipelinesReady {
 		r.backend.DestroyPipeline(r.cullPipeline)
 		r.backend.DestroyPipeline(r.skinPipeline)
+		r.backend.DestroyPipeline(r.particleUpdatePipeline)
 		r.backend.DestroyPipeline(r.shadowPipeline)
 		for _, p := range r.drawPipelines {
 			r.backend.DestroyPipeline(p)
@@ -327,6 +329,7 @@ func (r *Renderer) buildPipelines() {
 	}
 	r.cullPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.SceneCull), Entry: "main", Label: "scene-cull"})
 	r.skinPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.SceneSkin), Entry: "main", Label: "scene-skin"})
+	r.particleUpdatePipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleUpdate), Entry: "main", Label: "particle-update"})
 	// Shadow depth pass: position-only vertex-pull, no color attachment, writes depth.
 	// Cull is disabled so thin geometry still occludes from the light's view.
 	r.shadowPipeline = r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
@@ -723,10 +726,12 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 	}
 
 	// 1. Compute pre-skinning, then cull every view (shadow views filter to
-	// casters). Skinning writes positions that the shadow/G-buffer/forward vertex
-	// stages read (not cull — it only reads CPU-supplied bounds), so one barrier
-	// after both covers everything.
-	if dl.batchCount() > 0 {
+	// casters), then simulate particles. Skinning writes positions and particle
+	// update writes particle records that the shadow/G-buffer/forward vertex stages
+	// read (not cull — it only reads CPU-supplied bounds), so one barrier after all
+	// three covers everything.
+	hasParticles := len(scene.particleContainers) > 0
+	if dl.batchCount() > 0 || hasParticles {
 		if cmds := r.skinCommands(scene); len(cmds) > 0 {
 			r.dispatchSkinning(cmd, dl, cmds, scene.jointBuf.Addr)
 		}
@@ -735,7 +740,12 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 			sp := FrustumPlanes(views[i].cam.ViewProjection())
 			r.cullInto(cmd, dl, v.indirectBuf, v.visibleBuf, sp, 1)
 		}
-		r.cullInto(cmd, dl, dl.indirectBuf, dl.visibleBuf, planes, 0)
+		if dl.batchCount() > 0 {
+			r.cullInto(cmd, dl, dl.indirectBuf, dl.visibleBuf, planes, 0)
+		}
+		if hasParticles {
+			r.dispatchParticleUpdate(cmd, scene)
+		}
 		cmd.Barrier(gpu.StageCompute, gpu.StageIndirect|gpu.StageVertex, 0)
 	}
 
@@ -813,6 +823,9 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 	// still runs — it is what draws the overlay and closes the frame.
 	if !debugShown {
 		r.issueDraws(cmd, dl, passForward)
+		if hasParticles {
+			r.drawParticles(cmd, scene, drawVP, eye)
+		}
 	}
 	if r.overlayActive() && r.overlay != nil {
 		r.overlay.draw(cmd, float32(r.width), float32(r.height))
@@ -1217,6 +1230,131 @@ func (r *Renderer) dispatchSkinning(cmd gpu.CommandBuffer, dl *drawList, cmds []
 	}
 }
 
+// dispatchParticleUpdate runs every attached particle container's simulation kernel:
+// stages this frame's newborns into a host-visible scratch buffer, resets the
+// container's indirect-draw instance count to 0, and dispatches particle_update.comp
+// over capacity+pendingCount threads (see that shader for why). The kernel compacts
+// survivors — plus the newborns it consumes from its tail range — into the other half
+// of the container's ping-pong buffer pair, which drawParticles reads after the
+// compute/graphics barrier in encode.
+//
+// alive is advanced by the newborn count uploaded this call, never read back down as
+// particles die on the GPU: a deliberate, documented CPU-side over-estimate (see
+// particleData.alive) that trades some capacity headroom for needing no GPU readback.
+func (r *Renderer) dispatchParticleUpdate(cmd gpu.CommandBuffer, scene *Scene) {
+	for i := range scene.particleContainers {
+		d := &scene.particleContainers[i]
+		if scene.flags[d.ownerNode]&flagAttached == 0 {
+			continue
+		}
+		pendingCount := uint32(len(d.pending))
+		if d.capacity == 0 && pendingCount == 0 {
+			continue
+		}
+		r.ensureParticleBuffers(scene, d)
+
+		if pendingCount > 0 {
+			writeAt(d.pendingBuf, 0, toBytes(d.pending))
+		}
+		writeAt(d.indirectBuf, 0, utils.ToBytes(&indirectCmd{
+			indexCount: r.GeometryStore.IndexCount(d.geometry.ID()),
+			firstIndex: r.GeometryStore.IndexBase(d.geometry.ID()),
+		}))
+
+		dt := d.dt
+		d.dt, d.dtStaged = 0, false
+
+		var pendingAddr uint64
+		if pendingCount > 0 {
+			pendingAddr = d.pendingBuf.Addr
+		}
+		ur := particleUpdateRoot{
+			src: d.buffers[d.current].Addr, dst: d.buffers[1-d.current].Addr,
+			pending: pendingAddr, indirect: d.indirectBuf.Addr,
+			capacity: d.capacity, pendingCount: pendingCount, dt: dt,
+			gravity: d.update.Gravity, drag: d.update.Drag,
+		}
+		if d.update.SizeOverLife.Enabled {
+			ur.sizeEnabled, ur.sizeStart, ur.sizeEnd = 1, d.update.SizeOverLife.Start, d.update.SizeOverLife.End
+		}
+		if d.update.OpacityOverLife.Enabled {
+			ur.opacityEnabled, ur.opacityStart, ur.opacityEnd = 1, d.update.OpacityOverLife.Start, d.update.OpacityOverLife.End
+		}
+		threads := d.capacity + pendingCount
+		cmd.SetPipeline(r.particleUpdatePipeline)
+		cmd.Dispatch(utils.ToBytes(&ur), (threads+63)/64, 1, 1)
+
+		d.current = 1 - d.current
+		d.alive += pendingCount
+		d.pending = d.pending[:0]
+	}
+}
+
+// ensureParticleBuffers allocates a container's ping-pong particle buffers and
+// indirect-draw args on first use (sized to capacity, which is fixed at
+// construction), and grows the pending scratch buffer to fit this frame's newborns.
+// A fresh or Cleared container's particle buffers are zeroed so every slot starts
+// dead (age 0 >= lifetime 0) rather than reading whatever was in freshly allocated
+// memory — see particle_update.comp.glsl.
+func (r *Renderer) ensureParticleBuffers(scene *Scene, d *particleData) {
+	if !d.buffersReady {
+		size := max(uint64(d.capacity)*uint64(particleRecordSize), 1)
+		for i := range d.buffers {
+			if !d.buffers[i].Valid() || d.buffers[i].Size < size {
+				if d.buffers[i].Valid() {
+					scene.backend.Free(d.buffers[i])
+				}
+				d.buffers[i] = scene.backend.Alloc(size, gpu.MemoryHost, "particles")
+			}
+			clear(unsafe.Slice((*byte)(d.buffers[i].Ptr), d.buffers[i].Size))
+		}
+		if !d.indirectBuf.Valid() {
+			d.indirectBuf = scene.backend.Alloc(uint64(indirectSize), gpu.MemoryHost, "particles-indirect")
+		}
+		d.current = 0
+		d.buffersReady = true
+	}
+	if n := uint32(len(d.pending)); n > 0 {
+		if size := uint64(n) * uint64(particleRecordSize); !d.pendingBuf.Valid() || d.pendingBuf.Size < size {
+			if d.pendingBuf.Valid() {
+				scene.backend.Free(d.pendingBuf)
+			}
+			d.pendingBuf = scene.backend.Alloc(size, gpu.MemoryHost, "particles-pending")
+		}
+	}
+}
+
+// drawParticles issues one indirect draw per attached particle container, reading the
+// instance count dispatchParticleUpdate's kernel just compacted. Each container's
+// pipeline is resolved via the regular pipelineForMaterial path (its Material is a
+// *materials.BasicParticleMaterial, whose Vertex/Forward already are the particle
+// shaders — see basic_particle.go) and draws directly — unlike meshes, containers
+// are never batched into drawList's multi-draw-indirect runs (one geometry/material
+// per container already, so there is nothing to batch).
+func (r *Renderer) drawParticles(cmd gpu.CommandBuffer, scene *Scene, viewProj glm.Mat4f, eye glm.Vec3f) {
+	idx := r.GeometryStore.IndexBuffer()
+	for i := range scene.particleContainers {
+		d := &scene.particleContainers[i]
+		if scene.flags[d.ownerNode]&flagAttached == 0 || !d.buffersReady {
+			continue
+		}
+		if !d.pipelineValid {
+			d.pipelineIdx = r.pipelineForMaterial(d.material)
+			d.pipelineValid = true
+		}
+		dr := particleDrawRoot{
+			viewProj: viewProj,
+			pos:      r.GeometryStore.PositionsAddr(), attr: r.GeometryStore.AttributesAddr(), descs: r.GeometryStore.DescriptorsAddr(),
+			models: scene.drawList.worldBuf.Addr, particles: d.buffers[d.current].Addr,
+			materials: d.material.RecordsAddr(), lights: scene.lights.Addr(),
+			eye:        glm.Vec4f{eye[0], eye[1], eye[2], 1},
+			geometryID: d.geometry.ID(), materialID: d.material.ID(), transformID: d.ownerNode,
+		}
+		cmd.SetPipeline(r.drawPipelines[d.pipelineIdx])
+		cmd.DrawIndexedIndirect(utils.ToBytes(&dr), idx, gpu.IndexUint32, d.indirectBuf, 0, 1, indirectSize)
+	}
+}
+
 // recordShadowDepth renders the caster geometry into a light's depth map from its
 // camera. It uses the view's own compacted-visible buffer (culled with castersOnly)
 // and a single position-only MDI over every batch — material/pipeline don't matter
@@ -1415,6 +1553,7 @@ func (r *Renderer) Destroy() {
 	if r.pipelinesReady {
 		r.backend.DestroyPipeline(r.cullPipeline)
 		r.backend.DestroyPipeline(r.skinPipeline)
+		r.backend.DestroyPipeline(r.particleUpdatePipeline)
 		r.backend.DestroyPipeline(r.shadowPipeline)
 		for _, p := range r.drawPipelines {
 			r.backend.DestroyPipeline(p)
