@@ -116,6 +116,7 @@ func (s *Scene) NewSkeleton(cfg SkeletonConfig) Skeleton {
 		}
 		s.transforms[id.index] = cfg.BindPose[i]
 		s.flags[id.index] |= flagDirty
+		s.names[id.index] = names[i]
 		bones[i] = id
 	}
 

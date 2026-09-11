@@ -28,6 +28,19 @@ func (n Node) Scene() *Scene {
 	return n.scene
 }
 
+// Name returns the node's name, or "" if it was never given one. Purely
+// informational — nothing in the scene graph reads it. A loader sets it from
+// the source asset where one exists (see loaders/gltf); set your own via
+// SetName otherwise.
+func (n Node) Name() string {
+	return n.scene.names[n.id.index]
+}
+
+// SetName sets the node's name (see Name).
+func (n Node) SetName(name string) {
+	n.scene.names[n.id.index] = name
+}
+
 // IsValid reports whether this handle refers to a live node.
 func (n Node) IsValid() bool {
 	return n.scene != nil &&

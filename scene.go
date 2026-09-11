@@ -81,6 +81,10 @@ type Scene struct {
 	generation []uint32
 	kind       []NodeKind
 	payload    []uint32
+	// names is optional, per-node: empty ("") for a node nobody named. Set by a
+	// loader from the source asset (see loaders/gltf) or by a caller via
+	// Node.SetName; not otherwise used or required by anything in the scene graph.
+	names []string
 
 	freeHead uint32
 
@@ -228,6 +232,7 @@ func (s *Scene) allocNode(kind NodeKind) NodeID {
 		s.generation = append(s.generation, 1)
 		s.kind = append(s.kind, kind)
 		s.payload = append(s.payload, 0)
+		s.names = append(s.names, "")
 		// A grown s.world shifts where collectDrawables addresses instanceTransforms
 		// (InstancedMesh drawables use len(s.world) as their base offset — see
 		// instanced_mesh.go) — every drawable built against the old length would read
@@ -252,6 +257,7 @@ func (s *Scene) resetSlot(idx uint32, kind NodeKind) {
 	s.flags[idx] = flagAlive | flagLocalVisible | flagCastShadow | flagReceiveShadow | flagDirty | flagVisibleDirty
 	s.kind[idx] = kind
 	s.payload[idx] = 0
+	s.names[idx] = ""
 }
 
 func (s *Scene) validate(id NodeID) {
@@ -561,6 +567,20 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []materials.Material) {
 
 // MeshCount returns the number of mesh nodes in the scene.
 func (s *Scene) MeshCount() int { return len(s.meshes) }
+
+// FindByName returns the first live node with the given name (see Node.Name),
+// or false if none has it. A linear scan — fine for occasional lookups (finding
+// a named bone or prop after loading an asset), not meant for a per-frame path.
+// Name is not required to be unique; ties resolve to whichever node happens to
+// come first in node-slot order.
+func (s *Scene) FindByName(name string) (Node, bool) {
+	for i, n := range s.names {
+		if n == name && s.flags[i]&flagAlive != 0 {
+			return Node{scene: s, id: NodeID{index: uint32(i), gen: s.generation[i]}}, true
+		}
+	}
+	return Node{}, false
+}
 
 // FrameSphere returns a robust center + radius for the mesh nodes' world-space
 // bounds (median center, percentile-of-center-distances). Run Sync first.

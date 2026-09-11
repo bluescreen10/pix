@@ -172,6 +172,7 @@ func (l *loader) buildNode(idx int) pix.Node {
 	if si, ok := l.attachSkin[idx]; ok {
 		skel := l.skeletons[si]
 		setLocal(skel.Node, gn)
+		skel.Node.SetName(gn.Name)
 		l.nodes[idx] = skel.Node
 		for _, c := range gn.Children {
 			if owner, isJoint := l.jointOwner[c]; isJoint && owner == si {
@@ -184,6 +185,7 @@ func (l *loader) buildNode(idx int) pix.Node {
 
 	if si, ok := l.jointOwner[idx]; ok {
 		bone := l.skeletons[si].Bone(l.jointBoneIdx[idx])
+		bone.Node.SetName(gn.Name)
 		l.nodes[idx] = bone.Node
 		for _, c := range gn.Children {
 			if owner, isJoint := l.jointOwner[c]; isJoint && owner == si {
@@ -197,6 +199,7 @@ func (l *loader) buildNode(idx int) pix.Node {
 	node := l.scene.NewGroup().Node
 	l.nodes[idx] = node
 	setLocal(node, gn)
+	node.SetName(gn.Name)
 	if gn.Mesh != nil {
 		l.addMesh(node, *gn.Mesh, gn.Skin)
 	}
@@ -252,10 +255,12 @@ func (l *loader) addMesh(parent pix.Node, meshIdx int, skinIdx *int) {
 		if hasSkel && skinned {
 			sm := l.scene.NewSkinnedMesh(geo, mat, skel)
 			geo.Release() // the mesh holds its own copy
+			sm.SetName(gm.Name)
 			parent.Add(sm)
 		} else {
 			m := l.scene.NewMesh(geo, mat)
 			geo.Release()
+			m.SetName(gm.Name)
 			parent.Add(m)
 		}
 		l.added++
