@@ -94,9 +94,11 @@ type particleDrawRoot struct {
 	eye                    glm.Vec4f
 	geometryID, materialID uint32
 	transformID            uint32
-	// Padded to a multiple of 16 for the same reason drawable.go's *Root types are:
-	// MSL rounds a struct's size up to its alignment.
-	pad0, pad1 uint32
+	// time is elapsed seconds since the scene's clock started (Scene.clockStart) —
+	// passed unconditionally, same as drawRoot's (drawable.go); a particle shader
+	// reads it or ignores it.
+	time float32
+	pad0 uint32
 }
 
 var particleDrawRootSize = uint32(unsafe.Sizeof(particleDrawRoot{}))

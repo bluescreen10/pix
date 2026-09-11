@@ -49,9 +49,11 @@ layout(push_constant, scalar) uniform PC {
     uint64_t lights;
     vec4 eye;
     uint shadowSampler;
+    // time is elapsed seconds since the scene's clock started (Scene.clockStart),
+    // passed to every vertex/fragment shader pair unconditionally — read it or not.
+    float time;
     uint spad0;
     uint spad1;
-    uint spad2;
 } pc;
 
 layout(location = 0) out vec3 vColor;

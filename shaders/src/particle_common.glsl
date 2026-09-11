@@ -31,7 +31,9 @@ layout(push_constant, scalar) uniform PC {
     uint geometryID;
     uint materialID;
     uint transformID;
-    uint pad0;
+    // time is elapsed seconds since the scene's clock started (Scene.clockStart),
+    // passed to every vertex/fragment shader pair unconditionally — read it or not.
+    float time;
 } pc;
 
 layout(location = 0) in vec4 vColor;

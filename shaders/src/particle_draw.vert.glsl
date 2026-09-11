@@ -55,7 +55,7 @@ layout(push_constant, scalar) uniform PC {
     uint geometryID;
     uint materialID;
     uint transformID;
-    uint pad0;
+    float time;
 } pc;
 
 layout(location = 0) out vec4 vColor;

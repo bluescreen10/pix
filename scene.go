@@ -2,6 +2,7 @@ package pix
 
 import (
 	"math"
+	"time"
 
 	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/pix/colors"
@@ -89,6 +90,14 @@ type Scene struct {
 
 	meshes []meshData
 
+	instancedMeshes []instancedMeshData
+	// instanceTransforms is a flat, append-only array of per-instance transforms for
+	// every InstancedMesh, separate from s.world (which is one-slot-per-scene-node and
+	// tied to updateTransforms's hierarchy walk — instances have none). Addressed in
+	// drawable transformIDs as if it sits right after s.world — see collectDrawables
+	// and drawList.sync (drawlist.go), which uploads them into one contiguous buffer.
+	instanceTransforms []glm.Mat4f
+
 	particleContainers []particleData
 
 	// Skinning: skeletons (bone hierarchies + inverse binds) and skinned meshes
@@ -126,11 +135,17 @@ type Scene struct {
 	frameCenters []glm.Vec3f
 	frameReach   []float32
 	frameScratch []float32
+
+	// clockStart anchors elapsed (below), recomputed each Sync — set once here so
+	// every draw/particle root's time field (drawable.go, particle.go) shares one
+	// scene-wide clock without each caller inventing its own.
+	clockStart time.Time
+	elapsed    float32
 }
 
 // NewScene creates an empty scene bound to a backend (usually via Renderer.NewScene).
 func NewScene(backend gpu.Backend) *Scene {
-	s := &Scene{backend: backend, freeHead: invalidIdx, topoDirty: true}
+	s := &Scene{backend: backend, freeHead: invalidIdx, topoDirty: true, clockStart: time.Now()}
 	s.skeletons = mem.NewSlab[skeletonData]()
 	s.skinnedMeshes = mem.NewSlab[skinnedMeshData]()
 	s.lights = NewLights(backend)
@@ -213,6 +228,13 @@ func (s *Scene) allocNode(kind NodeKind) NodeID {
 		s.generation = append(s.generation, 1)
 		s.kind = append(s.kind, kind)
 		s.payload = append(s.payload, 0)
+		// A grown s.world shifts where collectDrawables addresses instanceTransforms
+		// (InstancedMesh drawables use len(s.world) as their base offset — see
+		// instanced_mesh.go) — every drawable built against the old length would read
+		// the wrong row otherwise. Marking dirty here, on every new slot regardless of
+		// this node's own kind, guarantees drawables are never rebuilt against a stale
+		// length.
+		s.drawableDirty = true
 	}
 	return NodeID{index: idx, gen: s.generation[idx]}
 }
@@ -337,6 +359,8 @@ func (s *Scene) destroyNode(id NodeID) {
 		s.freeSkeleton(s.payload[idx])
 	case KindParticleContainer:
 		s.swapRemoveParticles(s.payload[idx])
+	case KindInstancedMesh:
+		s.swapRemoveInstancedMesh(s.payload[idx])
 	}
 	s.flags[idx] &^= flagAlive
 	s.generation[idx]++
@@ -427,7 +451,7 @@ func (s *Scene) Sync() {
 	// updateTransforms walks topoOrder, so attachment must be current first.
 	s.flushTopoIfDirty()
 	if dirty := s.updateTransforms(); dirty {
-		s.drawList.sync(s.world) // host-visible, direct write (not staged)
+		s.drawList.sync(s.world, s.instanceTransforms) // host-visible, direct write (not staged)
 	}
 	s.syncSkinning()
 	// Light objects are mutable, so re-derive the flat GPU table each frame; rebuild
@@ -437,6 +461,11 @@ func (s *Scene) Sync() {
 	// (say) an animated character's pose changed stages/submits nothing extra.
 	s.lights.rebuild(s.ambient, s.fog, s.dirLights, s.pointLights, s.spotLights, s.shadowsEnabled)
 	s.lights.Sync()
+	// elapsed feeds every draw/particle root's time field (drawable.go, particle.go) —
+	// computed once here rather than by each call site, and passed explicitly rather
+	// than read back off the scene by the renderer, matching how every other
+	// per-frame value (viewProj, eye) already reaches fillDrawRoots.
+	s.elapsed = float32(time.Since(s.clockStart).Seconds())
 }
 
 // collectDrawables builds the GPU drawable table from the mesh and skinned-mesh
@@ -498,6 +527,34 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []materials.Material) {
 			flags:       flags,
 		})
 		materials = append(materials, sm.material)
+	}
+	// Instance transforms are addressed as if they sit right after every real node's
+	// world matrix — see the comment on Scene.instanceTransforms and allocNode's
+	// drawableDirty trigger, which is what keeps this base offset from ever going
+	// stale between rebuilds.
+	instanceBase := uint32(len(s.world))
+	for i := range s.instancedMeshes {
+		im := &s.instancedMeshes[i]
+		if s.flags[im.ownerNode]&flagAttached == 0 {
+			continue
+		}
+		var flags uint32
+		if s.flags[im.ownerNode]&flagCastShadow != 0 {
+			flags |= DrawableCastsShadow
+		}
+		if s.flags[im.ownerNode]&flagReceiveShadow != 0 {
+			flags |= DrawableReceivesShadow
+		}
+		for j := uint32(0); j < im.count; j++ {
+			out = append(out, gpuDrawable{
+				bounds:      [4]float32{im.bounds.Center[0], im.bounds.Center[1], im.bounds.Center[2], im.bounds.Radius},
+				transformID: instanceBase + im.transformBase + j,
+				geometryID:  im.geometry.ID(),
+				materialID:  im.material.ID(),
+				flags:       flags,
+			})
+			materials = append(materials, im.material)
+		}
 	}
 	return out, materials
 }
@@ -636,6 +693,12 @@ func (s *Scene) Destroy() {
 		s.meshes[i].material.Release()
 	}
 	s.meshes = nil
+	for i := range s.instancedMeshes {
+		s.instancedMeshes[i].geometry.Release()
+		s.instancedMeshes[i].material.Release()
+	}
+	s.instancedMeshes = nil
+	s.instanceTransforms = nil
 	for _, sm := range s.skinnedMeshes.All() {
 		sm.srcGeometry.Release()
 		sm.outputGeo.Release()

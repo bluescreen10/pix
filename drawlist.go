@@ -55,11 +55,14 @@ func newDrawList(b gpu.Backend) *drawList {
 	return &drawList{backend: b}
 }
 
-// sync uploads the scene's world matrices into the models buffer (growing it as the
-// node count grows). transformID in drawables indexes this array. The buffer is
+// sync uploads the scene's world matrices, followed immediately by every
+// InstancedMesh's per-instance transforms, into one contiguous models buffer
+// (growing it as needed). transformID in drawables indexes this combined array —
+// an InstancedMesh's drawables address their slice as if it sits right after world
+// (see Scene.collectDrawables and Scene.instanceTransforms). The buffer is
 // host-visible per-frame streaming, so this is a direct write (no staging uploader).
-func (d *drawList) sync(world []glm.Mat4f) {
-	n := uint32(len(world))
+func (d *drawList) sync(world, instances []glm.Mat4f) {
+	n := uint32(len(world) + len(instances))
 	if n > d.worldCap {
 		if d.worldBuf.Valid() {
 			d.backend.Free(d.worldBuf)
@@ -67,8 +70,11 @@ func (d *drawList) sync(world []glm.Mat4f) {
 		d.worldCap = max(n*2, 1)
 		d.worldBuf = d.backend.Alloc(uint64(d.worldCap)*64, gpu.MemoryHost, "world")
 	}
-	if n > 0 {
+	if len(world) > 0 {
 		writeAt(d.worldBuf, 0, toBytes(world))
+	}
+	if len(instances) > 0 {
+		writeAt(d.worldBuf, uint32(len(world))*64, toBytes(instances))
 	}
 }
 

@@ -760,7 +760,7 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 	// 3. Every run's drawRoot is filled once regardless of pass (same camera either
 	// way); issueDraws below then filters by pass to route it into the right render
 	// pass with the right pipeline set.
-	r.fillDrawRoots(dl, drawVP, eye, scene.lights.Addr())
+	r.fillDrawRoots(dl, drawVP, eye, scene.lights.Addr(), scene.elapsed)
 	gbufferActive := r.hasGBufferRuns(dl)
 	// A debug view needs the G-buffer to have actually been filled; with nothing
 	// rendering deferred there is nothing to show, so the frame shades normally.
@@ -922,11 +922,19 @@ func (r *Renderer) syncScene(scene *Scene, cam Camera, cmd gpu.CommandBuffer) {
 		//TODO: maybe the material should have a []pipelineKey (or pipelineID) stored
 		dl.pipeBuf = append(dl.pipeBuf, r.pipelineForMaterial(scene.meshes[i].material))
 	}
-	// Order must match collectDrawables (meshes, then skinnedMeshes.All()) — both
-	// calls run back-to-back here with no scene mutation between them, so the slab
-	// iteration order is identical.
+	// Order must match collectDrawables (meshes, then skinnedMeshes.All(), then
+	// instancedMeshes) — both calls run back-to-back here with no scene mutation
+	// between them, so the slab iteration order is identical.
 	for _, sm := range scene.skinnedMeshes.All() {
 		dl.pipeBuf = append(dl.pipeBuf, r.pipelineForMaterial(sm.material))
+	}
+	for i := range scene.instancedMeshes {
+		// One pipeline id per instance: collectDrawables emits one gpuDrawable per
+		// instance, and dl.pipeBuf must stay parallel to that, not to the field count.
+		pid := r.pipelineForMaterial(scene.instancedMeshes[i].material)
+		for j := uint32(0); j < scene.instancedMeshes[i].count; j++ {
+			dl.pipeBuf = append(dl.pipeBuf, pid)
+		}
 	}
 	if scene.drawableDirty || !slices.Equal(dl.pipeBuf, dl.batchedPipelines) {
 		drawables, materials := scene.collectDrawables()
@@ -1349,6 +1357,7 @@ func (r *Renderer) drawParticles(cmd gpu.CommandBuffer, scene *Scene, viewProj g
 			materials: d.material.RecordsAddr(), lights: scene.lights.Addr(),
 			eye:        glm.Vec4f{eye[0], eye[1], eye[2], 1},
 			geometryID: d.geometry.ID(), materialID: d.material.ID(), transformID: d.ownerNode,
+			time: scene.elapsed,
 		}
 		cmd.SetPipeline(r.drawPipelines[d.pipelineIdx])
 		cmd.DrawIndexedIndirect(utils.ToBytes(&dr), idx, gpu.IndexUint32, d.indirectBuf, 0, 1, indirectSize)
@@ -1383,7 +1392,7 @@ func (r *Renderer) recordShadowDepth(cmd gpu.CommandBuffer, dl *drawList, v *dra
 // forward and the G-buffer pass — a gbuffer fragment shader just doesn't read
 // lights/eye/shadowSampler). Filling every run regardless of pass keeps this call
 // independent of which passes actually run this frame; issueDraws filters by pass.
-func (r *Renderer) fillDrawRoots(dl *drawList, viewProj glm.Mat4f, eye glm.Vec3f, lightsAddr uint64) {
+func (r *Renderer) fillDrawRoots(dl *drawList, viewProj glm.Mat4f, eye glm.Vec3f, lightsAddr uint64, elapsed float32) {
 	if len(dl.runs) == 0 {
 		return
 	}
@@ -1407,6 +1416,7 @@ func (r *Renderer) fillDrawRoots(dl *drawList, viewProj glm.Mat4f, eye glm.Vec3f
 			lights:        lightsAddr,
 			eye:           glm.Vec4f{eye[0], eye[1], eye[2], 1},
 			shadowSampler: r.shadowSampler.Index,
+			time:          elapsed,
 		}
 	}
 }

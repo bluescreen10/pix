@@ -35,9 +35,11 @@ layout(push_constant, scalar) uniform PC {
     LightBuf lights;
     vec4 eye;
     uint shadowSampler; // bindless index of the PCF comparison sampler
+    // time is elapsed seconds since the scene's clock started (Scene.clockStart),
+    // passed to every vertex/fragment shader pair unconditionally — read it or not.
+    float time;
     uint spad0;
     uint spad1;
-    uint spad2;
 } pc;
 
 // Vertex → fragment varyings (produced by scene_draw.vert).

@@ -64,18 +64,23 @@ type cullRoot struct {
 // then pointers, then eye). One per pipeline (its material store's buffer address);
 // there is no regionBase — each indirect command sets firstInstance instead.
 type drawRoot struct {
-	viewProj         glm.Mat4f
-	pos              uint64
-	attr             uint64
-	descs            uint64
-	models           uint64
-	drawables        uint64
-	visible          uint64
-	materials        uint64
-	lights           uint64
-	eye              glm.Vec4f
-	shadowSampler    uint32 // bindless index of the PCF comparison sampler
-	pad0, pad1, pad2 uint32
+	viewProj      glm.Mat4f
+	pos           uint64
+	attr          uint64
+	descs         uint64
+	models        uint64
+	drawables     uint64
+	visible       uint64
+	materials     uint64
+	lights        uint64
+	eye           glm.Vec4f
+	shadowSampler uint32 // bindless index of the PCF comparison sampler
+	// time is elapsed seconds since the scene's clock started (Scene.clockStart) —
+	// passed to every vertex/fragment shader pair unconditionally, built-in or a
+	// custom material's; nothing requires reading it (see material_common.glsl and
+	// scene_draw.vert.glsl, which both declare it but only some shaders use it).
+	time       float32
+	pad0, pad1 uint32
 }
 
 // shadowRoot matches ShadowRoot in scene_shadow.vert (scalar; mat4 then pointers).

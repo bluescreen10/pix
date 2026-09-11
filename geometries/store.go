@@ -277,19 +277,32 @@ func (g *Store) Free(id uint32) {
 }
 
 // allocIn suballocates bytes in a stream, growing (and repacking) if it's full.
+//
+// One grow is not always enough: the TLSF pool bins free blocks coarsely (8
+// sub-bins per power-of-two range), and its search only considers bins whose
+// entire range is guaranteed >= the request — a repacked remainder block can be
+// numerically larger than bytes yet sit one bin below that threshold and never
+// be found. Sizing the grow to exactly used+bytes assumes a byte-exact fit is
+// always reachable, which this coarseness can violate. So retry with
+// increasing headroom instead of assuming a single grow suffices; this loop
+// terminates because each iteration at least doubles the stream (growStream
+// never returns a capacity smaller than what it's asked to reach), so it costs
+// at most a few extra iterations, never runs unbounded.
 func (g *Store) allocIn(stream int, bytes uint32) mem.Allocation {
 	s := g.streams[stream]
 	if alloc, err := s.tlsf.Alloc(bytes); err == nil {
 		return alloc
 	}
 	free, _ := s.tlsf.StorageReport()
-	used := s.tlsf.Capacity() - free
-	g.growStream(stream, used+bytes)
-	alloc, err := g.streams[stream].tlsf.Alloc(bytes)
-	if err != nil {
-		panic(fmt.Sprintf("render: %s alloc of %d bytes failed after grow", s.label, bytes))
+	target := s.tlsf.Capacity() - free + bytes
+	for range 8 {
+		g.growStream(stream, target)
+		if alloc, err := g.streams[stream].tlsf.Alloc(bytes); err == nil {
+			return alloc
+		}
+		target = g.streams[stream].tlsf.Capacity() + bytes
 	}
-	return alloc
+	panic(fmt.Sprintf("render: %s alloc of %d bytes failed after grow", s.label, bytes))
 }
 
 // growStream replaces a stream with a larger BDA buffer (and fresh TLSF) sized to
