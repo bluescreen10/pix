@@ -8,6 +8,23 @@
 // its local bounding sphere to world, frustum-test, and on survival bump its
 // batch's indirect instanceCount and append its index into the batch's region of
 // the shared visible buffer. Mirrors pix's cull.wesl on the bindless gpu.
+//
+// LOD (see the LOD spec, project memory): a drawable with lodID != 0 belongs to a
+// group of sibling records (one per level, sharing lodID and transformID) — at most
+// one survives per object per frame. Every sibling redundantly runs the same
+// deterministic selectLevel(dist, prevLevel, ...) and only proceeds past the frustum
+// test if it agrees it's the winner; this avoids needing the N sibling threads to
+// coordinate with each other directly. prevLevel (persisted in PrevLevelBuf, keyed by
+// transformID) is last frame's winner, read here before this frame's winner is known
+// and written by it — so LOD selection this frame acts on last frame's decision,
+// mirroring how engines pre-select a LOD before animating/skinning it (see the skin
+// compute shader's matching gate) rather than evaluating every level and discarding
+// the rest.
+//
+// TODO: LOD selection currently re-evaluates every LOD-tagged drawable's distance
+// every frame. Dispatching this at a lower rate (e.g. once every N frames, like
+// Unreal's animation update-rate optimization for distant actors) would cut cull cost
+// for scenes with many LOD objects — deferred until it's actually a measured cost.
 layout(local_size_x = 64) in;
 
 struct Drawable {
@@ -17,14 +34,24 @@ struct Drawable {
     uint materialID;
     uint batchID;
     uint flags;
+    uint lodID;
+    uint lodLevel;
 };
 struct IndirectCmd { uint indexCount; uint instanceCount; uint firstIndex; int vertexOffset; uint firstInstance; };
+struct LodEntry {
+    float boundaries[3]; // ascending; boundaries[i] is level i's far edge, i < levelCount-1
+    float hysteresis;
+    uint levelCount;
+    uint pad0, pad1;
+};
 
 layout(buffer_reference, scalar) readonly buffer DrawableBuf { Drawable v[]; };
 layout(buffer_reference, scalar) readonly buffer ModelBuf { mat4 v[]; };
 layout(buffer_reference, scalar) buffer IndirectBuf { IndirectCmd v[]; };
 layout(buffer_reference, scalar) readonly buffer RegionBuf { uint v[]; };
 layout(buffer_reference, scalar) buffer VisibleBuf { uint v[]; };
+layout(buffer_reference, scalar) readonly buffer LodBuf { LodEntry v[]; };
+layout(buffer_reference, scalar) buffer PrevLevelBuf { uint v[]; };
 
 // Pushed inline rather than behind a device address: it fits in push constants on
 // every backend, so the shader reads its parameters directly instead of chasing a
@@ -36,12 +63,44 @@ layout(push_constant, scalar) uniform PC {
     IndirectBuf indirect;
     RegionBuf regions;
     VisibleBuf visible;
+    LodBuf lods;
+    PrevLevelBuf prevLevel;
+    vec4 eye;
     uint count;
     uint castersOnly;
     vec4 planes[6];
 } pc;
 
 const uint FLAG_CASTS_SHADOW = 2u;
+
+// selectLevel picks the level dist falls into, favoring stickiness: prevLevel's own
+// band (widened by hysteresis on both edges) is checked FIRST, before the plain
+// ascending scan of every level's unwidened band. Checking prevLevel first (rather
+// than widening it in place inside the ascending scan) matters for levels other than
+// 0 — an ascending scan would hit some lower, unwidened level's band before ever
+// reaching a higher-indexed prevLevel's widened near edge, since adjacent levels'
+// bands necessarily touch at their shared boundary; widening only the far edge would
+// ever take effect. Checking prevLevel unconditionally first fixes that
+// asymmetrically for both edges, on any level. Every sibling level-thread of one
+// object computes this identically off the same (dist, prevLevel), so exactly one of
+// them ends up agreeing it's the current level, without the threads needing to
+// coordinate directly. See the LOD spec for why this specific formulation avoids the
+// race a naive per-thread "am I in range" check would have near a boundary.
+uint selectLevel(float dist, uint prevLevel, LodEntry le) {
+    if (prevLevel < le.levelCount) {
+        float nearB = (prevLevel == 0u) ? 0.0 : le.boundaries[prevLevel - 1u];
+        float farB = (prevLevel + 1u < le.levelCount) ? le.boundaries[prevLevel] : 3.4e38;
+        nearB = max(0.0, nearB - le.hysteresis);
+        farB += le.hysteresis;
+        if (dist >= nearB && dist < farB) return prevLevel;
+    }
+    for (uint i = 0u; i < le.levelCount; i++) {
+        float nearB = (i == 0u) ? 0.0 : le.boundaries[i - 1u];
+        float farB = (i + 1u < le.levelCount) ? le.boundaries[i] : 3.4e38;
+        if (dist >= nearB && dist < farB) return i;
+    }
+    return le.levelCount - 1u;
+}
 
 void main() {
     uint i = gl_GlobalInvocationID.x;
@@ -59,6 +118,15 @@ void main() {
     }
 
     uint bid = d.batchID;
+    if (d.lodID != 0u) {
+        LodEntry le = pc.lods.v[d.lodID];
+        uint prev = pc.prevLevel.v[d.transformID];
+        float dist = distance(center, pc.eye.xyz);
+        uint selected = selectLevel(dist, prev, le);
+        if (selected != d.lodLevel) return;
+        pc.prevLevel.v[d.transformID] = selected;
+    }
+
     uint slot = atomicAdd(pc.indirect.v[bid].instanceCount, 1u);
     pc.visible.v[pc.regions.v[bid] + slot] = i;
 }

@@ -24,14 +24,40 @@ type scene struct {
 }
 
 type node struct {
-	Name        string    `json:"name"`
-	Children    []int     `json:"children"`
-	Mesh        *int      `json:"mesh"`
-	Skin        *int      `json:"skin"`
-	Matrix      []float32 `json:"matrix"`
-	Translation []float32 `json:"translation"`
-	Rotation    []float32 `json:"rotation"`
-	Scale       []float32 `json:"scale"`
+	Name        string          `json:"name"`
+	Children    []int           `json:"children"`
+	Mesh        *int            `json:"mesh"`
+	Skin        *int            `json:"skin"`
+	Matrix      []float32       `json:"matrix"`
+	Translation []float32       `json:"translation"`
+	Rotation    []float32       `json:"rotation"`
+	Scale       []float32       `json:"scale"`
+	Extensions  *nodeExtensions `json:"extensions"`
+	Extras      *nodeExtras     `json:"extras"`
+}
+
+// nodeExtensions carries the MSFT_lod extension (see
+// https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/MSFT_lod):
+// a node with this set is LOD level 0, and Ids lists the node indices of
+// progressively lower-detail alternates (levels 1, 2, ...). Those alternate nodes
+// are not expected to appear in the scene's own node list — they exist only as LOD
+// data sources, referenced here, not as part of the visible hierarchy.
+type nodeExtensions struct {
+	MSFTLod *msftLod `json:"MSFT_lod"`
+}
+
+type msftLod struct {
+	Ids []int `json:"ids"`
+}
+
+// nodeExtras carries MSFT_lod's companion screen-coverage hints — the same MSFT_lod
+// node's own extras, one value per level (level 0..len-1), each the lower bound of
+// the fraction of screen area that level is meant to cover before the next one takes
+// over. See buildNode's MSFT_lod handling for how these are turned into pix's
+// distance-based AddLOD thresholds (screen coverage and world-space distance aren't
+// the same unit — see that comment for the conversion used).
+type nodeExtras struct {
+	MSFTScreenCoverage []float32 `json:"MSFT_screencoverage"`
 }
 
 // skin is a glTF skin: joints[i] is a node index, and inverseBindMatrices[i] (a

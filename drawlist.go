@@ -28,12 +28,24 @@ type drawList struct {
 	visCap           uint32
 	numInst          uint32
 	worldCap         uint32
+	lodCount         uint32 // len(Scene.lodEntries) as of the last rebuild
 
 	worldBuf    gpu.Buffer // per-node world matrices (models), indexed by node slot
 	drawableBuf gpu.Buffer
 	indirectBuf gpu.Buffer
 	regionBuf   gpu.Buffer
 	visibleBuf  gpu.Buffer
+
+	// LOD state — see the LOD spec (project memory). lodTableBuf is a straight,
+	// per-rebuild upload of the scene's lodEntries (indexed by gpuDrawable.lodID).
+	// prevLevelBuf is one uint32 per worldBuf slot (nodes, then instance transforms —
+	// the same transformID address space), holding which level was selected there
+	// last frame; scene_cull.comp both reads and writes it, so unlike every other
+	// buffer here it persists ACROSS ordinary frames and is only reset to the
+	// lodNoneSentinel on a structural rebuild (see rebuild's tail).
+	lodTableBuf  gpu.Buffer
+	prevLevelBuf gpu.Buffer
+	lodScratch   []uint32 // reused sentinel-fill scratch for prevLevelBuf resets
 
 	// Shadow views: one extra cull + depth pass per shadow-casting light. They share
 	// the drawable/world/region tables (culled from the same drawables) but each owns
@@ -82,9 +94,11 @@ func (d *drawList) sync(world, instances []glm.Mat4f) {
 // each), orders them so same-pipeline batches are contiguous (one multi-draw-indirect
 // call per pipeline), lays out their visible-buffer regions, fills the indirect
 // template (indexCount/firstIndex from the geometry, firstInstance = the region base),
-// resizes buffers, and uploads the drawable + region tables. Called on structural
-// change. pipelines[i] is drawables[i]'s draw pipeline.
-func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, mats []materials.Material, geometryStore *geometries.Store) {
+// resizes buffers, and uploads the drawable + region + LOD tables (and resets
+// prevLevelBuf's hysteresis state — see the field doc). Called on structural change.
+// pipelines[i] is drawables[i]'s draw pipeline; lodEntries is the scene's lodEntries,
+// uploaded verbatim (indexed directly by gpuDrawable.lodID, no reordering needed).
+func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, mats []materials.Material, geometryStore *geometries.Store, lodEntries []gpuLODEntry) {
 	type key struct{ pipeline, geo uint32 }
 
 	// First pass: unique (pipeline, geometry) batches + their instance counts, and a
@@ -166,6 +180,7 @@ func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, mats []m
 	}
 	d.numInst = uint32(len(drawables))
 
+	d.lodCount = uint32(len(lodEntries))
 	d.ensureBuffers()
 	if len(drawables) > 0 {
 		writeAt(d.drawableBuf, 0, toBytes(drawables))
@@ -173,6 +188,23 @@ func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, mats []m
 	if len(d.regions) > 0 {
 		writeAt(d.regionBuf, 0, toBytes(d.regions))
 	}
+	if len(lodEntries) > 0 {
+		writeAt(d.lodTableBuf, 0, toBytes(lodEntries))
+	}
+	// Reset every slot's hysteresis state: a structural change may have added,
+	// removed, or reassigned lodID/lodLevel, so stale "level shown last frame" state
+	// could otherwise pick a level that no longer matches this drawable set. Losing
+	// hysteresis's stickiness for one frame right after a rebuild is an accepted
+	// tradeoff (see the LOD spec) — rebuilds are already disruptive.
+	n := max(d.worldCap, 1)
+	if uint32(cap(d.lodScratch)) < n {
+		d.lodScratch = make([]uint32, n)
+	}
+	d.lodScratch = d.lodScratch[:n]
+	for i := range d.lodScratch {
+		d.lodScratch[i] = lodNoneSentinel
+	}
+	writeAt(d.prevLevelBuf, 0, toBytes(d.lodScratch))
 }
 
 // ensureBuffers owns every buffer the draw list allocates. The count-dependent ones
@@ -208,6 +240,24 @@ func (d *drawList) ensureBuffers() {
 		}
 		d.visibleBuf = d.backend.Alloc(size, gpu.MemoryHost, "visible")
 	}
+	nl := max(d.lodCount, 1)
+	if size := uint64(nl) * uint64(lodEntrySize); !d.lodTableBuf.Valid() || d.lodTableBuf.Size < size {
+		if d.lodTableBuf.Valid() {
+			d.backend.Free(d.lodTableBuf)
+		}
+		d.lodTableBuf = d.backend.Alloc(size, gpu.MemoryHost, "lod-table")
+	}
+	// prevLevelBuf's whole content is overwritten (see rebuild's sentinel-fill) every
+	// time this is called, so — unlike every other buffer here — reallocating it on
+	// grow rather than preserving old contents is fine: rebuild always follows up with
+	// a full rewrite regardless.
+	nw := max(d.worldCap, 1)
+	if size := uint64(nw) * 4; !d.prevLevelBuf.Valid() || d.prevLevelBuf.Size < size {
+		if d.prevLevelBuf.Valid() {
+			d.backend.Free(d.prevLevelBuf)
+		}
+		d.prevLevelBuf = d.backend.Alloc(size, gpu.MemoryHost, "lod-prev-level")
+	}
 }
 
 // ensureShadowViews grows the shadow-view pool to at least n views and makes sure each
@@ -240,7 +290,7 @@ func (d *drawList) ensureShadowViews(n int) {
 func (d *drawList) batchCount() int { return len(d.batches) }
 
 func (d *drawList) destroy() {
-	bufs := []gpu.Buffer{d.worldBuf, d.drawableBuf, d.indirectBuf, d.regionBuf, d.visibleBuf}
+	bufs := []gpu.Buffer{d.worldBuf, d.drawableBuf, d.indirectBuf, d.regionBuf, d.visibleBuf, d.lodTableBuf, d.prevLevelBuf}
 	for _, v := range d.shadowViews {
 		bufs = append(bufs, v.indirectBuf, v.visibleBuf)
 	}

@@ -16,6 +16,8 @@ struct Drawable {
     uint materialID;
     uint batchID;
     uint flags;
+    uint lodID;
+    uint lodLevel;
 };
 struct GeoDesc {
     uint positionBase;

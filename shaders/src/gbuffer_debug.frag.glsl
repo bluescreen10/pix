@@ -72,11 +72,20 @@ void main() {
         c = linearToSrgb(fetch(pc.emissiveTexture, uv).rgb);
         break;
     case VIEW_DEPTH: {
-        // Reversed-Z: 1 is the near plane and 0 is the far one, so invert to get the
-        // conventional "near is dark" ramp. The raw values crowd against 1 near the
-        // camera, so a sqrt spreads the useful range out.
+        // Reversed-Z: 1 is the near plane and 0 is the far one. For reversed-Z, d is
+        // approximately near/z (for z well under far) — a ratio, not a linear
+        // quantity — so a linear or sqrt remap of (1-d) only spreads values that are
+        // already close to 1 near, and saturates to white almost everywhere once
+        // near/far exceeds a few hundred:1 (this scene's cameras use ~12000:1 —
+        // radius*0.001 near, radius*12 far — which made every on-screen depth read
+        // as d well under 0.1, i.e. (1-d) and its sqrt both near 1: solid white).
+        // log2(d) IS linear in log(z) for that near/z relationship, so it spreads any
+        // near/far ratio evenly regardless of scale — the fix that actually matters
+        // here, not a tuned constant for one scene. Near reads dark (d=1 -> 0), far
+        // (and the untouched background, cleared to d=0) reads bright; max() guards
+        // against log2(0) on a driver that doesn't clamp it to -inf cleanly.
         float d = fetch(pc.depthTexture, uv).r;
-        c = vec3(sqrt(1.0 - d));
+        c = vec3(clamp(-log2(max(d, 1e-9)) / 20.0, 0.0, 1.0));
         break;
     }
     case VIEW_POSITION: {

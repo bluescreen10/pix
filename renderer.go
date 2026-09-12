@@ -89,8 +89,9 @@ type Renderer struct {
 
 	// debugView displays one G-buffer target instead of the shaded frame; its pipeline
 	// is built on first use since most frames never need it (see debug_view.go).
-	debugView     DebugView
-	debugPipeline gpu.Pipeline
+	debugView       DebugView
+	debugPipeline   gpu.Pipeline
+	debugIDPipeline gpu.Pipeline // DebugObjectID/DebugTriangleID's own pipeline (see recordDebugIDView)
 
 	// Shadows: global toggle + the shared PCF comparison sampler (created lazily) +
 	// the position-only depth-pass pipeline (rebuilt with the others on format change).
@@ -162,6 +163,12 @@ func (r *Renderer) ShadowDistance() float32 { return r.shadowDistance }
 
 // StatsVisible reports whether the debug HUD is showing (see ShowFPS).
 func (r *Renderer) StatsVisible() bool { return r.showFPS }
+
+// Stats returns the renderer's rolling frame-time statistics (CPU/GPU ms, FPS —
+// the same numbers ShowFPS draws onscreen), for callers that want them
+// programmatically (e.g. an automated before/after comparison) rather than reading
+// the HUD. GPU timestamps are only recorded while ShowFPS(true) is active.
+func (r *Renderer) Stats() *RendererStats { return r.stats }
 
 // ClearColor is the colour the frame is cleared to (see SetClearColor).
 func (r *Renderer) ClearColor() colors.RGBA32F { return r.clear }
@@ -738,10 +745,10 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 		for i := range views {
 			v := &dl.shadowViews[i]
 			sp := FrustumPlanes(views[i].cam.ViewProjection())
-			r.cullInto(cmd, dl, v.indirectBuf, v.visibleBuf, sp, 1)
+			r.cullInto(cmd, dl, v.indirectBuf, v.visibleBuf, sp, 1, eye)
 		}
 		if dl.batchCount() > 0 {
-			r.cullInto(cmd, dl, dl.indirectBuf, dl.visibleBuf, planes, 0)
+			r.cullInto(cmd, dl, dl.indirectBuf, dl.visibleBuf, planes, 0, eye)
 		}
 		if hasParticles {
 			r.dispatchParticleUpdate(cmd, scene)
@@ -765,9 +772,17 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 	// A debug view needs the G-buffer to have actually been filled; with nothing
 	// rendering deferred there is nothing to show, so the frame shades normally.
 	debugShown := gbufferActive && r.debugViewActive()
+	// Object/triangle id views are a separate, self-contained geometry pass (see
+	// recordDebugIDView) — they replace the G-buffer fill + lighting entirely,
+	// regardless of whether anything would have gone through the deferred path this
+	// frame at all.
+	idShown := r.idViewActive()
 
-	// 4. G-buffer fill + deferred lighting, only when something renders that way.
-	if gbufferActive {
+	// 4. G-buffer fill + deferred lighting, only when something renders that way —
+	// skipped entirely in favor of the id pass below when one is active.
+	if idShown {
+		r.recordDebugIDView(cmd, dl, target, drawVP)
+	} else if gbufferActive {
 		r.ensureGBuffer()
 		cmd.BeginRenderPass(gpu.RenderTargets{
 			Color: []gpu.ColorAttachment{
@@ -809,7 +824,7 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 	// cleared) so forward geometry composites over the already-lit scene and depth-
 	// tests correctly against it; otherwise this is the only pass, so it clears.
 	colorLoad, depthLoad := gpu.LoadClear, gpu.LoadClear
-	if gbufferActive {
+	if gbufferActive || idShown {
 		colorLoad, depthLoad = gpu.LoadKeep, gpu.LoadKeep
 	}
 	cmd.BeginRenderPass(gpu.RenderTargets{
@@ -818,10 +833,10 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 	})
 	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
 	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
-	// Forward geometry is suppressed while a G-buffer view is up: the point is to see
-	// that target on its own, not transparents composited over it. The pass itself
-	// still runs — it is what draws the overlay and closes the frame.
-	if !debugShown {
+	// Forward geometry is suppressed while a G-buffer view or an id view is up: the
+	// point is to see that target on its own, not transparents composited over it.
+	// The pass itself still runs — it is what draws the overlay and closes the frame.
+	if !debugShown && !idShown {
 		r.issueDraws(cmd, dl, passForward)
 		if hasParticles {
 			r.drawParticles(cmd, scene, drawVP, eye)
@@ -919,8 +934,13 @@ func (r *Renderer) syncScene(scene *Scene, cam Camera, cmd gpu.CommandBuffer) {
 	dl := scene.drawList
 	dl.pipeBuf = dl.pipeBuf[:0]
 	for i := range scene.meshes {
+		// One pipeline id per LOD level: collectDrawables emits one gpuDrawable per
+		// level (1 in the common non-LOD case), and dl.pipeBuf must stay parallel to
+		// that, not to the mesh count.
 		//TODO: maybe the material should have a []pipelineKey (or pipelineID) stored
-		dl.pipeBuf = append(dl.pipeBuf, r.pipelineForMaterial(scene.meshes[i].material))
+		for _, l := range scene.meshes[i].lods {
+			dl.pipeBuf = append(dl.pipeBuf, r.pipelineForMaterial(l.material))
+		}
 	}
 	// Order must match collectDrawables (meshes, then skinnedMeshes.All(), then
 	// instancedMeshes) — both calls run back-to-back here with no scene mutation
@@ -929,16 +949,22 @@ func (r *Renderer) syncScene(scene *Scene, cam Camera, cmd gpu.CommandBuffer) {
 		dl.pipeBuf = append(dl.pipeBuf, r.pipelineForMaterial(sm.material))
 	}
 	for i := range scene.instancedMeshes {
-		// One pipeline id per instance: collectDrawables emits one gpuDrawable per
-		// instance, and dl.pipeBuf must stay parallel to that, not to the field count.
-		pid := r.pipelineForMaterial(scene.instancedMeshes[i].material)
-		for j := uint32(0); j < scene.instancedMeshes[i].count; j++ {
-			dl.pipeBuf = append(dl.pipeBuf, pid)
+		// One pipeline id per (instance, LOD level) pair — same reasoning as above,
+		// nested inside the existing per-instance loop. Every instance of a field
+		// shares the same levels, so each level's pipeline is resolved once and
+		// reused across all instances.
+		im := &scene.instancedMeshes[i]
+		pids := make([]uint32, len(im.lods))
+		for lvl, l := range im.lods {
+			pids[lvl] = r.pipelineForMaterial(l.material)
+		}
+		for j := uint32(0); j < im.count; j++ {
+			dl.pipeBuf = append(dl.pipeBuf, pids...)
 		}
 	}
 	if scene.drawableDirty || !slices.Equal(dl.pipeBuf, dl.batchedPipelines) {
 		drawables, materials := scene.collectDrawables()
-		dl.rebuild(drawables, dl.pipeBuf, materials, r.GeometryStore)
+		dl.rebuild(drawables, dl.pipeBuf, materials, r.GeometryStore, scene.lodEntries)
 		scene.drawableDirty = false
 	}
 }
@@ -1189,12 +1215,18 @@ func snap(x, step float32) float32 {
 // buffers: it resets the indirect args from the shared template (zeroing each batch's
 // instanceCount), points a cull root at this view's buffers (the drawable/world/region
 // tables are shared), and dispatches one thread per instance. castersOnly=1 restricts
-// the view to shadow casters. No barrier — the caller batches all views behind one.
-func (r *Renderer) cullInto(cmd gpu.CommandBuffer, dl *drawList, indirect, visible gpu.Buffer, planes [6][4]float32, castersOnly uint32) {
+// the view to shadow casters. eye is the camera's world position, used only by LOD
+// distance tests (see scene_cull.comp's selectLevel) — every view (main + shadow) uses
+// the same main-camera eye, not the shadow light's own position, since LOD is a
+// main-camera-relative decision regardless of which view is culling this frame. No
+// barrier — the caller batches all views behind one.
+func (r *Renderer) cullInto(cmd gpu.CommandBuffer, dl *drawList, indirect, visible gpu.Buffer, planes [6][4]float32, castersOnly uint32, eye glm.Vec3f) {
 	writeAt(indirect, 0, toBytes(dl.template))
 	cr := cullRoot{
 		drawables: dl.drawableBuf.Addr, models: dl.worldBuf.Addr, indirect: indirect.Addr,
-		regions: dl.regionBuf.Addr, visible: visible.Addr, count: dl.numInst,
+		regions: dl.regionBuf.Addr, visible: visible.Addr,
+		lods: dl.lodTableBuf.Addr, prevLevel: dl.prevLevelBuf.Addr,
+		eye: glm.Vec4f{eye[0], eye[1], eye[2], 1}, count: dl.numInst,
 		castersOnly: castersOnly, planes: planes,
 	}
 	cmd.SetPipeline(r.cullPipeline)

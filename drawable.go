@@ -19,9 +19,14 @@ const (
 )
 
 // gpuDrawable is uploaded verbatim to the drawable buffer; matches Drawable in the
-// scene shaders (scalar, 40 bytes). bounds is the LOCAL bounding sphere; transformID
-// indexes the scene's world-matrix buffer (a node slot); geometryID/materialID index
-// the renderer's geometry/material tables.
+// scene shaders (scalar, 44 bytes). bounds is the LOCAL bounding sphere; transformID
+// indexes the scene's world-matrix buffer (a node slot, or an InstancedMesh instance —
+// see Scene.instanceTransforms); geometryID/materialID index the renderer's
+// geometry/material tables. lodID is 0 for an ordinary (non-LOD) drawable; otherwise it
+// indexes Scene.lodEntries, and lodLevel is this record's own 0-based level within that
+// entry — see the LOD spec: a Mesh/InstancedMesh/SkinnedMesh with N LOD levels emits N
+// gpuDrawable records sharing one lodID (and, for Mesh/SkinnedMesh, one transformID),
+// and scene_cull.comp lets through at most one of them per frame.
 type gpuDrawable struct {
 	bounds      [4]float32
 	transformID uint32
@@ -29,6 +34,27 @@ type gpuDrawable struct {
 	materialID  uint32
 	batchID     uint32
 	flags       uint32
+	lodID       uint32
+	lodLevel    uint32
+}
+
+// gpuLODEntry is one LOD group's shared config (mirrors LodEntry in scene_cull.comp):
+// up to 4 levels, boundaries[i] is the far edge (world units, distance from camera) of
+// level i for i < levelCount-1 — the last level has no upper bound. hysteresis widens
+// whichever level was selected last frame (see drawList.prevLevelBuf and
+// scene_cull.comp's selectLevel) to resist flip-flopping right at a boundary.
+// Scene.lodEntries[0] is reserved/unused so a drawable's lodID of 0 unambiguously means
+// "not LOD-tagged".
+// lodNoneSentinel marks a prevLevelBuf slot as "no level selected yet" — out of range
+// for any real levelCount (max maxLODLevels), so selectLevel's hysteresis widening
+// never accidentally matches it.
+const lodNoneSentinel uint32 = 0xFFFFFFFF
+
+type gpuLODEntry struct {
+	boundaries [3]float32
+	hysteresis float32
+	levelCount uint32
+	pad0, pad1 uint32
 }
 
 // indirectCmd is a VkDrawIndexedIndirectCommand (20 bytes).
@@ -48,13 +74,19 @@ type indirectCmd struct {
 // checks this against pipeline reflection and panics on a short root, so a mistake here
 // surfaces as an error rather than as a shader reading past the data.
 
-// cullRoot matches CullRoot in scene_cull.comp (scalar; pointers-first).
+// cullRoot matches CullRoot in scene_cull.comp (scalar; pointers-first). lods and
+// prevLevel are always valid addresses (allocated lazily, empty-but-valid when the
+// scene has no LOD drawables — see drawList.ensureBuffers) so the shader never needs a
+// null check; eye is the camera's world position, used only for LOD distance tests.
 type cullRoot struct {
 	drawables   uint64
 	models      uint64
 	indirect    uint64
 	regions     uint64
 	visible     uint64
+	lods        uint64
+	prevLevel   uint64
+	eye         glm.Vec4f
 	count       uint32
 	castersOnly uint32
 	planes      [6][4]float32
@@ -99,6 +131,23 @@ type shadowRoot struct {
 	// Without this the Metal backend hands setBytes a short buffer and the shader
 	// reads eight bytes past it (drawRoot pads for the same reason).
 	pad0, pad1 uint32
+}
+
+// debugIDRoot matches DebugIDRoot in scene_debug_id.vert/.frag (scalar; mat4 then
+// pointers). Another position-only stripped drawRoot, same shape as shadowRoot — see
+// its doc comment for why the trailing padding matters. mode selects which id the
+// fragment shader colors by: 0 = per-object (the drawable index), 1 = per-triangle
+// (gl_PrimitiveID, a free fragment-stage builtin — no vertex forwarding needed for
+// it). See DebugObjectID/DebugTriangleID and recordDebugIDView.
+type debugIDRoot struct {
+	viewProj  glm.Mat4f
+	pos       uint64
+	descs     uint64
+	models    uint64
+	drawables uint64
+	visible   uint64
+	mode      uint32
+	pad0      uint32
 }
 
 // skinCmd is one SkinnedMesh's compute-skinning dispatch, built by
@@ -162,4 +211,5 @@ type pipelineRun struct {
 var (
 	drawableSize = uint32(unsafe.Sizeof(gpuDrawable{}))
 	indirectSize = uint32(unsafe.Sizeof(indirectCmd{}))
+	lodEntrySize = uint32(unsafe.Sizeof(gpuLODEntry{}))
 )

@@ -47,6 +47,12 @@ var metalFullscreenVert []byte
 //go:embed build/gbuffer_debug.frag.metalbin
 var metalGBufferDebug []byte
 
+//go:embed build/scene_debug_id.vert.metalbin
+var metalSceneDebugIDVert []byte
+
+//go:embed build/scene_debug_id.frag.metalbin
+var metalSceneDebugIDFrag []byte
+
 //go:embed build/scene_basic.frag.metalbin
 var metalBasicForward []byte
 
@@ -85,6 +91,8 @@ var metalVariants = []struct{ spirv, metal []byte }{
 	{SceneShadowFrag, metalSceneShadowFrag},
 	{FullscreenVert, metalFullscreenVert},
 	{GBufferDebug, metalGBufferDebug},
+	{SceneDebugIDVert, metalSceneDebugIDVert},
+	{SceneDebugIDFrag, metalSceneDebugIDFrag},
 	{BasicForward, metalBasicForward},
 	{BlinnPhongForward, metalBlinnPhongForward},
 	{PBRForward, metalPBRForward},

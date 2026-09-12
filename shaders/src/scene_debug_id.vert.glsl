@@ -4,11 +4,12 @@
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
-// Position-only vertex-pull for the shadow depth pass. Same compaction model as
-// scene_draw.vert (gl_InstanceIndex indexes the view's compacted visible buffer,
-// the drawable's geometryID selects a descriptor whose positionBase locates the
-// vertex), but stripped to just clip position — the pass writes depth only, so no
-// attributes, normals, UVs or material are read. viewProj is the light's camera.
+// Position-only vertex-pull for the object/triangle-id debug view (see
+// recordDebugIDView) — a stripped scene_draw.vert, same shape as scene_shadow.vert:
+// no attributes, normals, UVs or material are read, just clip position plus the
+// drawable index forwarded for the object-id mode (see scene_debug_id.frag.glsl;
+// triangle-id mode instead reads gl_PrimitiveID there directly, a free fragment-stage
+// builtin that needs no vertex forwarding).
 struct Drawable {
     vec4 bounds;
     uint transformID;
@@ -34,10 +35,6 @@ layout(buffer_reference, scalar) readonly buffer ModelBuf { mat4 v[]; };
 layout(buffer_reference, scalar) readonly buffer DrawableBuf { Drawable v[]; };
 layout(buffer_reference, scalar) readonly buffer VisibleBuf { uint v[]; };
 
-// Pushed inline rather than behind a device address: it fits in push constants on
-// every backend, so the shader reads its parameters directly instead of chasing a
-// pointer to reach them. Fields that are themselves addresses stay addresses — those
-// point at unbounded arrays, so that indirection is inherent.
 layout(push_constant, scalar) uniform PC {
     mat4 viewProj;
     PosBuf pos;
@@ -45,7 +42,11 @@ layout(push_constant, scalar) uniform PC {
     ModelBuf models;
     DrawableBuf drawables;
     VisibleBuf visible;
+    uint mode;
+    uint pad0;
 } pc;
+
+layout(location = 0) flat out uint vObjectID;
 
 void main() {
     // firstInstance = the batch's region base, so gl_InstanceIndex already indexes
@@ -54,6 +55,8 @@ void main() {
     Drawable d = pc.drawables.v[di];
     GeoDesc g = pc.descs.v[d.geometryID];
     mat4 m = pc.models.v[d.transformID];
+
+    vObjectID = di;
 
     uint vi = uint(gl_VertexIndex);
     uint pb = g.positionBase + vi * 3u;

@@ -61,6 +61,10 @@ import _ "embed"
 //go:generate go run ../cmd/metalshader -in build/fullscreen.vert.spv -out build/fullscreen.vert.metalbin -metallib
 //go:generate glslc -fshader-stage=fragment --target-env=vulkan1.4 -O src/gbuffer_debug.frag.glsl -o build/gbuffer_debug.frag.spv
 //go:generate go run ../cmd/metalshader -in build/gbuffer_debug.frag.spv -out build/gbuffer_debug.frag.metalbin -metallib
+//go:generate glslc -fshader-stage=vertex --target-env=vulkan1.4 -O src/scene_debug_id.vert.glsl -o build/scene_debug_id.vert.spv
+//go:generate go run ../cmd/metalshader -in build/scene_debug_id.vert.spv -out build/scene_debug_id.vert.metalbin -metallib
+//go:generate glslc -fshader-stage=fragment --target-env=vulkan1.4 -O src/scene_debug_id.frag.glsl -o build/scene_debug_id.frag.spv
+//go:generate go run ../cmd/metalshader -in build/scene_debug_id.frag.spv -out build/scene_debug_id.frag.metalbin -metallib
 
 // --- particles ---
 
@@ -94,6 +98,12 @@ var FullscreenVert []byte
 //
 //go:embed build/gbuffer_debug.frag.spv
 var GBufferDebug []byte
+
+//go:embed build/scene_debug_id.vert.spv
+var SceneDebugIDVert []byte
+
+//go:embed build/scene_debug_id.frag.spv
+var SceneDebugIDFrag []byte
 
 // --- built-in material fragment shaders (see the materials package) ---
 

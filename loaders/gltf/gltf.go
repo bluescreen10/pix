@@ -201,12 +201,89 @@ func (l *loader) buildNode(idx int) pix.Node {
 	setLocal(node, gn)
 	node.SetName(gn.Name)
 	if gn.Mesh != nil {
-		l.addMesh(node, *gn.Mesh, gn.Skin)
+		meshes := l.addMesh(node, *gn.Mesh, gn.Skin)
+		if ext := gn.Extensions; ext != nil && ext.MSFTLod != nil {
+			l.applyMSFTLod(meshes, ext.MSFTLod, gn.Extras)
+		}
 	}
 	for _, c := range gn.Children {
 		node.Add(l.buildNode(c))
 	}
 	return node
+}
+
+// applyMSFTLod wires the MSFT_lod extension (see nodeExtensions's doc comment) into
+// pix's own AddLOD: lod.Ids are node indices whose own mesh becomes level 1, 2, ...
+// on top of level 0 (meshes, this node's already-built mesh). Only supports a node
+// whose glTF mesh has exactly one triangle primitive and isn't skinned — the same
+// restriction meshGeoMat's alternates are held to, since AddLOD's per-level slots are
+// one geometry/material each, not a multi-primitive sub-mesh list.
+//
+// MSFT_screencoverage (in extras, one value per level) is a fraction of screen area,
+// not a world-space distance — pix's AddLOD wants the latter. There is no exact
+// conversion without the viewer's FOV and viewport (which the extension doesn't
+// carry), so this uses the standard approximation that a sphere of radius r subtends
+// roughly (r/distance)^2 of the screen: distance = r / sqrt(coverage). Falls back to
+// an arbitrary but monotonically increasing distance per level if coverage hints are
+// absent, so a coverage-less MSFT_lod asset still loads instead of panicking.
+//
+// msftLodHysteresisFrac sets a real hysteresis band (a fraction of the computed
+// distance) rather than leaving it at pix's default of 0 — without it, an object
+// whose distance from the camera sits right at a level boundary flips level every
+// single frame on the slightest camera jitter, which for two levels whose geometry
+// isn't pixel-identical (simplification can shift vertices even slightly) looks
+// exactly like z-fighting as the two heights alternate, even though only one level
+// ever actually renders in any given frame. See the LOD spec's hysteresis design.
+const msftLodHysteresisFrac = 0.15
+
+func (l *loader) applyMSFTLod(meshes []pix.Mesh, lod *msftLod, extras *nodeExtras) {
+	if len(meshes) != 1 {
+		panic("pix/gltf: MSFT_lod is only supported on a node with exactly one non-skinned triangle primitive")
+	}
+	m := meshes[0]
+	radius := m.BoundingSphere().Radius
+	var coverage []float32
+	if extras != nil {
+		coverage = extras.MSFTScreenCoverage
+	}
+	var lastDistance float32
+	for i, id := range lod.Ids {
+		if id < 0 || id >= len(l.doc.Nodes) {
+			panic(fmt.Sprintf("pix/gltf: MSFT_lod.ids[%d]=%d out of range", i, id))
+		}
+		alt := l.doc.Nodes[id]
+		if alt.Mesh == nil {
+			panic(fmt.Sprintf("pix/gltf: MSFT_lod alternate node %d has no mesh", id))
+		}
+		geo, mat := l.meshGeoMat(*alt.Mesh)
+		minDistance := radius * 2 * float32(i+1)
+		if i < len(coverage) && coverage[i] > 0 {
+			minDistance = radius / float32(math.Sqrt(float64(coverage[i])))
+		}
+		lastDistance = minDistance
+		m.AddLOD(geo, mat, minDistance)
+		geo.Release() // AddLOD copies its own reference, same as NewMesh
+	}
+	// Scaled off the outermost (largest) threshold, not the innermost: a fixed
+	// fraction of a small near threshold would barely widen the far one at all, and
+	// erring toward a stickier-than-needed near boundary is harmless, while too
+	// little hysteresis at the far boundary is exactly the flicker this exists to
+	// prevent.
+	m.SetLODHysteresis(lastDistance * msftLodHysteresisFrac)
+}
+
+// meshGeoMat builds a bare geometry + resolves the material for meshIdx's single
+// triangle primitive, without creating any scene node — used for an MSFT_lod
+// alternate, which only ever needs to feed AddLOD, never its own Mesh/node.
+func (l *loader) meshGeoMat(meshIdx int) (geometries.Geometry, materials.Material) {
+	gm := l.doc.Meshes[meshIdx]
+	if len(gm.Primitives) != 1 {
+		panic("pix/gltf: MSFT_lod alternates must reference a single-primitive mesh")
+	}
+	data, _ := l.buildData(gm.Primitives[0])
+	geo := l.renderer.GeometryStore.Create(data)
+	mat := l.materialFor(gm.Primitives[0].Material)
+	return geo, mat
 }
 
 func (l *loader) roots() []int {
@@ -230,14 +307,17 @@ func (l *loader) roots() []int {
 
 // addMesh creates a Mesh (or, when a primitive carries skin data and the node
 // references a skin, a SkinnedMesh bound to that skin's pix.Skeleton) child per
-// triangle primitive of meshIdx, parented under parent.
-func (l *loader) addMesh(parent pix.Node, meshIdx int, skinIdx *int) {
+// triangle primitive of meshIdx, parented under parent. Returns the plain (non-
+// skinned) Mesh handles it created, in primitive order — used by applyMSFTLod, which
+// only ever expects exactly one.
+func (l *loader) addMesh(parent pix.Node, meshIdx int, skinIdx *int) []pix.Mesh {
 	gm := l.doc.Meshes[meshIdx]
 	var skel pix.Skeleton
 	hasSkel := skinIdx != nil && *skinIdx >= 0 && *skinIdx < len(l.skeletons)
 	if hasSkel {
 		skel = l.skeletons[*skinIdx]
 	}
+	var meshes []pix.Mesh
 	for _, prim := range gm.Primitives {
 		mode := 4
 		if prim.Mode != nil {
@@ -262,9 +342,11 @@ func (l *loader) addMesh(parent pix.Node, meshIdx int, skinIdx *int) {
 			geo.Release()
 			m.SetName(gm.Name)
 			parent.Add(m)
+			meshes = append(meshes, m)
 		}
 		l.added++
 	}
+	return meshes
 }
 
 // buildData reads a primitive's attributes into a GeometryConfig. The returned

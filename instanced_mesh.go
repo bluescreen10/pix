@@ -18,11 +18,14 @@ type InstancedMesh struct{ Node }
 
 // instancedMeshData is the per-field payload stored in Scene.instancedMeshes,
 // mirroring meshData's shape (mesh.go) plus the slice of Scene.instanceTransforms
-// this field owns.
+// this field owns. lods/hysteresis/lodGroupID are shared by every instance — an
+// InstancedMesh's LOD levels are a property of the field as a whole, not of any one
+// instance; only the transform differs per instance (see AddLOD).
 type instancedMeshData struct {
-	geometry geometries.Geometry
-	material materials.Material
-	bounds   glm.Sphere
+	lods       []lodLevel
+	hysteresis float32
+	lodGroupID uint32
+	bounds     glm.Sphere
 
 	transformBase uint32 // offset into Scene.instanceTransforms
 	count         uint32
@@ -34,14 +37,46 @@ func (m InstancedMesh) data() *instancedMeshData {
 	return &m.scene.instancedMeshes[m.scene.payload[m.slot()]]
 }
 
-// Geometry returns the field's geometry handle.
-func (m InstancedMesh) Geometry() geometries.Geometry { return m.data().geometry }
+// Geometry returns the field's (level-0) geometry handle.
+func (m InstancedMesh) Geometry() geometries.Geometry { return m.data().lods[0].geometry }
 
-// Material returns the field's material handle.
-func (m InstancedMesh) Material() materials.Material { return m.data().material }
+// Material returns the field's (level-0) material handle.
+func (m InstancedMesh) Material() materials.Material { return m.data().lods[0].material }
 
 // Count returns the number of instances.
 func (m InstancedMesh) Count() int { return int(m.data().count) }
+
+// AddLOD appends a coarser level shared by every instance in this field — see
+// Mesh.AddLOD's doc comment; the same rules (increasing minDistance, shared bounds,
+// at most maxLODLevels) apply here. Every instance gets its own individually culled
+// and LOD-selected record per level (see Scene.collectDrawables): a 3-level field of N
+// instances contributes 3N drawable records, not N — a real cost for very large N (tens
+// of thousands, e.g. a uniform grass field), so this is aimed at lower-count instanced
+// content (rocks, trees, props) rather than the grass-blade-count case.
+func (m InstancedMesh) AddLOD(geo geometries.Geometry, mat materials.Material, minDistance float32) InstancedMesh {
+	md := m.data()
+	if len(md.lods) >= maxLODLevels {
+		panic("pix: InstancedMesh.AddLOD: at most maxLODLevels levels are supported")
+	}
+	if minDistance <= md.lods[len(md.lods)-1].minDistance {
+		panic("pix: InstancedMesh.AddLOD levels must be added in increasing minDistance order")
+	}
+	md.lods = append(md.lods, lodLevel{geometry: geo.Copy(), material: mat.Copy(), minDistance: minDistance})
+	m.scene.rebuildLODEntry(&md.lodGroupID, md.lods, md.hysteresis)
+	m.scene.drawableDirty = true
+	return m
+}
+
+// SetLODHysteresis sets the sticky band (world units) shared by every instance in this
+// field — see Mesh.SetLODHysteresis.
+func (m InstancedMesh) SetLODHysteresis(h float32) InstancedMesh {
+	md := m.data()
+	md.hysteresis = h
+	if len(md.lods) > 1 {
+		m.scene.rebuildLODEntry(&md.lodGroupID, md.lods, md.hysteresis)
+	}
+	return m
+}
 
 // NewInstancedMesh creates an InstancedMesh from a geometry + material (both
 // renderer-owned; the scene takes its own references, Copy, so the caller may
@@ -60,8 +95,7 @@ func (s *Scene) NewInstancedMesh(geo geometries.Geometry, mat materials.Material
 	transformBase := uint32(len(s.instanceTransforms))
 	s.instanceTransforms = append(s.instanceTransforms, transforms...)
 	s.instancedMeshes = append(s.instancedMeshes, instancedMeshData{
-		geometry:      geo.Copy(),
-		material:      mat.Copy(),
+		lods:          []lodLevel{{geometry: geo.Copy(), material: mat.Copy()}},
 		bounds:        geo.BoundingSphere(),
 		transformBase: transformBase,
 		count:         uint32(len(transforms)),
@@ -74,8 +108,10 @@ func (s *Scene) NewInstancedMesh(geo geometries.Geometry, mat materials.Material
 
 func (s *Scene) swapRemoveInstancedMesh(payloadIdx uint32) {
 	d := &s.instancedMeshes[payloadIdx]
-	d.geometry.Release()
-	d.material.Release()
+	for _, l := range d.lods {
+		l.geometry.Release()
+		l.material.Release()
+	}
 	last := uint32(len(s.instancedMeshes) - 1)
 	if payloadIdx != last {
 		s.instancedMeshes[payloadIdx] = s.instancedMeshes[last]

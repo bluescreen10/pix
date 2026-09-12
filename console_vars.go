@@ -38,18 +38,20 @@ func (r *Renderer) registerBuiltins(c *console.Console) {
 	bindColor(c, "clear.color", r.ClearColor, r.SetClearColor,
 		"background colour, \"r g b a\" in [0,1]")
 
-	// The G-buffer view is an enum, so it goes through Register with its own names
-	// rather than Bind — "set gbuffer normal" reads better than a magic number, and
-	// the error lists what is valid.
-	c.Register("gbuffer", "show one G-buffer target instead of the shaded frame: "+
-		strings.Join(DebugViewNames(), "/")+" (needs `deferred on`)",
+	// The debug view is an enum, so it goes through Register with its own names
+	// rather than Bind — "set debug normal" reads better than a magic number, and
+	// the error lists what is valid. Most of these (albedo..position) are G-buffer
+	// targets and need `deferred on`; objectid/triangleid are a separate, always-
+	// available pass (see DebugView's doc comment) and are exempt from that check.
+	c.Register("debug", "show one debug view instead of the shaded frame: "+
+		strings.Join(DebugViewNames(), "/")+" (albedo..position need `deferred on`; objectid/triangleid always work)",
 		func() string { return r.DebugView().String() },
 		func(v string) error {
 			view, ok := ParseDebugView(v)
 			if !ok {
 				return fmt.Errorf("unknown view %q; want one of %s", v, strings.Join(DebugViewNames(), ", "))
 			}
-			if view != DebugOff && !r.DeferredEnabled() {
+			if view != DebugOff && view < DebugObjectID && !r.DeferredEnabled() {
 				return fmt.Errorf("deferred rendering is off, so there is no G-buffer to show — `set deferred on` first")
 			}
 			r.SetDebugView(view)

@@ -102,6 +102,13 @@ type Scene struct {
 	// and drawList.sync (drawlist.go), which uploads them into one contiguous buffer.
 	instanceTransforms []glm.Mat4f
 
+	// lodEntries is the scene's shared table of LOD-group configs: one gpuLODEntry
+	// per Mesh/InstancedMesh (later SkinnedMesh) that has ever had AddLOD called on
+	// it, indexed by that object's lodGroupID. Index 0 is a reserved, unused zero
+	// entry — a gpuDrawable.lodID of 0 means "not LOD-tagged", so lodGroupID must
+	// never be 0 for an object that actually has LOD levels. See rebuildLODEntry.
+	lodEntries []gpuLODEntry
+
 	particleContainers []particleData
 
 	// Skinning: skeletons (bone hierarchies + inverse binds) and skinned meshes
@@ -379,8 +386,10 @@ func (s *Scene) destroyNode(id NodeID) {
 
 func (s *Scene) swapRemoveMesh(payloadIdx uint32) {
 	md := &s.meshes[payloadIdx]
-	md.geometry.Release()
-	md.material.Release()
+	for _, l := range md.lods {
+		l.geometry.Release()
+		l.material.Release()
+	}
 	last := uint32(len(s.meshes) - 1)
 	if payloadIdx != last {
 		s.meshes[payloadIdx] = s.meshes[last]
@@ -502,14 +511,19 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []materials.Material) {
 		if s.flags[md.ownerNode]&flagReceiveShadow != 0 {
 			flags |= DrawableReceivesShadow
 		}
-		out = append(out, gpuDrawable{
-			bounds:      [4]float32{md.bounds.Center[0], md.bounds.Center[1], md.bounds.Center[2], md.bounds.Radius},
-			transformID: md.ownerNode,
-			geometryID:  md.geometry.ID(),
-			materialID:  md.material.ID(),
-			flags:       flags,
-		})
-		materials = append(materials, md.material)
+		bounds := [4]float32{md.bounds.Center[0], md.bounds.Center[1], md.bounds.Center[2], md.bounds.Radius}
+		for lvl, l := range md.lods {
+			out = append(out, gpuDrawable{
+				bounds:      bounds,
+				transformID: md.ownerNode,
+				geometryID:  l.geometry.ID(),
+				materialID:  l.material.ID(),
+				flags:       flags,
+				lodID:       md.lodGroupID,
+				lodLevel:    uint32(lvl),
+			})
+			materials = append(materials, l.material)
+		}
 	}
 	for _, sm := range s.skinnedMeshes.All() {
 		// Both must be attached: the mesh node puts it in the scene, and the
@@ -551,18 +565,49 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []materials.Material) {
 		if s.flags[im.ownerNode]&flagReceiveShadow != 0 {
 			flags |= DrawableReceivesShadow
 		}
+		bounds := [4]float32{im.bounds.Center[0], im.bounds.Center[1], im.bounds.Center[2], im.bounds.Radius}
 		for j := uint32(0); j < im.count; j++ {
-			out = append(out, gpuDrawable{
-				bounds:      [4]float32{im.bounds.Center[0], im.bounds.Center[1], im.bounds.Center[2], im.bounds.Radius},
-				transformID: instanceBase + im.transformBase + j,
-				geometryID:  im.geometry.ID(),
-				materialID:  im.material.ID(),
-				flags:       flags,
-			})
-			materials = append(materials, im.material)
+			for lvl, l := range im.lods {
+				out = append(out, gpuDrawable{
+					bounds:      bounds,
+					transformID: instanceBase + im.transformBase + j,
+					geometryID:  l.geometry.ID(),
+					materialID:  l.material.ID(),
+					flags:       flags,
+					lodID:       im.lodGroupID,
+					lodLevel:    uint32(lvl),
+				})
+				materials = append(materials, l.material)
+			}
 		}
 	}
 	return out, materials
+}
+
+// rebuildLODEntry (re)writes the gpuLODEntry for one LOD group from its current
+// levels, allocating a slot in s.lodEntries the first time (id starts at 0, the
+// reserved "not LOD-tagged" sentinel) and overwriting it in place on every later
+// AddLOD/SetLODHysteresis call. Shared by Mesh.AddLOD and InstancedMesh.AddLOD (and
+// their SetLODHysteresis counterparts) — the entry's shape doesn't care which kind of
+// object owns it.
+func (s *Scene) rebuildLODEntry(id *uint32, lods []lodLevel, hysteresis float32) {
+	var e gpuLODEntry
+	e.hysteresis = hysteresis
+	e.levelCount = uint32(len(lods))
+	// boundaries[i] is where level i ends and level i+1 begins — i.e. level i+1's own
+	// minDistance (see lodLevel/AddLOD's doc comments).
+	for i := 0; i < len(lods)-1; i++ {
+		e.boundaries[i] = lods[i+1].minDistance
+	}
+	if *id == 0 {
+		if len(s.lodEntries) == 0 {
+			s.lodEntries = append(s.lodEntries, gpuLODEntry{}) // index 0 reserved
+		}
+		*id = uint32(len(s.lodEntries))
+		s.lodEntries = append(s.lodEntries, e)
+	} else {
+		s.lodEntries[*id] = e
+	}
 }
 
 // MeshCount returns the number of mesh nodes in the scene.
@@ -709,13 +754,17 @@ func partitionFloat32(v []float32, lo, hi int) int {
 // Destroy releases the scene's GPU buffers, lights and mesh resource references.
 func (s *Scene) Destroy() {
 	for i := range s.meshes {
-		s.meshes[i].geometry.Release()
-		s.meshes[i].material.Release()
+		for _, l := range s.meshes[i].lods {
+			l.geometry.Release()
+			l.material.Release()
+		}
 	}
 	s.meshes = nil
 	for i := range s.instancedMeshes {
-		s.instancedMeshes[i].geometry.Release()
-		s.instancedMeshes[i].material.Release()
+		for _, l := range s.instancedMeshes[i].lods {
+			l.geometry.Release()
+			l.material.Release()
+		}
 	}
 	s.instancedMeshes = nil
 	s.instanceTransforms = nil
