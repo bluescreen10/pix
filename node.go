@@ -127,6 +127,10 @@ func (n Node) SetCastShadow(b bool) {
 	} else {
 		n.scene.flags[n.slot()] &^= flagCastShadow
 	}
+	// Both bits are baked into gpuDrawable.flags by collectDrawables, so a toggle
+	// after the draw list was last built is invisible until the drawables are
+	// rebuilt from the new flags.
+	n.scene.drawableDirty = true
 }
 
 func (n Node) ReceiveShadow() bool {
@@ -139,6 +143,10 @@ func (n Node) SetReceiveShadow(b bool) {
 	} else {
 		n.scene.flags[n.slot()] &^= flagReceiveShadow
 	}
+	// Both bits are baked into gpuDrawable.flags by collectDrawables, so a toggle
+	// after the draw list was last built is invisible until the drawables are
+	// rebuilt from the new flags.
+	n.scene.drawableDirty = true
 }
 
 // Destroy removes this node and its entire subtree.

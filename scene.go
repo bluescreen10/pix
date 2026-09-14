@@ -135,6 +135,15 @@ type Scene struct {
 
 	drawableDirty bool
 
+	// drawables and drawMaterials are the last collectDrawables output, retained so a
+	// frame that changed nothing structural does not rewalk the payload lists. They are
+	// parallel: drawMaterials[i] is the material drawables[i] references, which is what
+	// lets the renderer resolve one pipeline id per drawable without a second traversal
+	// that would have to re-derive this walk's order and its flagAttached filtering.
+	// Valid whenever drawableDirty is false; refilled by the renderer's syncDrawList.
+	drawables     []gpuDrawable
+	drawMaterials []materials.Material
+
 	// shadowsEnabled mirrors the renderer's global shadow toggle, written by the
 	// renderer each frame before Sync (it owns the toggle; the light table is what
 	// consumes it). False on a Scene synced without a renderer, which is the safe

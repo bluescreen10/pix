@@ -931,40 +931,30 @@ func (r *Renderer) syncScene(scene *Scene, cam Camera, cmd gpu.CommandBuffer) {
 	scene.Sync()
 	up.End(cmd)
 
+	r.syncDrawList(scene)
+}
+
+// syncDrawList refreshes the scene's batches for this frame. The drawables and their
+// materials are collected only on a structural change (drawableDirty); the pipeline
+// ids are re-resolved every frame off that cached material slice, because a material
+// can change pipeline (a shader swap, a blend-mode change) without the draw list
+// structure moving at all.
+//
+// Resolving straight off the cached materials is also what keeps pipeBuf aligned with
+// the drawables: both come from the one collectDrawables walk, so there is no second
+// traversal that has to independently reproduce its ordering and its flagAttached
+// filtering. A new object kind on Scene costs nothing here.
+func (r *Renderer) syncDrawList(scene *Scene) {
 	dl := scene.drawList
+	if scene.drawableDirty {
+		scene.drawables, scene.drawMaterials = scene.collectDrawables()
+	}
 	dl.pipeBuf = dl.pipeBuf[:0]
-	for i := range scene.meshes {
-		// One pipeline id per LOD level: collectDrawables emits one gpuDrawable per
-		// level (1 in the common non-LOD case), and dl.pipeBuf must stay parallel to
-		// that, not to the mesh count.
-		//TODO: maybe the material should have a []pipelineKey (or pipelineID) stored
-		for _, l := range scene.meshes[i].lods {
-			dl.pipeBuf = append(dl.pipeBuf, r.pipelineForMaterial(l.material))
-		}
-	}
-	// Order must match collectDrawables (meshes, then skinnedMeshes.All(), then
-	// instancedMeshes) — both calls run back-to-back here with no scene mutation
-	// between them, so the slab iteration order is identical.
-	for _, sm := range scene.skinnedMeshes.All() {
-		dl.pipeBuf = append(dl.pipeBuf, r.pipelineForMaterial(sm.material))
-	}
-	for i := range scene.instancedMeshes {
-		// One pipeline id per (instance, LOD level) pair — same reasoning as above,
-		// nested inside the existing per-instance loop. Every instance of a field
-		// shares the same levels, so each level's pipeline is resolved once and
-		// reused across all instances.
-		im := &scene.instancedMeshes[i]
-		pids := make([]uint32, len(im.lods))
-		for lvl, l := range im.lods {
-			pids[lvl] = r.pipelineForMaterial(l.material)
-		}
-		for j := uint32(0); j < im.count; j++ {
-			dl.pipeBuf = append(dl.pipeBuf, pids...)
-		}
+	for _, m := range scene.drawMaterials {
+		dl.pipeBuf = append(dl.pipeBuf, r.pipelineForMaterial(m))
 	}
 	if scene.drawableDirty || !slices.Equal(dl.pipeBuf, dl.batchedPipelines) {
-		drawables, materials := scene.collectDrawables()
-		dl.rebuild(drawables, dl.pipeBuf, materials, r.GeometryStore, scene.lodEntries)
+		dl.rebuild(scene.drawables, dl.pipeBuf, scene.drawMaterials, r.GeometryStore, scene.lodEntries)
 		scene.drawableDirty = false
 	}
 }
