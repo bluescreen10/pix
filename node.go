@@ -101,7 +101,12 @@ func (n Node) WorldTransform() glm.Mat4f { return n.scene.world[n.slot()] }
 func (n Node) Transform() glm.Mat4f { return n.scene.local[n.slot()] }
 
 // WorldTransformInv returns the cached inverse of the world-space matrix.
-func (n Node) WorldTransformInv() glm.Mat4f { return n.scene.worldInv[n.slot()] }
+// WorldTransformInv computes the inverse of the cached world-space matrix.
+// Computed on demand rather than cached: the only other reader is skeleton
+// root inversion (Scene.syncSkinning), which computes its own directly, so a
+// scene of many moving nodes was previously paying this inverse for every one
+// of them regardless of whether anything ever read it.
+func (n Node) WorldTransformInv() glm.Mat4f { return n.scene.world[n.slot()].Inv() }
 
 // Flags
 

@@ -71,9 +71,8 @@ type Scene struct {
 	nextSiblings  []NodeID
 	prevSiblings  []NodeID
 
-	local    []glm.Mat4f
-	world    []glm.Mat4f
-	worldInv []glm.Mat4f
+	local []glm.Mat4f
+	world []glm.Mat4f
 
 	transforms []Transform
 
@@ -90,6 +89,18 @@ type Scene struct {
 
 	topoOrder []uint32
 	topoDirty bool
+	// topoPos is topoOrder's reverse index: topoPos[idx] is idx's own position in
+	// topoOrder, or invalidIdx if idx has no live entry there (never attached, or
+	// its entry was tombstoned — see detachFromParent/reparent's fast paths).
+	// Rebuilt in full by flushTopoIfDirty, so it stays authoritative even across
+	// fast-path appends that a later full rebuild supersedes.
+	topoPos []uint32
+	// topoHoles counts tombstoned (invalidIdx) entries currently sitting in
+	// topoOrder, put there by detachFromParent's fast path instead of a full
+	// rebuild. Bounded to under half of len(topoOrder) — see detachFromParent —
+	// so a scene that only ever attaches/detaches leaves never grows topoOrder
+	// unboundedly full of dead entries.
+	topoHoles int
 	root      NodeID
 
 	meshes []meshData
@@ -242,13 +253,13 @@ func (s *Scene) allocNode(kind NodeKind) NodeID {
 		s.prevSiblings = append(s.prevSiblings, NodeID{})
 		s.local = append(s.local, glm.Mat4fIndentity)
 		s.world = append(s.world, glm.Mat4fIndentity)
-		s.worldInv = append(s.worldInv, glm.Mat4fIndentity)
 		s.transforms = append(s.transforms, defaultTransform)
 		s.flags = append(s.flags, flagAlive|flagLocalVisible|flagCastShadow|flagReceiveShadow|flagDirty|flagVisibleDirty)
 		s.generation = append(s.generation, 1)
 		s.kind = append(s.kind, kind)
 		s.payload = append(s.payload, 0)
 		s.names = append(s.names, "")
+		s.topoPos = append(s.topoPos, invalidIdx)
 		// A grown s.world shifts where collectDrawables addresses instanceTransforms
 		// (InstancedMesh drawables use len(s.world) as their base offset — see
 		// instanced_mesh.go) — every drawable built against the old length would read
@@ -268,12 +279,17 @@ func (s *Scene) resetSlot(idx uint32, kind NodeKind) {
 	s.prevSiblings[idx] = NodeID{}
 	s.local[idx] = glm.Mat4fIndentity
 	s.world[idx] = glm.Mat4fIndentity
-	s.worldInv[idx] = glm.Mat4fIndentity
 	s.transforms[idx] = defaultTransform
 	s.flags[idx] = flagAlive | flagLocalVisible | flagCastShadow | flagReceiveShadow | flagDirty | flagVisibleDirty
 	s.kind[idx] = kind
 	s.payload[idx] = 0
 	s.names[idx] = ""
+	// Not necessarily invalidIdx already: this slot may be a recycled node whose
+	// old topoOrder entry (if any) is still a live tombstone target for
+	// detachFromParent/reparent's fast paths to find — but that entry belonged to
+	// the PREVIOUS occupant, already invalidated when it was destroyed (destroyNode
+	// always detaches first). A fresh slot starts detached either way.
+	s.topoPos[idx] = invalidIdx
 }
 
 func (s *Scene) validate(id NodeID) {
@@ -305,13 +321,31 @@ func (s *Scene) reparent(child, newParent NodeID) {
 	}
 	s.lastChildren[newParent.index] = child
 	s.flags[child.index] |= flagDirty
-	s.topoDirty = true
+	// A leaf attaching under an already-attached parent can be appended straight
+	// to the end of topoOrder: the parent (and everything above it) is already
+	// somewhere earlier in the array, so parent-before-child holds trivially — no
+	// walk needed. detachFromParent just ran above, so if child had a live entry
+	// from a previous attachment it is already tombstoned; this never leaves two
+	// live entries for the same node. Anything else (child has children, so its
+	// whole subtree's flagAttached needs recomputing; or newParent isn't attached,
+	// so child isn't actually visible yet either) falls back to the existing full
+	// rebuild.
+	leaf := !s.firstChildren[child.index].isValid()
+	parentAttached := s.flags[newParent.index]&flagAttached != 0
+	if leaf && parentAttached && !s.topoDirty {
+		s.topoPos[child.index] = uint32(len(s.topoOrder))
+		s.topoOrder = append(s.topoOrder, child.index)
+		s.flags[child.index] |= flagAttached
+	} else {
+		s.topoDirty = true
+	}
 	// Reparenting can change flagAttached for child (and everything under it) once
 	// flushTopoIfDirty runs — which shifts every OTHER attached mesh's position in
-	// whatever collectDrawables produces next, not just child's own. Both dirty
-	// flags are unconditional here for the same reason destroyNode's is: cheap to
-	// over-trigger, and a narrower "only if this specific node..." check would miss
-	// the reindexing risk to unrelated meshes.
+	// whatever collectDrawables produces next, not just child's own. Unconditional
+	// here for the same reason destroyNode's is: cheap to over-trigger, and a
+	// narrower "only if this specific node..." check would miss the reindexing
+	// risk to unrelated meshes. Separate concern from the topology bookkeeping
+	// above, which is why it doesn't follow the fast/slow branch.
 	s.drawableDirty = true
 }
 
@@ -335,10 +369,38 @@ func (s *Scene) detachFromParent(child NodeID) {
 	s.parents[child.index] = NodeID{}
 	s.prevSiblings[child.index] = NodeID{}
 	s.nextSiblings[child.index] = NodeID{}
-	s.topoDirty = true
+	// A leaf (no children) can be pulled out of topoOrder in place, without the
+	// full rebuild every other case needs: nothing else in the tree depends on
+	// its position, and it has no descendants whose own flagAttached would go
+	// stale. Tombstone its entry (a live entry can never equal invalidIdx) rather
+	// than compact the array, so this stays O(1) instead of an O(topoOrder) shift;
+	// flushTopoIfDirty is what eventually reclaims the dead slot (see its comment).
+	// A node WITH children still needs the full rebuild — nothing else recomputes
+	// flagAttached for a whole detached subtree — so it falls back to the
+	// unconditional topoDirty every other structural change already used.
+	if leaf := !s.firstChildren[child.index].isValid(); leaf && !s.topoDirty {
+		if pos := s.topoPos[child.index]; pos != invalidIdx {
+			s.topoOrder[pos] = invalidIdx
+			s.topoPos[child.index] = invalidIdx
+			s.topoHoles++
+		}
+		s.flags[child.index] &^= flagAttached
+		// Keep tombstones under half the array: bounds topoOrder's growth for a
+		// scene that only ever attaches/detaches leaves (e.g. continuous
+		// bullet-hole-style spawning) instead of letting it fill up with dead
+		// entries forever. The 64 floor avoids rebuilding a tiny scene on every
+		// other churn.
+		if s.topoHoles > len(s.topoOrder)/2 && len(s.topoOrder) > 64 {
+			s.topoDirty = true
+		}
+	} else {
+		s.topoDirty = true
+	}
 	// See reparent's comment: detaching (whether standalone via Node.Remove, or as
 	// reparent's first step) can drop child out of flagAttached, reindexing every
-	// OTHER attached mesh in collectDrawables' next output.
+	// OTHER attached mesh in collectDrawables' next output. Drawable-list content
+	// is a separate concern from the topology bookkeeping above — unconditional
+	// here regardless of which path that took.
 	s.drawableDirty = true
 }
 
@@ -390,7 +452,12 @@ func (s *Scene) destroyNode(id NodeID) {
 	s.freeHead = idx
 	//TODO: in the future detect if drawable needs to be rebuilt
 	s.drawableDirty = true
-	s.topoDirty = true
+	// No topoDirty here: detachFromParent above already set it correctly (fast or
+	// slow path). destroyNode is only ever reached from destroySubtree, bottom-up
+	// after every descendant is already gone (grep confirms the sole call site),
+	// so idx is always a leaf here — every single-node destroy is fast-path
+	// eligible, and a whole subtree destroy becomes N fast-path detaches instead
+	// of N full topology rebuilds.
 }
 
 func (s *Scene) swapRemoveMesh(payloadIdx uint32) {
@@ -414,7 +481,13 @@ func (s *Scene) flushTopoIfDirty() {
 	s.topoOrder = s.topoOrder[:0]
 	for i := range s.flags {
 		s.flags[i] &^= flagAttached
+		// Full rebuild is the authoritative reset for topoPos too: whatever a
+		// fast-path append left behind (detachFromParent/reparent) gets wiped here
+		// regardless, so those paths never need to stay consistent with a rebuild
+		// that supersedes them.
+		s.topoPos[i] = invalidIdx
 	}
+	s.topoHoles = 0
 	queue := []uint32{s.root.index}
 	for len(queue) > 0 {
 		idx := queue[0]
@@ -422,6 +495,7 @@ func (s *Scene) flushTopoIfDirty() {
 		if s.flags[idx]&flagAlive == 0 {
 			continue
 		}
+		s.topoPos[idx] = uint32(len(s.topoOrder))
 		s.topoOrder = append(s.topoOrder, idx)
 		s.flags[idx] |= flagAttached
 		child := s.firstChildren[idx]
@@ -440,6 +514,11 @@ func (s *Scene) flushTopoIfDirty() {
 func (s *Scene) updateTransforms() bool {
 	anyDirty := false
 	for _, i := range s.topoOrder {
+		// A tombstone left by detachFromParent's fast path (see its doc comment) —
+		// not a real node index.
+		if i == invalidIdx {
+			continue
+		}
 		if s.flags[i]&flagDirty == 0 {
 			continue
 		}
@@ -451,11 +530,6 @@ func (s *Scene) updateTransforms() bool {
 		} else {
 			s.world[i] = s.world[p.index].Mul4x4(s.local[i])
 		}
-		//TODO: compute worldInv lazily. Every dirty node pays a full 4x4 inverse
-		// here, but the only readers are skeleton roots (Scene.syncSkinning) and
-		// the public Node.WorldTransformInv accessor — so in a scene of 10k static
-		// boxes, 10k inversions per dirty pass are thrown away unread.
-		s.worldInv[i] = s.world[i].Inv()
 		s.flags[i] &^= flagDirty
 		child := s.firstChildren[i]
 		for child.isValid() {

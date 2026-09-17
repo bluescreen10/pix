@@ -204,7 +204,7 @@ func (s *Scene) syncSkinning() {
 		return
 	}
 	for _, sk := range s.skeletons.All() {
-		rootInv := s.worldInv[sk.ownerNode]
+		rootInv := s.world[sk.ownerNode].Inv()
 		n := len(sk.bones)
 		if cap(sk.jointPos) < n {
 			sk.jointPos = make([]glm.Vec3f, n)
