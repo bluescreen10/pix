@@ -1312,7 +1312,7 @@ func (r *Renderer) skinCommands(scene *Scene) []skinCmd {
 	for _, sm := range scene.skinnedMeshes.All() {
 		sk := scene.skeletons.Get(sm.skeleton)
 		r.skinScratch = append(r.skinScratch, skinCmd{
-			srcDesc: sm.srcGeometry.ID(), dstDesc: sm.outputGeo.ID(),
+			srcDesc: sm.srcGeometry.ID().Slot, dstDesc: sm.outputGeo.ID().Slot,
 			jointBase: sk.jointBase, vertexCount: sm.vertCount,
 		})
 	}
@@ -1363,8 +1363,8 @@ func (r *Renderer) dispatchParticleUpdate(cmd gpu.CommandBuffer, scene *Scene) {
 			writeAt(d.pendingBuf, 0, toBytes(d.pending))
 		}
 		writeAt(d.indirectBuf, 0, utils.ToBytes(&indirectCmd{
-			indexCount: r.GeometryStore.IndexCount(d.geometry.ID()),
-			firstIndex: r.GeometryStore.IndexBase(d.geometry.ID()),
+			indexCount: r.GeometryStore.IndexCount(d.geometry.ID().Slot),
+			firstIndex: r.GeometryStore.IndexBase(d.geometry.ID().Slot),
 		}))
 
 		dt := d.dt
@@ -1454,7 +1454,7 @@ func (r *Renderer) drawParticles(cmd gpu.CommandBuffer, scene *Scene, viewProj g
 			models: scene.drawList.worldBuf.Addr, particles: d.buffers[d.current].Addr,
 			materials: d.material.Pool().RecordsAddr(), lights: scene.lights.Addr(),
 			eye:        glm.Vec4f{eye[0], eye[1], eye[2], 1},
-			geometryID: d.geometry.ID(), materialID: d.material.ID().Slot, transformID: d.ownerNode,
+			geometryID: d.geometry.ID().Slot, materialID: d.material.ID().Slot, transformID: d.ownerNode,
 			time: scene.elapsed,
 		}
 		cmd.SetPipeline(r.drawPipelines[d.pipelineIdx])

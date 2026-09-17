@@ -65,6 +65,11 @@ func (id NodeID) isValid() bool { return id.gen != 0 }
 type Scene struct {
 	backend gpu.Backend
 
+	// sourceID is this scene's identity as a packet producer, minted at construction
+	// and never reused. A renderer keys its per-source GPU cache on it, so a destroyed
+	// scene must not hand its identity to the next one — see FramePacket.Source.
+	sourceID SourceID
+
 	parents       []NodeID
 	firstChildren []NodeID
 	lastChildren  []NodeID
@@ -188,7 +193,10 @@ type Scene struct {
 
 // NewScene creates an empty scene bound to a backend (usually via Renderer.NewScene).
 func NewScene(backend gpu.Backend) *Scene {
-	s := &Scene{backend: backend, freeHead: invalidIdx, topoDirty: true, clockStart: time.Now()}
+	s := &Scene{
+		backend: backend, freeHead: invalidIdx, topoDirty: true,
+		clockStart: time.Now(), sourceID: NewSourceID(),
+	}
 	s.skeletons = mem.NewSlab[skeletonData]()
 	s.skinnedMeshes = mem.NewSlab[skinnedMeshData]()
 	s.lights = NewLights(backend)
@@ -197,6 +205,12 @@ func NewScene(backend gpu.Backend) *Scene {
 	s.flags[s.root.index] = flagAlive | flagLocalVisible | flagVisible
 	return s
 }
+
+// ID is the scene's identity as a packet producer. A renderer caches GPU state per
+// source, so pass this to Renderer.ReleaseSource when the scene is done with — scene
+// teardown does not reach into a renderer to do it, and a renderer that never hears
+// about the destruction would hold the cache forever.
+func (s *Scene) ID() SourceID { return s.sourceID }
 
 // Root returns the scene's root node.
 func (s *Scene) Root() Node { return Node{scene: s, id: s.root} }
@@ -595,24 +609,9 @@ func (s *Scene) collectDrawables() {
 		s.matSlot = make(map[materials.ID]uint32)
 	}
 	clear(s.matSlot)
-	out := s.drawables[:0]
-	matIdx := s.drawMatIndex[:0]
+	s.drawables = s.drawables[:0]
+	s.drawMatIndex = s.drawMatIndex[:0]
 	s.drawMaterials = s.drawMaterials[:0]
-	// emit records one drawable and the slot of the material it references, adding that
-	// material to the distinct set the first time it is seen. Instanced meshes are why
-	// this pays: every instance of every LOD level emits a drawable, and they all share
-	// the handful of materials the mesh was built with.
-	emit := func(d gpuDrawable, m materials.Material) {
-		out = append(out, d)
-		id := m.ID()
-		slot, ok := s.matSlot[id]
-		if !ok {
-			slot = uint32(len(s.drawMaterials))
-			s.drawMaterials = append(s.drawMaterials, m)
-			s.matSlot[id] = slot
-		}
-		matIdx = append(matIdx, slot)
-	}
 	for i := range s.meshes {
 		md := &s.meshes[i]
 		if s.flags[md.ownerNode]&flagAttached == 0 {
@@ -627,10 +626,10 @@ func (s *Scene) collectDrawables() {
 		}
 		bounds := [4]float32{md.bounds.Center[0], md.bounds.Center[1], md.bounds.Center[2], md.bounds.Radius}
 		for lvl, l := range md.lods {
-			emit(gpuDrawable{
+			s.addDrawable(gpuDrawable{
 				bounds:      bounds,
 				transformID: md.ownerNode,
-				geometryID:  l.geometry.ID(),
+				geometryID:  l.geometry.ID().Slot,
 				materialID:  l.material.ID().Slot,
 				flags:       flags,
 				lodID:       md.lodGroupID,
@@ -652,10 +651,10 @@ func (s *Scene) collectDrawables() {
 		if s.flags[sm.ownerNode]&flagReceiveShadow != 0 {
 			flags |= DrawableReceivesShadow
 		}
-		emit(gpuDrawable{
+		s.addDrawable(gpuDrawable{
 			bounds:      [4]float32{sm.bounds.Center[0], sm.bounds.Center[1], sm.bounds.Center[2], sm.bounds.Radius},
 			transformID: root,
-			geometryID:  sm.outputGeo.ID(),
+			geometryID:  sm.outputGeo.ID().Slot,
 			materialID:  sm.material.ID().Slot,
 			flags:       flags,
 		}, sm.material)
@@ -680,10 +679,10 @@ func (s *Scene) collectDrawables() {
 		bounds := [4]float32{im.bounds.Center[0], im.bounds.Center[1], im.bounds.Center[2], im.bounds.Radius}
 		for j := uint32(0); j < im.count; j++ {
 			for lvl, l := range im.lods {
-				emit(gpuDrawable{
+				s.addDrawable(gpuDrawable{
 					bounds:      bounds,
 					transformID: instanceBase + im.transformBase + j,
-					geometryID:  l.geometry.ID(),
+					geometryID:  l.geometry.ID().Slot,
 					materialID:  l.material.ID().Slot,
 					flags:       flags,
 					lodID:       im.lodGroupID,
@@ -692,7 +691,24 @@ func (s *Scene) collectDrawables() {
 			}
 		}
 	}
-	s.drawables, s.drawMatIndex = out, matIdx
+}
+
+// addDrawable records one drawable and, alongside it, the slot of the material it
+// references — adding that material to the distinct set the first time it is seen.
+//
+// Instanced meshes are why the dedup pays: every instance of every LOD level emits its
+// own drawable, and all of them share the handful of materials the mesh was built with.
+// A thousand-instance field contributes a thousand drawables and one material entry.
+func (s *Scene) addDrawable(d gpuDrawable, m materials.Material) {
+	s.drawables = append(s.drawables, d)
+	id := m.ID()
+	slot, seen := s.matSlot[id]
+	if !seen {
+		slot = uint32(len(s.drawMaterials))
+		s.drawMaterials = append(s.drawMaterials, m)
+		s.matSlot[id] = slot
+	}
+	s.drawMatIndex = append(s.drawMatIndex, slot)
 }
 
 // rebuildLODEntry (re)writes the gpuLODEntry for one LOD group from its current
