@@ -18,17 +18,22 @@ import (
 type drawList struct {
 	backend gpu.Backend
 
-	batches          []batch
-	runs             []pipelineRun // contiguous same-pipeline batch spans (one MDI call each)
-	regions          []uint32      // regionBase per batch (GPU mirror)
-	template         []indirectCmd // per-batch indirect args (reset each frame)
-	pipeBuf          []uint32      // scratch: per-mesh pipeline ids resolved each frame
-	roots            []drawRoot    // scratch: one drawRoot per pipeline run, pushed inline
-	batchedPipelines []uint32      // the pipeline assignment the current batches were built from
-	visCap           uint32
-	numInst          uint32
-	worldCap         uint32
-	lodCount         uint32 // len(Scene.lodEntries) as of the last rebuild
+	batches        []batch
+	runs           []pipelineRun // contiguous same-pipeline batch spans (one MDI call each)
+	regions        []uint32      // regionBase per batch (GPU mirror)
+	template       []indirectCmd // per-batch indirect args (reset each frame)
+	pipeBuf        []uint32      // scratch: per-drawable pipeline ids, expanded from matPipe
+	roots          []drawRoot    // scratch: one drawRoot per pipeline run, pushed inline
+	matPipe        []uint32      // scratch: one pipeline id per DISTINCT material, resolved each frame
+	batchedMatPipe []uint32      // the per-material pipeline assignment the current batches were built from
+	visCap         uint32
+	numInst        uint32
+	worldCap       uint32
+	lodCount       uint32 // len(Scene.lodEntries) as of the last rebuild
+	// rebuilds counts how many times the batch layout has been rebuilt. A diagnostic:
+	// a steady-state frame must not advance it, and neither must an edit that changes
+	// only a material's record (a tint), as opposed to its pipeline.
+	rebuilds uint64
 
 	worldBuf    gpu.Buffer // per-node world matrices (models), indexed by node slot
 	drawableBuf gpu.Buffer
@@ -98,11 +103,16 @@ func (d *drawList) sync(world, instances []glm.Mat4f) {
 // prevLevelBuf's hysteresis state — see the field doc). Called on structural change.
 // pipelines[i] is drawables[i]'s draw pipeline; lodEntries is the scene's lodEntries,
 // uploaded verbatim (indexed directly by gpuDrawable.lodID, no reordering needed).
-func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, mats []materials.Material, geometryStore *geometries.Store, lodEntries []gpuLODEntry) {
+//
+// Which pipeline assignment the batches were built from is remembered by syncDrawList,
+// per distinct material rather than per drawable — see batchedMatPipe.
+func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, mats []materials.Material, matIndex []uint32, geometryStore *geometries.Store, lodEntries []gpuLODEntry) {
 	type key struct{ pipeline, geo uint32 }
+	d.rebuilds++
 
 	// First pass: unique (pipeline, geometry) batches + their instance counts, and a
-	// representative material per pipeline (any drawable using that pipeline).
+	// representative material per pipeline (any drawable using that pipeline). mats is
+	// the distinct set, so matIndex[i] is where drawables[i]'s material sits in it.
 	index := map[key]uint32{}
 	rep := map[uint32]materials.Material{}
 	var raw []batch
@@ -110,7 +120,7 @@ func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, mats []m
 	for i := range drawables {
 		k := key{pipelines[i], drawables[i].geometryID}
 		if _, ok := rep[k.pipeline]; !ok {
-			rep[k.pipeline] = mats[i]
+			rep[k.pipeline] = mats[matIndex[i]]
 		}
 		bid, ok := index[k]
 		if !ok {
@@ -121,9 +131,6 @@ func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, mats []m
 		}
 		counts[bid]++
 	}
-
-	// Remember the pipeline assignment these batches were built from (change detection).
-	d.batchedPipelines = append(d.batchedPipelines[:0], pipelines...)
 
 	// Order batches: opaque pipelines before transparent (blended) ones so blending
 	// composites over the opaque scene; within each group, by pipeline (so a pipeline's

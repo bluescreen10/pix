@@ -32,13 +32,16 @@ func TestPipelineAlignmentDetachedMesh(t *testing.T) {
 
 	r.syncDrawList(scene)
 	pipes := scene.drawList.pipeBuf
-	drawables, mats := scene.drawables, scene.drawMaterials
+	drawables, mats, matIdx := scene.drawables, scene.drawMaterials, scene.drawMatIndex
 
 	if len(pipes) != len(drawables) {
 		t.Fatalf("pipeBuf has %d entries, collectDrawables emitted %d drawables", len(pipes), len(drawables))
 	}
+	if len(matIdx) != len(drawables) {
+		t.Fatalf("drawMatIndex has %d entries, collectDrawables emitted %d drawables", len(matIdx), len(drawables))
+	}
 	for i := range drawables {
-		if want := r.pipelineForMaterial(mats[i]); pipes[i] != want {
+		if want := r.pipelineForMaterial(mats[matIdx[i]]); pipes[i] != want {
 			t.Errorf("drawable %d: pipeline %d, want %d (its own material's)", i, pipes[i], want)
 		}
 	}

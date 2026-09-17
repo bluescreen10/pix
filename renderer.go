@@ -1000,29 +1000,39 @@ func (r *Renderer) syncScene(scene *Scene, cam Camera, cmd gpu.CommandBuffer) {
 	r.syncDrawList(scene)
 }
 
-// syncDrawList refreshes the scene's batches for this frame. The drawables and their
-// materials are collected only on a structural change (drawableDirty); the pipeline
-// ids are re-resolved every frame off that cached material slice, because a material
-// can change pipeline (a shader swap, a blend-mode change) without the draw list
-// structure moving at all.
+// syncDrawList refreshes the scene's batches for this frame. The drawables and the
+// distinct set of materials they reference are collected only on a structural change
+// (drawableDirty); the pipeline ids are re-resolved every frame off that cached
+// material set, because a material can change pipeline — a blend-mode or cull change —
+// without the draw list structure moving at all.
 //
-// Resolving straight off the cached materials is also what keeps pipeBuf aligned with
-// the drawables: both come from the one collectDrawables walk, so there is no second
-// traversal that has to independently reproduce its ordering and its flagAttached
-// filtering. A new object kind on Scene costs nothing here.
+// The work here is proportional to the number of distinct MATERIALS, not drawables.
+// A scene with ten thousand objects sharing six materials resolves six pipelines and
+// compares six ids; only when one of those six actually changes does anything touch
+// the per-drawable arrays. Resolving off the collected set is also what keeps pipeBuf
+// aligned with the drawables — both come from the one collectDrawables walk, so no
+// second traversal has to reproduce its ordering and its flagAttached filtering.
 func (r *Renderer) syncDrawList(scene *Scene) {
 	dl := scene.drawList
 	if scene.drawableDirty {
-		scene.drawables, scene.drawMaterials = scene.collectDrawables()
+		scene.collectDrawables()
 	}
-	dl.pipeBuf = dl.pipeBuf[:0]
+	dl.matPipe = dl.matPipe[:0]
 	for _, m := range scene.drawMaterials {
-		dl.pipeBuf = append(dl.pipeBuf, r.pipelineForMaterial(m))
+		dl.matPipe = append(dl.matPipe, r.pipelineForMaterial(m))
 	}
-	if scene.drawableDirty || !slices.Equal(dl.pipeBuf, dl.batchedPipelines) {
-		dl.rebuild(scene.drawables, dl.pipeBuf, scene.drawMaterials, r.GeometryStore, scene.lodEntries)
-		scene.drawableDirty = false
+	if !scene.drawableDirty && slices.Equal(dl.matPipe, dl.batchedMatPipe) {
+		return
 	}
+	// Something moved: expand the per-material pipelines back out to one per drawable,
+	// which is the form the batcher groups on.
+	dl.pipeBuf = dl.pipeBuf[:0]
+	for _, slot := range scene.drawMatIndex {
+		dl.pipeBuf = append(dl.pipeBuf, dl.matPipe[slot])
+	}
+	dl.rebuild(scene.drawables, dl.pipeBuf, scene.drawMaterials, scene.drawMatIndex, r.GeometryStore, scene.lodEntries)
+	dl.batchedMatPipe = append(dl.batchedMatPipe[:0], dl.matPipe...)
+	scene.drawableDirty = false
 }
 
 // prepareShadows ensures each shadow-casting directional light has a depth map and an

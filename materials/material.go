@@ -44,8 +44,8 @@ const (
 // Lighting are optional: a material that supplies BOTH renders through the G-buffer
 // (Deferred fills it, Lighting shades it in a fullscreen pass keyed to that shading
 // model); a material that supplies neither always renders forward. Custom material
-// types may supply any combination — see the Material interface's Deferred/Lighting
-// docs for the eligibility rule.
+// types may supply any combination — the renderer reads the eligibility off the pool,
+// so it is fixed for every material sharing that pool.
 type Shader struct {
 	Vertex   []byte // Backend-native bytes; nil => the default scene vertex-pull shader
 	Forward  []byte // Backend-native bytes; required — surface + lighting in one pass, outputs color

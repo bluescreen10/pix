@@ -146,14 +146,26 @@ type Scene struct {
 
 	drawableDirty bool
 
-	// drawables and drawMaterials are the last collectDrawables output, retained so a
-	// frame that changed nothing structural does not rewalk the payload lists. They are
-	// parallel: drawMaterials[i] is the material drawables[i] references, which is what
-	// lets the renderer resolve one pipeline id per drawable without a second traversal
-	// that would have to re-derive this walk's order and its flagAttached filtering.
-	// Valid whenever drawableDirty is false; refilled by the renderer's syncDrawList.
+	// The last collectDrawables output, retained so a frame that changed nothing
+	// structural does not rewalk the payload lists. Valid whenever drawableDirty is
+	// false; refilled by the renderer's syncDrawList.
+	//
+	// drawMaterials is the DISTINCT set of materials the drawables reference, and
+	// drawMatIndex is parallel to drawables: drawMatIndex[i] is the drawMaterials entry
+	// that drawables[i] uses. The indirection is the point. A scene draws far more
+	// objects than it has materials, so resolving a pipeline per entry in drawMaterials
+	// is O(distinct materials) where resolving it per drawable was O(objects) — and a
+	// material edit that changes a pipeline is then detected by comparing a list as long
+	// as the material set rather than as long as the scene.
+	//
+	// Both come out of the one collectDrawables walk, so nothing has to independently
+	// reproduce its ordering or its flagAttached filtering.
 	drawables     []gpuDrawable
 	drawMaterials []materials.Material
+	drawMatIndex  []uint32
+	// matSlot is collectDrawables' dedup scratch, keyed by material identity and reused
+	// across rebuilds so the walk does not allocate a map every time.
+	matSlot map[materials.ID]uint32
 
 	// shadowsEnabled mirrors the renderer's global shadow toggle, written by the
 	// renderer each frame before Sync (it owns the toggle; the light table is what
@@ -577,11 +589,30 @@ func (s *Scene) Sync() {
 // it was born with: drawing it anyway would silently place it at the origin,
 // ignoring every transform set on it. Skipping it instead makes the omission
 // obvious — the mesh is simply missing until it is added.
-func (s *Scene) collectDrawables() ([]gpuDrawable, []materials.Material) {
+func (s *Scene) collectDrawables() {
 	s.flushTopoIfDirty() // attachment is derived from the topological walk
-	n := len(s.meshes) + s.skinnedMeshes.Len()
-	out := make([]gpuDrawable, 0, n)
-	materials := make([]materials.Material, 0, n)
+	if s.matSlot == nil {
+		s.matSlot = make(map[materials.ID]uint32)
+	}
+	clear(s.matSlot)
+	out := s.drawables[:0]
+	matIdx := s.drawMatIndex[:0]
+	s.drawMaterials = s.drawMaterials[:0]
+	// emit records one drawable and the slot of the material it references, adding that
+	// material to the distinct set the first time it is seen. Instanced meshes are why
+	// this pays: every instance of every LOD level emits a drawable, and they all share
+	// the handful of materials the mesh was built with.
+	emit := func(d gpuDrawable, m materials.Material) {
+		out = append(out, d)
+		id := m.ID()
+		slot, ok := s.matSlot[id]
+		if !ok {
+			slot = uint32(len(s.drawMaterials))
+			s.drawMaterials = append(s.drawMaterials, m)
+			s.matSlot[id] = slot
+		}
+		matIdx = append(matIdx, slot)
+	}
 	for i := range s.meshes {
 		md := &s.meshes[i]
 		if s.flags[md.ownerNode]&flagAttached == 0 {
@@ -596,7 +627,7 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []materials.Material) {
 		}
 		bounds := [4]float32{md.bounds.Center[0], md.bounds.Center[1], md.bounds.Center[2], md.bounds.Radius}
 		for lvl, l := range md.lods {
-			out = append(out, gpuDrawable{
+			emit(gpuDrawable{
 				bounds:      bounds,
 				transformID: md.ownerNode,
 				geometryID:  l.geometry.ID(),
@@ -604,8 +635,7 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []materials.Material) {
 				flags:       flags,
 				lodID:       md.lodGroupID,
 				lodLevel:    uint32(lvl),
-			})
-			materials = append(materials, l.material)
+			}, l.material)
 		}
 	}
 	for _, sm := range s.skinnedMeshes.All() {
@@ -622,14 +652,13 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []materials.Material) {
 		if s.flags[sm.ownerNode]&flagReceiveShadow != 0 {
 			flags |= DrawableReceivesShadow
 		}
-		out = append(out, gpuDrawable{
+		emit(gpuDrawable{
 			bounds:      [4]float32{sm.bounds.Center[0], sm.bounds.Center[1], sm.bounds.Center[2], sm.bounds.Radius},
 			transformID: root,
 			geometryID:  sm.outputGeo.ID(),
 			materialID:  sm.material.ID().Slot,
 			flags:       flags,
-		})
-		materials = append(materials, sm.material)
+		}, sm.material)
 	}
 	// Instance transforms are addressed as if they sit right after every real node's
 	// world matrix — see the comment on Scene.instanceTransforms and allocNode's
@@ -651,7 +680,7 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []materials.Material) {
 		bounds := [4]float32{im.bounds.Center[0], im.bounds.Center[1], im.bounds.Center[2], im.bounds.Radius}
 		for j := uint32(0); j < im.count; j++ {
 			for lvl, l := range im.lods {
-				out = append(out, gpuDrawable{
+				emit(gpuDrawable{
 					bounds:      bounds,
 					transformID: instanceBase + im.transformBase + j,
 					geometryID:  l.geometry.ID(),
@@ -659,12 +688,11 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []materials.Material) {
 					flags:       flags,
 					lodID:       im.lodGroupID,
 					lodLevel:    uint32(lvl),
-				})
-				materials = append(materials, l.material)
+				}, l.material)
 			}
 		}
 	}
-	return out, materials
+	s.drawables, s.drawMatIndex = out, matIdx
 }
 
 // rebuildLODEntry (re)writes the gpuLODEntry for one LOD group from its current
