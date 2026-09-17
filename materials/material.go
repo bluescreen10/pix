@@ -1,7 +1,6 @@
 package materials
 
 import (
-	"bytes"
 	"unsafe"
 
 	"github.com/bluescreen10/gamekit/gpu"
@@ -62,11 +61,29 @@ type Shader struct {
 // do not discard on alpha, so a masked material routed deferred would silently render
 // as opaque. Add the flag together with the discard support, not before.
 
+// ID names one material by value: which pool holds its record, its slot in that pool,
+// and the slot's generation. It is the whole of what a renderer needs to find a
+// material, which is what lets a material reference travel as plain data — through a
+// frame packet, a GPU record index, an ECS component — instead of as a handle.
+//
+// Slot alone is not an identity. It is unique only within its pool, and only until the
+// slot is reused: after the last handle to a material is released the pool hands that
+// slot to the next one, and a stale Slot would then name a live material that is not
+// the one it was taken from. Gen is what distinguishes them — see Pool.Live.
+type ID struct {
+	Pool uint32 // Pool index within the owning Store (see Pool.Index).
+	Slot uint32 // Record index inside that pool.
+	Gen  uint32 // Slot generation, to survive reuse.
+}
+
 // Material is the handle a mesh holds. Each material type owns its own storage (a
 // per-type record buffer), and a Material value is a ref-counted instance in one of
-// those stores. The renderer issues all draws; a Material reports the pieces the
-// renderer needs to build its pipelines — the vertex/forward/deferred/lighting shaders
-// and the rasterization state (cull/blend) — plus where its record lives.
+// those stores. The renderer issues all draws.
+//
+// A Material answers only two questions about itself: which pool holds its record, and
+// which slot it occupies there. It reports nothing about how it is drawn — the shaders,
+// the rasterization state, the pipeline identity, the record buffer address all come
+// from the pool, which is keyed by those very shaders and so cannot be contradicted.
 //
 // The interface is NOT sealed — implement it from any package to add a material type
 // of your own. The built-ins each spell out every method themselves, against their own
@@ -88,49 +105,26 @@ type Material interface {
 	// Valid reports whether the underlying instance is still alive.
 	IsValid() bool
 
-	// Pipeline identity. Vertex nil means the default vertex-pull shader. Forward is
-	// always used for blended materials, and for opaque ones that do not supply both
-	// Deferred and Lighting. An opaque material supplying both renders through the
-	// G-buffer instead: Deferred fills it every frame, and Lighting shades it once per
-	// unique shading model (materials sharing a Lighting shader share a model, so one
-	// fullscreen pass lights all of them).
-	Vertex() []byte
-	Forward() []byte
-	Deferred() []byte // nil => this material always renders forward
-	Lighting() []byte // nil => this material always renders forward
-	Cull() CullMode
-	Blend() BlendMode
+	// ID names this instance: its pool, its slot, and the slot's generation.
+	ID() ID
 
-	// Hash is this material's pipeline identity: the renderer keys its pipeline cache
-	// on it instead of comparing SPIR-V every frame (this runs once per mesh per
-	// frame). What goes into it is the implementation's call — whatever distinguishes
-	// one of its pipelines from another. Anything the built-ins vary, their shaders,
-	// is covered by hashing the whole Shader (see Pool.Hash); a material that also
-	// varies on flags or specialization constants folds those in here too.
-	//
-	// The contract is only this: two materials returning the same Hash must be
-	// interchangeable in every pass. Return a constant, or leave out something that
-	// really does change the pipeline, and the renderer will quietly draw one of them
-	// with the other's shaders.
-	Hash() uint32
-
-	// Renderer-facing: the instance's index within its pool, and the pool's record
-	// buffer address (resolved at draw time — it moves when the pool grows).
-	ID() uint32
-	RecordsAddr() uint64
-
-	// Pool is where this material's record lives. Together with ID it is the whole of
-	// what the renderer needs: the pool carries the shaders (it is keyed by them, and
-	// they never change for its lifetime), the per-slot cull/blend, the record buffer
+	// Pool is where this material's record lives, and with it everything the renderer
+	// needs to draw the material: the shaders (a pool is keyed by them, and they never
+	// change for its lifetime), the per-slot cull and blend modes, the record buffer
 	// address, and a dense index to key per-pool state by.
 	//
-	// It is how the methods above are going away. Every one of them — Vertex, Forward,
-	// Deferred, Lighting, Cull, Blend, Hash, RecordsAddr — is already a pure forward to
-	// this pool in every implementation in the tree, which is the evidence that none of
-	// them is a question a material should be answering. A material that returned a
-	// non-nil Deferred() over a pool whose Shader().Deferred is nil would have the
-	// renderer build a G-buffer pipeline out of missing SPIR-V, and nothing here can
-	// stop it while the answer is the material's to give. See docs/frame-packet.md.
+	// This pair replaces the eight methods the interface used to require — Vertex,
+	// Forward, Deferred, Lighting, Cull, Blend, Hash, RecordsAddr. Every one of them
+	// was a pure forward to this pool in every implementation that ever existed, which
+	// is the evidence that none was a question a material should have been answering.
+	// Asking the pool instead also makes a whole class of answer unrepresentable: a
+	// material that returned a non-nil Deferred() over a pool whose Shader().Deferred
+	// is nil used to have the renderer build a G-buffer pipeline out of missing SPIR-V,
+	// and nothing could stop it while the answer was the material's to give.
+	//
+	// Cull and Blend are gone from this interface but remain on the concrete types,
+	// where they are ordinary accessors for application code rather than something the
+	// renderer consumes. See docs/frame-packet.md.
 	Pool() *Pool
 }
 
@@ -179,12 +173,6 @@ func SameSPIRV(a, b []byte) bool {
 	return len(a) == len(b) && unsafe.SliceData(a) == unsafe.SliceData(b)
 }
 
-// sameShader reports whether two Shaders carry identical SPIR-V in every stage.
-func sameShader(a, b Shader) bool {
-	return bytes.Equal(a.Vertex, b.Vertex) && bytes.Equal(a.Forward, b.Forward) &&
-		bytes.Equal(a.Deferred, b.Deferred) && bytes.Equal(a.Lighting, b.Lighting)
-}
-
 // Uploader is the minimal capability Sync needs to stage a copy into device memory.
 // Declared here, by the consumer, rather than imported from wherever an
 // implementation lives — this package takes no dependency on that package at all;
@@ -193,28 +181,32 @@ type Uploader interface {
 	Copy(dst gpu.Buffer, dstOffset uint32, data []byte)
 }
 
-// hashShader folds every stage of a Shader into one pipeline identity — the default
-// Material.Hash for anything whose pipelines vary only by shader (see Pool.Hash).
-func hashShader(sh Shader) uint32 {
-	const prime = uint32(16777619)
-	h := HashSPIRV(sh.Vertex)
+// hashShader folds every stage of a Shader into one 64-bit shader identity: the value
+// a Pool is keyed by, computed once when the pool is created (see Pool.Hash).
+//
+// 64 bits rather than 32 so the hash can *be* the identity. At 32 bits a match had to
+// be confirmed by comparing every byte of every stage, because a collision would have
+// silently handed a caller another shader's pool — and that comparison sat on the path
+// a glTF import walks hundreds of times.
+func hashShader(sh Shader) uint64 {
+	const prime = uint64(1099511628211)
+	h := HashBytes(sh.Vertex)
 	for _, b := range [][]byte{sh.Forward, sh.Deferred, sh.Lighting} {
 		for _, c := range b {
-			h = (h ^ uint32(c)) * prime
+			h = (h ^ uint64(c)) * prime
 		}
 		h = (h ^ 0xFF) * prime // stage separator, so concatenations can't alias
 	}
 	return h
 }
 
-// HashSPIRV is FNV-1a over SPIR-V bytes. Computed once per pool, so shader identity
-// checks (pool dedup, draw-pipeline dedup) are a uint32 compare, not a slice scan.
-// Exported as a building block for a custom Material's Hash.
-func HashSPIRV(b []byte) uint32 {
-	const offset, prime = uint32(2166136261), uint32(16777619)
+// HashBytes is FNV-1a over bytes. Computed once per pool, so shader identity
+// checks (pool dedup, draw-pipeline dedup) are an integer compare, not a slice scan.
+func HashBytes(b []byte) uint64 {
+	const offset, prime = uint64(14695981039346656037), uint64(1099511628211)
 	h := offset
 	for _, c := range b {
-		h = (h ^ uint32(c)) * prime
+		h = (h ^ uint64(c)) * prime
 	}
 	return h
 }

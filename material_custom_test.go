@@ -7,8 +7,8 @@ import (
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/ref"
 	"github.com/bluescreen10/pix/materials"
+	"github.com/bluescreen10/pix/ref"
 	"github.com/bluescreen10/pix/shaders"
 )
 
@@ -56,17 +56,11 @@ func (m *customMaterial) Copy() materials.Material { m.ref.Copy(); return m }
 func (m *customMaterial) Release()                 { m.ref.Release() }
 func (m *customMaterial) IsValid() bool            { return m.ref.IsValid() }
 
-func (m *customMaterial) Vertex() []byte   { return m.pool.Shader().Vertex }
-func (m *customMaterial) Forward() []byte  { return m.pool.Shader().Forward }
-func (m *customMaterial) Deferred() []byte { return nil }
-func (m *customMaterial) Lighting() []byte { return nil }
-
-func (m *customMaterial) Cull() materials.CullMode   { return m.pool.Cull(m.ref.ID()) }
-func (m *customMaterial) Blend() materials.BlendMode { return m.pool.Blend(m.ref.ID()) }
-
-func (m *customMaterial) Hash() uint32          { return m.pool.Hash() }
-func (m *customMaterial) ID() uint32            { return m.ref.ID() }
-func (m *customMaterial) RecordsAddr() uint64   { return m.pool.RecordsAddr() }
+// Two methods beyond the handle, and neither answers a question about rendering: the
+// pool does that. Everything this type used to forward — the four shader stages, cull,
+// blend, the pipeline hash, the record buffer address — was only ever m.pool asked the
+// long way round, and is now read from the pool directly.
+func (m *customMaterial) ID() materials.ID      { return m.pool.IDOf(m.ref) }
 func (m *customMaterial) Pool() *materials.Pool { return m.pool }
 func (m *customMaterial) SetColor(c colors.RGBA32F) {
 	m.color = c

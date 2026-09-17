@@ -46,9 +46,8 @@ type Pool struct {
 	// so it is stable for the store's lifetime and dense — which is what lets the
 	// renderer key per-pool state, such as its pipeline table, by array index rather
 	// than by lookup, and what lets a material be named by value as (pool, slot, gen).
-	index       uint32
-	forwardHash uint32 // hash of sh.Forward alone (pool dedup key)
-	hash        uint32 // hash of the whole Shader — every instance's Material.Hash
+	index uint32
+	hash  uint64 // hash of the whole Shader — this pool's identity, and its dedup key
 
 	entries mem.Slab[entry]
 
@@ -67,7 +66,7 @@ type Pool struct {
 func newPool(b gpu.Backend, sh Shader, label string, index uint32) *Pool {
 	s := &Pool{
 		backend: b, sh: sh, label: label, index: index, entries: mem.NewSlab[entry](),
-		forwardHash: HashSPIRV(sh.Forward), hash: hashShader(sh),
+		hash: hashShader(sh),
 	}
 	// The buffer is allocated by the first register, which is what reveals the stride.
 	return s
@@ -179,14 +178,21 @@ func (s *Pool) Sync(u Uploader) {
 }
 
 // RecordsAddr is the device address of the pool's record buffer, resolved at draw
-// time because it moves when the pool grows. Hash is the pipeline identity every
-// instance of this pool reports. Shader is the SPIR-V set the pool is keyed by.
+// time because it moves when the pool grows. Hash is this pool's shader identity, wide
+// enough to stand alone as its dedup key (see Store.Pool). Shader is the SPIR-V set the
+// pool is keyed by, and the source of truth for how its materials are drawn.
 func (s *Pool) RecordsAddr() uint64 { return s.buf.Addr }
-func (s *Pool) Hash() uint32        { return s.hash }
+func (s *Pool) Hash() uint64        { return s.hash }
 func (s *Pool) Shader() Shader      { return s.sh }
 
 // Index is this pool's dense, stable position in its owning Store — see the field.
 func (s *Pool) Index() uint32 { return s.index }
+
+// IDOf names one of this pool's instances by value. Material implementations return
+// it from ID(), so none of them has to know how an identity is put together.
+func (s *Pool) IDOf(r ref.Ref) ID {
+	return ID{Pool: s.index, Slot: r.ID(), Gen: r.Gen()}
+}
 
 // Live reports whether slot id still holds the same instance generation gen. A
 // reference carried as plain data cannot ref-count what it names, so whoever resolves

@@ -35,8 +35,8 @@ func TestDeferredPBRRenders(t *testing.T) {
 	if mat.Blend() != materials.BlendOpaque {
 		t.Fatalf("materials.PBRMaterial default blend = %v, want materials.BlendOpaque", mat.Blend())
 	}
-	if mat.Deferred() == nil || mat.Lighting() == nil {
-		t.Fatal("materials.PBRMaterial should provide Deferred()+Lighting() (eligible for the G-buffer path)")
+	if sh := mat.Pool().Shader(); sh.Deferred == nil || sh.Lighting == nil {
+		t.Fatal("materials.PBRMaterial's pool should supply Deferred+Lighting (eligible for the G-buffer path)")
 	}
 	scene.Add(scene.NewMesh(cube, mat))
 
@@ -116,7 +116,7 @@ func TestDeferredAndForwardMixed(t *testing.T) {
 
 	basic := r.NewBasicMaterial()
 	basic.SetColor(colors.RGBA32F{0, 1, 0, 1})
-	if basic.Deferred() != nil || basic.Lighting() != nil {
+	if sh := basic.Pool().Shader(); sh.Deferred != nil || sh.Lighting != nil {
 		t.Fatal("materials.BasicMaterial should be forward-only (no Deferred/Lighting)")
 	}
 	right := scene.NewMesh(cube, basic)

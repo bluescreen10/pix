@@ -44,14 +44,15 @@ func (s *Store) Pool(sh Shader, label string) *Pool {
 			return p
 		}
 	}
-	h := HashSPIRV(sh.Forward)
+	// Slow path: a caller holding its own copy of SPIR-V that some pool already has.
+	// The hash covers every stage, so it settles pool identity on its own — matching on
+	// Forward alone would silently hand a caller another Shader's Deferred/Lighting
+	// (routing it through the G-buffer against a record layout it never asked for, or
+	// losing its deferred path, depending on creation order), and confirming a 32-bit
+	// match by comparing every byte of every stage is what this width replaces.
+	h := hashShader(sh)
 	for _, p := range s.pools {
-		// The forward-shader hash fixes the record layout, but the whole Shader must
-		// match before sharing a pool: a pool hands its own sh to every instance, so
-		// matching on Forward alone would silently give a caller another Shader's
-		// Deferred/Lighting (routing it through the G-buffer against a record layout it
-		// never asked for, or losing its deferred path — depending on creation order).
-		if p.forwardHash == h && sameShader(p.sh, sh) {
+		if p.hash == h {
 			return p
 		}
 	}

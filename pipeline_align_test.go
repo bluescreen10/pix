@@ -101,7 +101,7 @@ func TestPipelineFollowsMaterialSwap(t *testing.T) {
 	if want := r.pipelineForMaterial(phong); scene.drawList.pipeBuf[0] != want {
 		t.Errorf("after SetMaterial: pipeline %d, want %d", scene.drawList.pipeBuf[0], want)
 	}
-	if scene.drawables[0].materialID != phong.ID() {
-		t.Errorf("drawable materialID = %d, want %d", scene.drawables[0].materialID, phong.ID())
+	if scene.drawables[0].materialID != phong.ID().Slot {
+		t.Errorf("drawable materialID = %d, want %d", scene.drawables[0].materialID, phong.ID().Slot)
 	}
 }

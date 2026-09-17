@@ -309,26 +309,6 @@ func (m *PBRMaterial) IsValid() bool {
 	return m.ref.IsValid()
 }
 
-// Vertex is nil for the built-in materials: they use the default vertex-pull shader.
-func (m *PBRMaterial) Vertex() []byte {
-	return m.pool.Shader().Vertex
-}
-
-// Forward is the always-present single-pass shader (surface + lighting).
-func (m *PBRMaterial) Forward() []byte {
-	return m.pool.Shader().Forward
-}
-
-// Deferred fills the G-buffer; nil means this material always renders forward.
-func (m *PBRMaterial) Deferred() []byte {
-	return m.pool.Shader().Deferred
-}
-
-// Lighting shades the G-buffer in a fullscreen pass; nil means always forward.
-func (m *PBRMaterial) Lighting() []byte {
-	return m.pool.Shader().Lighting
-}
-
 // Cull reports which triangle faces are discarded.
 func (m *PBRMaterial) Cull() CullMode {
 	return m.pool.Cull(m.ref.ID())
@@ -366,18 +346,8 @@ func (m *PBRMaterial) Pool() *Pool {
 	return m.pool
 }
 
-// Hash is this material type's pipeline identity: its pool's, since these
-// materials vary only by shader.
-func (m *PBRMaterial) Hash() uint32 {
-	return m.pool.Hash()
-}
-
 // ID is the instance's index within its store; RecordsAddr is the store's
 // record buffer address, resolved at draw time because it moves when the store grows.
-func (m *PBRMaterial) ID() uint32 {
-	return m.ref.ID()
-}
-
-func (m *PBRMaterial) RecordsAddr() uint64 {
-	return m.pool.RecordsAddr()
+func (m *PBRMaterial) ID() ID {
+	return m.pool.IDOf(m.ref)
 }

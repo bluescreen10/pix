@@ -378,7 +378,7 @@ const (
 // lighting pipeline — a shading model).
 type materialPipeline struct {
 	pass             pass
-	shaderHash       uint32 // cached (vertex,fragment) identity — the dedup key
+	shaderHash       uint64 // cached (vertex,fragment) identity — the dedup key
 	vertex, fragment []byte // kept only to build the pipeline
 	cull             materials.CullMode
 	blend            materials.BlendMode
@@ -449,7 +449,7 @@ func (r *Renderer) buildLightingPipe(fragment []byte) gpu.Pipeline {
 // shader (the dedup key) plus the SPIR-V itself, kept only to rebuild the pipeline on a
 // format change — the same shape as materialPipeline.
 type lightingPipelineKey struct {
-	hash     uint32
+	hash     uint64
 	fragment []byte
 }
 
@@ -469,7 +469,7 @@ func (r *Renderer) lightingPipelineFor(lightingShader []byte) uint32 {
 			return uint32(i)
 		}
 	}
-	hash := materials.HashSPIRV(lightingShader)
+	hash := materials.HashBytes(lightingShader)
 	for i := range r.lightingKeys {
 		if r.lightingKeys[i].hash == hash {
 			return uint32(i)
@@ -570,7 +570,7 @@ func (r *Renderer) pipelineForPool(p *materials.Pool, cull materials.CullMode, b
 // slot within it.
 func (r *Renderer) pipelineForMaterial(m materials.Material) uint32 {
 	p, id := m.Pool(), m.ID()
-	return r.pipelineForPool(p, p.Cull(id), p.Blend(id))
+	return r.pipelineForPool(p, p.Cull(id.Slot), p.Blend(id.Slot))
 }
 
 // sameKey compares two pipeline keys. lightingIdx is part of the identity: a gbuffer
@@ -1442,9 +1442,9 @@ func (r *Renderer) drawParticles(cmd gpu.CommandBuffer, scene *Scene, viewProj g
 			viewProj: viewProj,
 			pos:      r.GeometryStore.PositionsAddr(), attr: r.GeometryStore.AttributesAddr(), descs: r.GeometryStore.DescriptorsAddr(),
 			models: scene.drawList.worldBuf.Addr, particles: d.buffers[d.current].Addr,
-			materials: d.material.RecordsAddr(), lights: scene.lights.Addr(),
+			materials: d.material.Pool().RecordsAddr(), lights: scene.lights.Addr(),
 			eye:        glm.Vec4f{eye[0], eye[1], eye[2], 1},
-			geometryID: d.geometry.ID(), materialID: d.material.ID(), transformID: d.ownerNode,
+			geometryID: d.geometry.ID(), materialID: d.material.ID().Slot, transformID: d.ownerNode,
 			time: scene.elapsed,
 		}
 		cmd.SetPipeline(r.drawPipelines[d.pipelineIdx])
@@ -1500,7 +1500,7 @@ func (r *Renderer) fillDrawRoots(dl *drawList, viewProj glm.Mat4f, eye glm.Vec3f
 			models:        dl.worldBuf.Addr,
 			drawables:     dl.drawableBuf.Addr,
 			visible:       dl.visibleBuf.Addr,
-			materials:     run.mat.RecordsAddr(),
+			materials:     run.mat.Pool().RecordsAddr(),
 			lights:        lightsAddr,
 			eye:           glm.Vec4f{eye[0], eye[1], eye[2], 1},
 			shadowSampler: r.shadowSampler.Index,

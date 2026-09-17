@@ -136,28 +136,6 @@ func (m *BasicParticleMaterial) IsValid() bool {
 	return m.ref.IsValid()
 }
 
-// Vertex is the particle vertex-pull shader — not nil, unlike a mesh material: there
-// is no default particle vertex stage to fall back to.
-func (m *BasicParticleMaterial) Vertex() []byte {
-	return m.pool.Shader().Vertex
-}
-
-// Forward is the always-present single-pass shader (unlit particle shading).
-func (m *BasicParticleMaterial) Forward() []byte {
-	return m.pool.Shader().Forward
-}
-
-// Deferred is always nil: unlit particles have no surface to hand a deferred
-// lighting pass, and always render forward.
-func (m *BasicParticleMaterial) Deferred() []byte {
-	return m.pool.Shader().Deferred
-}
-
-// Lighting is always nil; see Deferred.
-func (m *BasicParticleMaterial) Lighting() []byte {
-	return m.pool.Shader().Lighting
-}
-
 // Cull reports which triangle faces are discarded.
 func (m *BasicParticleMaterial) Cull() CullMode {
 	return m.pool.Cull(m.ref.ID())
@@ -194,19 +172,8 @@ func (m *BasicParticleMaterial) Pool() *Pool {
 	return m.pool
 }
 
-// Hash is this material type's pipeline identity: its pool's, since these materials
-// vary only by shader. Distinct from BasicMaterial's Hash — a different Forward
-// shader (ParticleBasicForward vs BasicForward) means a different pool.
-func (m *BasicParticleMaterial) Hash() uint32 {
-	return m.pool.Hash()
-}
-
 // ID is the instance's index within its store; RecordsAddr is the store's record
 // buffer address, resolved at draw time because it moves when the store grows.
-func (m *BasicParticleMaterial) ID() uint32 {
-	return m.ref.ID()
-}
-
-func (m *BasicParticleMaterial) RecordsAddr() uint64 {
-	return m.pool.RecordsAddr()
+func (m *BasicParticleMaterial) ID() ID {
+	return m.pool.IDOf(m.ref)
 }

@@ -128,7 +128,10 @@ func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, mats []m
 	// Order batches: opaque pipelines before transparent (blended) ones so blending
 	// composites over the opaque scene; within each group, by pipeline (so a pipeline's
 	// commands stay contiguous for one MDI call).
-	transparent := func(pid uint32) bool { return rep[pid].Blend() != materials.BlendOpaque }
+	transparent := func(pid uint32) bool {
+		m := rep[pid]
+		return m.Pool().Blend(m.ID().Slot) != materials.BlendOpaque
+	}
 	order := make([]uint32, len(raw))
 	for i := range order {
 		order[i] = uint32(i)

@@ -600,7 +600,7 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []materials.Material) {
 				bounds:      bounds,
 				transformID: md.ownerNode,
 				geometryID:  l.geometry.ID(),
-				materialID:  l.material.ID(),
+				materialID:  l.material.ID().Slot,
 				flags:       flags,
 				lodID:       md.lodGroupID,
 				lodLevel:    uint32(lvl),
@@ -626,7 +626,7 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []materials.Material) {
 			bounds:      [4]float32{sm.bounds.Center[0], sm.bounds.Center[1], sm.bounds.Center[2], sm.bounds.Radius},
 			transformID: root,
 			geometryID:  sm.outputGeo.ID(),
-			materialID:  sm.material.ID(),
+			materialID:  sm.material.ID().Slot,
 			flags:       flags,
 		})
 		materials = append(materials, sm.material)
@@ -655,7 +655,7 @@ func (s *Scene) collectDrawables() ([]gpuDrawable, []materials.Material) {
 					bounds:      bounds,
 					transformID: instanceBase + im.transformBase + j,
 					geometryID:  l.geometry.ID(),
-					materialID:  l.material.ID(),
+					materialID:  l.material.ID().Slot,
 					flags:       flags,
 					lodID:       im.lodGroupID,
 					lodLevel:    uint32(lvl),
