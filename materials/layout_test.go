@@ -183,11 +183,11 @@ func TestMaterialCopyIsTheSameInstance(t *testing.T) {
 
 	// Refcounting still works: two handles, so one Release must not dispose.
 	m.Release()
-	if !dup.Valid() {
+	if !dup.IsValid() {
 		t.Fatal("releasing one of two handles disposed the instance")
 	}
 	dup.Release()
-	if dup.Valid() {
+	if dup.IsValid() {
 		t.Fatal("instance outlived its last handle")
 	}
 }

@@ -50,7 +50,7 @@ func (r Ref) Release() {
 }
 
 // Valid reports whether the underlying resource is still alive (not disposed and slot not reused).
-func (r Ref) Valid() bool {
+func (r Ref) IsValid() bool {
 	return r.validate != nil && r.validate(r.id, r.gen)
 }
 

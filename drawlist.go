@@ -76,7 +76,7 @@ func newDrawList(b gpu.Backend) *drawList {
 func (d *drawList) sync(world, instances []glm.Mat4f) {
 	n := uint32(len(world) + len(instances))
 	if n > d.worldCap {
-		if d.worldBuf.Valid() {
+		if d.worldBuf.IsValid() {
 			d.backend.Free(d.worldBuf)
 		}
 		d.worldCap = max(n*2, 1)
@@ -216,33 +216,33 @@ func (d *drawList) ensureBuffers() {
 	nb := max(uint32(len(d.batches)), 1)
 	ni := max(d.numInst, 1)
 
-	if size := uint64(ni) * uint64(drawableSize); !d.drawableBuf.Valid() || d.drawableBuf.Size < size {
-		if d.drawableBuf.Valid() {
+	if size := uint64(ni) * uint64(drawableSize); !d.drawableBuf.IsValid() || d.drawableBuf.Size < size {
+		if d.drawableBuf.IsValid() {
 			d.backend.Free(d.drawableBuf)
 		}
 		d.drawableBuf = d.backend.Alloc(size, gpu.MemoryHost, "drawables")
 	}
-	if size := uint64(nb) * uint64(indirectSize); !d.indirectBuf.Valid() || d.indirectBuf.Size < size {
-		if d.indirectBuf.Valid() {
+	if size := uint64(nb) * uint64(indirectSize); !d.indirectBuf.IsValid() || d.indirectBuf.Size < size {
+		if d.indirectBuf.IsValid() {
 			d.backend.Free(d.indirectBuf)
 		}
 		d.indirectBuf = d.backend.Alloc(size, gpu.MemoryHost, "indirect")
 	}
-	if size := uint64(nb) * 4; !d.regionBuf.Valid() || d.regionBuf.Size < size {
-		if d.regionBuf.Valid() {
+	if size := uint64(nb) * 4; !d.regionBuf.IsValid() || d.regionBuf.Size < size {
+		if d.regionBuf.IsValid() {
 			d.backend.Free(d.regionBuf)
 		}
 		d.regionBuf = d.backend.Alloc(size, gpu.MemoryHost, "regions")
 	}
-	if size := uint64(d.visCap) * 4; !d.visibleBuf.Valid() || d.visibleBuf.Size < size {
-		if d.visibleBuf.Valid() {
+	if size := uint64(d.visCap) * 4; !d.visibleBuf.IsValid() || d.visibleBuf.Size < size {
+		if d.visibleBuf.IsValid() {
 			d.backend.Free(d.visibleBuf)
 		}
 		d.visibleBuf = d.backend.Alloc(size, gpu.MemoryHost, "visible")
 	}
 	nl := max(d.lodCount, 1)
-	if size := uint64(nl) * uint64(lodEntrySize); !d.lodTableBuf.Valid() || d.lodTableBuf.Size < size {
-		if d.lodTableBuf.Valid() {
+	if size := uint64(nl) * uint64(lodEntrySize); !d.lodTableBuf.IsValid() || d.lodTableBuf.Size < size {
+		if d.lodTableBuf.IsValid() {
 			d.backend.Free(d.lodTableBuf)
 		}
 		d.lodTableBuf = d.backend.Alloc(size, gpu.MemoryHost, "lod-table")
@@ -252,8 +252,8 @@ func (d *drawList) ensureBuffers() {
 	// grow rather than preserving old contents is fine: rebuild always follows up with
 	// a full rewrite regardless.
 	nw := max(d.worldCap, 1)
-	if size := uint64(nw) * 4; !d.prevLevelBuf.Valid() || d.prevLevelBuf.Size < size {
-		if d.prevLevelBuf.Valid() {
+	if size := uint64(nw) * 4; !d.prevLevelBuf.IsValid() || d.prevLevelBuf.Size < size {
+		if d.prevLevelBuf.IsValid() {
 			d.backend.Free(d.prevLevelBuf)
 		}
 		d.prevLevelBuf = d.backend.Alloc(size, gpu.MemoryHost, "lod-prev-level")
@@ -272,14 +272,14 @@ func (d *drawList) ensureShadowViews(n int) {
 	visible := uint64(d.visCap) * 4
 	for i := range d.shadowViews {
 		v := &d.shadowViews[i]
-		if !v.indirectBuf.Valid() || v.indirectBuf.Size < indirect {
-			if v.indirectBuf.Valid() {
+		if !v.indirectBuf.IsValid() || v.indirectBuf.Size < indirect {
+			if v.indirectBuf.IsValid() {
 				d.backend.Free(v.indirectBuf)
 			}
 			v.indirectBuf = d.backend.Alloc(indirect, gpu.MemoryHost, "shadow-indirect")
 		}
-		if !v.visibleBuf.Valid() || v.visibleBuf.Size < visible {
-			if v.visibleBuf.Valid() {
+		if !v.visibleBuf.IsValid() || v.visibleBuf.Size < visible {
+			if v.visibleBuf.IsValid() {
 				d.backend.Free(v.visibleBuf)
 			}
 			v.visibleBuf = d.backend.Alloc(visible, gpu.MemoryHost, "shadow-visible")
@@ -295,7 +295,7 @@ func (d *drawList) destroy() {
 		bufs = append(bufs, v.indirectBuf, v.visibleBuf)
 	}
 	for _, b := range bufs {
-		if b.Valid() {
+		if b.IsValid() {
 			d.backend.Free(b)
 		}
 	}

@@ -100,7 +100,7 @@ func (s *Pool) ensureCap(n uint32) {
 	for newCap < n {
 		newCap *= 2
 	}
-	if s.buf.Valid() {
+	if s.buf.IsValid() {
 		s.backend.Free(s.buf)
 	}
 	s.cap = newCap
@@ -209,7 +209,7 @@ func (s *Pool) dispose(id uint32) {
 }
 
 func (s *Pool) destroy() {
-	if s.buf.Valid() {
+	if s.buf.IsValid() {
 		s.backend.Free(s.buf)
 		s.buf = gpu.Buffer{}
 	}

@@ -72,10 +72,10 @@ func (s *LightShadow) SetBias(bias float32) { s.bias = bias }
 // ensureMap allocates the depth map, or reallocates it when SetSize changed the
 // requested resolution. Point lights use ensureFaceMaps instead.
 func (s *LightShadow) ensureMap(textureStore *textures.Store) {
-	if s.Map.Valid() && s.mapSize == s.size {
+	if s.Map.IsValid() && s.mapSize == s.size {
 		return
 	}
-	if s.Map.Valid() {
+	if s.Map.IsValid() {
 		s.Map.Release()
 	}
 	s.Map = textureStore.CreateDepthTarget(s.size, s.size)
@@ -88,10 +88,10 @@ func (s *LightShadow) ensureFaceMaps(textureStore *textures.Store) {
 	stale := s.mapSize != s.size
 	for i := range s.faces {
 		f := &s.faces[i]
-		if f.m.Valid() && !stale {
+		if f.m.IsValid() && !stale {
 			continue
 		}
-		if f.m.Valid() {
+		if f.m.IsValid() {
 			f.m.Release()
 		}
 		f.m = textureStore.CreateDepthTarget(s.size, s.size)

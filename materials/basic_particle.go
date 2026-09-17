@@ -132,8 +132,8 @@ func (m *BasicParticleMaterial) Release() {
 }
 
 // Valid reports whether the underlying instance is still alive.
-func (m *BasicParticleMaterial) Valid() bool {
-	return m.ref.Valid()
+func (m *BasicParticleMaterial) IsValid() bool {
+	return m.ref.IsValid()
 }
 
 // Vertex is the particle vertex-pull shader — not nil, unlike a mesh material: there

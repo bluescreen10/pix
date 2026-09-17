@@ -788,7 +788,7 @@ func (s *Scene) Destroy() {
 	if s.lights != nil {
 		s.lights.Destroy()
 	}
-	if s.jointBuf.Valid() {
+	if s.jointBuf.IsValid() {
 		s.backend.Free(s.jointBuf)
 	}
 }

@@ -458,12 +458,12 @@ func (g *Store) writeStream(stream int, byteOffset uint32, data []byte) {
 // Destroy releases all GPU buffers held by the store.
 func (g *Store) Destroy() {
 	for s := 0; s < streamCount; s++ {
-		if g.streams[s] != nil && g.streams[s].buf.Valid() {
+		if g.streams[s] != nil && g.streams[s].buf.IsValid() {
 			g.backend.Free(g.streams[s].buf)
 			g.streams[s] = nil
 		}
 	}
-	if g.descBuf.Valid() {
+	if g.descBuf.IsValid() {
 		g.backend.Free(g.descBuf)
 		g.descBuf = gpu.Buffer{}
 	}

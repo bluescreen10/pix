@@ -48,8 +48,8 @@ func (r *Renderer) recordScreenshot(cmd gpu.CommandBuffer, target gpu.Texture) {
 		return
 	}
 	n := int(r.width * r.height * 4)
-	if !r.readback.Valid() || len(r.pixels) < n {
-		if r.readback.Valid() {
+	if !r.readback.IsValid() || len(r.pixels) < n {
+		if r.readback.IsValid() {
 			r.backend.Free(r.readback)
 		}
 		r.readback = r.backend.Alloc(uint64(n), gpu.MemoryHost, "readback")
@@ -76,7 +76,7 @@ func (r *Renderer) writeScreenshot() {
 // encodePNG converts the readback buffer to an image and writes it.
 func (r *Renderer) encodePNG(path string) error {
 	n := int(r.width * r.height * 4)
-	if !r.readback.Valid() || len(r.pixels) < n {
+	if !r.readback.IsValid() || len(r.pixels) < n {
 		return fmt.Errorf("no frame was captured (the target may not allow readback)")
 	}
 	copy(r.pixels, unsafe.Slice((*byte)(r.readback.Ptr), n))

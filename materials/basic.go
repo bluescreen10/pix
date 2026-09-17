@@ -141,8 +141,8 @@ func (m *BasicMaterial) Release() {
 }
 
 // Valid reports whether the underlying instance is still alive.
-func (m *BasicMaterial) Valid() bool {
-	return m.ref.Valid()
+func (m *BasicMaterial) IsValid() bool {
+	return m.ref.IsValid()
 }
 
 // Vertex is nil for the built-in materials: they use the default vertex-pull shader.

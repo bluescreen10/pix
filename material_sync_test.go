@@ -107,17 +107,17 @@ func TestMaterialTextureRefsAreHeldByTheHandle(t *testing.T) {
 	tex.Release() // the material holds the only remaining reference
 
 	held := mat.ColorMap()
-	if !held.Valid() {
+	if !held.IsValid() {
 		t.Fatal("material did not keep its color map alive")
 	}
 
 	meshCopy := mat.Copy() // what Scene.NewMesh stores
 	mat.Release()
-	if !held.Valid() {
+	if !held.IsValid() {
 		t.Fatal("releasing the authoring handle freed a texture the mesh copy still holds")
 	}
 	meshCopy.Release()
-	if held.Valid() {
+	if held.IsValid() {
 		t.Fatal("texture outlived every material handle referencing it")
 	}
 }

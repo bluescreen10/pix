@@ -143,7 +143,7 @@ func (l *loader) build() (int, error) {
 		m.Release()
 	}
 	for _, t := range l.allTex {
-		if t.Valid() {
+		if t.IsValid() {
 			t.Release()
 		}
 	}
@@ -735,7 +735,7 @@ func (l *loader) loadMaterials() {
 				if tt := ext.Transmission.TransmissionTexture; tt != nil {
 					// Single-channel data (the extension reads red), so upload it
 					// as R8 rather than paying for four channels.
-					if t := l.texture(tt.Index, textures.Grayscale); t.Valid() {
+					if t := l.texture(tt.Index, textures.Grayscale); t.IsValid() {
 						m.SetTransmissionMap(t)
 						m.SetTransmissionMapSampler(samp)
 					}
@@ -743,7 +743,7 @@ func (l *loader) loadMaterials() {
 			}
 		}
 		if gm.NormalTexture != nil {
-			if t := l.texture(gm.NormalTexture.Index, textures.Normal); t.Valid() {
+			if t := l.texture(gm.NormalTexture.Index, textures.Normal); t.IsValid() {
 				m.SetNormalMap(t)
 				m.SetNormalMapSampler(samp)
 			}
@@ -759,7 +759,7 @@ func (l *loader) loadMaterials() {
 				m.SetRoughness(*pbr.RoughnessFactor)
 			}
 			if pbr.BaseColorTexture != nil {
-				if t := l.texture(pbr.BaseColorTexture.Index, textures.SRGB); t.Valid() {
+				if t := l.texture(pbr.BaseColorTexture.Index, textures.SRGB); t.IsValid() {
 					m.SetColorMap(t)
 					m.SetColorMapSampler(samp)
 				}
@@ -767,7 +767,7 @@ func (l *loader) loadMaterials() {
 			// One combined metallic-roughness texture (glTF: .b metallic, .g roughness)
 			// feeds both independent map slots.
 			if pbr.MetallicRoughnessTexture != nil {
-				if t := l.texture(pbr.MetallicRoughnessTexture.Index, textures.Linear); t.Valid() {
+				if t := l.texture(pbr.MetallicRoughnessTexture.Index, textures.Linear); t.IsValid() {
 					m.SetMetallicMap(t)
 					m.SetMetallicMapSampler(samp)
 					m.SetRoughnessMap(t)

@@ -86,7 +86,7 @@ type Material interface {
 	// Release drops this handle's reference (freed at refcount 0).
 	Release()
 	// Valid reports whether the underlying instance is still alive.
-	Valid() bool
+	IsValid() bool
 
 	// Pipeline identity. Vertex nil means the default vertex-pull shader. Forward is
 	// always used for blended materials, and for opaque ones that do not supply both
@@ -136,14 +136,14 @@ var (
 // both from the Texture inside Bytes, as the built-ins do, and a record can never
 // disagree with what the material actually holds.
 func MapIndex(t textures.Texture) uint32 {
-	if t.Valid() {
+	if t.IsValid() {
 		return t.Index()
 	}
 	return NoTextureIndex
 }
 
 func MapFlag(t textures.Texture, flag uint32) uint32 {
-	if t.Valid() {
+	if t.IsValid() {
 		return flag
 	}
 	return 0

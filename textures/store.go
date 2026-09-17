@@ -136,7 +136,7 @@ func (t *Store) GPU(tex Texture) gpu.Texture {
 // Destroy releases all uploaded textures and samplers.
 func (t *Store) Destroy() {
 	for e := range t.entries.Items() {
-		if e.tex.Valid() {
+		if e.tex.IsValid() {
 			t.backend.DestroyTexture(e.tex)
 		}
 	}
@@ -148,7 +148,7 @@ func (t *Store) Destroy() {
 
 // dispose/validate let a ref own a slot in this store.
 func (t *Store) dispose(id uint32) {
-	if e := t.entries.Get(id); e.tex.Valid() {
+	if e := t.entries.Get(id); e.tex.IsValid() {
 		t.backend.DestroyTexture(e.tex)
 		e.tex = gpu.Texture{}
 	}

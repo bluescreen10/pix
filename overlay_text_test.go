@@ -182,7 +182,7 @@ func TestBuildFontAtlasPlacesEveryGlyph(t *testing.T) {
 	if len(a.entries) != len(font) {
 		t.Fatalf("atlas holds %d glyphs, font has %d", len(a.entries), len(font))
 	}
-	if !a.tex.Valid() {
+	if !a.tex.IsValid() {
 		t.Fatal("atlas texture was not created")
 	}
 	for ch, e := range a.entries {

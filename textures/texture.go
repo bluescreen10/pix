@@ -22,8 +22,8 @@ func (t Texture) Release() {
 }
 
 // Valid reports whether the underlying texture is still alive.
-func (t Texture) Valid() bool {
-	return t.ref.Valid()
+func (t Texture) IsValid() bool {
+	return t.ref.IsValid()
 }
 
 // Index returns the bindless heap index used by materials.

@@ -185,7 +185,7 @@ func (s *Scene) growJoints(minCap uint32) {
 		sk.jointAlloc = alloc
 		sk.jointBase = alloc.Offset() / jointElemSize
 	}
-	if s.jointBuf.Valid() {
+	if s.jointBuf.IsValid() {
 		s.backend.Free(s.jointBuf)
 	}
 	s.jointBuf = s.backend.Alloc(uint64(newCap), gpu.MemoryHost, "joints")

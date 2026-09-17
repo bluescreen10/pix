@@ -36,7 +36,7 @@ func TestDirectionalShadowMapAllocated(t *testing.T) {
 	if s == nil {
 		t.Fatal("light.Shadow() is nil after SetCastShadow(true)")
 	}
-	if !s.Map.Valid() {
+	if !s.Map.IsValid() {
 		t.Fatal("shadow map not allocated after render with shadows enabled")
 	}
 	// A fitted ortho camera should look at the scene (non-zero view-projection).
@@ -345,7 +345,7 @@ func TestShadowSetSizeReallocatesMap(t *testing.T) {
 	if r.TextureStore.GPU(s.Map).H == first {
 		t.Fatal("map was not reallocated after SetSize changed the resolution")
 	}
-	if !s.Map.Valid() {
+	if !s.Map.IsValid() {
 		t.Fatal("map invalid after resize")
 	}
 }

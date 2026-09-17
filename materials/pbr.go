@@ -305,8 +305,8 @@ func (m *PBRMaterial) Release() {
 }
 
 // Valid reports whether the underlying instance is still alive.
-func (m *PBRMaterial) Valid() bool {
-	return m.ref.Valid()
+func (m *PBRMaterial) IsValid() bool {
+	return m.ref.IsValid()
 }
 
 // Vertex is nil for the built-in materials: they use the default vertex-pull shader.

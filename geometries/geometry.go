@@ -27,8 +27,8 @@ func (g Geometry) Release() {
 }
 
 // Valid reports whether the underlying geometry is still alive.
-func (g Geometry) Valid() bool {
-	return g.ref.Valid()
+func (g Geometry) IsValid() bool {
+	return g.ref.IsValid()
 }
 
 // GetAttributeData returns a copy of a stored attribute reinterpreted as
@@ -58,6 +58,18 @@ func (g Geometry) SetAttributeData[T any](t AttributeType, data []T) {
 	g.store.setAttribute(g.ref.ID(), t, toBytes(data), len(data))
 }
 
+// Indices returns the geometry's triangle index list, or nil if it is no longer
+// alive. A geometry created without an explicit index list gets a generated
+// 0..n-1 one, so this is never nil for a live geometry. Do not mutate the
+// returned slice — it aliases the geometry's internal data, the same contract
+// GetAttributeData carries.
+func (g Geometry) Indices() []uint32 {
+	if g.store == nil {
+		return nil
+	}
+	return g.store.indices(g.ref.ID())
+}
+
 // BoundingSphere returns the geometry's local-space bounding sphere.
 func (g Geometry) BoundingSphere() glm.Sphere {
 	return g.boundingSphere
@@ -82,6 +94,16 @@ func (g Geometry) SkinOutput() Geometry {
 		store:          g.store,
 		boundingSphere: g.store.BoundingSphere(id),
 	}
+}
+
+// indices returns a geometry's stored index list (nil if the id is dead). A
+// geometry created without indices has a generated 0..n-1 list by this point —
+// see Store.Create.
+func (g *Store) indices(id uint32) []uint32 {
+	if !g.entries.Alive(id) {
+		return nil
+	}
+	return g.entries.Get(id).indices
 }
 
 // attribute returns a pointer to a geometry's stored attribute (nil if the id is

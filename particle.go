@@ -405,14 +405,14 @@ func (s *Scene) swapRemoveParticles(payloadIdx uint32) {
 	d.geometry.Release()
 	d.material.Release()
 	for _, buf := range d.buffers {
-		if buf.Valid() {
+		if buf.IsValid() {
 			s.backend.Free(buf)
 		}
 	}
-	if d.indirectBuf.Valid() {
+	if d.indirectBuf.IsValid() {
 		s.backend.Free(d.indirectBuf)
 	}
-	if d.pendingBuf.Valid() {
+	if d.pendingBuf.IsValid() {
 		s.backend.Free(d.pendingBuf)
 	}
 	last := uint32(len(s.particleContainers) - 1)

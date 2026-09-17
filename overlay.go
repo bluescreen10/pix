@@ -159,7 +159,7 @@ func (o *overlay) draw(cmd gpu.CommandBuffer, vpW, vpH float32) {
 		return
 	}
 	if n > o.quadCap {
-		if o.quadBuf.Valid() {
+		if o.quadBuf.IsValid() {
 			o.backend.Free(o.quadBuf)
 		}
 		o.quadCap = n * 2
@@ -182,7 +182,7 @@ func (o *overlay) destroy() {
 		o.atlas.destroy()
 		o.atlas = nil
 	}
-	if o.quadBuf.Valid() {
+	if o.quadBuf.IsValid() {
 		o.backend.Free(o.quadBuf)
 	}
 	o.backend.DestroyPipeline(o.pipe)

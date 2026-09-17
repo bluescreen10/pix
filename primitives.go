@@ -305,3 +305,6 @@ func (r *Renderer) NewCylinderGeometry(radiusTop, radiusBottom, height float32, 
 func (r *Renderer) NewCapsuleGeometry(radius, length float32, capSegments, radialSegments int) geometries.Geometry {
 	return r.GeometryStore.Create(CapsuleGeometry(radius, length, capSegments, radialSegments))
 }
+
+// NewDecalGeometry is in decal_geometry.go: unlike the builders above it derives
+// its shape from an existing mesh rather than from parameters alone.

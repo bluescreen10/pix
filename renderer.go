@@ -276,7 +276,7 @@ func (r *Renderer) SetRenderTarget(tex gpu.Texture, w, h uint32, format gpu.Form
 // enable deferred rendering and they cost 16 bytes/pixel; see gbuffer.glsl).
 func (r *Renderer) configure(w, h uint32, format gpu.Format) {
 	r.width, r.height, r.color = w, h, format
-	if r.depth.Valid() {
+	if r.depth.IsValid() {
 		r.backend.DestroyTexture(r.depth)
 	}
 	// Sampled too: the deferred lighting pass reads depth back to reconstruct position.
@@ -294,7 +294,7 @@ func (r *Renderer) configure(w, h uint32, format gpu.Format) {
 // not reclaim them, so each resize while deferred is enabled permanently consumes four
 // sampled-image slots. Fine for now; reclaiming slots is a backend-wide change.
 func (r *Renderer) ensureGBuffer() {
-	if r.diffuseTexture.Valid() {
+	if r.diffuseTexture.IsValid() {
 		return
 	}
 	rt := func(format gpu.Format, label string) gpu.Texture {
@@ -311,7 +311,7 @@ func (r *Renderer) ensureGBuffer() {
 // destroyGBuffer releases the G-buffer targets and marks them absent.
 func (r *Renderer) destroyGBuffer() {
 	for _, t := range []*gpu.Texture{&r.diffuseTexture, &r.normalTexture, &r.materialTexture, &r.emissiveTexture} {
-		if t.Valid() {
+		if t.IsValid() {
 			r.backend.DestroyTexture(*t)
 			*t = gpu.Texture{}
 		}
@@ -554,7 +554,7 @@ func (r *Renderer) ShowFPS(on bool) {
 	r.showFPS = on
 	if on {
 		r.ensureOverlay()
-		if !r.gpuPool.Valid() {
+		if !r.gpuPool.IsValid() {
 			r.gpuPool = r.backend.CreateTimestampPool(2)
 		}
 	}
@@ -633,7 +633,7 @@ func (r *Renderer) Console() *console.Console {
 // Render draws the scene from cam into the configured target (swapchain or texture).
 // The camera is not retained.
 func (r *Renderer) Render(scene *Scene, cam Camera) {
-	//TODO: r.swapchain.H == 0 is a bit of a smell something like r.swapchain.Valid()
+	//TODO: r.swapchain.H == 0 is a bit of a smell something like r.swapchain.IsValid()
 	// would be better
 	if !r.hasTarget && r.swapchain.H == 0 {
 		panic("renderer has no target")
@@ -669,6 +669,7 @@ func (r *Renderer) Render(scene *Scene, cam Camera) {
 	r.encode(cmd, target, scene, planes, drawVP, eye)
 	// Recorded after everything is drawn but before the frame is submitted, so a
 	// windowed capture reads the image while it is still ours (see screenshot.go).
+	// TODO: screenshot should not show console or overlays
 	r.recordScreenshot(cmd, target)
 	cpu += time.Since(encStart)
 	r.stats.AddCPUTime(cpu)
@@ -696,7 +697,7 @@ func (r *Renderer) Capture() []byte {
 		return nil
 	}
 	n := int(r.width * r.height * 4)
-	if !r.readback.Valid() {
+	if !r.readback.IsValid() {
 		r.readback = r.backend.Alloc(uint64(n), gpu.MemoryHost, "readback")
 		r.pixels = make([]byte, n)
 	}
@@ -716,7 +717,7 @@ func (r *Renderer) Pixels() []byte { return r.Capture() }
 // All compute culls run first (outside any render pass), share one barrier, then the
 // shadow depth passes and the main color pass consume their results.
 func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scene, planes [6][4]float32, drawVP glm.Mat4f, eye glm.Vec3f) {
-	if r.showFPS && r.gpuPool.Valid() {
+	if r.showFPS && r.gpuPool.IsValid() {
 		cmd.ResetTimestamps(r.gpuPool, 2)
 		cmd.WriteTimestamp(r.gpuPool, 0, gpu.StageNone)
 	}
@@ -827,16 +828,19 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 	if gbufferActive || idShown {
 		colorLoad, depthLoad = gpu.LoadKeep, gpu.LoadKeep
 	}
+	// Forward geometry is suppressed while a G-buffer view or an id view is up: the
+	// point is to see that target on its own, not transparents composited over it.
+	drawForward := !debugShown && !idShown
+
+	// The pass itself still runs even when drawForward is false — it is what draws
+	// the overlay and closes the frame.
 	cmd.BeginRenderPass(gpu.RenderTargets{
 		Color: []gpu.ColorAttachment{{Texture: target, Load: colorLoad, Store: gpu.StoreKeep, Clear: r.clear}},
 		Depth: &gpu.DepthAttachment{Texture: r.depth, Load: depthLoad, Store: gpu.StoreKeep, Clear: 0.0},
 	})
 	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
 	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
-	// Forward geometry is suppressed while a G-buffer view or an id view is up: the
-	// point is to see that target on its own, not transparents composited over it.
-	// The pass itself still runs — it is what draws the overlay and closes the frame.
-	if !debugShown && !idShown {
+	if drawForward {
 		r.issueDraws(cmd, dl, passForward)
 		if hasParticles {
 			r.drawParticles(cmd, scene, drawVP, eye)
@@ -846,7 +850,7 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 		r.overlay.draw(cmd, float32(r.width), float32(r.height))
 	}
 	cmd.EndRenderPass()
-	if r.showFPS && r.gpuPool.Valid() {
+	if r.showFPS && r.gpuPool.IsValid() {
 		cmd.WriteTimestamp(r.gpuPool, 1, gpu.StageColorOutput)
 	}
 }
@@ -882,12 +886,12 @@ func (r *Renderer) collectShadowViews(scene *Scene) []shadowView {
 	}
 	var out []shadowView
 	for _, l := range scene.dirLights {
-		if s := l.shadow; s != nil && s.Map.Valid() {
+		if s := l.shadow; s != nil && s.Map.IsValid() {
 			out = append(out, shadowView{cam: s.Camera, m: s.Map, size: s.Size()})
 		}
 	}
 	for _, l := range scene.spotLights {
-		if s := l.shadow; s != nil && s.Map.Valid() {
+		if s := l.shadow; s != nil && s.Map.IsValid() {
 			out = append(out, shadowView{cam: s.Camera, m: s.Map, size: s.Size()})
 		}
 	}
@@ -897,7 +901,7 @@ func (r *Renderer) collectShadowViews(scene *Scene) []shadowView {
 			continue
 		}
 		for i := range s.faces {
-			if f := s.faces[i]; f.m.Valid() {
+			if f := s.faces[i]; f.m.IsValid() {
 				out = append(out, shadowView{cam: f.cam, m: f.m, size: s.Size()})
 			}
 		}
@@ -1330,23 +1334,23 @@ func (r *Renderer) ensureParticleBuffers(scene *Scene, d *particleData) {
 	if !d.buffersReady {
 		size := max(uint64(d.capacity)*uint64(particleRecordSize), 1)
 		for i := range d.buffers {
-			if !d.buffers[i].Valid() || d.buffers[i].Size < size {
-				if d.buffers[i].Valid() {
+			if !d.buffers[i].IsValid() || d.buffers[i].Size < size {
+				if d.buffers[i].IsValid() {
 					scene.backend.Free(d.buffers[i])
 				}
 				d.buffers[i] = scene.backend.Alloc(size, gpu.MemoryHost, "particles")
 			}
 			clear(unsafe.Slice((*byte)(d.buffers[i].Ptr), d.buffers[i].Size))
 		}
-		if !d.indirectBuf.Valid() {
+		if !d.indirectBuf.IsValid() {
 			d.indirectBuf = scene.backend.Alloc(uint64(indirectSize), gpu.MemoryHost, "particles-indirect")
 		}
 		d.current = 0
 		d.buffersReady = true
 	}
 	if n := uint32(len(d.pending)); n > 0 {
-		if size := uint64(n) * uint64(particleRecordSize); !d.pendingBuf.Valid() || d.pendingBuf.Size < size {
-			if d.pendingBuf.Valid() {
+		if size := uint64(n) * uint64(particleRecordSize); !d.pendingBuf.IsValid() || d.pendingBuf.Size < size {
+			if d.pendingBuf.IsValid() {
 				scene.backend.Free(d.pendingBuf)
 			}
 			d.pendingBuf = scene.backend.Alloc(size, gpu.MemoryHost, "particles-pending")
@@ -1443,10 +1447,11 @@ func (r *Renderer) fillDrawRoots(dl *drawList, viewProj glm.Mat4f, eye glm.Vec3f
 	}
 }
 
-// issueDraws records one multi-draw-indirect call per pipeline run belonging to pass:
-// all of a material type's per-geometry commands go in a single DrawIndexedIndirect.
-// Each command's firstInstance is its region base, so gl_InstanceIndex indexes the
-// compacted visible buffer directly — no per-command push constant.
+// issueDraws records one multi-draw-indirect call per pipeline run belonging to
+// pass: all of a material type's per-geometry commands go in a single
+// DrawIndexedIndirect. Each command's
+// firstInstance is its region base, so gl_InstanceIndex indexes the compacted visible
+// buffer directly — no per-command push constant.
 func (r *Renderer) issueDraws(cmd gpu.CommandBuffer, dl *drawList, p pass) {
 	if len(dl.runs) == 0 {
 		return
@@ -1454,7 +1459,8 @@ func (r *Renderer) issueDraws(cmd gpu.CommandBuffer, dl *drawList, p pass) {
 	idx := r.GeometryStore.IndexBuffer()
 	for ri := range dl.runs {
 		run := &dl.runs[ri]
-		if r.drawPipelineKeys[run.pipeline].pass != p {
+		key := r.drawPipelineKeys[run.pipeline]
+		if key.pass != p {
 			continue
 		}
 		cmd.SetPipeline(r.drawPipelines[run.pipeline])
@@ -1579,7 +1585,7 @@ func (r *Renderer) Destroy() {
 	if r.overlay != nil {
 		r.overlay.destroy()
 	}
-	if r.gpuPool.Valid() {
+	if r.gpuPool.IsValid() {
 		r.backend.DestroyTimestampPool(r.gpuPool)
 	}
 	if r.pipelinesReady {
@@ -1594,7 +1600,7 @@ func (r *Renderer) Destroy() {
 			r.backend.DestroyPipeline(p)
 		}
 	}
-	if r.depth.Valid() {
+	if r.depth.IsValid() {
 		r.backend.DestroyTexture(r.depth)
 	}
 	r.destroyGBuffer()
@@ -1604,10 +1610,10 @@ func (r *Renderer) Destroy() {
 	if r.shadowSampler.H != 0 {
 		r.backend.DestroySampler(r.shadowSampler)
 	}
-	if r.ownsTarget && r.target.Valid() {
+	if r.ownsTarget && r.target.IsValid() {
 		r.backend.DestroyTexture(r.target)
 	}
-	if r.readback.Valid() {
+	if r.readback.IsValid() {
 		r.backend.Free(r.readback)
 	}
 	r.GeometryStore.Destroy()

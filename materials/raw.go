@@ -2,9 +2,8 @@ package materials
 
 import (
 	"github.com/bluescreen10/pix/internal/ref"
+	"github.com/bluescreen10/pix/textures"
 )
-
-import "github.com/bluescreen10/pix/textures"
 
 // RawMaterial is a self-describing, one-off material: you provide the shader and the
 // per-instance data size, and the material system auto-allocates storage (a "uniform"
@@ -63,7 +62,7 @@ func (m *RawMaterial) Dispose() {
 // yourself (via Bytes) — RawMaterial has no typed record to do it for you.
 func (m *RawMaterial) SetTexture(slot int, texture textures.Texture) {
 	old := m.textures[slot]
-	if texture.Valid() {
+	if texture.IsValid() {
 		m.textures[slot] = texture.Copy()
 	} else {
 		m.textures[slot] = textures.Texture{}
@@ -96,8 +95,8 @@ func (m *RawMaterial) Release() {
 }
 
 // Valid reports whether the underlying instance is still alive.
-func (m *RawMaterial) Valid() bool {
-	return m.ref.Valid()
+func (m *RawMaterial) IsValid() bool {
+	return m.ref.IsValid()
 }
 
 // Vertex is nil for the built-in materials: they use the default vertex-pull shader.

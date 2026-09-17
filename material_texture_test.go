@@ -2,8 +2,9 @@ package pix
 
 import (
 	"testing"
+
+	"github.com/bluescreen10/pix/textures"
 )
-import "github.com/bluescreen10/pix/textures"
 
 // Reproduces what loaders/gltf does: one cached texture handed to two map slots.
 func TestSharedTextureOwnership(t *testing.T) {
@@ -16,7 +17,7 @@ func TestSharedTextureOwnership(t *testing.T) {
 	m.SetRoughnessMap(tex) // same handle into a second slot
 	m.Release()
 
-	if !tex.Valid() {
+	if !tex.IsValid() {
 		t.Fatal("the caller's own texture reference was freed by the material")
 	}
 	tex.Release()
@@ -43,7 +44,7 @@ func TestSetMapSelfRebind(t *testing.T) {
 
 	m.SetColorMap(m.ColorMap()) // rebind to itself
 
-	if !m.ColorMap().Valid() {
+	if !m.ColorMap().IsValid() {
 		t.Fatal("self-rebind destroyed the texture")
 	}
 }
@@ -71,7 +72,7 @@ func TestSetMapSelfRebindThenReleaseIsSafe(t *testing.T) {
 
 	m.Release()
 
-	if !other.Valid() {
+	if !other.IsValid() {
 		t.Fatal("releasing the material after a self-rebind disposed an unrelated texture")
 	}
 }

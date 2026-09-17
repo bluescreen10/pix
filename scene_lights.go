@@ -125,7 +125,7 @@ func (l *Lights) rebuild(ambient colors.RGB32F, fog Fog, dirs []*DirectionalLigh
 		}
 		// A casting light with an allocated map contributes its view-projection (the
 		// un-flipped matrix the depth pass used) and heap index for shader sampling.
-		if shadows && d.shadow != nil && d.shadow.Map.Valid() {
+		if shadows && d.shadow != nil && d.shadow.Map.IsValid() {
 			gl.shadowVP = d.shadow.Camera.ViewProjection()
 			gl.shadowMap = d.shadow.Map.Index()
 			gl.shadowBias = d.shadow.ndcBias
@@ -147,7 +147,7 @@ func (l *Lights) rebuild(ambient colors.RGB32F, fog Fog, dirs []*DirectionalLigh
 		if s := p.shadow; shadows && s != nil {
 			gp.shadowBias = s.ndcBias
 			for f := range s.faces {
-				if s.faces[f].m.Valid() {
+				if s.faces[f].m.IsValid() {
 					gp.shadowVP[f] = s.faces[f].cam.ViewProjection()
 					gp.shadowMap[f] = s.faces[f].m.Index()
 				}
@@ -170,7 +170,7 @@ func (l *Lights) rebuild(ambient colors.RGB32F, fog Fog, dirs []*DirectionalLigh
 			cosInner:  cosInner,
 			shadowMap: noShadowMap,
 		}
-		if shadows && sp.shadow != nil && sp.shadow.Map.Valid() {
+		if shadows && sp.shadow != nil && sp.shadow.Map.IsValid() {
 			gs.shadowVP = sp.shadow.Camera.ViewProjection()
 			gs.shadowMap = sp.shadow.Map.Index()
 			gs.shadowBias = sp.shadow.ndcBias
@@ -201,7 +201,7 @@ func (l *Lights) Sync() {
 
 // Destroy releases the table buffer.
 func (l *Lights) Destroy() {
-	if l.buf.Valid() {
+	if l.buf.IsValid() {
 		l.backend.Free(l.buf)
 		l.buf = gpu.Buffer{}
 	}

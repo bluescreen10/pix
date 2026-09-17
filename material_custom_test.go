@@ -54,7 +54,7 @@ func (m *customMaterial) Dispose() {} // holds no textures
 
 func (m *customMaterial) Copy() materials.Material { m.ref.Copy(); return m }
 func (m *customMaterial) Release()                 { m.ref.Release() }
-func (m *customMaterial) Valid() bool              { return m.ref.Valid() }
+func (m *customMaterial) IsValid() bool            { return m.ref.IsValid() }
 
 func (m *customMaterial) Vertex() []byte   { return m.pool.Shader().Vertex }
 func (m *customMaterial) Forward() []byte  { return m.pool.Shader().Forward }
