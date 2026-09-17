@@ -1,7 +1,15 @@
 // Package ref is the reference-counted, generation-stamped handle shared by the
-// renderer's resource stores (geometries, textures). It is internal: a Ref is an
-// implementation detail of the handle types built on it (geometries.Geometry,
-// textures.Texture), never something a caller of pix constructs directly.
+// renderer's resource stores (geometries, textures, material pools). Most callers
+// never name a Ref: it is the machinery inside the handle types built on it
+// (geometries.Geometry, textures.Texture), and those are what application code holds.
+//
+// It is public rather than internal for one reason: materials.Pool.Create hands a Ref
+// back to whoever is defining a material type, and materials.Material is deliberately
+// open. While this package was internal, only types inside this module could receive
+// that Ref, so a material type "defined outside the materials package" could not
+// actually live outside pix — the extensibility the interface promises stopped at the
+// module boundary. Constructing a Ref directly is still not something to do; obtain
+// one from the store that owns the resource.
 package ref
 
 import "sync/atomic"
@@ -57,4 +65,12 @@ func (r Ref) IsValid() bool {
 // ID returns the slot index into the owning resource table.
 func (r Ref) ID() uint32 {
 	return r.id
+}
+
+// Gen returns the slot's generation stamp. A slot is reused after its last handle is
+// released, so ID alone cannot tell a live resource from one that merely inherited its
+// place: (ID, Gen) is the identity that survives reuse. Callers that pass a resource
+// reference by value — the frame packet's GeometryID/MaterialID — must carry both.
+func (r Ref) Gen() uint32 {
+	return r.gen
 }

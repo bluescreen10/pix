@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/internal/ref"
+	"github.com/bluescreen10/pix/ref"
 )
 
 // Geometry is a ref-counted handle to a renderer-owned geometry. Clone with Copy();

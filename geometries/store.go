@@ -11,7 +11,7 @@ import (
 	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/internal/mem"
-	"github.com/bluescreen10/pix/internal/ref"
+	"github.com/bluescreen10/pix/ref"
 )
 
 // Stream indices. Position and index are their own buffers (so position-only

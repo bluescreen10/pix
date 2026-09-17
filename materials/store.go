@@ -55,9 +55,25 @@ func (s *Store) Pool(sh Shader, label string) *Pool {
 			return p
 		}
 	}
-	p := newPool(s.backend, sh, label)
+	p := newPool(s.backend, sh, label, uint32(len(s.pools)))
 	s.pools = append(s.pools, p)
 	return p
+}
+
+// PoolAt returns the pool with the given index, or nil if there is none. It is the
+// reverse of Pool.Index: a material reference that travels as plain data carries the
+// index, and whoever receives it resolves the pool through here.
+func (s *Store) PoolAt(index uint32) *Pool {
+	if index >= uint32(len(s.pools)) {
+		return nil
+	}
+	return s.pools[index]
+}
+
+// Pools is the number of pools the store holds. Indices are dense in [0, Pools), so a
+// consumer keeping per-pool state can size an array from it.
+func (s *Store) Pools() int {
+	return len(s.pools)
 }
 
 // Sync uploads every pool's changed records into device memory. Material records are

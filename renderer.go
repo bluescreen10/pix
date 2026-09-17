@@ -70,6 +70,11 @@ type Renderer struct {
 	drawPipelines    []gpu.Pipeline
 	drawPipelineKeys []materialPipeline
 	pipelinesReady   bool
+	// pools indexes poolPipelines by materials.Pool.Index, so resolving a material's
+	// pipeline is an array index rather than a scan of drawPipelineKeys. Grown on
+	// demand; entries stay valid across a format change, which rebuilds the pipelines
+	// in place and leaves their indices alone.
+	pools []poolPipelines
 
 	// Deferred: global toggle (off by default — every material renders Forward() until
 	// enabled) + the G-buffer targets (recreated with the depth buffer on resize) + the
@@ -491,24 +496,81 @@ func (r *Renderer) pipelineFor(k materialPipeline) uint32 {
 	return id
 }
 
-// pipelineForMaterial resolves the draw pipeline for a material from its interface.
-// When deferred rendering is enabled (EnableDeferredRendering), an opaque material
-// supplying both Deferred and Lighting renders through the G-buffer; everything else
-// (blended, deferred disabled, or opaque missing either shader) renders forward.
-// Blended materials are forced forward: the G-buffer holds one surface per pixel, so
-// it cannot represent a fragment that composites over what is behind it.
-func (r *Renderer) pipelineForMaterial(m materials.Material) uint32 {
-	if r.deferredEnabled && m.Blend() == materials.BlendOpaque {
-		if def, lit := m.Deferred(), m.Lighting(); def != nil && lit != nil {
-			return r.pipelineFor(materialPipeline{
-				pass: passGBuffer, shaderHash: m.Hash(), vertex: m.Vertex(), fragment: def,
-				cull: m.Cull(), lightingIdx: r.lightingPipelineFor(lit),
-			})
+// pipelineUnresolved marks a cell of a pool's pipeline table that has not been built
+// yet. Zero is a perfectly good pipeline index, so it cannot double as "empty".
+const pipelineUnresolved uint32 = 0xFFFFFFFF
+
+// poolPipelines is every draw pipeline the instances of one material pool can select
+// between. A pool is keyed by a Shader that never changes for its lifetime, so the
+// only things that vary within it are the per-instance cull and blend modes, plus the
+// pass the renderer picks. Cull and blend have three values each and there are two
+// passes, so the entire space is a fixed table indexed directly — no hashing, no
+// scan, no map — filled lazily because most pools use one or two of the cells.
+type poolPipelines struct {
+	table [2][3][3]uint32 // [pass][cull][blend]
+}
+
+func newPoolPipelines() poolPipelines {
+	var pp poolPipelines
+	for p := range pp.table {
+		for c := range pp.table[p] {
+			for b := range pp.table[p][c] {
+				pp.table[p][c][b] = pipelineUnresolved
+			}
 		}
 	}
-	return r.pipelineFor(materialPipeline{
-		pass: passForward, shaderHash: m.Hash(), vertex: m.Vertex(), fragment: m.Forward(), cull: m.Cull(), blend: m.Blend(),
-	})
+	return pp
+}
+
+// pipelineForPool resolves the draw pipeline for one material of a pool, given that
+// material's rasterization state. When deferred rendering is enabled
+// (EnableDeferredRendering), an opaque material whose pool supplies both Deferred and
+// Lighting renders through the G-buffer; everything else (blended, deferred disabled,
+// or a pool missing either shader) renders forward. Blended materials are forced
+// forward: the G-buffer holds one surface per pixel, so it cannot represent a fragment
+// that composites over what is behind it.
+//
+// Eligibility is asked of the pool rather than the material because the pool is keyed
+// by those very shaders — a material cannot disagree with it, and so cannot ask for a
+// G-buffer pipeline built out of SPIR-V its pool does not have.
+func (r *Renderer) pipelineForPool(p *materials.Pool, cull materials.CullMode, blend materials.BlendMode) uint32 {
+	for uint32(len(r.pools)) <= p.Index() {
+		r.pools = append(r.pools, newPoolPipelines())
+	}
+	pp := &r.pools[p.Index()]
+
+	sh := p.Shader()
+	ps := passForward
+	if r.deferredEnabled && blend == materials.BlendOpaque && sh.Deferred != nil && sh.Lighting != nil {
+		ps = passGBuffer
+	}
+	// The toggle is part of the index, not a reason to invalidate: flipping deferred
+	// rendering selects the other row and finds whatever was already built there.
+	if id := pp.table[ps][cull][blend]; id != pipelineUnresolved {
+		return id
+	}
+
+	key := materialPipeline{
+		pass: passForward, shaderHash: p.Hash(), vertex: sh.Vertex, fragment: sh.Forward,
+		cull: cull, blend: blend,
+	}
+	if ps == passGBuffer {
+		key = materialPipeline{
+			pass: passGBuffer, shaderHash: p.Hash(), vertex: sh.Vertex, fragment: sh.Deferred,
+			cull: cull, lightingIdx: r.lightingPipelineFor(sh.Lighting),
+		}
+	}
+	id := r.pipelineFor(key)
+	pp.table[ps][cull][blend] = id
+	return id
+}
+
+// pipelineForMaterial resolves the draw pipeline for a material. Everything it needs
+// lives in the material's pool; the material itself only says which pool and which
+// slot within it.
+func (r *Renderer) pipelineForMaterial(m materials.Material) uint32 {
+	p, id := m.Pool(), m.ID()
+	return r.pipelineForPool(p, p.Cull(id), p.Blend(id))
 }
 
 // sameKey compares two pipeline keys. lightingIdx is part of the identity: a gbuffer

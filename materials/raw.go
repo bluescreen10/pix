@@ -1,7 +1,7 @@
 package materials
 
 import (
-	"github.com/bluescreen10/pix/internal/ref"
+	"github.com/bluescreen10/pix/ref"
 	"github.com/bluescreen10/pix/textures"
 )
 

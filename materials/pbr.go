@@ -4,7 +4,7 @@ import (
 	"unsafe"
 
 	"github.com/bluescreen10/pix/colors"
-	"github.com/bluescreen10/pix/internal/ref"
+	"github.com/bluescreen10/pix/ref"
 	"github.com/bluescreen10/pix/shaders"
 	"github.com/bluescreen10/pix/textures"
 )

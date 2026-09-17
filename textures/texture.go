@@ -1,6 +1,6 @@
 package textures
 
-import "github.com/bluescreen10/pix/internal/ref"
+import "github.com/bluescreen10/pix/ref"
 
 // Texture is a ref-counted handle to a renderer-owned texture. Clone with Copy();
 // surrender ownership with Release() (the texture is destroyed at refcount 0). It

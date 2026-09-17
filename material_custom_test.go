@@ -7,7 +7,7 @@ import (
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/internal/ref"
+	"github.com/bluescreen10/pix/ref"
 	"github.com/bluescreen10/pix/materials"
 	"github.com/bluescreen10/pix/shaders"
 )
@@ -64,9 +64,10 @@ func (m *customMaterial) Lighting() []byte { return nil }
 func (m *customMaterial) Cull() materials.CullMode   { return m.pool.Cull(m.ref.ID()) }
 func (m *customMaterial) Blend() materials.BlendMode { return m.pool.Blend(m.ref.ID()) }
 
-func (m *customMaterial) Hash() uint32        { return m.pool.Hash() }
-func (m *customMaterial) ID() uint32          { return m.ref.ID() }
-func (m *customMaterial) RecordsAddr() uint64 { return m.pool.RecordsAddr() }
+func (m *customMaterial) Hash() uint32          { return m.pool.Hash() }
+func (m *customMaterial) ID() uint32            { return m.ref.ID() }
+func (m *customMaterial) RecordsAddr() uint64   { return m.pool.RecordsAddr() }
+func (m *customMaterial) Pool() *materials.Pool { return m.pool }
 func (m *customMaterial) SetColor(c colors.RGBA32F) {
 	m.color = c
 	m.pool.MarkDirty(m.ref.ID())

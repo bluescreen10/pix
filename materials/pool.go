@@ -5,7 +5,7 @@ import (
 
 	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/pix/internal/mem"
-	"github.com/bluescreen10/pix/internal/ref"
+	"github.com/bluescreen10/pix/ref"
 )
 
 // Instance is one live material. The typed materials implement it: a material
@@ -39,8 +39,14 @@ type entry struct {
 // ones marked dirty. So every setter must call markDirty, or its change is never
 // uploaded and the GPU renders the previous value indefinitely.
 type Pool struct {
-	backend     gpu.Backend
-	sh          Shader
+	backend gpu.Backend
+	sh      Shader
+	// index is this pool's position in its Store's pool list, assigned at creation.
+	// Pools are never removed from a store (Destroy tears down all of them at once),
+	// so it is stable for the store's lifetime and dense — which is what lets the
+	// renderer key per-pool state, such as its pipeline table, by array index rather
+	// than by lookup, and what lets a material be named by value as (pool, slot, gen).
+	index       uint32
 	forwardHash uint32 // hash of sh.Forward alone (pool dedup key)
 	hash        uint32 // hash of the whole Shader — every instance's Material.Hash
 
@@ -58,9 +64,9 @@ type Pool struct {
 	label string
 }
 
-func newPool(b gpu.Backend, sh Shader, label string) *Pool {
+func newPool(b gpu.Backend, sh Shader, label string, index uint32) *Pool {
 	s := &Pool{
-		backend: b, sh: sh, label: label, entries: mem.NewSlab[entry](),
+		backend: b, sh: sh, label: label, index: index, entries: mem.NewSlab[entry](),
 		forwardHash: HashSPIRV(sh.Forward), hash: hashShader(sh),
 	}
 	// The buffer is allocated by the first register, which is what reveals the stride.
@@ -178,6 +184,14 @@ func (s *Pool) Sync(u Uploader) {
 func (s *Pool) RecordsAddr() uint64 { return s.buf.Addr }
 func (s *Pool) Hash() uint32        { return s.hash }
 func (s *Pool) Shader() Shader      { return s.sh }
+
+// Index is this pool's dense, stable position in its owning Store — see the field.
+func (s *Pool) Index() uint32 { return s.index }
+
+// Live reports whether slot id still holds the same instance generation gen. A
+// reference carried as plain data cannot ref-count what it names, so whoever resolves
+// one checks it here before trusting the slot.
+func (s *Pool) Live(id, gen uint32) bool { return s.validate(id, gen) }
 
 // MarkDirty flags an instance's record for re-upload on the next Sync. A material
 // implementation must call it from every setter, or the GPU keeps rendering the

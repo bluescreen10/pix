@@ -118,6 +118,20 @@ type Material interface {
 	// buffer address (resolved at draw time — it moves when the pool grows).
 	ID() uint32
 	RecordsAddr() uint64
+
+	// Pool is where this material's record lives. Together with ID it is the whole of
+	// what the renderer needs: the pool carries the shaders (it is keyed by them, and
+	// they never change for its lifetime), the per-slot cull/blend, the record buffer
+	// address, and a dense index to key per-pool state by.
+	//
+	// It is how the methods above are going away. Every one of them — Vertex, Forward,
+	// Deferred, Lighting, Cull, Blend, Hash, RecordsAddr — is already a pure forward to
+	// this pool in every implementation in the tree, which is the evidence that none of
+	// them is a question a material should be answering. A material that returned a
+	// non-nil Deferred() over a pool whose Shader().Deferred is nil would have the
+	// renderer build a G-buffer pipeline out of missing SPIR-V, and nothing here can
+	// stop it while the answer is the material's to give. See docs/frame-packet.md.
+	Pool() *Pool
 }
 
 // Every material type implements Material by hand against its own store+ref, so a

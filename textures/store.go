@@ -9,7 +9,7 @@ import (
 
 	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/pix/internal/mem"
-	"github.com/bluescreen10/pix/internal/ref"
+	"github.com/bluescreen10/pix/ref"
 )
 
 // defaultAnisotropy is the sampler anisotropy the built-in sampler requests. 8 is
