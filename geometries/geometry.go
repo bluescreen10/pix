@@ -75,9 +75,18 @@ func (g Geometry) BoundingSphere() glm.Sphere {
 	return g.boundingSphere
 }
 
-// id is the geometry's slot in the store (used by drawables).
-func (g Geometry) ID() uint32 {
-	return g.ref.ID()
+// ID names one geometry by value: its slot in the owning store, plus the slot's
+// generation. Slot alone is what the GPU drawable records and what the store's
+// descriptor lookups take; Gen is what keeps a reference that outlives its geometry
+// from naming whichever one inherited the slot. Mirrors materials.ID — see
+// docs/frame-packet.md on why resource references travel as plain data.
+type ID struct {
+	Slot uint32
+	Gen  uint32
+}
+
+func (g Geometry) ID() ID {
+	return ID{Slot: g.ref.ID(), Gen: g.ref.Gen()}
 }
 
 // skinOutput allocates a derived output geometry that receives this geometry's
