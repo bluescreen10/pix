@@ -21,7 +21,7 @@ type OrbitControls struct {
 	camera camera
 	mouse  input.MouseInput
 
-	// target Point
+	// orbit target
 	target        glm.Vec3f
 	desiredTarget glm.Vec3f
 
@@ -40,13 +40,7 @@ type OrbitControls struct {
 	dampingEnabled bool
 	dampingFactor  float32
 
-	// mappings
-	//keyMapping   KeyMapping
 	mouseButtons MouseButtonMapping
-
-	//temp
-	scrollX float64
-	scrollY float64
 
 	// state
 	isRotating bool
@@ -62,10 +56,9 @@ type MouseButtonMapping struct {
 	Zoom  input.MouseButton
 }
 
-// TODO: input should be an interface
 func NewOrbit(camera camera, mouse input.MouseInput) *OrbitControls {
-	x, y := mouse.GetPos()
-	scrollX, scrollY := mouse.GetScroll()
+	x, y := mouse.Pos()
+	scrollX, scrollY := mouse.Scroll()
 
 	return &OrbitControls{
 		camera: camera,
@@ -107,10 +100,10 @@ func (c *OrbitControls) SetYaw(yaw float32) {
 
 func (c *OrbitControls) Update() {
 	dt := time.Since(c.lastUpdate)
-	x, y := c.mouse.GetPos()
+	x, y := c.mouse.Pos()
 	newPos := glm.Vec2f{float32(x), float32(y)}
 
-	x, y = c.mouse.GetScroll()
+	x, y = c.mouse.Scroll()
 	newScroll := glm.Vec2f{float32(x), float32(y)}
 
 	pos := c.camera.Position()
@@ -118,7 +111,7 @@ func (c *OrbitControls) Update() {
 	radius := offset.Length()
 
 	// orbit
-	if c.mouse.GetButton(c.mouseButtons.Orbit) == input.ButtonPress {
+	if c.mouse.Button(c.mouseButtons.Orbit) == input.ButtonPress {
 		if !c.isRotating {
 			c.mousePos = newPos
 			c.isRotating = true
@@ -133,7 +126,7 @@ func (c *OrbitControls) Update() {
 	}
 
 	// pan
-	if c.mouse.GetButton(c.mouseButtons.Pan) == input.ButtonPress {
+	if c.mouse.Button(c.mouseButtons.Pan) == input.ButtonPress {
 		if !c.isPanning {
 			c.mousePos = newPos
 			c.isPanning = true

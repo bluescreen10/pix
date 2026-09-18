@@ -17,7 +17,7 @@ const (
 )
 
 type MouseInput interface {
-	GetPos() (x, y float64)
-	GetButton(button MouseButton) MouseButtonAction
-	GetScroll() (x, y float64)
+	Pos() (x, y float64)
+	Button(button MouseButton) MouseButtonAction
+	Scroll() (x, y float64)
 }

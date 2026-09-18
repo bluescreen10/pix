@@ -55,77 +55,77 @@ const (
 	KeyWorld1       Key = 161
 	KeyWorld2       Key = 162
 
-	/* Function keys=  */
-	KeyEscape       = 256
-	KeyEnter        = 257
-	KeyTab          = 258
-	KeyBackspace    = 259
-	KeyInsert       = 260
-	KeyDelete       = 261
-	KeyRight        = 262
-	KeyLeft         = 263
-	KeyDown         = 264
-	KeyUp           = 265
-	KeyPageUp       = 266
-	KeyPageDown     = 267
-	KeyHome         = 268
-	KeyEnd          = 269
-	KeyCapsLock     = 280
-	KeyScrollLock   = 281
-	KeyNumLock      = 282
-	KeyPrintScreen  = 283
-	KeyPause        = 284
-	KeyF1           = 290
-	KeyF2           = 291
-	KeyF3           = 292
-	KeyF4           = 293
-	KeyF5           = 294
-	KeyF6           = 295
-	KeyF7           = 296
-	KeyF8           = 297
-	KeyF9           = 298
-	KeyF10          = 299
-	KeyF11          = 300
-	KeyF12          = 301
-	KeyF13          = 302
-	KeyF14          = 303
-	KeyF15          = 304
-	KeyF16          = 305
-	KeyF17          = 306
-	KeyF18          = 307
-	KeyF19          = 308
-	KeyF20          = 309
-	KeyF21          = 310
-	KeyF22          = 311
-	KeyF23          = 312
-	KeyF24          = 313
-	KeyF25          = 314
-	KeyKP0          = 320
-	KeyKP1          = 321
-	KeyKP2          = 322
-	KeyKP3          = 323
-	KeyKP4          = 324
-	KeyKP5          = 325
-	KeyKP6          = 326
-	KeyKP7          = 327
-	KeyKP8          = 328
-	KeyKP9          = 329
-	KeyKPDecimal    = 330
-	KeyKPDivide     = 331
-	KeyKPMultiply   = 332
-	KeyKPSubtract   = 333
-	KeyKPAdd        = 334
-	KeyKPEnter      = 335
-	KeyKPEqual      = 336
-	KeyLeftShift    = 340
-	KeyLeftControl  = 341
-	KeyLeftAlt      = 342
-	KeyLeftSuper    = 343
-	KeyRightShift   = 344
-	KeyRightControl = 345
-	KeyRightAlt     = 346
-	KeyRightSuper   = 347
-	KeyMenu         = 348
+	// Function keys.
+	KeyEscape       Key = 256
+	KeyEnter        Key = 257
+	KeyTab          Key = 258
+	KeyBackspace    Key = 259
+	KeyInsert       Key = 260
+	KeyDelete       Key = 261
+	KeyRight        Key = 262
+	KeyLeft         Key = 263
+	KeyDown         Key = 264
+	KeyUp           Key = 265
+	KeyPageUp       Key = 266
+	KeyPageDown     Key = 267
+	KeyHome         Key = 268
+	KeyEnd          Key = 269
+	KeyCapsLock     Key = 280
+	KeyScrollLock   Key = 281
+	KeyNumLock      Key = 282
+	KeyPrintScreen  Key = 283
+	KeyPause        Key = 284
+	KeyF1           Key = 290
+	KeyF2           Key = 291
+	KeyF3           Key = 292
+	KeyF4           Key = 293
+	KeyF5           Key = 294
+	KeyF6           Key = 295
+	KeyF7           Key = 296
+	KeyF8           Key = 297
+	KeyF9           Key = 298
+	KeyF10          Key = 299
+	KeyF11          Key = 300
+	KeyF12          Key = 301
+	KeyF13          Key = 302
+	KeyF14          Key = 303
+	KeyF15          Key = 304
+	KeyF16          Key = 305
+	KeyF17          Key = 306
+	KeyF18          Key = 307
+	KeyF19          Key = 308
+	KeyF20          Key = 309
+	KeyF21          Key = 310
+	KeyF22          Key = 311
+	KeyF23          Key = 312
+	KeyF24          Key = 313
+	KeyF25          Key = 314
+	KeyKP0          Key = 320
+	KeyKP1          Key = 321
+	KeyKP2          Key = 322
+	KeyKP3          Key = 323
+	KeyKP4          Key = 324
+	KeyKP5          Key = 325
+	KeyKP6          Key = 326
+	KeyKP7          Key = 327
+	KeyKP8          Key = 328
+	KeyKP9          Key = 329
+	KeyKPDecimal    Key = 330
+	KeyKPDivide     Key = 331
+	KeyKPMultiply   Key = 332
+	KeyKPSubtract   Key = 333
+	KeyKPAdd        Key = 334
+	KeyKPEnter      Key = 335
+	KeyKPEqual      Key = 336
+	KeyLeftShift    Key = 340
+	KeyLeftControl  Key = 341
+	KeyLeftAlt      Key = 342
+	KeyLeftSuper    Key = 343
+	KeyRightShift   Key = 344
+	KeyRightControl Key = 345
+	KeyRightAlt     Key = 346
+	KeyRightSuper   Key = 347
+	KeyMenu         Key = 348
 )
 
 type KeyAction uint8
@@ -136,8 +136,8 @@ const (
 	KeyRepeat  KeyAction = 2
 )
 
-type KeyBoardInput interface {
-	GetKey(key Key) KeyAction
+type KeyboardInput interface {
+	Key(key Key) KeyAction
 }
 
 // ModifierKey is a bitmask of the modifiers held when a key event fired.
@@ -159,7 +159,7 @@ type KeyEvent struct {
 	Mods   ModifierKey
 }
 
-// KeyEvents is edge-triggered keyboard input, as opposed to KeyBoardInput's "is it
+// KeyEvents is edge-triggered keyboard input, as opposed to KeyboardInput's "is it
 // down right now" polling.
 //
 // Two things polling cannot do, both of which a text UI needs: auto-repeat at the

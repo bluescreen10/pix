@@ -9,7 +9,7 @@ import (
 )
 
 var _ input.MouseInput = (*Input)(nil)
-var _ input.KeyBoardInput = (*Input)(nil)
+var _ input.KeyboardInput = (*Input)(nil)
 var _ input.TextInput = (*Input)(nil)
 var _ input.KeyEvents = (*Input)(nil)
 
@@ -33,19 +33,19 @@ func New(window *gamekit.Window) *Input {
 	return in
 }
 
-func (i *Input) GetPos() (x, y float64) {
+func (i *Input) Pos() (x, y float64) {
 	return i.window.GetPointerPos()
 }
 
-func (i *Input) GetScroll() (x, y float64) {
+func (i *Input) Scroll() (x, y float64) {
 	return i.window.GetScroll()
 }
 
-func (i *Input) GetButton(button input.MouseButton) input.MouseButtonAction {
+func (i *Input) Button(button input.MouseButton) input.MouseButtonAction {
 	return input.MouseButtonAction(i.window.GetPointerButton(pointer.Button(button)))
 }
 
-func (i *Input) GetKey(key input.Key) input.KeyAction {
+func (i *Input) Key(key input.Key) input.KeyAction {
 	return input.KeyAction(i.window.GetKey(keyboard.Key(key)))
 }
 

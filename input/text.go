@@ -3,7 +3,7 @@ package input
 // TextInput is character entry: the text the user actually typed, already mapped
 // through their keyboard layout and modifiers by the platform.
 //
-// This is deliberately separate from KeyBoardInput/KeyEvents, which report physical
+// This is deliberately separate from KeyboardInput/KeyEvents, which report physical
 // keys. Text cannot be reconstructed from key codes without reimplementing the
 // platform's layout handling — KeyA is the letter "q" on AZERTY, Shift+2 is "@" on
 // US and "\"" on French, and dead keys produce a character only on the *next*

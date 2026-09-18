@@ -26,10 +26,10 @@ var DefaultKeyMapping = KeyMapping{
 // fpsInput is the input capability FirstPersonControls needs: mouse-look plus
 // fly-movement keys. Declared here, by the consumer, rather than requiring a
 // caller-specific concrete type — anything satisfying both input.MouseInput and
-// input.KeyBoardInput (e.g. *gamekitinput.Input) works for free.
+// input.KeyboardInput (e.g. *gamekitinput.Input) works for free.
 type fpsInput interface {
 	input.MouseInput
-	input.KeyBoardInput
+	input.KeyboardInput
 }
 
 // FirstPersonControls is a mouse-look + WASD fly camera, the kind found in an FPS
@@ -56,7 +56,7 @@ type FirstPersonControls struct {
 // NewFirstPerson builds controls seeded from camera's current facing (so it doesn't
 // snap on the first Update).
 func NewFirstPerson(camera camera, in fpsInput) *FirstPersonControls {
-	x, y := in.GetPos()
+	x, y := in.Pos()
 	fwd := camera.Fwd()
 
 	return &FirstPersonControls{
@@ -79,9 +79,13 @@ func NewFirstPerson(camera camera, in fpsInput) *FirstPersonControls {
 // MoveSpeed is the fly speed in units/second; LookSpeed is mouse sensitivity in
 // radians/pixel. Provided so a caller that has to read a setting back — a console
 // variable, a settings UI — does not have to mirror it.
-func (c *FirstPersonControls) MoveSpeed() float32 { return c.moveSpeed }
+func (c *FirstPersonControls) MoveSpeed() float32 {
+	return c.moveSpeed
+}
 
-func (c *FirstPersonControls) LookSpeed() float32 { return c.lookSpeed }
+func (c *FirstPersonControls) LookSpeed() float32 {
+	return c.lookSpeed
+}
 
 // SetMoveSpeed sets fly speed in units/second.
 func (c *FirstPersonControls) SetMoveSpeed(speed float32) {
@@ -103,7 +107,7 @@ func (c *FirstPersonControls) Update() {
 	dt := now.Sub(c.lastUpdate).Seconds()
 	c.lastUpdate = now
 
-	x, y := c.input.GetPos()
+	x, y := c.input.Pos()
 	newPos := glm.Vec2f{float32(x), float32(y)}
 	deltaMouse := newPos.Sub(c.mousePos)
 	c.mousePos = newPos
@@ -127,22 +131,22 @@ func (c *FirstPersonControls) Update() {
 
 	pos := c.camera.Position()
 	move := float32(dt) * c.moveSpeed
-	if c.input.GetKey(c.keyMapping.Forward) == input.KeyPress {
+	if c.input.Key(c.keyMapping.Forward) == input.KeyPress {
 		pos = pos.Add(moveForward.Scale(move))
 	}
-	if c.input.GetKey(c.keyMapping.Back) == input.KeyPress {
+	if c.input.Key(c.keyMapping.Back) == input.KeyPress {
 		pos = pos.Sub(moveForward.Scale(move))
 	}
-	if c.input.GetKey(c.keyMapping.Right) == input.KeyPress {
+	if c.input.Key(c.keyMapping.Right) == input.KeyPress {
 		pos = pos.Add(right.Scale(move))
 	}
-	if c.input.GetKey(c.keyMapping.Left) == input.KeyPress {
+	if c.input.Key(c.keyMapping.Left) == input.KeyPress {
 		pos = pos.Sub(right.Scale(move))
 	}
-	if c.input.GetKey(c.keyMapping.Up) == input.KeyPress {
+	if c.input.Key(c.keyMapping.Up) == input.KeyPress {
 		pos = pos.Add(glm.Vec3f{0, move, 0})
 	}
-	if c.input.GetKey(c.keyMapping.Down) == input.KeyPress {
+	if c.input.Key(c.keyMapping.Down) == input.KeyPress {
 		pos = pos.Sub(glm.Vec3f{0, move, 0})
 	}
 
