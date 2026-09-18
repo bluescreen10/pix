@@ -1,8 +1,9 @@
-package pix
+package pix_test
 
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
 )
@@ -23,11 +24,13 @@ func (e *countEmitter) Emit(dt float32) int {
 	e.emitted++
 	return e.n
 }
-func (e *countEmitter) Reset() { e.resets++ }
+func (e *countEmitter) Reset() {
+	e.resets++
+}
 
-func newParticleTestScene(t *testing.T) (*Renderer, *scenes.Scene, scenes.ParticleConfig) {
+func newParticleTestScene(t *testing.T) (*pix.Renderer, *scenes.Scene, scenes.ParticleConfig) {
 	t.Helper()
-	r, err := NewOffscreenRenderer(16, 16)
+	r, err := pix.NewOffscreenRenderer(16, 16)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,8 +55,13 @@ func newParticleTestScene(t *testing.T) (*Renderer, *scenes.Scene, scenes.Partic
 // import a package that imports it back).
 type spawnFunc func(*scenes.Particle)
 
-func (f spawnFunc) Spawn(p *scenes.Particle)                       { f(p) }
-func SpawnFuncFor(f func(*scenes.Particle)) scenes.ParticleSpawner { return spawnFunc(f) }
+func (f spawnFunc) Spawn(p *scenes.Particle) {
+	f(p)
+}
+
+func SpawnFuncFor(f func(*scenes.Particle)) scenes.ParticleSpawner {
+	return spawnFunc(f)
+}
 
 func TestParticleContainerDefaults(t *testing.T) {
 	_, scene, config := newParticleTestScene(t)

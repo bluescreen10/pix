@@ -1,8 +1,9 @@
-package pix
+package pix_test
 
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
@@ -12,13 +13,13 @@ import (
 // TestShowFPS renders a few frames with the HUD enabled and checks the overlay text
 // is visible (font-colored pixels) and that GPU timestamps produced a positive time.
 func TestShowFPS(t *testing.T) {
-	r, err := NewOffscreenRenderer(320, 140)
+	r, err := pix.NewOffscreenRenderer(320, 140)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
 	r.SetClearColor([4]float32{0, 0, 0, 1})
-	r.fontColor = colors.RGBA32F{1, 0.9, 0.35, 1}
+	r.SetFontColor(colors.RGBA32F{1, 0.9, 0.35, 1})
 	r.ShowFPS(true)
 
 	scene := scenes.New()
@@ -41,11 +42,11 @@ func TestShowFPS(t *testing.T) {
 	if lit < 50 {
 		t.Fatalf("overlay text not visible (%d font px)", lit)
 	}
-	if r.stats.AvgGPUTime() <= 0 {
+	if r.Stats().AvgGPUTime() <= 0 {
 		t.Fatalf("no GPU time recorded via timestamps")
 	}
 	t.Logf("overlay lit=%d px | FPS=%.0f CPU=%.3fms GPU=%.3fms",
-		lit, r.stats.FPS(),
-		float64(r.stats.AvgCPUTime().Microseconds())/1000,
-		float64(r.stats.AvgGPUTime().Microseconds())/1000)
+		lit, r.Stats().FPS(),
+		float64(r.Stats().AvgCPUTime().Microseconds())/1000,
+		float64(r.Stats().AvgGPUTime().Microseconds())/1000)
 }

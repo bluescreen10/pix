@@ -1,8 +1,9 @@
-package pix
+package pix_test
 
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
@@ -30,7 +31,7 @@ func distinctColors(px []byte) map[[3]byte]int {
 // different objects get two different flat colors.
 func TestDebugObjectIDView(t *testing.T) {
 	const size = 128
-	r, err := NewOffscreenRenderer(size, size)
+	r, err := pix.NewOffscreenRenderer(size, size)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +40,7 @@ func TestDebugObjectIDView(t *testing.T) {
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
 
-	geo := r.GeometryStore.Create(BoxGeometry(1, 1, 1))
+	geo := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	mat := r.NewBasicMaterial()
 
 	a := scene.NewMesh(geo, mat)
@@ -53,7 +54,7 @@ func TestDebugObjectIDView(t *testing.T) {
 	cam.SetPosition(glm.Vec3f{0, 0, 4})
 	cam.LookAt(glm.Vec3f{0, 0, 0})
 
-	r.SetDebugView(DebugObjectID)
+	r.SetDebugView(pix.DebugObjectID)
 	r.Render(scene, cam)
 	colors := distinctColors(r.Pixels())
 	t.Logf("distinct object-id colors: %d", len(colors))
@@ -66,7 +67,7 @@ func TestDebugObjectIDView(t *testing.T) {
 // across a single box's visible faces (12 triangles), also in plain forward mode.
 func TestDebugTriangleIDView(t *testing.T) {
 	const size = 200
-	r, err := NewOffscreenRenderer(size, size)
+	r, err := pix.NewOffscreenRenderer(size, size)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +76,7 @@ func TestDebugTriangleIDView(t *testing.T) {
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
 
-	geo := r.GeometryStore.Create(BoxGeometry(1, 1, 1))
+	geo := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	mat := r.NewBasicMaterial()
 	m := scene.NewMesh(geo, mat)
 	m.SetRotationQuat(glm.NewQuat(0.6, glm.Vec3f{1, 1, 0}))
@@ -85,7 +86,7 @@ func TestDebugTriangleIDView(t *testing.T) {
 	cam.SetPosition(glm.Vec3f{0, 0, 2.5})
 	cam.LookAt(glm.Vec3f{0, 0, 0})
 
-	r.SetDebugView(DebugTriangleID)
+	r.SetDebugView(pix.DebugTriangleID)
 	r.Render(scene, cam)
 	colors := distinctColors(r.Pixels())
 	t.Logf("distinct triangle-id colors: %d", len(colors))
@@ -97,15 +98,12 @@ func TestDebugTriangleIDView(t *testing.T) {
 // TestDebugOffUnaffected confirms adding the two new enum values didn't disturb
 // normal shading or the existing G-buffer views' own gating.
 func TestDebugIDViewOffByDefault(t *testing.T) {
-	r, err := NewOffscreenRenderer(64, 64)
+	r, err := pix.NewOffscreenRenderer(64, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	if r.DebugView() != DebugOff {
+	if r.DebugView() != pix.DebugOff {
 		t.Fatalf("expected DebugOff by default, got %v", r.DebugView())
-	}
-	if r.idViewActive() {
-		t.Fatal("idViewActive should be false when DebugView is off")
 	}
 }

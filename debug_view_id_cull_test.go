@@ -1,8 +1,9 @@
-package pix
+package pix_test
 
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
@@ -19,7 +20,7 @@ import (
 // winding, so a fixed CullBack debug pass would show nothing at all here.
 func TestDebugIDShowsDoubleSidedBackfaces(t *testing.T) {
 	const size = 64
-	r, err := NewOffscreenRenderer(size, size)
+	r, err := pix.NewOffscreenRenderer(size, size)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +29,7 @@ func TestDebugIDShowsDoubleSidedBackfaces(t *testing.T) {
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
 
-	geo := r.GeometryStore.Create(BoxGeometry(10, 10, 10))
+	geo := r.GeometryStore.Create(pix.BoxGeometry(10, 10, 10))
 	mat := r.NewBasicMaterial()
 	mat.SetCull(materials.CullNone)
 	box := scene.NewMesh(geo, mat)
@@ -38,7 +39,7 @@ func TestDebugIDShowsDoubleSidedBackfaces(t *testing.T) {
 	cam.SetPosition(glm.Vec3f{0, 0, 0}) // inside the box
 	cam.LookAt(glm.Vec3f{0, 0, -1})
 
-	r.SetDebugView(DebugObjectID)
+	r.SetDebugView(pix.DebugObjectID)
 	r.Render(scene, cam)
 	px := r.Pixels()
 	lit := 0

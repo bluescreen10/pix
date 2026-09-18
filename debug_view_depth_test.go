@@ -1,8 +1,9 @@
-package pix
+package pix_test
 
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
@@ -18,7 +19,7 @@ import (
 // sqrt stayed close to 1 regardless of how much farther the actual geometry was.
 func TestDepthDebugPolarity(t *testing.T) {
 	const size = 64
-	r, err := NewOffscreenRenderer(size, size)
+	r, err := pix.NewOffscreenRenderer(size, size)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,11 +32,11 @@ func TestDepthDebugPolarity(t *testing.T) {
 	// PBR is deferred-capable; BasicMaterial is forward-only and never fills the
 	// G-buffer, so it wouldn't exercise this view at all.
 	mat := r.NewPBRMaterial()
-	nearGeo := r.GeometryStore.Create(BoxGeometry(10, 10, 10))
+	nearGeo := r.GeometryStore.Create(pix.BoxGeometry(10, 10, 10))
 	nearBox := scene.NewMesh(nearGeo, mat)
 	nearBox.SetPosition(glm.Vec3f{-15, 0, -100})
 	scene.Add(nearBox)
-	farGeo := r.GeometryStore.Create(BoxGeometry(2000, 2000, 2000))
+	farGeo := r.GeometryStore.Create(pix.BoxGeometry(2000, 2000, 2000))
 	farBox := scene.NewMesh(farGeo, mat)
 	farBox.SetPosition(glm.Vec3f{15, 0, -20000})
 	scene.Add(farBox)
@@ -49,7 +50,7 @@ func TestDepthDebugPolarity(t *testing.T) {
 	// those same pixels, plus a corner known to be neither box.
 	r.Render(scene, cam)
 	normalPx := append([]byte(nil), r.Pixels()...)
-	r.SetDebugView(DebugDepth)
+	r.SetDebugView(pix.DebugDepth)
 	r.Render(scene, cam)
 	depthPx := r.Pixels()
 

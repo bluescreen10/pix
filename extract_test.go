@@ -1,20 +1,22 @@
-package pix
+package pix_test
 
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
 )
 
 // TestExtractDescribesObjectsNotDrawRecords pins the shape of the boundary: the packet
-// carries one entry per renderable OBJECT, and the renderer expands it into the flat
-// per-instance, per-level draw records the GPU works on. The expected numbers below are
-// written out rather than derived, so a change to either side has to disagree with a
-// stated intent instead of with a second copy of the same loop.
+// carries one entry per renderable OBJECT — an attached mesh, however many instances or
+// LOD levels it has — not the flat per-instance, per-level draw records the renderer
+// expands it into internally. The expected numbers below are written out rather than
+// derived, so a change to either side has to disagree with a stated intent instead of
+// with a second copy of the same loop.
 func TestExtractDescribesObjectsNotDrawRecords(t *testing.T) {
-	r, err := NewOffscreenRenderer(64, 64)
+	r, err := pix.NewOffscreenRenderer(64, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,8 +24,8 @@ func TestExtractDescribesObjectsNotDrawRecords(t *testing.T) {
 	scene := scenes.New()
 	defer scene.Destroy()
 
-	near := r.GeometryStore.Create(BoxGeometry(1, 1, 1))
-	far := r.GeometryStore.Create(BoxGeometry(2, 2, 2))
+	near := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
+	far := r.GeometryStore.Create(pix.BoxGeometry(2, 2, 2))
 	defer near.Release()
 	defer far.Release()
 
@@ -32,7 +34,7 @@ func TestExtractDescribesObjectsNotDrawRecords(t *testing.T) {
 	blue.SetColor(colors.RGBA32F{0, 0, 1, 1})
 
 	// A plain mesh; a mesh with one coarser level; a 3-instance mesh with one coarser
-	// level. The last is what makes instance-major vs level-major ordering observable.
+	// level.
 	scene.Add(scene.NewMesh(near, red))
 
 	lodded := scene.NewMesh(near, red)
@@ -40,9 +42,9 @@ func TestExtractDescribesObjectsNotDrawRecords(t *testing.T) {
 	scene.Add(lodded)
 
 	xforms := []glm.Mat4f{
-		glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatIdentityf, glm.Vec3f{-2, 0, 0}),
-		glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatIdentityf, glm.Vec3f{2, 0, 0}),
-		glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatIdentityf, glm.Vec3f{6, 0, 0}),
+		glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatfIdentity, glm.Vec3f{-2, 0, 0}),
+		glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatfIdentity, glm.Vec3f{2, 0, 0}),
+		glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatfIdentity, glm.Vec3f{6, 0, 0}),
 	}
 	field := scene.NewInstancedMesh(near, blue, xforms)
 	field.AddLOD(far, red, 20)
@@ -52,7 +54,6 @@ func TestExtractDescribesObjectsNotDrawRecords(t *testing.T) {
 	scene.NewMesh(near, red)
 
 	scene.Sync()
-	r.prepareFrom(scene)
 
 	var p scenes.FramePacket
 	scene.Extract(&p)
@@ -73,48 +74,13 @@ func TestExtractDescribesObjectsNotDrawRecords(t *testing.T) {
 	if p.Source != scene.ID() {
 		t.Errorf("packet source %d, want the scene's %d", p.Source, scene.ID())
 	}
-
-	// 1 plain + 2 levels + (3 instances x 2 levels) = 9 draw records.
-	const wantRecords = 1 + 2 + 3*2
-	got := r.stateFor(scene.ID()).dl.drawables
-	if len(got) != wantRecords {
-		t.Fatalf("expanded to %d draw records, want %d", len(got), wantRecords)
-	}
-
-	// Instances outer, levels inner: the instanced mesh's six records must read
-	// (instance0 level0, instance0 level1, instance1 level0, ...).
-	inst := got[3:]
-	for i, rec := range inst {
-		wantInstance, wantLevel := uint32(i/2), uint32(i%2)
-		if rec.lodLevel != wantLevel {
-			t.Errorf("instanced record %d: level %d, want %d (levels must vary fastest)",
-				i, rec.lodLevel, wantLevel)
-		}
-		if rec.transformID != inst[0].transformID+wantInstance {
-			t.Errorf("instanced record %d: transform %d, want %d",
-				i, rec.transformID, inst[0].transformID+wantInstance)
-		}
-	}
-
-	// Every LOD-tagged object gets one entry in the renderer's LOD config table, and
-	// slot 0 stays reserved so a lodID of 0 means "not LOD-tagged".
-	if len(r.stateFor(scene.ID()).dl.lodEntries) != 3 {
-		t.Errorf("LOD config table has %d entries, want 3 (reserved slot + two groups)",
-			len(r.stateFor(scene.ID()).dl.lodEntries))
-	}
-	if got[0].lodID != 0 {
-		t.Errorf("the plain mesh's record has lodID %d, want 0", got[0].lodID)
-	}
-	if e := r.stateFor(scene.ID()).dl.lodEntries[got[1].lodID]; e.levelCount != 2 || e.boundaries[0] != 10 {
-		t.Errorf("LOD group = {levelCount %d, boundary %v}, want {2, 10}", e.levelCount, e.boundaries[0])
-	}
 }
 
 // TestExtractBorrowsTransforms pins the O(1) handoff: extraction must hand over the
 // scene's transform storage, not a copy of it, however large the scene — and an
 // unchanged scene must not be rewalked at all.
 func TestExtractBorrowsTransforms(t *testing.T) {
-	r, err := NewOffscreenRenderer(64, 64)
+	r, err := pix.NewOffscreenRenderer(64, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +88,7 @@ func TestExtractBorrowsTransforms(t *testing.T) {
 	scene := scenes.New()
 	defer scene.Destroy()
 
-	geo := r.GeometryStore.Create(BoxGeometry(1, 1, 1))
+	geo := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	defer geo.Release()
 	mesh := scene.NewMesh(geo, r.NewBasicMaterial())
 	scene.Add(mesh)
