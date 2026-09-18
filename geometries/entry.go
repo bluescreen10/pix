@@ -23,7 +23,7 @@ type vertexSkin struct {
 }
 
 // entry is the source of truth for one geometry. Attributes hold the original CPU
-// bytes (retained for grow-repacking and GetAttributeData); the packed GPU stream
+// bytes (retained for grow-repacking and AttributeData); the packed GPU stream
 // bytes are reconstructed on demand. It holds each present stream's suballocation
 // and the local bounds.
 //
@@ -136,7 +136,7 @@ func (e *entry) packAttributes() []byte {
 	n := e.attrs[AttributePosition].count
 	normals, vertColors, uvs := e.vec3(AttributeNormal), e.rgba(AttributeColor), e.vec2(AttributeUV)
 	attrs := make([]vertexAttributes, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		va := vertexAttributes{color: colors.RGBA8{255, 255, 255, 255}} // default white
 		if i < len(normals) {
 			// Unorm10x3 stores unsigned [0,1], so remap the signed normal here. The
@@ -166,7 +166,7 @@ func (e *entry) packSkin() []byte {
 	n := e.attrs[AttributePosition].count
 	joints, weights := e.vec4u16(AttributeSkinIndex), e.vec4(AttributeSkinWeight)
 	out := make([]vertexSkin, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		var j glm.Vec4[uint16]
 		if i < len(joints) {
 			j = joints[i]

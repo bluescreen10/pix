@@ -7,7 +7,7 @@ import (
 	"github.com/bluescreen10/pix/glm"
 )
 
-// TestAttributeRoundTrip verifies GetAttributeData[T] returns what NewGeometry stored
+// TestAttributeRoundTrip verifies AttributeData[T] returns what NewGeometry stored
 // and SetAttributeData[T] replaces it in place.
 func TestAttributeRoundTrip(t *testing.T) {
 	r, err := NewOffscreenRenderer(64, 64)
@@ -27,7 +27,7 @@ func TestAttributeRoundTrip(t *testing.T) {
 	})
 	defer geo.Release()
 
-	got := geo.GetAttributeData[glm.Vec3f](geometries.AttributePosition)
+	got := geo.AttributeData[glm.Vec3f](geometries.AttributePosition)
 	if len(got) != len(positions) {
 		t.Fatalf("position len = %d, want %d", len(got), len(positions))
 	}
@@ -38,14 +38,14 @@ func TestAttributeRoundTrip(t *testing.T) {
 	}
 
 	// Absent attribute → nil.
-	if n := geo.GetAttributeData[glm.Vec4f](geometries.AttributeColor); n != nil {
+	if n := geo.AttributeData[glm.Vec4f](geometries.AttributeColor); n != nil {
 		t.Fatalf("absent color attribute = %v, want nil", n)
 	}
 
 	// Replace positions in place and read them back.
 	moved := []glm.Vec3f{{-2, -2, 1}, {2, -2, 1}, {0, 2, 1}}
 	geo.SetAttributeData(geometries.AttributePosition, moved)
-	back := geo.GetAttributeData[glm.Vec3f](geometries.AttributePosition)
+	back := geo.AttributeData[glm.Vec3f](geometries.AttributePosition)
 	for i := range moved {
 		if back[i] != moved[i] {
 			t.Fatalf("after set: position[%d] = %v, want %v", i, back[i], moved[i])

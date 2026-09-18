@@ -31,11 +31,11 @@ func (g Geometry) IsValid() bool {
 	return g.ref.IsValid()
 }
 
-// GetAttributeData returns a copy of a stored attribute reinterpreted as
-// []T (e.g. GetAttributeData[glm.Vec3f](AttributePosition)), or nil if the attribute
+// AttributeData returns a copy of a stored attribute reinterpreted as
+// []T (e.g. AttributeData[glm.Vec3f](AttributePosition)), or nil if the attribute
 // is absent. T must match the element layout the attribute was created with. Do not
 // mutate the returned slice — it aliases the geometry's internal bytes.
-func (g Geometry) GetAttributeData[T any](t AttributeType) []T {
+func (g Geometry) AttributeData[T any](t AttributeType) []T {
 	if g.store == nil {
 		return nil
 	}
@@ -62,7 +62,7 @@ func (g Geometry) SetAttributeData[T any](t AttributeType, data []T) {
 // alive. A geometry created without an explicit index list gets a generated
 // 0..n-1 one, so this is never nil for a live geometry. Do not mutate the
 // returned slice — it aliases the geometry's internal data, the same contract
-// GetAttributeData carries.
+// AttributeData carries.
 func (g Geometry) Indices() []uint32 {
 	if g.store == nil {
 		return nil
@@ -116,7 +116,7 @@ func (g *Store) indices(id uint32) []uint32 {
 }
 
 // attribute returns a pointer to a geometry's stored attribute (nil if the id is
-// dead or the attribute is absent). The generic GetAttributeData/SetAttributeData
+// dead or the attribute is absent). The generic AttributeData/SetAttributeData
 // methods reinterpret its bytes.
 func (g *Store) attribute(id uint32, t AttributeType) *Attribute {
 	if !g.entries.Alive(id) || t >= attributeCount {

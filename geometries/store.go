@@ -265,7 +265,7 @@ func (g *Store) Free(id uint32) {
 		return
 	}
 	e := g.entries.Get(id)
-	for s := 0; s < streamCount; s++ {
+	for s := range streamCount {
 		if e.streamPresent(s) {
 			g.streams[s].tlsf.Free(e.allocs[s])
 		}
@@ -457,7 +457,7 @@ func (g *Store) writeStream(stream int, byteOffset uint32, data []byte) {
 
 // Destroy releases all GPU buffers held by the store.
 func (g *Store) Destroy() {
-	for s := 0; s < streamCount; s++ {
+	for s := range streamCount {
 		if g.streams[s] != nil && g.streams[s].buf.IsValid() {
 			g.backend.Free(g.streams[s].buf)
 			g.streams[s] = nil

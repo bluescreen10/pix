@@ -14,7 +14,7 @@ const (
 )
 
 // DataType is an attribute element's CPU format. It records how NewAttribute's
-// typed slice was laid out so GetAttributeData can hand it back in the same shape.
+// typed slice was laid out so AttributeData can hand it back in the same shape.
 type DataType uint8
 
 const (
@@ -48,7 +48,7 @@ type Attribute struct {
 }
 
 // NewAttribute wraps a typed slice as an Attribute. dataType records the element
-// layout (so GetAttributeData returns the same shape); data is reinterpreted as
+// layout (so AttributeData returns the same shape); data is reinterpreted as
 // raw bytes without copying, so the backing array must outlive the geometry.
 func NewAttribute[T any](attrType AttributeType, dataType DataType, data []T) Attribute {
 	return Attribute{attrType: attrType, dataType: dataType, data: toBytes(data), count: len(data)}
@@ -61,7 +61,7 @@ func (a Attribute) Type() AttributeType {
 
 // AttributeData reinterprets a's element data as []T (matching the layout given to
 // NewAttribute), before it has ever been uploaded — the pre-upload counterpart to
-// Geometry.GetAttributeData. Do not mutate the result — it aliases a's internal bytes.
+// Geometry.AttributeData. Do not mutate the result — it aliases a's internal bytes.
 func AttributeData[T any](a Attribute) []T {
 	return fromBytes[T](a.data, a.count)
 }

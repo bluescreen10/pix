@@ -75,12 +75,12 @@ func DecalGeometry(mesh Mesh, pos glm.Vec3f, orientation glm.Quatf, size glm.Vec
 	sc.updateTransforms()
 
 	geo := mesh.Geometry()
-	srcPos := geo.GetAttributeData[glm.Vec3f](geometries.AttributePosition)
+	srcPos := geo.AttributeData[glm.Vec3f](geometries.AttributePosition)
 	srcIdx := geo.Indices()
 	if len(srcPos) == 0 || len(srcIdx) < 3 {
 		return geometries.GeometryConfig{}, false
 	}
-	srcNormal := geo.GetAttributeData[glm.Vec3f](geometries.AttributeNormal)
+	srcNormal := geo.AttributeData[glm.Vec3f](geometries.AttributeNormal)
 
 	// Clip in decal space, where the box is axis-aligned and centered on the
 	// origin: one matrix per vertex, and six trivial half-space tests instead of

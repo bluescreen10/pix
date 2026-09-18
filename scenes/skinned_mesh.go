@@ -82,7 +82,7 @@ func (s *Scene) NewSkinnedMesh(geo geometries.Geometry, mat materials.Material, 
 	skelIdx := s.payload[skel.slot()]
 	sk := s.skeletons.Get(skelIdx)
 
-	positions := geo.GetAttributeData[glm.Vec3f](geometries.AttributePosition)
+	positions := geo.AttributeData[glm.Vec3f](geometries.AttributePosition)
 	radii, bindPos := computeJointRadii(geo, sk.invBind, positions)
 	unitScale := make([]float32, len(bindPos))
 	for i := range unitScale {
@@ -121,8 +121,8 @@ func (s *Scene) freeSkinnedMesh(payloadIdx uint32) {
 // the geometry's skin data. A joint radii[j] stays negative if no vertex ever
 // weights it (skinnedBounds skips those when building the mesh's bounding sphere).
 func computeJointRadii(geo geometries.Geometry, invBind []glm.Mat4f, positions []glm.Vec3f) (radii []float32, bindPos []glm.Vec3f) {
-	joints := geo.GetAttributeData[glm.Vec4[uint16]](geometries.AttributeSkinIndex)
-	weights := geo.GetAttributeData[glm.Vec4f](geometries.AttributeSkinWeight)
+	joints := geo.AttributeData[glm.Vec4[uint16]](geometries.AttributeSkinIndex)
+	weights := geo.AttributeData[glm.Vec4f](geometries.AttributeSkinWeight)
 	if joints == nil || weights == nil {
 		panic("pix: NewSkinnedMesh requires geometry with skin index and skin weight attributes")
 	}
