@@ -70,11 +70,9 @@ func (t *Store) CreateSampler(d gpu.SamplerDescriptor) uint32 {
 // repacked and filtered according to format, and returns a fresh single-ref handle.
 // Submitted + waited immediately.
 func (t *Store) Create(rgba []byte, w, h int, format Format) Texture {
-	channels := format.channels()
-	base := format.repack(rgba, w, h)
-	// The backend derives each level's extent from the mip index, so mipChain's
-	// per-level sizes aren't needed here.
-	levels, _ := mipChain(base, w, h, channels, format == SRGB, format == Normal)
+	// The backend derives each level's extent from the mip index, so
+	// GenerateMipChain's per-level sizes aren't needed here.
+	base, levels, _ := GenerateMipChain(rgba, w, h, format)
 
 	tex := t.backend.CreateTexture(gpu.TextureDescriptor{
 		Kind: gpu.Texture2D, Width: uint32(w), Height: uint32(h),

@@ -11,7 +11,9 @@ import "github.com/bluescreen10/pix/scenes"
 // SpawnFunc adapts a plain function to scenes.ParticleSpawner.
 type SpawnFunc func(*scenes.Particle)
 
-func (f SpawnFunc) Spawn(p *scenes.Particle) { f(p) }
+func (f SpawnFunc) Spawn(p *scenes.Particle) {
+	f(p)
+}
 
 // RateEmitter requests births at a steady rate, accumulating fractional births
 // between updates so a rate like 0.5/s still produces exactly one birth every two
@@ -36,7 +38,9 @@ func (e *RateEmitter) Emit(dt float32) int {
 	return n
 }
 
-func (e *RateEmitter) Reset() { e.acc = 0 }
+func (e *RateEmitter) Reset() {
+	e.acc = 0
+}
 
 // BurstEmitter requests its full count once, on the first positive Emit call, and
 // nothing afterward until Reset rearms it.
@@ -61,4 +65,6 @@ func (e *BurstEmitter) Emit(dt float32) int {
 	return e.count
 }
 
-func (e *BurstEmitter) Reset() { e.armed = true }
+func (e *BurstEmitter) Reset() {
+	e.armed = true
+}

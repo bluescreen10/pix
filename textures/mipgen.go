@@ -23,6 +23,19 @@ func mipLevels(w, h int) int {
 	return n
 }
 
+// GenerateMipChain builds a full mip chain for format from RGBA8 source pixels
+// (w*h*4, row-major), applying the same repacking and filtering Store.Create uses
+// internally. It has no GPU dependency, so offline tools that bake or cache textures
+// (or tests) can call it directly. Returns the repacked base level, every level below
+// it largest-first, and each returned level's pixel dimensions (not including the
+// base, which is always w×h).
+func GenerateMipChain(rgba []byte, w, h int, format Format) (base []byte, levels [][]byte, sizes [][2]int) {
+	channels := format.channels()
+	base = format.repack(rgba, w, h)
+	levels, sizes = mipChain(base, w, h, channels, format == SRGB, format == Normal)
+	return base, levels, sizes
+}
+
 // mipChain builds every level below the base for a `channels`-per-texel image,
 // returning them largest-first (NOT including the base). srgb selects linear-space
 // filtering; normalMap renormalizes each result texel as a unit vector.
