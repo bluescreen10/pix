@@ -1,4 +1,4 @@
-package gltf
+package gltf_test
 
 import (
 	"encoding/base64"
@@ -13,6 +13,7 @@ import (
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/loaders/gltf"
 	"github.com/bluescreen10/pix/scenes"
 )
 
@@ -66,7 +67,7 @@ func TestMultiSceneOnlyDefault(t *testing.T) {
 	defer r.Destroy()
 	scene := scenes.New()
 	defer scene.Destroy()
-	n, err := Load(r, scene, path)
+	n, err := gltf.Load(r, scene, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +134,7 @@ func TestLoadTriangle(t *testing.T) {
 	scene := scenes.New()
 	defer scene.Destroy()
 
-	n, err := Load(r, scene, writeTriangleGLTF(t))
+	n, err := gltf.Load(r, scene, writeTriangleGLTF(t))
 	if err != nil {
 		t.Fatal(err)
 	}

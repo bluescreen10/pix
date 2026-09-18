@@ -1,4 +1,4 @@
-package gltf
+package gltf_test
 
 import (
 	"testing"
@@ -6,6 +6,7 @@ import (
 	_ "github.com/bluescreen10/gamekit/gpu/vulkan"
 	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
+	"github.com/bluescreen10/pix/loaders/gltf"
 	"github.com/bluescreen10/pix/scenes"
 )
 
@@ -25,7 +26,7 @@ func TestLoadSkinnedAnimatedAsset(t *testing.T) {
 	scene := scenes.New()
 	defer scene.Destroy()
 
-	res, err := LoadFull(r, scene, capoeiraAsset)
+	res, err := gltf.LoadFull(r, scene, capoeiraAsset)
 	if err != nil {
 		t.Fatal(err)
 	}

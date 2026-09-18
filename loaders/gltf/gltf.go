@@ -645,7 +645,7 @@ func (l *loader) animValues(sampler animSampler, channel scenes.Channel, keyCoun
 			return nil
 		}
 		out := make([]float32, keyCount*stride)
-		for i := 0; i < keyCount; i++ {
+		for i := range keyCount {
 			copy(out[i*stride:], all[i*stride*3+stride:i*stride*3+stride*2])
 		}
 		return out
@@ -943,7 +943,7 @@ func (l *loader) accessorBytes(idx int) []byte {
 		return buf[base:end:end]
 	}
 	out := make([]byte, acc.Count*elemSize)
-	for i := 0; i < acc.Count; i++ {
+	for i := range acc.Count {
 		copy(out[i*elemSize:], buf[base+i*stride:base+i*stride+elemSize])
 	}
 	return out

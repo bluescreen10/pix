@@ -1,4 +1,4 @@
-package gltf
+package gltf_test
 
 import (
 	"image"
@@ -11,6 +11,7 @@ import (
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/loaders/gltf"
 	"github.com/bluescreen10/pix/scenes"
 )
 
@@ -32,7 +33,7 @@ func TestCaptureAnimatedFrames(t *testing.T) {
 
 	scene := scenes.New()
 	defer scene.Destroy()
-	res, err := LoadFull(r, scene, capoeiraAsset)
+	res, err := gltf.LoadFull(r, scene, capoeiraAsset)
 	if err != nil {
 		t.Fatal(err)
 	}
