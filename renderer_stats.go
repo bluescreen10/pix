@@ -37,7 +37,9 @@ func (s *RendererStats) StartFrame() {
 }
 
 // slot is the 0-based ring index for the current frame (frame 1 → slot 0).
-func (s *RendererStats) slot() int { return (s.currentFrame - 1) % s.maxSamples }
+func (s *RendererStats) slot() int {
+	return (s.currentFrame - 1) % s.maxSamples
+}
 
 func (s *RendererStats) EndFrame() {
 	s.frameTimes[s.slot()] = time.Since(s.start).Seconds()
@@ -81,7 +83,7 @@ func (s *RendererStats) avg(buf []float64) time.Duration {
 		return 0
 	}
 	var total float64
-	for i := 0; i < s.samples; i++ {
+	for i := range s.samples {
 		total += buf[i]
 	}
 	return time.Duration(total / float64(s.samples) * float64(time.Second))

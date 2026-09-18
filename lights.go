@@ -201,7 +201,9 @@ func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPack
 }
 
 // Addr returns the table's device address.
-func (l *Lights) Addr() uint64 { return l.buf.Addr }
+func (l *Lights) Addr() uint64 {
+	return l.buf.Addr
+}
 
 // Sync writes the table directly (MemoryHost, no staging/uploader) when it
 // changed since the last call.

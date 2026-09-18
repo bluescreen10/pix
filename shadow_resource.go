@@ -212,8 +212,13 @@ func (r *Renderer) ShadowView(source scenes.SourceID, light scenes.LightID) *Sha
 }
 
 // Camera and Map of one cube face, for inspecting a point light's shadow.
-func (f pointFace) Camera() Camera        { return f.cam }
-func (f pointFace) Map() textures.Texture { return f.m }
+func (f pointFace) Camera() Camera {
+	return f.cam
+}
+
+func (f pointFace) Map() textures.Texture {
+	return f.m
+}
 
 // particleState is one particle system's GPU simulation state. The buffers ARE the
 // simulation — nothing on the CPU mirrors them — so they are keyed by the system's

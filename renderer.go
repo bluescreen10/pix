@@ -44,13 +44,8 @@ type Renderer struct {
 
 	// Renderer-owned shared resources + GPU-driven pipelines. All three stores are
 	// exported: callers create resources on them directly (GeometryStore.Create,
-	// TextureStore.Create, r.NewPBRMaterial()) rather than
-	// through per-renderer wrapper methods that would have to be kept in sync.
-	//
-	// GeometryStore and TextureStore are exported (unlike materials) so callers
-	// create those resources directly — r.GeometryStore.Create(cfg),
-	// r.TextureStore.Create(pixels, w, h, format) — with no per-renderer wrapper
-	// method to keep in sync.
+	// TextureStore.Create, r.NewPBRMaterial()) rather than through per-renderer
+	// wrapper methods that would have to be kept in sync.
 	GeometryStore *geometries.Store
 	TextureStore  *textures.Store
 	MaterialStore *materials.Store
@@ -154,7 +149,9 @@ func (r *Renderer) EnableDeferredRendering(on bool) {
 // Scale is framebuffer pixels per logical point (see RendererConfig.Scale). Sizes the
 // renderer draws for a human to read — the HUD, the console — are given in logical
 // points and multiplied by this, so they stay the same physical size on any display.
-func (r *Renderer) Scale() float32 { return r.scale }
+func (r *Renderer) Scale() float32 {
+	return r.scale
+}
 
 // SetScale updates the display scale, for a window moved between displays of
 // different densities. Values <= 0 are ignored.
@@ -171,29 +168,45 @@ func (r *Renderer) SetScale(s float32) {
 // the matching Enable*/Set* call. They exist so these toggles can be bound to
 // something that has to read them back — a console variable, a settings panel —
 // without the caller keeping its own shadow copy in sync.
-func (r *Renderer) ShadowsEnabled() bool { return r.shadowsEnabled }
+func (r *Renderer) ShadowsEnabled() bool {
+	return r.shadowsEnabled
+}
 
-func (r *Renderer) DeferredEnabled() bool { return r.deferredEnabled }
+func (r *Renderer) DeferredEnabled() bool {
+	return r.deferredEnabled
+}
 
-func (r *Renderer) ShadowDistance() float32 { return r.shadowDistance }
+func (r *Renderer) ShadowDistance() float32 {
+	return r.shadowDistance
+}
 
 // StatsVisible reports whether the debug HUD is showing (see ShowFPS).
-func (r *Renderer) StatsVisible() bool { return r.showFPS }
+func (r *Renderer) StatsVisible() bool {
+	return r.showFPS
+}
 
 // Stats returns the renderer's rolling frame-time statistics (CPU/GPU ms, FPS —
 // the same numbers ShowFPS draws onscreen), for callers that want them
 // programmatically (e.g. an automated before/after comparison) rather than reading
 // the HUD. GPU timestamps are only recorded while ShowFPS(true) is active.
-func (r *Renderer) Stats() *RendererStats { return r.stats }
+func (r *Renderer) Stats() *RendererStats {
+	return r.stats
+}
 
 // ClearColor is the colour the frame is cleared to (see SetClearColor).
-func (r *Renderer) ClearColor() colors.RGBA32F { return r.clear }
+func (r *Renderer) ClearColor() colors.RGBA32F {
+	return r.clear
+}
 
 // FontColor is the colour the debug HUD's text is drawn in.
-func (r *Renderer) FontColor() colors.RGBA32F { return r.fontColor }
+func (r *Renderer) FontColor() colors.RGBA32F {
+	return r.fontColor
+}
 
 // SetFontColor sets the colour of the debug HUD's text.
-func (r *Renderer) SetFontColor(rgba colors.RGBA32F) { r.fontColor = rgba }
+func (r *Renderer) SetFontColor(rgba colors.RGBA32F) {
+	r.fontColor = rgba
+}
 
 // SetShadowDistance caps how far along the camera's view frustum directional shadows
 // are fit: a smaller distance packs the shadow map's resolution into the near view for
@@ -254,13 +267,13 @@ func NewRenderer(cfg *RendererConfig) (*Renderer, error) {
 			return nil, fmt.Errorf("render: attach window: %w", err)
 		}
 	case cfg.Width > 0 && cfg.Height > 0:
-		r.attatchTexture(cfg.Width, cfg.Height)
+		r.attachTexture(cfg.Width, cfg.Height)
 	}
 	return r, nil
 }
 
 // attachTexture configures an internally-owned RGBA8 render target of w×h.
-func (r *Renderer) attatchTexture(w, h uint32) {
+func (r *Renderer) attachTexture(w, h uint32) {
 	tex := r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: w, Height: h,
 		Format: gpu.FormatRGBA8Unorm, Usage: gpu.TextureRenderTarget | gpu.TextureTransfer})
 	r.ownsTarget = true
@@ -837,7 +850,6 @@ func (r *Renderer) Render(scene scenes.Producer, cam Camera) {
 
 	r.readGPU()
 	r.stats.EndFrame()
-	return
 }
 
 // Capture copies the current render target into a CPU buffer and returns it as RGBA8
@@ -860,7 +872,9 @@ func (r *Renderer) Capture() []byte {
 }
 
 // Pixels is an alias for Capture (headless).
-func (r *Renderer) Pixels() []byte { return r.Capture() }
+func (r *Renderer) Pixels() []byte {
+	return r.Capture()
+}
 
 // encode records the frame: the shadow views (cull + depth pass per casting light),
 // then the main view (cull + lit draw), plus GPU timestamps + the HUD when enabled.
@@ -1089,6 +1103,15 @@ func (r *Renderer) syncScene(scene scenes.Producer, cam Camera, cmd gpu.CommandB
 	r.syncDrawList(scene)
 }
 
+// prepareFrom runs one frame's producer-side work — settle the scene, extract a
+// packet, refresh the draw list — without recording any GPU commands. Render does the
+// same steps as part of a frame; this is the seam tests use to inspect the derived
+// state, and it keeps them from having to know that extraction happens exactly once.
+func (r *Renderer) prepareFrom(scene scenes.Producer) {
+	scene.Extract(&r.frame)
+	r.syncDrawList(scene)
+}
+
 // syncDrawList refreshes the scene's batches for this frame. The drawables and the
 // distinct set of materials they reference are collected only on a structural change
 // (drawableDirty); the pipeline ids are re-resolved every frame off that cached
@@ -1101,15 +1124,6 @@ func (r *Renderer) syncScene(scene scenes.Producer, cam Camera, cmd gpu.CommandB
 // the per-drawable arrays. Resolving off the collected set is also what keeps pipeBuf
 // aligned with the drawables — both come from the one collectDrawables walk, so no
 // second traversal has to reproduce its ordering and its flagAttached filtering.
-// prepareFrom runs one frame's producer-side work — settle the scene, extract a
-// packet, refresh the draw list — without recording any GPU commands. Render does the
-// same steps as part of a frame; this is the seam tests use to inspect the derived
-// state, and it keeps them from having to know that extraction happens exactly once.
-func (r *Renderer) prepareFrom(scene scenes.Producer) {
-	scene.Extract(&r.frame)
-	r.syncDrawList(scene)
-}
-
 func (r *Renderer) syncDrawList(scene scenes.Producer) {
 	dl := r.stateFor(scene.ID()).dl
 	p := &r.frame
@@ -1370,7 +1384,7 @@ func (r *Renderer) fitDirectionalShadow(s *shadowResource, l scenes.LightPacket,
 		t = glm.Clamp((shadowDist-nearDist)/(farDist-nearDist), 0, 1)
 	}
 	var pts [8]glm.Vec3f
-	for j := 0; j < 4; j++ {
+	for j := range 4 {
 		pts[j] = corners[j]
 		pts[j+4] = corners[j].Add(corners[j+4].Sub(corners[j]).Scale(t))
 	}
@@ -1444,12 +1458,15 @@ func boundingSphere(p [8]glm.Vec3f) (glm.Vec3f, float32) {
 }
 
 // small float32 math helpers for the shadow fit.
+
 func abs32(x float32) float32 {
 	return float32(math.Abs(float64(x)))
 }
+
 func sqrt32(x float32) float32 {
 	return float32(math.Sqrt(float64(x)))
 }
+
 func cos32(x float32) float32 {
 	return float32(math.Cos(float64(x)))
 }
@@ -1711,14 +1728,6 @@ func (r *Renderer) issueDraws(cmd gpu.CommandBuffer, dl *drawList, p pass) {
 	}
 }
 
-// recordLighting shades the G-buffer: one fullscreen pass per unique shading model
-// referenced by this frame's active gbuffer runs, each additively blending its
-// contribution onto target (which already holds the G-buffer pass's emissive write).
-//
-// NOTE: with more than one active model this shades every non-background pixel in
-// every pass (no per-model masking yet — fine while PBR is the only built-in deferred
-// model; a real fix, e.g. a model-id compare or a stencil mask written during the
-// G-buffer pass, is needed before a second one ships).
 // ensureGBufferSampler creates the sampler both fullscreen passes read the G-buffer
 // with, on first use.
 //
@@ -1739,6 +1748,14 @@ func (r *Renderer) ensureGBufferSampler() {
 	})
 }
 
+// recordLighting shades the G-buffer: one fullscreen pass per unique shading model
+// referenced by this frame's active gbuffer runs, each additively blending its
+// contribution onto target (which already holds the G-buffer pass's emissive write).
+//
+// NOTE: with more than one active model this shades every non-background pixel in
+// every pass (no per-model masking yet — fine while PBR is the only built-in deferred
+// model; a real fix, e.g. a model-id compare or a stencil mask written during the
+// G-buffer pass, is needed before a second one ships).
 func (r *Renderer) recordLighting(cmd gpu.CommandBuffer, dl *drawList, target gpu.Texture, viewProj glm.Mat4f, eye glm.Vec3f, lightsAddr uint64) {
 	r.ensureGBufferSampler()
 	invViewProj := viewProj.Inv()

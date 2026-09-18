@@ -16,7 +16,7 @@ import (
 //	decal.SetCastShadow(false)
 //	box.Add(decal)
 //
-// Returns the zero Geometry (Valid() reports false) when the box misses mesh entirely
+// Returns the zero Geometry (IsValid() reports false) when the box misses mesh entirely
 // or every candidate triangle faces away — callers must check rather than assume a
 // patch was produced.
 func (r *Renderer) NewDecalGeometry(mesh scenes.Mesh, pos glm.Vec3f, orientation glm.Quatf, size glm.Vec3f) geometries.Geometry {

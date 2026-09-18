@@ -377,7 +377,9 @@ func (d *drawList) ensureShadowViews(n int) {
 	}
 }
 
-func (d *drawList) batchCount() int { return len(d.batches) }
+func (d *drawList) batchCount() int {
+	return len(d.batches)
+}
 
 func (d *drawList) destroy() {
 	bufs := []gpu.Buffer{d.worldBuf, d.drawableBuf, d.indirectBuf, d.regionBuf, d.visibleBuf, d.lodTableBuf, d.prevLevelBuf}

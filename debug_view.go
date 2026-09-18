@@ -61,7 +61,9 @@ func DebugViewNames() []string {
 }
 
 // DebugView reports which G-buffer target is being displayed.
-func (r *Renderer) DebugView() DebugView { return r.debugView }
+func (r *Renderer) DebugView() DebugView {
+	return r.debugView
+}
 
 // SetDebugView displays one G-buffer target, or the object/triangle id pass,
 // fullscreen instead of the shaded frame. DebugOff restores normal shading.

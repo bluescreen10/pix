@@ -63,7 +63,9 @@ func newOverlay(b gpu.Backend, texStore *textures.Store, scale float32, colorFor
 }
 
 // reset clears the accumulated quads (call once per frame before text calls).
-func (o *overlay) reset() { o.quads = o.quads[:0] }
+func (o *overlay) reset() {
+	o.quads = o.quads[:0]
+}
 
 // rect appends one solid screen-space rectangle (x,y top-left, w×h, in pixels). It
 // points at the atlas's fully-opaque cell, so a fill and a glyph are the same quad and
