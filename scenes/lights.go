@@ -33,7 +33,9 @@ func newLightShadow() *LightShadow {
 }
 
 // Size is the shadow map's requested resolution per side.
-func (s *LightShadow) Size() uint32 { return s.size }
+func (s *LightShadow) Size() uint32 {
+	return s.size
+}
 
 // SetSize sets the shadow map's resolution per side. The renderer reallocates its map
 // at the new resolution on the next frame that renders it; a zero size is ignored.
@@ -45,13 +47,17 @@ func (s *LightShadow) SetSize(size uint32) {
 }
 
 // Bias is the extra depth offset applied to the shadow comparison, in world units.
-func (s *LightShadow) Bias() float32 { return s.bias }
+func (s *LightShadow) Bias() float32 {
+	return s.bias
+}
 
 // SetBias sets an extra depth offset for the shadow comparison, in WORLD units, on top
 // of a bias the renderer derives from the map's texel footprint. 0 (the default) is
 // usually right — the derived term already scales with the fit, so it works at any
 // scene scale. Raise this if surfaces self-shadow (acne).
-func (s *LightShadow) SetBias(bias float32) { s.bias = bias }
+func (s *LightShadow) SetBias(bias float32) {
+	s.bias = bias
+}
 
 // DirectionalLight is a distant light with parallel rays (a sun). Direction is the
 // direction the light travels (e.g. {0,-1,0} for a downward sun). Fields are exported
@@ -65,7 +71,9 @@ type DirectionalLight struct {
 }
 
 // ID is this light's stable identity, which the renderer keys its shadow resources on.
-func (l *DirectionalLight) ID() LightID { return l.id }
+func (l *DirectionalLight) ID() LightID {
+	return l.id
+}
 
 // SetCastShadow toggles shadow casting. Turning it on creates the Shadow with an
 // orthographic camera; turning it off drops it.
@@ -96,7 +104,9 @@ type PointLight struct {
 }
 
 // ID is this light's stable identity, which the renderer keys its shadow resources on.
-func (l *PointLight) ID() LightID { return l.id }
+func (l *PointLight) ID() LightID {
+	return l.id
+}
 
 // SetCastShadow toggles shadow casting. Turning it on creates six 90° perspective cube
 // faces (the renderer aims them from the light each frame); turning it off drops them.
@@ -133,7 +143,9 @@ type SpotLight struct {
 }
 
 // ID is this light's stable identity, which the renderer keys its shadow resources on.
-func (l *SpotLight) ID() LightID { return l.id }
+func (l *SpotLight) ID() LightID {
+	return l.id
+}
 
 // SetCastShadow toggles shadow casting. Turning it on creates the Shadow with a
 // perspective camera matching the cone; turning it off drops it.

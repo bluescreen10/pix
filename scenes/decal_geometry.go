@@ -233,7 +233,7 @@ func clipToBox(poly []decalClipVertex, scratch *[]decalClipVertex, half glm.Vec3
 // single box plane cannot intersect the box, and most of a mesh's triangles fail
 // here without ever being clipped.
 func outsideSamePlane(p0, p1, p2, half glm.Vec3f) bool {
-	for axis := 0; axis < 3; axis++ {
+	for axis := range 3 {
 		if p0[axis] > half[axis] && p1[axis] > half[axis] && p2[axis] > half[axis] {
 			return true
 		}

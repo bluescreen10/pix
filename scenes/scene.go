@@ -62,7 +62,9 @@ type NodeID struct {
 	gen   uint32
 }
 
-func (id NodeID) isValid() bool { return id.gen != 0 }
+func (id NodeID) isValid() bool {
+	return id.gen != 0
+}
 
 // Scene owns the node scene graph (flat parallel arrays, linked-list hierarchy), the
 // per-node transforms, the mesh/skin/particle payloads (which hold ref-counted handles
@@ -226,13 +228,19 @@ func New() *Scene {
 // source, so pass this to Renderer.ReleaseSource when the scene is done with — scene
 // teardown does not reach into a renderer to do it, and a renderer that never hears
 // about the destruction would hold the cache forever.
-func (s *Scene) ID() SourceID { return s.sourceID }
+func (s *Scene) ID() SourceID {
+	return s.sourceID
+}
 
 // Root returns the scene's root node.
-func (s *Scene) Root() Node { return Node{scene: s, id: s.root} }
+func (s *Scene) Root() Node {
+	return Node{scene: s, id: s.root}
+}
 
 // Add parents a node under the scene root.
-func (s *Scene) Add(n SceneNode) { s.reparent(n.ID(), s.root) }
+func (s *Scene) Add(n SceneNode) {
+	s.reparent(n.ID(), s.root)
+}
 
 // NewGroup creates an empty group node (hierarchy only).
 func (s *Scene) NewGroup() Group {
@@ -247,10 +255,14 @@ func (s *Scene) SetAmbient(color colors.RGB32F) {
 // SetFog sets the scene's distance fog, or clears it when f is nil (the default).
 // Pass one of the fog models — scene.SetFog(pix.NewExp2Fog(color, 60000)) — and keep
 // the returned value if you want to animate its fields; they are re-read every frame.
-func (s *Scene) SetFog(fog Fog) { s.fog = fog }
+func (s *Scene) SetFog(fog Fog) {
+	s.fog = fog
+}
 
 // Fog returns the scene's distance fog, or nil when there is none.
-func (s *Scene) Fog() Fog { return s.fog }
+func (s *Scene) Fog() Fog {
+	return s.fog
+}
 
 // AddDirectionalLight adds a directional light (dir = travel direction) and returns
 // its handle — configure it further or call CastShadow on the returned light.
@@ -607,7 +619,9 @@ func (s *Scene) Sync() {
 }
 
 // MeshCount returns the number of mesh nodes in the scene.
-func (s *Scene) MeshCount() int { return len(s.meshes) }
+func (s *Scene) MeshCount() int {
+	return len(s.meshes)
+}
 
 // FindByName returns the first live node with the given name (see Node.Name),
 // or false if none has it. A linear scan — fine for occasional lookups (finding

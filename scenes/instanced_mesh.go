@@ -37,13 +37,19 @@ func (m InstancedMesh) data() *instancedMeshData {
 }
 
 // Geometry returns the field's (level-0) geometry handle.
-func (m InstancedMesh) Geometry() geometries.Geometry { return m.data().lods[0].geometry }
+func (m InstancedMesh) Geometry() geometries.Geometry {
+	return m.data().lods[0].geometry
+}
 
 // Material returns the field's (level-0) material handle.
-func (m InstancedMesh) Material() materials.Material { return m.data().lods[0].material }
+func (m InstancedMesh) Material() materials.Material {
+	return m.data().lods[0].material
+}
 
 // Count returns the number of instances.
-func (m InstancedMesh) Count() int { return int(m.data().count) }
+func (m InstancedMesh) Count() int {
+	return int(m.data().count)
+}
 
 // AddLOD appends a coarser level shared by every instance in this field — see
 // Mesh.AddLOD's doc comment; the same rules (increasing minDistance, shared bounds,

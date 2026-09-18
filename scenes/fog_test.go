@@ -1,41 +1,60 @@
-package scenes
+package scenes_test
 
 import (
 	"math"
 	"testing"
 
 	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/scenes"
 )
 
 // TestFogPacking pins the packed form the shaders read: mode in fogColor.w and
-// (near, far, density) in fogParams, with nil meaning no fog.
-// exp2Density mirrors Exp2Fog.fogState's arithmetic: the constant folds to float32
-// before the divide, which rounds differently from float32(const / const).
-func exp2Density(distance float32) float32 { return exp2DensityScale / distance }
-
+// (near, far) in fogParams, with nil meaning no fog. The exp2 case (which also
+// carries a Density) is checked separately in TestExp2FogPacksDensity.
 func TestFogPacking(t *testing.T) {
 	tests := []struct {
-		name   string
-		fog    Fog
-		color  colors.RGB32F
-		mode   uint32
-		params [3]float32
+		name  string
+		fog   scenes.Fog
+		color colors.RGB32F
+		mode  uint32
+		near  float32
+		far   float32
 	}{
-		{"nil disables", nil, colors.RGB32F{}, FogNone, [3]float32{}},
-		{"linear", NewLinearFog(colors.RGB32F{0.5, 0.6, 0.7}, 10, 200), colors.RGB32F{0.5, 0.6, 0.7}, FogLinear, [3]float32{10, 200, 0}},
-		{"exp2", NewExp2Fog(colors.RGB32F{0.1, 0.2, 0.3}, 1000), colors.RGB32F{0.1, 0.2, 0.3}, FogExp2, [3]float32{0, 0, exp2Density(1000)}},
-		{"exp2 zero distance disables", NewExp2Fog(colors.RGB32F{1, 1, 1}, 0), colors.RGB32F{}, FogNone, [3]float32{}},
+		{"nil disables", nil, colors.RGB32F{}, scenes.FogNone, 0, 0},
+		{"linear", scenes.NewLinearFog(colors.RGB32F{0.5, 0.6, 0.7}, 10, 200), colors.RGB32F{0.5, 0.6, 0.7}, scenes.FogLinear, 10, 200},
+		{"exp2 zero distance disables", scenes.NewExp2Fog(colors.RGB32F{1, 1, 1}, 0), colors.RGB32F{}, scenes.FogNone, 0, 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s := StateOf(tc.fog)
+			s := scenes.StateOf(tc.fog)
 			if s.Color != tc.color || s.Mode != tc.mode {
 				t.Errorf("color/mode = %v/%d, want %v/%d", s.Color, s.Mode, tc.color, tc.mode)
 			}
-			if got := [3]float32{s.Near, s.Far, s.Density}; got != tc.params {
-				t.Errorf("params = %v, want %v", got, tc.params)
+			if s.Near != tc.near || s.Far != tc.far {
+				t.Errorf("near/far = %v/%v, want %v/%v", s.Near, s.Far, tc.near, tc.far)
+			}
+			if s.Density != 0 {
+				t.Errorf("density = %v, want 0 (this case carries no density)", s.Density)
 			}
 		})
+	}
+}
+
+// TestExp2FogPacksDensity checks the exp2 case: Near/Far are unused for this mode,
+// and Density follows the formula documented on Exp2Fog (10% visible at Distance),
+// checked to a loose tolerance since the exact bit pattern is an implementation
+// detail rather than part of the public contract.
+func TestExp2FogPacksDensity(t *testing.T) {
+	s := scenes.StateOf(scenes.NewExp2Fog(colors.RGB32F{0.1, 0.2, 0.3}, 1000))
+	if want := (colors.RGB32F{0.1, 0.2, 0.3}); s.Color != want || s.Mode != scenes.FogExp2 {
+		t.Fatalf("color/mode = %v/%d, want %v/%d", s.Color, s.Mode, want, scenes.FogExp2)
+	}
+	if s.Near != 0 || s.Far != 0 {
+		t.Fatalf("near/far = %v/%v, want 0/0 (exp2 doesn't use them)", s.Near, s.Far)
+	}
+	want := float32(math.Sqrt(-math.Log(0.1))) / 1000 // documented: 10% visible at Distance
+	if math.Abs(float64(s.Density-want)) > 1e-4 {
+		t.Fatalf("density = %v, want ~%v", s.Density, want)
 	}
 }
 
@@ -45,13 +64,14 @@ func TestFogPacking(t *testing.T) {
 // shader's exp(-(d*density)^2).
 func TestExp2FogDistanceMeaning(t *testing.T) {
 	const dist = 800
-	density := float64(NewExp2Fog(colors.RGB32F{}, dist).fogState().Density)
+	const visibleAtDistance = 0.1
+	density := float64(scenes.StateOf(scenes.NewExp2Fog(colors.RGB32F{}, dist)).Density)
 	transmittance := func(d float64) float64 {
 		t := d * density
 		return math.Exp(-t * t)
 	}
-	if got := transmittance(dist); math.Abs(got-exp2VisibleAtDistance) > 1e-5 {
-		t.Errorf("visibility at Distance = %.5f, want %.2f", got, exp2VisibleAtDistance)
+	if got := transmittance(dist); math.Abs(got-visibleAtDistance) > 1e-5 {
+		t.Errorf("visibility at Distance = %.5f, want %.2f", got, visibleAtDistance)
 	}
 	// A tenth of the way out should still be almost entirely clear — the squared
 	// exponent is what buys this over a plain exponential.

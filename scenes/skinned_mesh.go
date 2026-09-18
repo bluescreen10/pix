@@ -39,10 +39,14 @@ func (m SkinnedMesh) data() *skinnedMeshData {
 
 // SourceGeometry returns the mesh's un-skinned source geometry (the one carrying
 // skin index/weight attributes).
-func (m SkinnedMesh) SourceGeometry() geometries.Geometry { return m.data().srcGeometry }
+func (m SkinnedMesh) SourceGeometry() geometries.Geometry {
+	return m.data().srcGeometry
+}
 
 // Material returns the mesh's material handle.
-func (m SkinnedMesh) Material() materials.Material { return m.data().material }
+func (m SkinnedMesh) Material() materials.Material {
+	return m.data().material
+}
 
 // SetMaterial swaps the mesh's material (the cached materialID changes, so the
 // scene's drawables are rebuilt).
@@ -63,7 +67,9 @@ func (m SkinnedMesh) Skeleton() Skeleton {
 
 // BoundingSphere returns the mesh's current skeleton-local bounding sphere (valid
 // after Sync — i.e. after the first Render call following any pose change).
-func (m SkinnedMesh) BoundingSphere() glm.Sphere { return m.data().bounds }
+func (m SkinnedMesh) BoundingSphere() glm.Sphere {
+	return m.data().bounds
+}
 
 // NewSkinnedMesh creates a compute-skinned mesh bound to skel: geo must carry
 // AttributeSkinIndex/AttributeSkinWeight (indices relative to skel's joint order).
@@ -139,7 +145,7 @@ func computeJointRadii(geo geometries.Geometry, invBind []glm.Mat4f, positions [
 	}
 	for v, p := range positions {
 		j, w := joints[v], weights[v]
-		for k := 0; k < 4; k++ {
+		for k := range 4 {
 			if w[k] <= skinWeightEpsilon {
 				continue
 			}

@@ -1,27 +1,29 @@
-package scenes
+package scenes_test
 
-import ()
+import (
+	"testing"
 
-import "testing"
+	"github.com/bluescreen10/pix/scenes"
+)
 
 // TestAnimationMixerDrivesNode plays a simple 2-key position track on a group
 // node and checks the mixer's Update actually applies interpolated positions —
 // headless, no GPU involved.
 func TestAnimationMixerDrivesNode(t *testing.T) {
-	scene := New()
+	scene := scenes.New()
 	defer scene.Destroy()
 
 	n := scene.NewGroup()
 	scene.Add(n)
 
-	clip := &AnimationClip{
+	clip := &scenes.AnimationClip{
 		Name:     "move",
 		Duration: 2,
-		Tracks: []Track{
+		Tracks: []scenes.Track{
 			{
 				Target:  n,
-				Channel: ChannelPosition,
-				Interp:  InterpLinear,
+				Channel: scenes.ChannelPosition,
+				Interp:  scenes.InterpLinear,
 				Times:   []float32{0, 2},
 				Values:  []float32{0, 0, 0, 10, 0, 0},
 			},
@@ -30,7 +32,7 @@ func TestAnimationMixerDrivesNode(t *testing.T) {
 
 	mixer := scene.NewAnimationMixer(n)
 	action := mixer.Action(clip)
-	action.SetLoop(LoopOnce).Play()
+	action.SetLoop(scenes.LoopOnce).Play()
 
 	mixer.Update(1) // halfway through the 2-second track
 	scene.Sync()
@@ -53,24 +55,24 @@ func TestAnimationMixerDrivesNode(t *testing.T) {
 // TestAnimationMixerLoopRepeat checks that LoopRepeat wraps time rather than
 // clamping.
 func TestAnimationMixerLoopRepeat(t *testing.T) {
-	scene := New()
+	scene := scenes.New()
 	defer scene.Destroy()
 
 	n := scene.NewGroup()
 	scene.Add(n)
 
-	clip := &AnimationClip{
+	clip := &scenes.AnimationClip{
 		Duration: 1,
-		Tracks: []Track{
+		Tracks: []scenes.Track{
 			{
-				Target: n, Channel: ChannelPosition, Interp: InterpLinear,
+				Target: n, Channel: scenes.ChannelPosition, Interp: scenes.InterpLinear,
 				Times: []float32{0, 1}, Values: []float32{0, 0, 0, 10, 0, 0},
 			},
 		},
 	}
 	mixer := scene.NewAnimationMixer(n)
 	action := mixer.Action(clip)
-	action.SetLoop(LoopRepeat).Play()
+	action.SetLoop(scenes.LoopRepeat).Play()
 
 	mixer.Update(1.25) // wraps: 1.25 mod 1 = 0.25
 	scene.Sync()
@@ -86,17 +88,17 @@ func TestAnimationMixerLoopRepeat(t *testing.T) {
 // TestAnimationMixerBlendsTwoActions checks that two actions on the same node,
 // weighted 0.5/0.5, produce the midpoint between their two poses.
 func TestAnimationMixerBlendsTwoActions(t *testing.T) {
-	scene := New()
+	scene := scenes.New()
 	defer scene.Destroy()
 
 	n := scene.NewGroup()
 	scene.Add(n)
 
-	still := func(x float32) *AnimationClip {
-		return &AnimationClip{
+	still := func(x float32) *scenes.AnimationClip {
+		return &scenes.AnimationClip{
 			Duration: 1,
-			Tracks: []Track{
-				{Target: n, Channel: ChannelPosition, Interp: InterpStep, Times: []float32{0}, Values: []float32{x, 0, 0}},
+			Tracks: []scenes.Track{
+				{Target: n, Channel: scenes.ChannelPosition, Interp: scenes.InterpStep, Times: []float32{0}, Values: []float32{x, 0, 0}},
 			},
 		}
 	}

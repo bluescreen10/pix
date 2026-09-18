@@ -38,7 +38,10 @@ func newAnimationAction(clip *AnimationClip) *AnimationAction {
 }
 
 // Play starts (or resumes) playback.
-func (a *AnimationAction) Play() *AnimationAction { a.playing = true; return a }
+func (a *AnimationAction) Play() *AnimationAction {
+	a.playing = true
+	return a
+}
 
 // Stop halts playback and resets local time to 0.
 func (a *AnimationAction) Stop() *AnimationAction {
@@ -56,17 +59,29 @@ func (a *AnimationAction) Reset() *AnimationAction {
 }
 
 // SetWeight sets the action's blend weight (0 = no contribution).
-func (a *AnimationAction) SetWeight(weight float32) *AnimationAction { a.weight = weight; return a }
+func (a *AnimationAction) SetWeight(weight float32) *AnimationAction {
+	a.weight = weight
+	return a
+}
 
 // SetTimeScale sets the playback rate (negative plays backward).
-func (a *AnimationAction) SetTimeScale(scale float32) *AnimationAction { a.timeScale = scale; return a }
+func (a *AnimationAction) SetTimeScale(scale float32) *AnimationAction {
+	a.timeScale = scale
+	return a
+}
 
 // SetLoop sets how local time behaves past the clip's duration.
-func (a *AnimationAction) SetLoop(mode LoopMode) *AnimationAction { a.loop = mode; return a }
+func (a *AnimationAction) SetLoop(mode LoopMode) *AnimationAction {
+	a.loop = mode
+	return a
+}
 
 // SetPaused freezes (or resumes) local time without stopping — a paused action
 // still contributes its current pose to the blend.
-func (a *AnimationAction) SetPaused(paused bool) *AnimationAction { a.paused = paused; return a }
+func (a *AnimationAction) SetPaused(paused bool) *AnimationAction {
+	a.paused = paused
+	return a
+}
 
 // SetTime sets local time directly.
 func (a *AnimationAction) SetTime(time float32) *AnimationAction {
@@ -75,9 +90,17 @@ func (a *AnimationAction) SetTime(time float32) *AnimationAction {
 	return a
 }
 
-func (a *AnimationAction) Time() float32   { return a.time }
-func (a *AnimationAction) Weight() float32 { return a.weight }
-func (a *AnimationAction) IsPlaying() bool { return a.playing && !a.paused }
+func (a *AnimationAction) Time() float32 {
+	return a.time
+}
+
+func (a *AnimationAction) Weight() float32 {
+	return a.weight
+}
+
+func (a *AnimationAction) IsPlaying() bool {
+	return a.playing && !a.paused
+}
 
 func (a *AnimationAction) resetCursors() {
 	for i := range a.cursors {

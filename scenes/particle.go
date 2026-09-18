@@ -259,19 +259,29 @@ func (s *Scene) NewParticleContainer(config ParticleConfig, capacity int) Partic
 }
 
 // Capacity returns the container's maximum number of live particles.
-func (c ParticleContainer) Capacity() int { return int(c.data().capacity) }
+func (c ParticleContainer) Capacity() int {
+	return int(c.data().capacity)
+}
 
 // StartEmission resumes emitter clocks without resetting them.
-func (c ParticleContainer) StartEmission() { c.data().emitting = true }
+func (c ParticleContainer) StartEmission() {
+	c.data().emitting = true
+}
 
 // StopEmission freezes emitter clocks while living particles continue updating.
-func (c ParticleContainer) StopEmission() { c.data().emitting = false }
+func (c ParticleContainer) StopEmission() {
+	c.data().emitting = false
+}
 
 // Geometry returns the container's geometry handle.
-func (c ParticleContainer) Geometry() geometries.Geometry { return c.data().geometry }
+func (c ParticleContainer) Geometry() geometries.Geometry {
+	return c.data().geometry
+}
 
 // Material returns the container's material handle.
-func (c ParticleContainer) Material() materials.Material { return c.data().material }
+func (c ParticleContainer) Material() materials.Material {
+	return c.data().material
+}
 
 // Update stages this step's dt and runs emission and spawning. It does not itself
 // dispatch GPU work or wait for GPU completion: like culling and skinning, the
@@ -356,7 +366,9 @@ func (s *Scene) swapRemoveParticles(payloadIdx uint32) {
 
 // SystemID is this container's stable particle-system identity — what a renderer keys
 // its simulation buffers on. Distinct from Node.ID, which identifies the graph node.
-func (c ParticleContainer) SystemID() ParticleID { return c.data().id }
+func (c ParticleContainer) SystemID() ParticleID {
+	return c.data().id
+}
 
 // SetEmitters replaces the emitters driving this container. Emission is otherwise
 // configured at construction; this exists because emitters are the one part of a
@@ -374,16 +386,24 @@ func (c ParticleContainer) SetEmitters(e []ParticleEmitter) {
 // Pending is the births queued by Update calls since the last frame that rendered this
 // container, in spawn order. The slice is the container's own storage — read it, do not
 // retain or modify it — and it empties when a rendered frame consumes the step.
-func (c ParticleContainer) Pending() []ParticleRecord { return c.data().pending }
+func (c ParticleContainer) Pending() []ParticleRecord {
+	return c.data().pending
+}
 
 // Alive is the container's live particle count as of the last consumed step. It is a
 // CPU estimate advanced by births and never read back down as particles die on the GPU,
 // so it over-counts until a Clear; see the ParticleContainer docs.
-func (c ParticleContainer) Alive() uint32 { return c.data().alive }
+func (c ParticleContainer) Alive() uint32 {
+	return c.data().alive
+}
 
 // Emitting reports whether emission is enabled (see StopEmission/StartEmission).
-func (c ParticleContainer) Emitting() bool { return c.data().emitting }
+func (c ParticleContainer) Emitting() bool {
+	return c.data().emitting
+}
 
 // PendingStep is the simulation time accumulated by Update since the last rendered
 // frame — what the next frame will advance the simulation by.
-func (c ParticleContainer) PendingStep() float32 { return c.data().dt }
+func (c ParticleContainer) PendingStep() float32 {
+	return c.data().dt
+}

@@ -41,10 +41,14 @@ func (m Mesh) data() *meshData {
 }
 
 // Geometry returns the mesh's (level-0) geometry handle.
-func (m Mesh) Geometry() geometries.Geometry { return m.data().lods[0].geometry }
+func (m Mesh) Geometry() geometries.Geometry {
+	return m.data().lods[0].geometry
+}
 
 // Material returns the mesh's (level-0) material handle.
-func (m Mesh) Material() materials.Material { return m.data().lods[0].material }
+func (m Mesh) Material() materials.Material {
+	return m.data().lods[0].material
+}
 
 // SetMaterial swaps the mesh's level-0 material (the cached materialID changes, so the
 // scene's drawables are rebuilt). Coarser LOD levels added via AddLOD keep their own
@@ -58,7 +62,9 @@ func (m Mesh) SetMaterial(mat materials.Material) {
 }
 
 // BoundingSphere returns the mesh's local bounding sphere.
-func (m Mesh) BoundingSphere() glm.Sphere { return m.data().bounds }
+func (m Mesh) BoundingSphere() glm.Sphere {
+	return m.data().bounds
+}
 
 // AddLOD appends a coarser level, shown once the camera is farther than
 // minDistance from the mesh (replacing whichever level was previously shown at

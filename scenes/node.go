@@ -17,8 +17,13 @@ type Node struct {
 	id    NodeID
 }
 
-func (n Node) slot() uint32          { return n.id.index }
-func (n Node) transform() *Transform { return &n.scene.transforms[n.id.index] }
+func (n Node) slot() uint32 {
+	return n.id.index
+}
+
+func (n Node) transform() *Transform {
+	return &n.scene.transforms[n.id.index]
+}
 
 func (n Node) ID() NodeID {
 	return n.id
@@ -95,18 +100,23 @@ func (n Node) ForEachChild(fn func(Node) bool) {
 // Transforms
 
 // WorldTransform returns the cached world-space matrix.
-func (n Node) WorldTransform() glm.Mat4f { return n.scene.world[n.slot()] }
+func (n Node) WorldTransform() glm.Mat4f {
+	return n.scene.world[n.slot()]
+}
 
 // Transform returns the local transform matrix.
-func (n Node) Transform() glm.Mat4f { return n.scene.local[n.slot()] }
+func (n Node) Transform() glm.Mat4f {
+	return n.scene.local[n.slot()]
+}
 
-// WorldTransformInv returns the cached inverse of the world-space matrix.
 // WorldTransformInv computes the inverse of the cached world-space matrix.
 // Computed on demand rather than cached: the only other reader is skeleton
 // root inversion (Scene.syncSkinning), which computes its own directly, so a
 // scene of many moving nodes was previously paying this inverse for every one
 // of them regardless of whether anything ever read it.
-func (n Node) WorldTransformInv() glm.Mat4f { return n.scene.world[n.slot()].Inv() }
+func (n Node) WorldTransformInv() glm.Mat4f {
+	return n.scene.world[n.slot()].Inv()
+}
 
 // Flags
 
@@ -161,14 +171,18 @@ func (n Node) Destroy() {
 
 // Position
 
-func (n Node) Position() glm.Vec3f { return n.transform().Position }
+func (n Node) Position() glm.Vec3f {
+	return n.transform().Position
+}
 
 func (n Node) SetPosition(pos glm.Vec3f) {
 	n.transform().Position = pos
 	n.scene.flags[n.slot()] |= flagDirty
 }
 
-func (n Node) SetPositionXYZ(x, y, z float32) { n.SetPosition(glm.Vec3f{x, y, z}) }
+func (n Node) SetPositionXYZ(x, y, z float32) {
+	n.SetPosition(glm.Vec3f{x, y, z})
+}
 
 func (n Node) SetPositionX(x float32) {
 	p := n.transform().Position
@@ -200,7 +214,9 @@ func (n Node) SetPositionYZ(y, z float32) {
 	n.SetPosition(glm.Vec3f{p[0], y, z})
 }
 
-func (n Node) Move(delta glm.Vec3f) { n.SetPosition(n.transform().Position.Add(delta)) }
+func (n Node) Move(delta glm.Vec3f) {
+	n.SetPosition(n.transform().Position.Add(delta))
+}
 
 func (n Node) MoveXYZ(x, y, z float32) {
 	n.Move(glm.Vec3f{x, y, z})
@@ -232,7 +248,9 @@ func (n Node) MoveYZ(y, z float32) {
 
 // Rotation
 
-func (n Node) RotationQuat() glm.Quatf { return n.transform().Rotation }
+func (n Node) RotationQuat() glm.Quatf {
+	return n.transform().Rotation
+}
 
 func (n Node) SetRotationQuat(rot glm.Quatf) {
 	n.transform().Rotation = rot
@@ -297,14 +315,18 @@ func (n Node) RotateYZ(y, z float32) {
 
 // Scale
 
-func (n Node) Scale() glm.Vec3f { return n.transform().Scale }
+func (n Node) Scale() glm.Vec3f {
+	return n.transform().Scale
+}
 
 func (n Node) SetScale(scale glm.Vec3f) {
 	n.transform().Scale = scale
 	n.scene.flags[n.slot()] |= flagDirty
 }
 
-func (n Node) SetScaleXYZ(x, y, z float32) { n.SetScale(glm.Vec3f{x, y, z}) }
+func (n Node) SetScaleXYZ(x, y, z float32) {
+	n.SetScale(glm.Vec3f{x, y, z})
+}
 
 func (n Node) SetScaleX(x float32) {
 	s := n.transform().Scale
@@ -336,7 +358,9 @@ func (n Node) SetScaleYZ(y, z float32) {
 	n.SetScale(glm.Vec3f{s[0], y, z})
 }
 
-func (n Node) Grow(delta glm.Vec3f) { n.SetScale(n.transform().Scale.Add(delta)) }
+func (n Node) Grow(delta glm.Vec3f) {
+	n.SetScale(n.transform().Scale.Add(delta))
+}
 
 func (n Node) GrowXYZ(x, y, z float32) {
 	n.Grow(glm.Vec3f{x, y, z})

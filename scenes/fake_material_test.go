@@ -1,4 +1,4 @@
-package scenes
+package scenes_test
 
 import "github.com/bluescreen10/pix/materials"
 
@@ -9,11 +9,23 @@ import "github.com/bluescreen10/pix/materials"
 // and publishes its ID, so a stub is enough to exercise every path here.
 type fakeMaterial struct{ id materials.ID }
 
-func (m *fakeMaterial) Copy() materials.Material { return m }
-func (m *fakeMaterial) Release()                 {}
-func (m *fakeMaterial) IsValid() bool            { return true }
-func (m *fakeMaterial) ID() materials.ID         { return m.id }
-func (m *fakeMaterial) Pool() *materials.Pool    { return nil }
+func (m *fakeMaterial) Copy() materials.Material {
+	return m
+}
+
+func (m *fakeMaterial) Release() {}
+
+func (m *fakeMaterial) IsValid() bool {
+	return true
+}
+
+func (m *fakeMaterial) ID() materials.ID {
+	return m.id
+}
+
+func (m *fakeMaterial) Pool() *materials.Pool {
+	return nil
+}
 
 var nextFakeSlot uint32
 

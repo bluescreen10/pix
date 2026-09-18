@@ -97,7 +97,7 @@ func (s *Scene) NewSkeleton(cfg SkeletonConfig) Skeleton {
 
 	rootID := s.allocNode(KindSkeleton)
 	bones := make([]NodeID, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		p := cfg.Parents[i]
 		if p >= int32(i) {
 			panic("pix: SkeletonConfig.Parents[i] must be < i (topological order)")

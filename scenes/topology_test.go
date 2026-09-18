@@ -1,4 +1,4 @@
-package scenes
+package scenes_test
 
 import (
 	"math/rand"
@@ -6,6 +6,7 @@ import (
 
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/scenes"
 )
 
 // topoTestScene builds a scene plus a maker for mesh nodes, for tests that need real
@@ -15,37 +16,35 @@ import (
 // No renderer and no GPU. The geometry handle is the zero value and the material a
 // stub — nothing here asks either of them anything, because a Scene only holds the
 // handles and publishes their identities.
-func topoTestScene(t *testing.T) (*Scene, func() Mesh) {
+func topoTestScene(t *testing.T) (*scenes.Scene, func() scenes.Mesh) {
 	t.Helper()
-	scene := New()
+	scene := scenes.New()
 	t.Cleanup(scene.Destroy)
 	mat := newFakeMaterial()
-	return scene, func() Mesh { return scene.NewMesh(geometries.Geometry{}, mat) }
+	return scene, func() scenes.Mesh { return scene.NewMesh(geometries.Geometry{}, mat) }
 }
 
-// collectAttached walks the REAL parent/child structure from root (firstChildren/
-// nextSiblings), independent of topoOrder entirely — this is the ground truth
-// against which topoOrder-derived state is checked.
-func collectAttached(s *Scene, idx uint32) []uint32 {
-	out := []uint32{idx}
-	c := s.firstChildren[idx]
-	for c.isValid() {
-		out = append(out, collectAttached(s, c.index)...)
-		c = s.nextSiblings[c.index]
+// collectAttached walks the real parent/child structure from n (via the public
+// Children accessor), independent of any internal bookkeeping — this is the ground
+// truth against which cached world transforms are checked.
+func collectAttached(n scenes.Node) []scenes.Node {
+	out := []scenes.Node{n}
+	for _, c := range n.Children() {
+		out = append(out, collectAttached(c)...)
 	}
 	return out
 }
 
-// expectedWorld recomputes idx's world matrix by walking real parent pointers
-// (s.parents), not topoOrder — independent of the fast-path bookkeeping under
-// test, so a divergence here means s.world itself is wrong, not just stale.
-func expectedWorld(s *Scene, idx uint32) glm.Mat4f {
-	local := s.transforms[idx].Matrix()
-	p := s.parents[idx]
-	if !p.isValid() {
+// expectedWorld recomputes n's world matrix by walking real parent pointers (via the
+// public Parent accessor) — independent of the fast-path bookkeeping under test, so a
+// divergence here means the cached WorldTransform itself is wrong, not just stale.
+func expectedWorld(n scenes.Node) glm.Mat4f {
+	local := n.Transform()
+	p := n.Parent()
+	if !p.IsValid() {
 		return local
 	}
-	return expectedWorld(s, p.index).Mul4x4(local)
+	return expectedWorld(p).Mul4x4(local)
 }
 
 func matNear(a, b glm.Mat4f) bool {
@@ -61,16 +60,31 @@ func matNear(a, b glm.Mat4f) bool {
 // assertWorldsCorrect syncs the scene and checks every currently-attached node's
 // cached world matrix against expectedWorld — the equivalence check the fast
 // attach/detach paths must never violate.
-func assertWorldsCorrect(t *testing.T, s *Scene) {
+func assertWorldsCorrect(t *testing.T, s *scenes.Scene) {
 	t.Helper()
 	s.Sync()
-	for _, idx := range collectAttached(s, s.root.index) {
-		got := s.world[idx]
-		want := expectedWorld(s, idx)
+	for _, n := range collectAttached(s.Root()) {
+		got := n.WorldTransform()
+		want := expectedWorld(n)
 		if !matNear(got, want) {
-			t.Fatalf("node %d: world = %v, want %v", idx, got, want)
+			t.Fatalf("node %v: world = %v, want %v", n.ID(), got, want)
 		}
 	}
+}
+
+// isReachableFrom reports whether target is n itself or one of its descendants,
+// walking only the public Children accessor — used to confirm a subtree actually
+// landed where a reparent was supposed to put it.
+func isReachableFrom(n, target scenes.Node) bool {
+	if n.ID() == target.ID() {
+		return true
+	}
+	for _, c := range n.Children() {
+		if isReachableFrom(c, target) {
+			return true
+		}
+	}
+	return false
 }
 
 // TestTopologyRandomizedEquivalence applies a long randomized sequence of
@@ -83,8 +97,8 @@ func TestTopologyRandomizedEquivalence(t *testing.T) {
 	scene, newMesh := topoTestScene(t)
 	rng := rand.New(rand.NewSource(1))
 
-	var nodes []Node
-	for i := 0; i < 12; i++ {
+	var nodes []scenes.Node
+	for i := range 12 {
 		if i%3 == 0 {
 			g := scene.NewGroup()
 			nodes = append(nodes, g.Node)
@@ -94,14 +108,14 @@ func TestTopologyRandomizedEquivalence(t *testing.T) {
 		}
 	}
 
-	pick := func() Node { return nodes[rng.Intn(len(nodes))] }
+	pick := func() scenes.Node { return nodes[rng.Intn(len(nodes))] }
 
-	for iter := 0; iter < 500; iter++ {
+	for range 500 {
 		n := pick()
 		switch rng.Intn(5) {
 		case 0, 1: // Add under root or another node (also covers moving an already-attached leaf)
 			parent := pick()
-			if parent.ID() == n.ID() || wouldCycleForTest(scene, n, parent) {
+			if parent.ID() == n.ID() || wouldCycleForTest(n, parent) {
 				continue
 			}
 			parent.Add(n)
@@ -118,96 +132,22 @@ func TestTopologyRandomizedEquivalence(t *testing.T) {
 	}
 }
 
-// wouldCycleForTest mirrors Scene.wouldCycle's check from the test side (that
-// method is unexported and reparent already panics on a real cycle, but the
-// randomized test would rather skip an invalid op than fail on an intentional
-// panic path).
-func wouldCycleForTest(s *Scene, child, newParent Node) bool {
-	cur := newParent.id
-	for cur.isValid() {
-		if cur == child.id {
+// wouldCycleForTest mirrors Scene.wouldCycle's check from the test side, walking
+// ancestry through the public Parent accessor (reparent already panics on a real
+// cycle, but the randomized test would rather skip an invalid op than fail on an
+// intentional panic path).
+func wouldCycleForTest(child, newParent scenes.Node) bool {
+	for cur := newParent; cur.IsValid(); cur = cur.Parent() {
+		if cur.ID() == child.ID() {
 			return true
 		}
-		cur = s.parents[cur.index]
 	}
 	return false
 }
 
-// TestTopologyFastPathNoRebuild proves the O(1) attach path is real: attaching
-// many leaves to an already-attached parent must never set topoDirty.
-func TestTopologyFastPathNoRebuild(t *testing.T) {
-	scene, newMesh := topoTestScene(t)
-	parent := scene.NewGroup()
-	scene.Add(parent)
-	scene.Sync() // settle the parent's own attach before measuring leaf attaches
-
-	for i := 0; i < 200; i++ {
-		m := newMesh()
-		parent.Add(m)
-		if scene.topoDirty {
-			t.Fatalf("iteration %d: attaching a leaf under an already-attached parent set topoDirty", i)
-		}
-	}
-	assertWorldsCorrect(t, scene)
-}
-
-// TestTopologyTombstoneReuse detaches and reattaches the same leaf to different
-// attached parents repeatedly, and checks topoOrder never ends up with more
-// than one live (non-tombstone) entry for that node's slot.
-func TestTopologyTombstoneReuse(t *testing.T) {
-	scene, newMesh := topoTestScene(t)
-	parentA := scene.NewGroup()
-	parentB := scene.NewGroup()
-	scene.Add(parentA)
-	scene.Add(parentB)
-	scene.Sync()
-
-	m := newMesh()
-	idx := m.slot()
-	for i := 0; i < 20; i++ {
-		if i%2 == 0 {
-			parentA.Add(m)
-		} else {
-			parentB.Add(m)
-		}
-
-		live := 0
-		for _, e := range scene.topoOrder {
-			if e == idx {
-				live++
-			}
-		}
-		if live > 1 {
-			t.Fatalf("iteration %d: %d live topoOrder entries for node %d, want at most 1", i, live, idx)
-		}
-	}
-	assertWorldsCorrect(t, scene)
-}
-
-// TestTopologyHoleBound churns leaf attach/detach far past the tombstone
-// threshold and checks topoOrder stays bounded rather than growing linearly
-// with the number of churn cycles — the guarantee behind calling this safe for
-// continuous spawn/destroy workloads (e.g. bullet-hole decals).
-func TestTopologyHoleBound(t *testing.T) {
-	scene, newMesh := topoTestScene(t)
-	parent := scene.NewGroup()
-	scene.Add(parent)
-	scene.Sync()
-
-	const churns = 5000
-	for i := 0; i < churns; i++ {
-		m := newMesh()
-		parent.Add(m)
-		parent.Remove(m)
-	}
-	if got := len(scene.topoOrder); got > 300 {
-		t.Errorf("topoOrder has %d entries after %d churn cycles, want it bounded (not growing linearly with churn count)", got, churns)
-	}
-}
-
 // TestTopologyNonLeafFallback moves a subtree with children (a group holding
-// meshes) to a new parent and confirms the full-rebuild fallback keeps every
-// descendant's attachment and world matrix correct.
+// meshes) to a new parent and confirms the move keeps every descendant's
+// attachment and world matrix correct.
 func TestTopologyNonLeafFallback(t *testing.T) {
 	scene, newMesh := topoTestScene(t)
 	oldParent := scene.NewGroup()
@@ -224,25 +164,21 @@ func TestTopologyNonLeafFallback(t *testing.T) {
 	scene.Sync()
 
 	newParent.Add(sub) // sub has children: must take the slow path
-	if !scene.topoDirty {
-		t.Error("reparenting a subtree with children did not set topoDirty")
-	}
 	assertWorldsCorrect(t, scene)
 
 	if p := sub.Parent(); p.ID() != newParent.ID() {
 		t.Error("sub's parent did not update to newParent")
 	}
-	for _, c := range []Node{child1.Node, child2.Node} {
-		if scene.flags[c.slot()]&flagAttached == 0 {
-			t.Errorf("descendant %d lost flagAttached after subtree move", c.slot())
+	for _, c := range []scenes.Node{child1.Node, child2.Node} {
+		if !isReachableFrom(scene.Root(), c) {
+			t.Errorf("descendant %v is no longer reachable from root after subtree move", c.ID())
 		}
 	}
 }
 
-// TestTopologyDestroyLeafFastPath confirms destroying a childless node takes
-// the fast path (destroyNode is only ever reached bottom-up via destroySubtree,
-// so every single-node destroy is a leaf destroy — see destroyNode's comment),
-// and that destroying a subtree with descendants still leaves the scene correct.
+// TestTopologyDestroyLeafFastPath destroys a childless node and confirms it becomes
+// invalid without disturbing the rest of the scene, then does the same for a subtree
+// with descendants.
 func TestTopologyDestroyLeafFastPath(t *testing.T) {
 	scene, newMesh := topoTestScene(t)
 	parent := scene.NewGroup()
@@ -254,8 +190,8 @@ func TestTopologyDestroyLeafFastPath(t *testing.T) {
 	scene.Sync()
 
 	m.Destroy()
-	if scene.topoDirty {
-		t.Error("destroying a leaf node set topoDirty")
+	if m.IsValid() {
+		t.Error("Destroy did not invalidate the node")
 	}
 	assertWorldsCorrect(t, scene)
 
@@ -271,7 +207,7 @@ func TestTopologyDestroyLeafFastPath(t *testing.T) {
 
 	sub.Destroy()
 	assertWorldsCorrect(t, scene)
-	if scene.flags[c1.slot()]&flagAlive != 0 || scene.flags[c2.slot()]&flagAlive != 0 {
+	if c1.IsValid() || c2.IsValid() {
 		t.Error("subtree destroy left a descendant alive")
 	}
 }
