@@ -11,8 +11,8 @@ import (
 
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/internal/mem"
 	"github.com/bluescreen10/pix/materials"
+	"github.com/bluescreen10/pix/mem"
 )
 
 const invalidIndex = ^uint32(0)
@@ -667,8 +667,8 @@ func (s *Scene) FrameSphere(percentile float32) (center glm.Vec3f, radius float3
 		centers = append(centers, worldCenter(m, md.bounds.Center))
 		reach = append(reach, worldRadius(m, md.bounds.Radius))
 	}
-	for _, sm := range s.skinnedMeshes.All() {
-		m := s.world[s.skeletons.Get(sm.skeleton).ownerNode]
+	for _, sm := range s.skinnedMeshes.Entries() {
+		m := s.world[s.skeletons.Value(sm.skeleton).ownerNode]
 		centers = append(centers, worldCenter(m, sm.bounds.Center))
 		reach = append(reach, worldRadius(m, sm.bounds.Radius))
 	}
@@ -775,7 +775,7 @@ func (s *Scene) Destroy() {
 	}
 	s.instancedMeshes = nil
 	s.instanceTransforms = nil
-	for _, sm := range s.skinnedMeshes.All() {
+	for _, sm := range s.skinnedMeshes.Entries() {
 		sm.srcGeometry.Release()
 		sm.outputGeo.Release()
 		sm.material.Release()

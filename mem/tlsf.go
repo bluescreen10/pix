@@ -6,12 +6,15 @@ import (
 )
 
 var (
-	ErrNoSpace       = errors.New("out of memory")
-	ErrInvalidBuffer = errors.New("invalid buffer")
+	// ErrNoSpace indicates that an allocator has no free region large enough to
+	// satisfy a request.
+	ErrNoSpace = errors.New("mem: insufficient free space")
+	// ErrInvalidAllocation indicates that an allocation has already been freed.
+	ErrInvalidAllocation = errors.New("mem: invalid allocation")
 )
 
 const (
-	unusedNode       = nodeId(0xffffffff)
+	unusedNode       = nodeID(0xffffffff)
 	topBinIndexShift = 3
 	leafBinIndexMask = 0x7
 
@@ -20,55 +23,61 @@ const (
 	mantissaMask     = mantissaMaxValue - 1
 )
 
-type nodeId int
+type nodeID int
 
 type node struct {
 	offset uint32
 	size   uint32
 
-	binPrev nodeId
-	binNext nodeId
-	prev    nodeId
-	next    nodeId
+	binPrev nodeID
+	binNext nodeID
+	prev    nodeID
+	next    nodeID
 
 	used bool
 }
 
+// Allocation identifies a byte range reserved by a TLSF allocator. Allocation
+// values must come from Alloc and must only be freed once.
 type Allocation struct {
-	id     nodeId
+	id     nodeID
 	size   uint32
 	offset uint32
 }
 
+// Offset returns the allocation's byte offset from the start of its allocator.
 func (a Allocation) Offset() uint32 {
 	return a.offset
 }
 
+// Size returns the allocation's size in bytes.
 func (a Allocation) Size() uint32 {
 	return a.size
 }
 
+// TLSF manages byte ranges using the two-level segregated fit algorithm.
+// A TLSF must be initialized with NewTLSF before use.
 type TLSF struct {
-	capacity   uint32
-	freeSpace  uint32
-	freeOffset uint32
+	capacity  uint32
+	freeSpace uint32
 
 	usedTopBins uint32
 	usedBins    [32]uint32
-	bins        [32 * 8]nodeId
+	bins        [32 * 8]nodeID
 
 	nodes     []node
-	freeNodes []nodeId
+	freeNodes []nodeID
 }
 
+// Alloc reserves a contiguous range of size bytes.
 func (t *TLSF) Alloc(size uint32) (Allocation, error) {
 	minBinIndex := t.roundUp(size)
 
 	minTopBinIndex := minBinIndex >> topBinIndexShift
 	minLeafBinIndex := minBinIndex & leafBinIndexMask
 
-	topBinIndex := nodeId(minTopBinIndex)
-	leafBinIndex := nodeId(unusedNode)
+	topBinIndex := nodeID(minTopBinIndex)
+	leafBinIndex := nodeID(unusedNode)
 
 	if t.usedTopBins&(1<<topBinIndex) != 0 {
 		leafBinIndex = t.findLowestSetBitAfter(t.usedBins[topBinIndex], minLeafBinIndex)
@@ -81,7 +90,7 @@ func (t *TLSF) Alloc(size uint32) (Allocation, error) {
 			return Allocation{}, ErrNoSpace
 		}
 
-		leafBinIndex = nodeId(bits.TrailingZeros32(uint32(t.usedBins[topBinIndex])))
+		leafBinIndex = nodeID(bits.TrailingZeros32(uint32(t.usedBins[topBinIndex])))
 	}
 
 	binIndex := (topBinIndex << topBinIndexShift) | leafBinIndex
@@ -127,36 +136,38 @@ func (t *TLSF) Alloc(size uint32) (Allocation, error) {
 	return Allocation{id: nodeIndex, size: size, offset: nodeOffset}, nil
 }
 
-func (t *TLSF) Free(alloc Allocation) error {
-	n := t.nodes[alloc.id]
+// Free releases allocation. It returns ErrInvalidAllocation when allocation has
+// already been freed.
+func (t *TLSF) Free(allocation Allocation) error {
+	node := t.nodes[allocation.id]
 
-	if !n.used {
-		return ErrInvalidBuffer
+	if !node.used {
+		return ErrInvalidAllocation
 	}
 
-	offset := n.offset
-	size := n.size
+	offset := node.offset
+	size := node.size
 
-	if (n.prev != unusedNode) && !t.nodes[n.prev].used {
-		prevNode := t.nodes[n.prev]
-		offset = prevNode.offset
-		size += prevNode.size
+	if node.prev != unusedNode && !t.nodes[node.prev].used {
+		previousNode := t.nodes[node.prev]
+		offset = previousNode.offset
+		size += previousNode.size
 
-		t.removeNode(n.prev)
-		n.prev = prevNode.prev
+		t.removeNode(node.prev)
+		node.prev = previousNode.prev
 	}
 
-	if (n.next != unusedNode) && !t.nodes[n.next].used {
-		nextNode := t.nodes[n.next]
+	if node.next != unusedNode && !t.nodes[node.next].used {
+		nextNode := t.nodes[node.next]
 		size += nextNode.size
-		t.removeNode(n.next)
-		n.next = nextNode.next
+		t.removeNode(node.next)
+		node.next = nextNode.next
 	}
 
-	next := n.next
-	prev := n.prev
+	next := node.next
+	previous := node.prev
 
-	t.freeNodes = append(t.freeNodes, alloc.id)
+	t.freeNodes = append(t.freeNodes, allocation.id)
 	combinedNodeIndex := t.insertNode(size, offset)
 
 	if next != unusedNode {
@@ -164,23 +175,25 @@ func (t *TLSF) Free(alloc Allocation) error {
 		t.nodes[next].prev = combinedNodeIndex
 	}
 
-	if prev != unusedNode {
-		t.nodes[combinedNodeIndex].prev = prev
-		t.nodes[prev].next = combinedNodeIndex
+	if previous != unusedNode {
+		t.nodes[combinedNodeIndex].prev = previous
+		t.nodes[previous].next = combinedNodeIndex
 	}
 
 	return nil
 }
 
+// Capacity returns the number of bytes managed by t.
 func (t *TLSF) Capacity() uint32 {
 	return t.capacity
 }
 
+// FreeSpace returns the total number of unallocated bytes.
 func (t *TLSF) FreeSpace() uint32 {
 	return t.freeSpace
 }
 
-func (t *TLSF) findLowestSetBitAfter(mask uint32, start uint32) nodeId {
+func (t *TLSF) findLowestSetBitAfter(mask uint32, start uint32) nodeID {
 	maskBeforeStart := uint32(1<<start) - 1
 	maskAfterStart := ^maskBeforeStart
 	bitsAfter := mask & maskAfterStart
@@ -189,29 +202,28 @@ func (t *TLSF) findLowestSetBitAfter(mask uint32, start uint32) nodeId {
 		return unusedNode
 	}
 
-	return nodeId(bits.TrailingZeros32(bitsAfter))
+	return nodeID(bits.TrailingZeros32(bitsAfter))
 }
 
 func (t *TLSF) reset() {
 	t.usedTopBins = 0
-	t.freeOffset = 0
 	t.freeSpace = 0
 
-	for i := range len(t.usedBins) {
+	for i := range t.usedBins {
 		t.usedBins[i] = 0
 	}
 
-	for i := range len(t.bins) {
+	for i := range t.bins {
 		t.bins[i] = unusedNode
 	}
 
-	t.nodes = t.nodes[0:0]
-	t.freeNodes = t.freeNodes[0:0]
+	t.nodes = t.nodes[:0]
+	t.freeNodes = t.freeNodes[:0]
 
 	t.insertNode(t.capacity, 0)
 }
 
-func (t *TLSF) insertNode(size uint32, dataOffset uint32) nodeId {
+func (t *TLSF) insertNode(size, offset uint32) nodeID {
 	index := t.roundDown(size)
 
 	topBinIndex := index >> topBinIndexShift
@@ -226,7 +238,7 @@ func (t *TLSF) insertNode(size uint32, dataOffset uint32) nodeId {
 	nodeIndex := t.getFreeNodeIndex()
 
 	t.nodes[nodeIndex].size = size
-	t.nodes[nodeIndex].offset = dataOffset
+	t.nodes[nodeIndex].offset = offset
 	t.nodes[nodeIndex].binNext = firstNodeIndex
 
 	if firstNodeIndex != unusedNode {
@@ -238,23 +250,23 @@ func (t *TLSF) insertNode(size uint32, dataOffset uint32) nodeId {
 	return nodeIndex
 }
 
-func (t *TLSF) removeNode(nodeIndex nodeId) {
-	n := t.nodes[nodeIndex]
+func (t *TLSF) removeNode(nodeIndex nodeID) {
+	node := t.nodes[nodeIndex]
 
-	if n.binPrev != unusedNode {
-		t.nodes[n.binPrev].binNext = n.binNext
-		if n.binNext != unusedNode {
-			t.nodes[n.binNext].binPrev = n.binPrev
+	if node.binPrev != unusedNode {
+		t.nodes[node.binPrev].binNext = node.binNext
+		if node.binNext != unusedNode {
+			t.nodes[node.binNext].binPrev = node.binPrev
 		}
 	} else {
-		binIndex := t.roundDown(n.size)
+		binIndex := t.roundDown(node.size)
 
 		topBinIndex := binIndex >> topBinIndexShift
 		leafBinIndex := binIndex & leafBinIndexMask
 
-		t.bins[binIndex] = n.binNext
-		if n.binNext != unusedNode {
-			t.nodes[n.binNext].binPrev = unusedNode
+		t.bins[binIndex] = node.binNext
+		if node.binNext != unusedNode {
+			t.nodes[node.binNext].binPrev = unusedNode
 		}
 
 		if t.bins[binIndex] == unusedNode {
@@ -268,16 +280,16 @@ func (t *TLSF) removeNode(nodeIndex nodeId) {
 	}
 
 	t.freeNodes = append(t.freeNodes, nodeIndex)
-	t.freeSpace -= n.size
+	t.freeSpace -= node.size
 }
 
-func (t *TLSF) getFreeNodeIndex() nodeId {
-	var index nodeId
+func (t *TLSF) getFreeNodeIndex() nodeID {
+	var index nodeID
 	if last := len(t.freeNodes); last > 0 {
 		index = t.freeNodes[last-1]
-		t.freeNodes = t.freeNodes[0 : last-1]
+		t.freeNodes = t.freeNodes[:last-1]
 	} else {
-		index = nodeId(len(t.nodes))
+		index = nodeID(len(t.nodes))
 		t.nodes = append(t.nodes, node{})
 	}
 
@@ -333,11 +345,10 @@ func (t *TLSF) roundUp(value uint32) uint32 {
 	return (exp << mantissaBits) + mantissa
 }
 
-// floatToUint converts a bin index back to the (lower-bound) byte size it
-// represents.
-func (t *TLSF) floatToUint(floatValue uint32) uint32 {
-	exponent := floatValue >> mantissaBits
-	mantissa := floatValue & mantissaMask
+// binSize returns the lower-bound byte size represented by binIndex.
+func (t *TLSF) binSize(binIndex uint32) uint32 {
+	exponent := binIndex >> mantissaBits
+	mantissa := binIndex & mantissaMask
 	if exponent == 0 {
 		return mantissa
 	}
@@ -348,16 +359,18 @@ func (t *TLSF) floatToUint(floatValue uint32) uint32 {
 // region (a lower bound taken from the highest non-empty bin).
 func (t *TLSF) StorageReport() (totalFreeSpace, largestFreeRegion uint32) {
 	totalFreeSpace = t.freeSpace
-	if t.usedTopBins != 0 {
-		topBinIndex := uint32(31 - bits.LeadingZeros32(t.usedTopBins))
-		leafBinIndex := uint32(31 - bits.LeadingZeros32(t.usedBins[topBinIndex]))
-		largestFreeRegion = t.floatToUint((topBinIndex << topBinIndexShift) | leafBinIndex)
+	if t.usedTopBins == 0 {
+		return totalFreeSpace, 0
 	}
+	topBinIndex := uint32(31 - bits.LeadingZeros32(t.usedTopBins))
+	leafBinIndex := uint32(31 - bits.LeadingZeros32(t.usedBins[topBinIndex]))
+	largestFreeRegion = t.binSize((topBinIndex << topBinIndexShift) | leafBinIndex)
 	return totalFreeSpace, largestFreeRegion
 }
 
-func NewTLSF(size uint32) *TLSF {
-	t := &TLSF{capacity: size}
+// NewTLSF returns an allocator that manages capacity bytes.
+func NewTLSF(capacity uint32) *TLSF {
+	t := &TLSF{capacity: capacity}
 	t.reset()
 	return t
 }

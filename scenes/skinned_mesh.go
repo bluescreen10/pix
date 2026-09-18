@@ -34,7 +34,7 @@ type skinnedMeshData struct {
 type SkinnedMesh struct{ Node }
 
 func (m SkinnedMesh) data() *skinnedMeshData {
-	return m.scene.skinnedMeshes.Get(m.scene.payload[m.slot()])
+	return m.scene.skinnedMeshes.Value(m.scene.payload[m.slot()])
 }
 
 // SourceGeometry returns the mesh's un-skinned source geometry (the one carrying
@@ -60,7 +60,7 @@ func (m SkinnedMesh) SetMaterial(mat materials.Material) {
 
 // Skeleton returns the skeleton this mesh is bound to.
 func (m SkinnedMesh) Skeleton() Skeleton {
-	root := m.scene.skeletons.Get(m.data().skeleton).ownerNode
+	root := m.scene.skeletons.Value(m.data().skeleton).ownerNode
 	id := NodeID{index: root, gen: m.scene.generation[root]}
 	return Skeleton{Node{scene: m.scene, id: id}}
 }
@@ -86,7 +86,7 @@ func (s *Scene) NewSkinnedMesh(geo geometries.Geometry, mat materials.Material, 
 		panic("pix: NewSkinnedMesh requires a Skeleton")
 	}
 	skelIdx := s.payload[skel.slot()]
-	sk := s.skeletons.Get(skelIdx)
+	sk := s.skeletons.Value(skelIdx)
 
 	positions := geo.AttributeData[glm.Vec3f](geometries.AttributePosition)
 	radii, bindPos := computeJointRadii(geo, sk.invBind, positions)
@@ -114,7 +114,7 @@ func (s *Scene) NewSkinnedMesh(geo geometries.Geometry, mat materials.Material, 
 }
 
 func (s *Scene) freeSkinnedMesh(payloadIdx uint32) {
-	sm := s.skinnedMeshes.Get(payloadIdx)
+	sm := s.skinnedMeshes.Value(payloadIdx)
 	sm.srcGeometry.Release()
 	sm.outputGeo.Release()
 	sm.material.Release()

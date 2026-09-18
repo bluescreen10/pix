@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/bluescreen10/gamekit/gpu"
-	"github.com/bluescreen10/pix/internal/mem"
+	"github.com/bluescreen10/pix/mem"
 	"github.com/bluescreen10/pix/ref"
 )
 
@@ -145,7 +145,7 @@ type scatterPart struct {
 func (s *Pool) Sync(u Uploader) {
 	if s.allDirty {
 		s.allDirty = false
-		for id := range s.entries.All() {
+		for id := range s.entries.Entries() {
 			s.dirty[id] = struct{}{}
 		}
 	}
@@ -160,8 +160,8 @@ func (s *Pool) Sync(u Uploader) {
 	parts := s.parts[:0]
 	for id := range s.dirty {
 		lo := len(scratch)
-		if s.entries.Alive(id) {
-			scratch = append(scratch, s.entries.Get(id).inst.Bytes()...)
+		if s.entries.IsAlive(id) {
+			scratch = append(scratch, s.entries.Value(id).inst.Bytes()...)
 		} else {
 			// A freed slot still gets one last write, of zeros: a draw issued in the
 			// same frame the material was released must not read its old record.
@@ -224,19 +224,19 @@ func (s *Pool) MarkDirty(id uint32) {
 // renderer can read it without deserializing anything.
 
 func (s *Pool) Cull(id uint32) CullMode {
-	return s.entries.Get(id).cull
+	return s.entries.Value(id).cull
 }
 
 func (s *Pool) SetCull(id uint32, c CullMode) {
-	s.entries.Get(id).cull = c
+	s.entries.Value(id).cull = c
 }
 
 func (s *Pool) Blend(id uint32) BlendMode {
-	return s.entries.Get(id).blend
+	return s.entries.Value(id).blend
 }
 
 func (s *Pool) SetBlend(id uint32, b BlendMode) {
-	s.entries.Get(id).blend = b
+	s.entries.Value(id).blend = b
 }
 
 // dispose/validate let a ref own a slot in this pool.
@@ -251,7 +251,7 @@ func (s *Pool) validate(id, gen uint32) bool {
 // dispose frees the slot behind the last released handle: the material drops the
 // textures it held, and the slot uploads zeros on the next Sync.
 func (s *Pool) dispose(id uint32) {
-	s.entries.Get(id).inst.Dispose()
+	s.entries.Value(id).inst.Dispose()
 	s.entries.Free(id)
 	s.markDirty(id)
 }

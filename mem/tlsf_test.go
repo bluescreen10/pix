@@ -1,9 +1,10 @@
 package mem_test
 
 import (
+	"errors"
 	"testing"
 
-	"github.com/bluescreen10/pix/internal/mem"
+	"github.com/bluescreen10/pix/mem"
 )
 
 const testArenaSize uint32 = 1024 * 1024 * 256 // 256 MiB
@@ -46,6 +47,35 @@ func TestTLSFBasic(t *testing.T) {
 	tlsf := mem.NewTLSF(testArenaSize)
 	a := allocAt(t, tlsf, 1337, 0)
 	mustFree(t, tlsf, a)
+}
+
+func TestTLSFCapacityAndErrors(t *testing.T) {
+	allocator := mem.NewTLSF(16)
+	if got := allocator.Capacity(); got != 16 {
+		t.Errorf("Capacity() = %d, want 16", got)
+	}
+	if got := allocator.FreeSpace(); got != 16 {
+		t.Errorf("FreeSpace() = %d, want 16", got)
+	}
+
+	allocation := mustAlloc(t, allocator, 16)
+	if allocation.Offset() != 0 || allocation.Size() != 16 {
+		t.Errorf("allocation = (offset %d, size %d), want (offset 0, size 16)", allocation.Offset(), allocation.Size())
+	}
+	if got := allocator.FreeSpace(); got != 0 {
+		t.Errorf("FreeSpace() after allocation = %d, want 0", got)
+	}
+	if _, err := allocator.Alloc(1); !errors.Is(err, mem.ErrNoSpace) {
+		t.Errorf("Alloc() error = %v, want %v", err, mem.ErrNoSpace)
+	}
+
+	mustFree(t, allocator, allocation)
+	if got := allocator.FreeSpace(); got != 16 {
+		t.Errorf("FreeSpace() after Free() = %d, want 16", got)
+	}
+	if err := allocator.Free(allocation); !errors.Is(err, mem.ErrInvalidAllocation) {
+		t.Errorf("second Free() error = %v, want %v", err, mem.ErrInvalidAllocation)
+	}
 }
 
 func TestTLSFAllocate(t *testing.T) {

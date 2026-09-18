@@ -10,7 +10,7 @@ import (
 
 	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/internal/mem"
+	"github.com/bluescreen10/pix/mem"
 	"github.com/bluescreen10/pix/ref"
 )
 
@@ -171,7 +171,7 @@ func (g *Store) IndexBase(id uint32) uint32 {
 
 // BoundingSphere returns a geometry's local bounding sphere.
 func (g *Store) BoundingSphere(id uint32) glm.Sphere {
-	return g.entries.Get(id).boundingSphere
+	return g.entries.Value(id).boundingSphere
 }
 
 // Generation returns the current generation of a geometry id (for stale checks).
@@ -261,10 +261,10 @@ func (g *Store) alloc(cfg GeometryConfig) (id, gen uint32) {
 // Free releases a geometry id; its suballocations return to the TLSF pools and the
 // slot's generation is bumped so existing handles become detectably stale.
 func (g *Store) Free(id uint32) {
-	if !g.entries.Alive(id) {
+	if !g.entries.IsAlive(id) {
 		return
 	}
-	e := g.entries.Get(id)
+	e := g.entries.Value(id)
 	for s := range streamCount {
 		if e.streamPresent(s) {
 			g.streams[s].tlsf.Free(e.allocs[s])
@@ -321,7 +321,7 @@ func (g *Store) growStream(stream int, minCap uint32) {
 
 	ns := g.newStream(s.label, newCap)
 	g.streams[stream] = ns
-	for id, e := range g.entries.All() {
+	for id, e := range g.entries.Entries() {
 		if !e.streamPresent(stream) {
 			continue
 		}
@@ -358,10 +358,10 @@ func (g *Store) growStream(stream int, minCap uint32) {
 // (skinning never changes topology). FlagSkinned is cleared on the output
 // descriptor: once skinned, the data is plain triangles again.
 func (g *Store) createSkinOutput(srcID uint32) (id, gen uint32) {
-	if !g.entries.Alive(srcID) {
+	if !g.entries.IsAlive(srcID) {
 		panic("render: createSkinOutput on a dead geometry")
 	}
-	src := g.entries.Get(srcID)
+	src := g.entries.Value(srcID)
 	srcDesc := g.descs[srcID]
 	n := src.attrs[AttributePosition].count
 	if n == 0 {

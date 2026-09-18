@@ -109,20 +109,20 @@ func (g Geometry) SkinOutput() Geometry {
 // geometry created without indices has a generated 0..n-1 list by this point —
 // see Store.Create.
 func (g *Store) indices(id uint32) []uint32 {
-	if !g.entries.Alive(id) {
+	if !g.entries.IsAlive(id) {
 		return nil
 	}
-	return g.entries.Get(id).indices
+	return g.entries.Value(id).indices
 }
 
 // attribute returns a pointer to a geometry's stored attribute (nil if the id is
 // dead or the attribute is absent). The generic AttributeData/SetAttributeData
 // methods reinterpret its bytes.
 func (g *Store) attribute(id uint32, t AttributeType) *Attribute {
-	if !g.entries.Alive(id) || t >= attributeCount {
+	if !g.entries.IsAlive(id) || t >= attributeCount {
 		return nil
 	}
-	e := g.entries.Get(id)
+	e := g.entries.Value(id)
 	if !e.has(t) {
 		return nil
 	}
@@ -134,10 +134,10 @@ func (g *Store) attribute(id uint32, t AttributeType) *Attribute {
 // (so the suballocation still fits); adding a new attribute or resizing is not
 // supported — use Store.Create for that.
 func (g *Store) setAttribute(id uint32, t AttributeType, data []byte, count int) {
-	if !g.entries.Alive(id) || t >= attributeCount {
+	if !g.entries.IsAlive(id) || t >= attributeCount {
 		return
 	}
-	e := g.entries.Get(id)
+	e := g.entries.Value(id)
 	if !e.has(t) {
 		panic(fmt.Sprintf("render: SetAttributeData on absent attribute %d (use Store.Create to add it)", t))
 	}

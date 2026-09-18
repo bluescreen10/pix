@@ -82,10 +82,10 @@ func (s *Scene) rebuildPacketTables() {
 		}, md.lods)
 	}
 
-	for _, sm := range s.skinnedMeshes.All() {
+	for _, sm := range s.skinnedMeshes.Entries() {
 		// Both must be attached: the mesh node puts it in the scene, and the skeleton
 		// root supplies the transform its drawable is rendered with.
-		root := s.skeletons.Get(sm.skeleton).ownerNode
+		root := s.skeletons.Value(sm.skeleton).ownerNode
 		if s.flags[sm.ownerNode]&flagAttached == 0 || s.flags[root]&flagAttached == 0 {
 			continue
 		}
@@ -233,8 +233,8 @@ func applyShadowSettings(lp *LightPacket, sh *LightShadow) {
 // recomputed by Scene.Sync, so this only records ranges into that table.
 func (s *Scene) extractSkins() {
 	out := s.packet.Skins.Data[:0]
-	for _, sm := range s.skinnedMeshes.All() {
-		sk := s.skeletons.Get(sm.skeleton)
+	for _, sm := range s.skinnedMeshes.Entries() {
+		sk := s.skeletons.Value(sm.skeleton)
 		out = append(out, SkinPacket{
 			Source:      sm.srcGeometry.ID(),
 			Output:      sm.outputGeo.ID(),

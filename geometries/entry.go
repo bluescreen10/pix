@@ -3,7 +3,7 @@ package geometries
 import (
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/internal/mem"
+	"github.com/bluescreen10/pix/mem"
 )
 
 // vertexAttributes is the interleaved per-vertex attribute record (16 bytes,

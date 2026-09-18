@@ -8,7 +8,7 @@ import (
 	"unsafe"
 
 	"github.com/bluescreen10/gamekit/gpu"
-	"github.com/bluescreen10/pix/internal/mem"
+	"github.com/bluescreen10/pix/mem"
 	"github.com/bluescreen10/pix/ref"
 )
 
@@ -131,12 +131,12 @@ func (t *Store) handle(tex gpu.Texture) Texture {
 // GPU resolves a handle to its backing backend texture (e.g. to bind a shadow map
 // as a depth render attachment, or to transition it for sampling).
 func (t *Store) GPU(tex Texture) gpu.Texture {
-	return t.entries.Get(tex.ref.ID()).tex
+	return t.entries.Value(tex.ref.ID()).tex
 }
 
 // Destroy releases all uploaded textures and samplers.
 func (t *Store) Destroy() {
-	for e := range t.entries.Items() {
+	for e := range t.entries.Values() {
 		if e.tex.IsValid() {
 			t.backend.DestroyTexture(e.tex)
 		}
@@ -149,7 +149,7 @@ func (t *Store) Destroy() {
 
 // dispose/validate let a ref own a slot in this store.
 func (t *Store) dispose(id uint32) {
-	if e := t.entries.Get(id); e.tex.IsValid() {
+	if e := t.entries.Value(id); e.tex.IsValid() {
 		t.backend.DestroyTexture(e.tex)
 		e.tex = gpu.Texture{}
 	}

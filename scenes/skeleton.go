@@ -50,7 +50,7 @@ type Skeleton struct{ Node }
 type Bone struct{ Node }
 
 func (s Skeleton) data() *skeletonData {
-	return s.scene.skeletons.Get(s.scene.payload[s.slot()])
+	return s.scene.skeletons.Value(s.scene.payload[s.slot()])
 }
 
 // Bone returns joint i's node handle.
@@ -141,7 +141,7 @@ func (s *Scene) updateSkinning() {
 	if s.skeletons.Len() == 0 {
 		return
 	}
-	for _, sk := range s.skeletons.All() {
+	for _, sk := range s.skeletons.Entries() {
 		rootInv := s.world[sk.ownerNode].Inv()
 		n := len(sk.bones)
 		if cap(sk.jointPos) < n {
@@ -162,8 +162,8 @@ func (s *Scene) updateSkinning() {
 			sk.jointScale[j] = maxColumnLength(rl)
 		}
 	}
-	for _, sm := range s.skinnedMeshes.All() {
-		sk := s.skeletons.Get(sm.skeleton)
+	for _, sm := range s.skinnedMeshes.Entries() {
+		sk := s.skeletons.Value(sm.skeleton)
 		sm.bounds = skinnedBounds(sk.jointPos, sk.jointScale, sm.radii)
 	}
 }
