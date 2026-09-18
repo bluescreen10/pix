@@ -29,7 +29,7 @@ func BenchmarkSyncDrawListPerDrawable(b *testing.B) {
 			defer geo.Release()
 			xforms := make([]glm.Mat4f, n)
 			for i := range xforms {
-				xforms[i] = glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatIdentityf, glm.Vec3f{float32(i), 0, 0})
+				xforms[i] = glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatfIdentity, glm.Vec3f{float32(i), 0, 0})
 			}
 			scene.Add(scene.NewInstancedMesh(geo, r.NewBasicMaterial(), xforms))
 			r.prepareFrom(scene)
@@ -89,7 +89,7 @@ func BenchmarkSyncDrawListStatic(b *testing.B) {
 
 			xforms := make([]glm.Mat4f, n)
 			for i := range xforms {
-				xforms[i] = glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatIdentityf, glm.Vec3f{float32(i), 0, 0})
+				xforms[i] = glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatfIdentity, glm.Vec3f{float32(i), 0, 0})
 			}
 			scene.Add(scene.NewInstancedMesh(geo, r.NewBasicMaterial(), xforms))
 

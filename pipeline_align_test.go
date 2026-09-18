@@ -1,117 +1,145 @@
-package pix
+package pix_test
 
 import (
+	"bytes"
 	"testing"
 
+	"github.com/bluescreen10/pix"
+	"github.com/bluescreen10/pix/cameras"
+	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
 )
 
-// TestPipelineAlignmentDetachedMesh pins the parallel-array contract syncDrawList
-// relies on: pipeBuf[i] must be the pipeline of the material drawables[i] references.
+// TestPipelineAlignmentDetachedMesh pins the parallel-array contract the renderer's
+// batching relies on internally: a mesh created but never added to the scene (or later
+// detached) must have exactly zero effect on how any other mesh renders.
 //
-// It used to be resolved by a second walk of the payload lists that did not filter on
-// flagAttached the way collectDrawables does, so a mesh that exists but is not in the
-// graph (NewMesh without Add, or a later detach) shifted every following pipeline id
-// by one. That is not just a wrong shader: gpuDrawable.materialID is an index into the
-// *pool* of the material the pipeline was built for, so a shifted pair makes the draw
-// read another material type's record buffer at that index.
+// This used to be resolved by a second walk of the payload lists that did not filter
+// the same way the real drawable-collection walk does, so an orphaned mesh shifted
+// every following material index by one — not just a wrong shader, but a drawable
+// reading another material type's record buffer at that index. Checked here by
+// rendering the same attached mesh with and without an orphan mesh existing alongside
+// it and requiring bit-identical output.
 func TestPipelineAlignmentDetachedMesh(t *testing.T) {
-	r, err := NewOffscreenRenderer(64, 64)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Destroy()
-	scene := scenes.New()
-	defer scene.Destroy()
-
-	geo := r.GeometryStore.Create(BoxGeometry(1, 1, 1))
-	basic := r.NewBasicMaterial()
-	phong := r.NewBlinnPhongMaterial()
-
-	// Created but never added to the scene root: no drawable, but still in scene.meshes.
-	scene.NewMesh(geo, basic)
-
-	added := scene.NewMesh(geo, phong)
-	scene.Add(added)
-
-	r.prepareFrom(scene)
-	pipes := r.stateFor(scene.ID()).dl.pipeBuf
-	drawables, mats, matIdx := r.stateFor(scene.ID()).dl.drawables, r.frame.Materials.Data, r.stateFor(scene.ID()).dl.drawMatSlot
-
-	if len(pipes) != len(drawables) {
-		t.Fatalf("pipeBuf has %d entries, expand emitted %d drawables", len(pipes), len(drawables))
-	}
-	if len(matIdx) != len(drawables) {
-		t.Fatalf("drawMatSlot has %d entries, expand emitted %d drawables", len(matIdx), len(drawables))
-	}
-	for i := range drawables {
-		id := mats[matIdx[i]]
-		pool := r.MaterialStore.PoolAt(id.Pool)
-		want := r.pipelineForPool(pool, pool.Cull(id.Slot), pool.Blend(id.Slot))
-		if pipes[i] != want {
-			t.Errorf("drawable %d: pipeline %d, want %d (its own material's)", i, pipes[i], want)
+	render := func(withOrphan bool) []byte {
+		r, err := pix.NewOffscreenRenderer(64, 64)
+		if err != nil {
+			t.Fatal(err)
 		}
+		defer r.Destroy()
+		scene := scenes.New()
+		defer scene.Destroy()
+		scene.SetAmbient(colors.RGB32F{0.8, 0.8, 0.8})
+
+		geo := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
+		phong := r.NewBlinnPhongMaterial()
+		phong.SetColor(colors.RGBA32F{0.2, 0.6, 0.9, 1})
+
+		if withOrphan {
+			basic := r.NewBasicMaterial()
+			scene.NewMesh(geo, basic) // created but never added to the scene root
+		}
+
+		added := scene.NewMesh(geo, phong)
+		scene.Add(added)
+
+		cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+		cam.SetPosition(glm.Vec3f{0, 0, 3})
+		r.Render(scene, cam)
+		return append([]byte(nil), r.Pixels()...)
 	}
-	// The surviving drawable is the Blinn-Phong one; the orphaned basic material
-	// must not have claimed its slot.
-	if want := r.pipelineForMaterial(phong); len(pipes) > 0 && pipes[0] != want {
-		t.Errorf("attached mesh got pipeline %d, want %d", pipes[0], want)
+
+	without := render(false)
+	with := render(true)
+	if !bytes.Equal(without, with) {
+		t.Fatal("an orphaned (never-added) mesh changed how the attached mesh rendered — " +
+			"material/pipeline indices likely shifted out of alignment")
 	}
 }
 
-// TestDrawableFlagsFollowShadowToggle covers Node.SetCastShadow/SetReceiveShadow: both
-// bits land in gpuDrawable.flags, so toggling one after the draw list was built has to
-// mark the drawables dirty or the change never reaches the GPU.
+// TestDrawableFlagsFollowShadowToggle covers Node.SetCastShadow: toggling it after the
+// draw list was already built has to actually reach the GPU, or the renderer keeps
+// casting (or not casting) a shadow the caller just asked to change. Checked by
+// rendering an occluder over a receiver with a shadow-casting light and comparing
+// scene brightness before and after the toggle.
 func TestDrawableFlagsFollowShadowToggle(t *testing.T) {
-	r, err := NewOffscreenRenderer(64, 64)
+	r, err := pix.NewOffscreenRenderer(160, 160)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
+	r.EnableShadows(true)
+	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
+
 	scene := scenes.New()
 	defer scene.Destroy()
+	scene.SetAmbient(colors.RGB32F{0.05, 0.05, 0.05})
+	light := scene.AddDirectionalLight(glm.Vec3f{0.15, -1, 0.15}, colors.RGB32F{1, 1, 1}, 3)
+	light.SetCastShadow(true)
 
-	mesh := scene.NewMesh(r.GeometryStore.Create(BoxGeometry(1, 1, 1)), r.NewBasicMaterial())
-	scene.Add(mesh)
-	mesh.SetCastShadow(false)
-	r.prepareFrom(scene)
-	if len(r.stateFor(scene.ID()).dl.drawables) != 1 {
-		t.Fatalf("got %d drawables, want 1", len(r.stateFor(scene.ID()).dl.drawables))
-	}
-	if r.stateFor(scene.ID()).dl.drawables[0].flags&DrawableCastsShadow != 0 {
-		t.Fatal("drawable casts shadow with the flag off")
-	}
+	geo := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
+	ground := scene.NewMesh(geo, r.NewPBRMaterial())
+	ground.SetScale(glm.Vec3f{6, 0.2, 6})
+	scene.Add(ground)
 
-	mesh.SetCastShadow(true)
-	r.prepareFrom(scene)
-	if r.stateFor(scene.ID()).dl.drawables[0].flags&DrawableCastsShadow == 0 {
-		t.Error("SetCastShadow(true) did not reach the drawable")
+	occluder := scene.NewMesh(geo, r.NewPBRMaterial())
+	occluder.SetPosition(glm.Vec3f{0, 1.5, 0})
+	occluder.SetScale(glm.Vec3f{0.8, 0.8, 0.8})
+	scene.Add(occluder)
+
+	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam.SetPosition(glm.Vec3f{0, 5, 6})
+	cam.SetTarget(glm.Vec3f{0, 0, 0})
+
+	occluder.SetCastShadow(false)
+	r.Render(scene, cam)
+	notCasting := sceneLuma(r.Pixels())
+
+	occluder.SetCastShadow(true)
+	r.Render(scene, cam)
+	casting := sceneLuma(r.Pixels())
+
+	if casting >= notCasting {
+		t.Fatalf("enabling SetCastShadow did not darken the frame: off=%d on=%d", notCasting, casting)
 	}
 }
 
-// TestPipelineFollowsMaterialSwap is why syncDrawList re-resolves pipelines from the
-// cached materials every frame rather than only on drawableDirty: swapping in a
-// material of another type must move the mesh onto that type's pipeline.
+// TestPipelineFollowsMaterialSwap is why the renderer re-resolves pipelines from the
+// cached materials every frame rather than only on a structural change: swapping in a
+// material of another type must move the mesh onto that type's pipeline and actually
+// change how it renders.
 func TestPipelineFollowsMaterialSwap(t *testing.T) {
-	r, err := NewOffscreenRenderer(64, 64)
+	r, err := pix.NewOffscreenRenderer(64, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
 	scene := scenes.New()
 	defer scene.Destroy()
+	scene.SetAmbient(colors.RGB32F{0.8, 0.8, 0.8})
 
-	phong := r.NewBlinnPhongMaterial()
-	mesh := scene.NewMesh(r.GeometryStore.Create(BoxGeometry(1, 1, 1)), r.NewBasicMaterial())
+	red := r.NewBasicMaterial()
+	red.SetColor(colors.RGBA32F{1, 0, 0, 1})
+	blue := r.NewBlinnPhongMaterial()
+	blue.SetColor(colors.RGBA32F{0, 0, 1, 1})
+
+	mesh := scene.NewMesh(r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1)), red)
 	scene.Add(mesh)
-	r.prepareFrom(scene)
 
-	mesh.SetMaterial(phong)
-	r.prepareFrom(scene)
-	if want := r.pipelineForMaterial(phong); r.stateFor(scene.ID()).dl.pipeBuf[0] != want {
-		t.Errorf("after SetMaterial: pipeline %d, want %d", r.stateFor(scene.ID()).dl.pipeBuf[0], want)
+	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam.SetPosition(glm.Vec3f{0, 0, 3})
+	r.Render(scene, cam)
+	px := r.Pixels()
+	i := (32*64 + 32) * 4
+	if px[i] < 200 || px[i+2] > 40 {
+		t.Fatalf("before swap: center pixel = (%d,%d,%d), want red", px[i], px[i+1], px[i+2])
 	}
-	if r.stateFor(scene.ID()).dl.drawables[0].materialID != phong.ID().Slot {
-		t.Errorf("drawable materialID = %d, want %d", r.stateFor(scene.ID()).dl.drawables[0].materialID, phong.ID().Slot)
+
+	mesh.SetMaterial(blue)
+	r.Render(scene, cam)
+	px = r.Pixels()
+	if px[i+2] < 200 || px[i] > 40 {
+		t.Fatalf("after swap to blue Blinn-Phong: center pixel = (%d,%d,%d), want blue", px[i], px[i+1], px[i+2])
 	}
 }
