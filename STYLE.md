@@ -91,7 +91,7 @@ Conventional short names such as `ctx`, `r`, or `w` are acceptable when their me
 
 If a function is difficult to name clearly, consider whether it has too many responsibilities. Functions should generally be named for what they return or compute; methods for the action they perform. ([Gopher Guides][3])
 
-###Getters and Setters
+### Getters and Setters
 
 Getter methods should usually be named after the value they return, without a Get prefix:
 
@@ -125,6 +125,34 @@ db.SetUsers(users)
 ```
 
 Use Get only when it is part of the operation’s meaning rather than merely indicating property access.
+
+### Boolean Predicates
+
+Methods that return a boolean should read as predicates. Prefer names beginning with `Is`, `Has`, or another appropriate boolean verb when it improves clarity:
+
+```go
+// Bad
+func (v Value) Valid() bool
+func (n Node) Children() bool
+
+// Good
+func (v Value) IsValid() bool
+func (n Node) HasChildren() bool
+```
+
+Choose the prefix according to the meaning:
+
+```go
+IsValid()
+IsEmpty()
+IsVisible()
+
+HasChildren()
+HasValue()
+HasFocus()
+```
+
+The method name should read naturally as a yes/no question and make the boolean result obvious at the call site.
 
 ## Packages
 
