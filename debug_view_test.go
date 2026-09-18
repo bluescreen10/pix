@@ -1,15 +1,18 @@
-package pix
+package pix_test
 
 import (
+	"bytes"
 	"testing"
+
+	"github.com/bluescreen10/pix"
 )
 
 // TestDebugViewNamesRoundTrip: the console addresses views by name, so parse and String
 // must agree for every one of them — a mismatch means `set gbuffer normal` reports back
 // something else.
 func TestDebugViewNamesRoundTrip(t *testing.T) {
-	for _, name := range DebugViewNames() {
-		v, ok := ParseDebugView(name)
+	for _, name := range pix.DebugViewNames() {
+		v, ok := pix.ParseDebugView(name)
 		if !ok {
 			t.Errorf("ParseDebugView(%q) failed on a name it published", name)
 			continue
@@ -18,36 +21,39 @@ func TestDebugViewNamesRoundTrip(t *testing.T) {
 			t.Errorf("%q parsed to %v which stringifies as %q", name, uint32(v), got)
 		}
 	}
-	if _, ok := ParseDebugView("nonsense"); ok {
+	if _, ok := pix.ParseDebugView("nonsense"); ok {
 		t.Error("an unknown view name was accepted")
 	}
-	if got := DebugOff.String(); got != "off" {
+	if got := pix.DebugOff.String(); got != "off" {
 		t.Errorf("DebugOff = %q, want off", got)
 	}
 }
 
 // TestDebugViewNeedsDeferred: the views show the deferred path's intermediate targets,
 // which the forward path never fills — so the setting must lie dormant rather than
-// producing a black or garbage frame.
+// producing a black or garbage frame. Checked by rendering, not by the internal
+// activity flag: with deferred off, setting a view must not change the frame at all;
+// with deferred on, it must.
 func TestDebugViewNeedsDeferred(t *testing.T) {
-	r, err := NewOffscreenRenderer(32, 32)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Destroy()
+	r, scene, cam := shotScene(t, 32, 32)
 
-	r.SetDebugView(DebugNormal)
 	r.EnableDeferredRendering(false)
-	if r.debugViewActive() {
-		t.Error("a debug view claimed to be active with deferred rendering off")
+	r.SetDebugView(pix.DebugOff)
+	r.Render(scene, cam)
+	off := append([]byte(nil), r.Pixels()...)
+
+	r.SetDebugView(pix.DebugNormal)
+	r.Render(scene, cam)
+	dormant := r.Pixels()
+	if !bytes.Equal(off, dormant) {
+		t.Error("a debug view changed the frame with deferred rendering off — it should lie dormant")
 	}
+
 	r.EnableDeferredRendering(true)
-	if !r.debugViewActive() {
-		t.Error("a debug view is not active with deferred rendering on")
-	}
-	r.SetDebugView(DebugOff)
-	if r.debugViewActive() {
-		t.Error("DebugOff still counts as active")
+	r.Render(scene, cam)
+	active := r.Pixels()
+	if bytes.Equal(off, active) {
+		t.Error("a debug view made no difference with deferred rendering on")
 	}
 }
 
@@ -58,7 +64,7 @@ func TestDebugViewsRenderDistinctFrames(t *testing.T) {
 	r, scene, cam := shotScene(t, 96, 96)
 	r.EnableDeferredRendering(true)
 
-	frame := func(v DebugView) (sum int64, nonBlank bool) {
+	frame := func(v pix.DebugView) (sum int64, nonBlank bool) {
 		r.SetDebugView(v)
 		r.Render(scene, cam)
 		px := r.Pixels()
@@ -72,12 +78,12 @@ func TestDebugViewsRenderDistinctFrames(t *testing.T) {
 		return sum, lit > 0
 	}
 
-	shaded, _ := frame(DebugOff)
-	seen := map[int64]DebugView{shaded: DebugOff}
+	shaded, _ := frame(pix.DebugOff)
+	seen := map[int64]pix.DebugView{shaded: pix.DebugOff}
 
 	// DebugEmissive is left out on purpose: nothing in this scene emits, so its target
 	// is legitimately black and the not-blank check below would fail on correct output.
-	for _, v := range []DebugView{DebugAlbedo, DebugNormal, DebugMaterial, DebugDepth, DebugPosition} {
+	for _, v := range []pix.DebugView{pix.DebugAlbedo, pix.DebugNormal, pix.DebugMaterial, pix.DebugDepth, pix.DebugPosition} {
 		sum, nonBlank := frame(v)
 		if !nonBlank {
 			t.Errorf("%v rendered a blank frame", v)
@@ -90,9 +96,9 @@ func TestDebugViewsRenderDistinctFrames(t *testing.T) {
 	}
 
 	// Turning it off must restore the shaded frame exactly.
-	r.SetDebugView(DebugOff)
+	r.SetDebugView(pix.DebugOff)
 	r.Render(scene, cam)
-	if again, _ := frame(DebugOff); again != shaded {
+	if again, _ := frame(pix.DebugOff); again != shaded {
 		t.Errorf("returning to DebugOff did not reproduce the shaded frame: %d vs %d", again, shaded)
 	}
 }
@@ -109,7 +115,7 @@ func TestDebugViewWithStatsCompletesFrames(t *testing.T) {
 	r.EnableDeferredRendering(true)
 	r.ShowFPS(true) // arms the GPU timestamp queries
 
-	for _, v := range []DebugView{DebugOff, DebugNormal, DebugAlbedo, DebugDepth, DebugOff} {
+	for _, v := range []pix.DebugView{pix.DebugOff, pix.DebugNormal, pix.DebugAlbedo, pix.DebugDepth, pix.DebugOff} {
 		r.SetDebugView(v)
 		for range 3 { // several frames: the read happens at the end of each
 			r.Render(scene, cam)
@@ -119,20 +125,24 @@ func TestDebugViewWithStatsCompletesFrames(t *testing.T) {
 
 // TestDebugViewKeepsTheOverlay: the console has to stay visible while a view is up, or
 // there is no way to type the command that turns it off again. The overlay is drawn by
-// the forward pass, which the debug path must therefore not skip.
+// the forward pass, which the debug path must therefore not skip — checked by comparing
+// a frame with the stats HUD on against one with it off: if the overlay pass were being
+// skipped, toggling the HUD would make no visible difference.
 func TestDebugViewKeepsTheOverlay(t *testing.T) {
 	r, scene, cam := shotScene(t, 64, 64)
 	r.EnableDeferredRendering(true)
-	r.ShowFPS(true)
+	r.SetDebugView(pix.DebugNormal)
 
-	r.SetDebugView(DebugNormal)
+	r.ShowFPS(false)
 	r.Render(scene, cam)
+	withoutHUD := append([]byte(nil), r.Pixels()...)
 
-	if r.overlay == nil {
-		t.Fatal("no overlay was created")
-	}
-	if len(r.overlay.quads) == 0 {
-		t.Fatal("the overlay drew nothing while a debug view was up — the HUD and " +
-			"console would be invisible, leaving no way to turn the view off")
+	r.ShowFPS(true)
+	r.Render(scene, cam)
+	withHUD := r.Pixels()
+
+	if bytes.Equal(withoutHUD, withHUD) {
+		t.Fatal("enabling the HUD made no visible difference while a debug view was up — " +
+			"the overlay pass is being skipped, leaving no way to turn the view off")
 	}
 }

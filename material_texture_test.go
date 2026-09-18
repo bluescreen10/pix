@@ -1,14 +1,15 @@
-package pix
+package pix_test
 
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/textures"
 )
 
 // Reproduces what loaders/gltf does: one cached texture handed to two map slots.
 func TestSharedTextureOwnership(t *testing.T) {
-	r, _ := NewOffscreenRenderer(16, 16)
+	r, _ := pix.NewOffscreenRenderer(16, 16)
 	defer r.Destroy()
 
 	tex := r.TextureStore.Create([]byte{255, 255, 255, 255}, 1, 1, textures.Linear)
@@ -31,7 +32,7 @@ func TestSharedTextureOwnership(t *testing.T) {
 // material holding a corrupted Ref (see TestSetMapSelfRebindThenReleaseIsSafe for the
 // worse consequence of that).
 func TestSetMapSelfRebind(t *testing.T) {
-	r, err := NewOffscreenRenderer(16, 16)
+	r, err := pix.NewOffscreenRenderer(16, 16)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +56,7 @@ func TestSetMapSelfRebind(t *testing.T) {
 // material later then disposes whatever texture has since been allocated into that
 // same store slot — a completely unrelated resource.
 func TestSetMapSelfRebindThenReleaseIsSafe(t *testing.T) {
-	r, err := NewOffscreenRenderer(16, 16)
+	r, err := pix.NewOffscreenRenderer(16, 16)
 	if err != nil {
 		t.Fatal(err)
 	}

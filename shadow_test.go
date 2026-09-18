@@ -1,8 +1,9 @@
-package pix
+package pix_test
 
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
@@ -14,7 +15,7 @@ import (
 // enabled, a shadow-casting directional light gets a bindless depth map allocated (and
 // its ortho camera fitted) on the first render.
 func TestDirectionalShadowMapAllocated(t *testing.T) {
-	r, err := NewOffscreenRenderer(64, 64)
+	r, err := pix.NewOffscreenRenderer(64, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +59,7 @@ func TestDirectionalShadowMapAllocated(t *testing.T) {
 // DEPTH_ATTACHMENT transition on the second frame is exercised, then confirms the main
 // color pass still produced the scene (the extra views didn't break the frame).
 func TestDirectionalShadowDepthPass(t *testing.T) {
-	r, err := NewOffscreenRenderer(96, 96)
+	r, err := pix.NewOffscreenRenderer(96, 96)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +107,7 @@ func TestDirectionalShadowDepthPass(t *testing.T) {
 // directional light but NO geometry. The draw list has no batches, so shadow views
 // must be skipped entirely (they'd otherwise allocate a zero-sized visible buffer).
 func TestShadowsEmptyScene(t *testing.T) {
-	r, err := NewOffscreenRenderer(64, 64)
+	r, err := pix.NewOffscreenRenderer(64, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +129,7 @@ func TestShadowsEmptyScene(t *testing.T) {
 // shadow, so the same scene renders darker with shadows on than off.
 func TestSpotShadowDarkensReceiver(t *testing.T) {
 	build := func(shadows bool) []byte {
-		r, err := NewOffscreenRenderer(160, 160)
+		r, err := pix.NewOffscreenRenderer(160, 160)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -185,7 +186,7 @@ func TestSpotShadowDarkensReceiver(t *testing.T) {
 // renders darker with shadows on than off. Exercises the 6-face path + face selection.
 func TestPointShadowDarkensReceiver(t *testing.T) {
 	build := func(shadows bool) []byte {
-		r, err := NewOffscreenRenderer(160, 160)
+		r, err := pix.NewOffscreenRenderer(160, 160)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -250,7 +251,7 @@ func sceneLuma(px []byte) int64 {
 // shadowVP/map + the PCF sampling actually attenuate light.
 func TestDirectionalShadowDarkensReceiver(t *testing.T) {
 	build := func(shadows bool) []byte {
-		r, err := NewOffscreenRenderer(160, 160)
+		r, err := pix.NewOffscreenRenderer(160, 160)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -303,7 +304,7 @@ func TestDirectionalShadowDarkensReceiver(t *testing.T) {
 // read every frame for the bias and the shadow pass viewport, so a stale map would
 // leave those disagreeing with the texture they describe.
 func TestShadowSetSizeReallocatesMap(t *testing.T) {
-	r, err := NewOffscreenRenderer(64, 64)
+	r, err := pix.NewOffscreenRenderer(64, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +370,7 @@ func TestShadowSetSizeReallocatesMap(t *testing.T) {
 // last map drawn, so the lighting shader kept sampling it. Shadows froze on screen
 // instead of disappearing.
 func TestEnableShadowsTogglesAtRuntime(t *testing.T) {
-	r, err := NewOffscreenRenderer(160, 160)
+	r, err := pix.NewOffscreenRenderer(160, 160)
 	if err != nil {
 		t.Fatal(err)
 	}

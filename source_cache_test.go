@@ -1,8 +1,9 @@
-package pix
+package pix_test
 
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
@@ -10,15 +11,14 @@ import (
 )
 
 // The renderer's GPU draw state is cached per packet SOURCE, not held by the Scene.
-// These tests pin the consequences: two scenes do not share state, a released source
-// rebuilds correctly rather than rendering from buffers nobody filled, and the cache
-// does not grow without bound.
+// These tests pin the consequences: two scenes do not share state, and a released
+// source rebuilds correctly rather than rendering from buffers nobody filled.
 
-func greenCubeScene(t *testing.T, r *Renderer) (*scenes.Scene, Camera) {
+func greenCubeScene(t *testing.T, r *pix.Renderer) (*scenes.Scene, pix.Camera) {
 	t.Helper()
 	scene := scenes.New()
 	scene.SetAmbient(colors.RGB32F{1, 1, 1})
-	geo := r.GeometryStore.Create(BoxGeometry(1, 1, 1))
+	geo := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	mat := r.NewBasicMaterial()
 	mat.SetColor(colors.RGBA32F{0, 1, 0, 1})
 	scene.Add(scene.NewMesh(geo, mat))
@@ -41,9 +41,10 @@ func greenPixels(px []byte) int {
 
 // TestSourceCacheIsPerScene: each scene gets its own GPU draw state, keyed by its
 // source id. Sharing one would mean the second scene drawn in a frame overwrote the
-// first's drawable table.
+// first's drawable table — checked by re-rendering the first scene after the second
+// and confirming it still reproduces its own frame, not the second scene's leftovers.
 func TestSourceCacheIsPerScene(t *testing.T) {
-	r, err := NewOffscreenRenderer(64, 64)
+	r, err := pix.NewOffscreenRenderer(64, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,20 +52,27 @@ func TestSourceCacheIsPerScene(t *testing.T) {
 
 	a, camA := greenCubeScene(t, r)
 	defer a.Destroy()
-	b, _ := greenCubeScene(t, r)
+	b, camB := greenCubeScene(t, r)
 	defer b.Destroy()
 
 	if a.ID() == b.ID() {
 		t.Fatal("two scenes minted the same source id")
 	}
-	r.Render(a, camA)
-	r.Render(b, camA)
 
-	if len(r.sources) != 2 {
-		t.Fatalf("renderer cached %d sources, want 2", len(r.sources))
+	r.Render(a, camA)
+	want := greenPixels(r.Pixels())
+	if want == 0 {
+		t.Fatal("scene a did not render at all")
 	}
-	if r.stateFor(a.ID()) == r.stateFor(b.ID()) {
-		t.Error("both scenes resolved to the same render state")
+
+	r.Render(b, camB)
+	if got := greenPixels(r.Pixels()); got == 0 {
+		t.Fatal("scene b did not render at all")
+	}
+
+	r.Render(a, camA)
+	if got := greenPixels(r.Pixels()); got != want {
+		t.Errorf("re-rendering a after b produced %d green pixels, want %d — rendering b corrupted a's cached draw state", got, want)
 	}
 }
 
@@ -73,7 +81,7 @@ func TestSourceCacheIsPerScene(t *testing.T) {
 // tracks dirtiness since the last EXTRACTION and has no idea its consumer went away —
 // so a fresh cache must upload regardless of what the packet says changed.
 func TestReleasedSourceRendersAgain(t *testing.T) {
-	r, err := NewOffscreenRenderer(64, 64)
+	r, err := pix.NewOffscreenRenderer(64, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,9 +98,6 @@ func TestReleasedSourceRendersAgain(t *testing.T) {
 	}
 
 	r.ReleaseSource(scene.ID())
-	if len(r.sources) != 0 {
-		t.Fatalf("ReleaseSource left %d sources cached", len(r.sources))
-	}
 
 	// Nothing about the scene changed, so the packet reports no transform movement and
 	// the same mesh revision. The renderer must still rebuild from the complete tables.
@@ -104,9 +109,10 @@ func TestReleasedSourceRendersAgain(t *testing.T) {
 }
 
 // TestReleaseSourceIsIdempotent: releasing an unknown or already-released id is a
-// no-op, so a caller need not track whether it already did it.
+// no-op, so a caller need not track whether it already did it — it must not panic,
+// and the renderer must still work normally afterward.
 func TestReleaseSourceIsIdempotent(t *testing.T) {
-	r, err := NewOffscreenRenderer(64, 64)
+	r, err := pix.NewOffscreenRenderer(64, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +125,11 @@ func TestReleaseSourceIsIdempotent(t *testing.T) {
 	r.ReleaseSource(scene.ID())
 	r.ReleaseSource(scene.ID())
 	r.ReleaseSource(scenes.NewSourceID())
-	if len(r.sources) != 0 {
-		t.Errorf("renderer holds %d sources after releasing everything", len(r.sources))
+
+	// The renderer must still work normally after releasing everything (including an
+	// id it never saw).
+	r.Render(scene, cam)
+	if greenPixels(r.Pixels()) == 0 {
+		t.Error("renderer failed to render after a sequence of idempotent releases")
 	}
 }

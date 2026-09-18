@@ -1,8 +1,9 @@
-package pix
+package pix_test
 
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
@@ -11,7 +12,7 @@ import (
 )
 
 // renderCube draws one unlit cube filling the view and returns the centre pixel.
-func renderCube(t *testing.T, r *Renderer, scene *scenes.Scene, cam Camera) (byte, byte, byte) {
+func renderCube(t *testing.T, r *pix.Renderer, scene *scenes.Scene, cam pix.Camera) (byte, byte, byte) {
 	t.Helper()
 	r.Render(scene, cam)
 	px := r.Pixels()
@@ -25,7 +26,7 @@ func renderCube(t *testing.T, r *Renderer, scene *scenes.Scene, cam Camera) (byt
 // an accessor that forgets to mark its record dirty updates the host shadow and the
 // GPU never sees it — the frame would silently keep rendering the old value.
 func TestMaterialEditBetweenFramesReachesGPU(t *testing.T) {
-	r, err := NewOffscreenRenderer(64, 64)
+	r, err := pix.NewOffscreenRenderer(64, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +59,7 @@ func TestMaterialEditBetweenFramesReachesGPU(t *testing.T) {
 // the device buffer, whose contents are undefined, so every live record must be
 // re-uploaded and not just the ones edited since the last Sync.
 func TestMaterialStoreGrowReuploadsEveryRecord(t *testing.T) {
-	r, err := NewOffscreenRenderer(64, 64)
+	r, err := pix.NewOffscreenRenderer(64, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +97,7 @@ func TestMaterialStoreGrowReuploadsEveryRecord(t *testing.T) {
 // Mesh holds. Releasing the authoring handle must not free a texture the mesh's copy
 // still references.
 func TestMaterialTextureRefsAreHeldByTheHandle(t *testing.T) {
-	r, err := NewOffscreenRenderer(16, 16)
+	r, err := pix.NewOffscreenRenderer(16, 16)
 	if err != nil {
 		t.Fatal(err)
 	}

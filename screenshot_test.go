@@ -1,4 +1,4 @@
-package pix
+package pix_test
 
 import (
 	"image/png"
@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
@@ -15,9 +16,9 @@ import (
 
 // shotScene builds a renderer showing one lit cube, so a capture has something in it
 // that is neither uniform nor the clear colour.
-func shotScene(t *testing.T, w, h uint32) (*Renderer, *scenes.Scene, Camera) {
+func shotScene(t *testing.T, w, h uint32) (*pix.Renderer, *scenes.Scene, pix.Camera) {
 	t.Helper()
-	r, err := NewOffscreenRenderer(w, h)
+	r, err := pix.NewOffscreenRenderer(w, h)
 	if err != nil {
 		t.Fatal(err)
 	}

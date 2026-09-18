@@ -1,8 +1,9 @@
-package pix
+package pix_test
 
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 )
@@ -10,7 +11,7 @@ import (
 // TestAttributeRoundTrip verifies AttributeData[T] returns what NewGeometry stored
 // and SetAttributeData[T] replaces it in place.
 func TestAttributeRoundTrip(t *testing.T) {
-	r, err := NewOffscreenRenderer(64, 64)
+	r, err := pix.NewOffscreenRenderer(64, 64)
 	if err != nil {
 		t.Fatal(err)
 	}

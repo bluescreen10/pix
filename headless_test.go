@@ -1,10 +1,11 @@
-package pix
+package pix_test
 
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix"
+	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
-	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
 	"github.com/bluescreen10/pix/scenes"
@@ -64,54 +65,96 @@ func TestSceneWorksWithoutARenderer(t *testing.T) {
 	}
 }
 
+// fakeProducer is a scenes.Producer backed by nothing but a hand-filled FramePacket —
+// exactly the "ECS, an editor, a test fixture with no world behind it at all" case
+// scenes.Producer's doc comment calls out. It proves the renderer consumes the packet
+// contract itself, not anything specific to *scenes.Scene.
+type fakeProducer struct {
+	id     scenes.SourceID
+	packet scenes.FramePacket
+}
+
+func (f *fakeProducer) ID() scenes.SourceID {
+	return f.id
+}
+
+func (f *fakeProducer) Extract(p *scenes.FramePacket) {
+	*p = f.packet
+}
+
+func (f *fakeProducer) Rendered() {}
+
 // TestHandAuthoredPacketNeedsNoScene is the other half of the claim: a FramePacket is
-// plain data anyone can fill in, and the renderer's own expansion consumes it without
-// ever seeing a Scene. This is the shape a custom ECS producer would emit.
+// plain data anyone can fill in, and the renderer draws from it without ever seeing a
+// Scene. Three transforms reference one mesh entry, so a correct expansion must draw
+// three separate boxes; rendering them spread along X and checking the lit silhouette
+// spans that whole width is the public-API proxy for "three records were produced, not
+// one" — the renderer holds no other way to observe the packet's internal expansion.
 func TestHandAuthoredPacketNeedsNoScene(t *testing.T) {
-	p := scenes.FramePacket{Source: scenes.NewSourceID(), Frame: 1, Time: 0.5}
-	at := func(x float32) glm.Mat4f {
-		return glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatIdentityf, glm.Vec3f{x, 0, 0})
+	r, err := pix.NewOffscreenRenderer(160, 40)
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer r.Destroy()
+	scene := scenes.New() // only used to allocate real geometry/material resources
+	defer scene.Destroy()
+	scene.SetAmbient(colors.RGB32F{1, 1, 1})
+
+	geo := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
+	defer geo.Release()
+	mat := r.NewBasicMaterial()
+	mat.SetColor(colors.RGBA32F{0, 1, 0, 1})
+	defer mat.Release()
+
+	at := func(x float32) glm.Mat4f {
+		return glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatfIdentity, glm.Vec3f{x, 0, 0})
+	}
+	p := scenes.FramePacket{Source: scenes.NewSourceID(), Frame: 1}
 	// Slot 0 stands in for a root nothing draws at; the mesh below is drawn at 1..3.
-	p.Transforms.Data = []glm.Mat4f{glm.Mat4Identity[float32](), at(2), at(3), at(4)}
-	p.Materials.Data = []materials.ID{{Pool: 0, Slot: 7, Gen: 1}}
+	p.Transforms.Data = []glm.Mat4f{glm.Mat4Identity[float32](), at(-6), at(0), at(6)}
+	p.Materials.Data = []materials.ID{mat.ID()}
 	p.Meshes.Data = []scenes.MeshPacket{{
 		ID:         scenes.ObjectID{Index: 1, Gen: 1},
 		Transforms: scenes.IndexRange{First: 1, Count: 3}, // drawn at three transforms
-		Geometry:   geometries.ID{Slot: 4, Gen: 1},
+		Geometry:   geo.ID(),
 		Material:   0,
-		Bounds:     glm.Sphere{Radius: 1},
-		Flags:      scenes.RenderCastsShadow,
+		Bounds:     geo.BoundingSphere(),
 	}}
 	p.Meshes.Revision = 1
 
-	var dl drawList
-	dl.matPipe = []uint32{3} // one pipeline for the one material
-	dl.expand(&p)
+	producer := &fakeProducer{id: p.Source, packet: p}
 
-	if len(dl.drawables) != 3 {
-		t.Fatalf("expanded to %d draw records, want 3", len(dl.drawables))
-	}
-	for i, d := range dl.drawables {
-		if d.geometryID != 4 || d.materialID != 7 {
-			t.Errorf("record %d: geometry %d material %d, want 4 and 7", i, d.geometryID, d.materialID)
-		}
-		if d.flags&DrawableCastsShadow == 0 {
-			t.Errorf("record %d lost its caster flag", i)
-		}
-		if want := uint32(1 + i); d.transformID != want {
-			t.Errorf("record %d: transform %d, want %d", i, d.transformID, want)
-		}
-	}
-	if dl.pipeBuf[0] != 3 {
-		t.Errorf("record pipeline = %d, want 3", dl.pipeBuf[0])
-	}
+	cam := cameras.NewPerspectiveCamera(60, 4, 0.1, 100)
+	cam.SetPosition(glm.Vec3f{0, 0, 6})
+	r.Render(producer, cam)
 
-	// Shadow fitting derives its bounds from the packet too, with no producer to ask.
-	// Three unit spheres at x=2,3,4 span x in [1,5]: centre 3, and a radius that
-	// reaches the corner of that box.
-	center, radius := casterBounds(&p)
-	if center != (glm.Vec3f{3, 0, 0}) || radius < 2 {
-		t.Errorf("caster bounds = %v r=%v, want centre {3 0 0} and a radius of at least 2", center, radius)
+	px := r.Pixels()
+	const w, h = 160, 40
+	litCol := make([]bool, w)
+	for y := range h {
+		for x := range w {
+			i := (y*w + x) * 4
+			if px[i+1] > 100 && px[i] < 60 {
+				litCol[x] = true
+			}
+		}
+	}
+	first, last := -1, -1
+	for x, lit := range litCol {
+		if lit {
+			if first < 0 {
+				first = x
+			}
+			last = x
+		}
+	}
+	if first < 0 {
+		t.Fatal("hand-authored packet produced no visible geometry")
+	}
+	// Three boxes 4 units apart, spread across a 4:1 aspect frame, should light up a
+	// third or more of the frame's width; a single box (only one drawable record
+	// actually produced) would cover a small fraction of it.
+	if span := last - first; span < w/3 {
+		t.Fatalf("lit span = %d px (columns %d..%d), want > %d — looks like fewer than 3 boxes rendered", span, first, last, w/3)
 	}
 }

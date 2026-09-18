@@ -1,23 +1,16 @@
-package pix
+package pix_test
 
 import (
 	"math"
 	"testing"
 
+	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
 )
-
-func rotY(a float32) glm.Mat4f {
-	c, s := float32(math.Cos(float64(a))), float32(math.Sin(float64(a)))
-	m := glm.Mat4Identity[float32]()
-	m[0], m[8] = c, s
-	m[2], m[10] = -s, c
-	return m
-}
 
 // normalCube returns a cube with 24 vertices (4 per face) so each face carries a
 // constant outward normal — required for per-face lighting to vary.
@@ -56,7 +49,7 @@ func normalCube() geometries.GeometryConfig {
 
 func TestDirectionalLighting(t *testing.T) {
 	const size = 160
-	r, err := NewOffscreenRenderer(size, size)
+	r, err := pix.NewOffscreenRenderer(size, size)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,9 +1,10 @@
-package pix
+package pix_test
 
 import (
 	"strings"
 	"testing"
 
+	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/console"
 	"github.com/bluescreen10/pix/input"
@@ -16,9 +17,9 @@ type nullInput struct{}
 func (nullInput) Chars() []rune          { return nil }
 func (nullInput) Keys() []input.KeyEvent { return nil }
 
-func consoleFor(t *testing.T) (*Renderer, *console.Console) {
+func consoleFor(t *testing.T) (*pix.Renderer, *console.Console) {
 	t.Helper()
-	r, err := NewOffscreenRenderer(32, 32)
+	r, err := pix.NewOffscreenRenderer(32, 32)
 	if err != nil {
 		t.Fatal(err)
 	}

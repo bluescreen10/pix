@@ -1,4 +1,4 @@
-package pix
+package pix_test
 
 import (
 	"fmt"

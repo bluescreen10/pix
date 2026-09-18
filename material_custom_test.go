@@ -1,9 +1,10 @@
-package pix
+package pix_test
 
 import (
 	"testing"
 	"unsafe"
 
+	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
@@ -53,16 +54,32 @@ func (m *customMaterial) Dispose() {} // holds no textures
 
 // --- materials.Material ---
 
-func (m *customMaterial) Copy() materials.Material { m.ref.Copy(); return m }
-func (m *customMaterial) Release()                 { m.ref.Release() }
-func (m *customMaterial) IsValid() bool            { return m.ref.IsValid() }
+func (m *customMaterial) Copy() materials.Material {
+	m.ref.Copy()
+	return m
+}
+
+func (m *customMaterial) Release() {
+	m.ref.Release()
+}
+
+func (m *customMaterial) IsValid() bool {
+	return m.ref.IsValid()
+}
 
 // Two methods beyond the handle, and neither answers a question about rendering: the
 // pool does that. Everything this type used to forward — the four shader stages, cull,
 // blend, the pipeline hash, the record buffer address — was only ever m.pool asked the
 // long way round, and is now read from the pool directly.
-func (m *customMaterial) ID() materials.ID      { return m.pool.IDOf(m.ref) }
-func (m *customMaterial) Pool() *materials.Pool { return m.pool }
+
+func (m *customMaterial) ID() materials.ID {
+	return m.pool.IDOf(m.ref)
+}
+
+func (m *customMaterial) Pool() *materials.Pool {
+	return m.pool
+}
+
 func (m *customMaterial) SetColor(c colors.RGBA32F) {
 	m.color = c
 	m.pool.MarkDirty(m.ref.ID())
@@ -75,7 +92,7 @@ var _ materials.Material = (*customMaterial)(nil)
 // contract were still unexported, this would not compile, and if the renderer could
 // not route a foreign Material, the cube would not come out green.
 func TestCustomMaterialFromOutsideThePackage(t *testing.T) {
-	r, err := NewOffscreenRenderer(64, 64)
+	r, err := pix.NewOffscreenRenderer(64, 64)
 	if err != nil {
 		t.Fatal(err)
 	}

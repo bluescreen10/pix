@@ -1,8 +1,9 @@
-package pix
+package pix_test
 
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 )
@@ -17,12 +18,12 @@ func TestPrimitiveWindingIsOutward(t *testing.T) {
 		name string
 		cfg  geometries.GeometryConfig
 	}{
-		{"box", BoxGeometry(2, 3, 4)},
-		{"plane", PlaneGeometry(4, 6, 3, 5)},
-		{"sphere", SphereGeometry(1.5, 16, 12)},
-		{"cylinder", CylinderGeometry(1, 1, 3, 16, 2)},
-		{"cone", CylinderGeometry(0, 1, 2, 16, 1)},
-		{"capsule", CapsuleGeometry(0.5, 2, 6, 16)},
+		{"box", pix.BoxGeometry(2, 3, 4)},
+		{"plane", pix.PlaneGeometry(4, 6, 3, 5)},
+		{"sphere", pix.SphereGeometry(1.5, 16, 12)},
+		{"cylinder", pix.CylinderGeometry(1, 1, 3, 16, 2)},
+		{"cone", pix.CylinderGeometry(0, 1, 2, 16, 1)},
+		{"capsule", pix.CapsuleGeometry(0.5, 2, 6, 16)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -59,11 +60,11 @@ func TestPrimitiveExtents(t *testing.T) {
 		cfg                 geometries.GeometryConfig
 		wantW, wantH, wantD float32
 	}{
-		{"box", BoxGeometry(2, 3, 4), 2, 3, 4},
-		{"plane", PlaneGeometry(4, 6, 3, 5), 4, 0, 6}, // flat: no Y extent
-		{"sphere", SphereGeometry(1.5, 24, 16), 3, 3, 3},
-		{"cylinder", CylinderGeometry(1, 1, 3, 24, 1), 2, 3, 2},
-		{"capsule", CapsuleGeometry(0.5, 2, 8, 24), 1, 3, 1}, // 2 + 2*0.5
+		{"box", pix.BoxGeometry(2, 3, 4), 2, 3, 4},
+		{"plane", pix.PlaneGeometry(4, 6, 3, 5), 4, 0, 6}, // flat: no Y extent
+		{"sphere", pix.SphereGeometry(1.5, 24, 16), 3, 3, 3},
+		{"cylinder", pix.CylinderGeometry(1, 1, 3, 24, 1), 2, 3, 2},
+		{"capsule", pix.CapsuleGeometry(0.5, 2, 8, 24), 1, 3, 1}, // 2 + 2*0.5
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

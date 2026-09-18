@@ -1,8 +1,9 @@
-package pix
+package pix_test
 
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/geometries"
@@ -47,11 +48,11 @@ func twoBoneSkeleton() scenes.SkeletonConfig {
 		Parents: []int32{-1, 0},
 		InverseBind: []glm.Mat4f{
 			glm.Mat4fIdentity,
-			glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatIdentityf, glm.Vec3f{0, -2, 0}),
+			glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatfIdentity, glm.Vec3f{0, -2, 0}),
 		},
 		BindPose: []scenes.Transform{
-			{Rotation: glm.QuatIdentityf, Scale: glm.Vec3f{1, 1, 1}},
-			{Position: glm.Vec3f{0, 2, 0}, Rotation: glm.QuatIdentityf, Scale: glm.Vec3f{1, 1, 1}},
+			{Rotation: glm.QuatfIdentity, Scale: glm.Vec3f{1, 1, 1}},
+			{Position: glm.Vec3f{0, 2, 0}, Rotation: glm.QuatfIdentity, Scale: glm.Vec3f{1, 1, 1}},
 		},
 	}
 }
@@ -73,7 +74,7 @@ func countLitPixels(pixels []byte) int {
 // positions rather than uninitialized garbage, and the draw pipeline can render a
 // SkinnedMesh's output geometry at all.
 func TestSkinnedMeshBindPose(t *testing.T) {
-	r, err := NewOffscreenRenderer(64, 64)
+	r, err := pix.NewOffscreenRenderer(64, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +111,7 @@ func TestSkinnedMeshBindPose(t *testing.T) {
 // actually changes relative to bind pose — proving the full compute-skin pipeline
 // (dispatch, barrier, vertex read) picks up a pose change end to end.
 func TestSkinnedMeshDeforms(t *testing.T) {
-	r, err := NewOffscreenRenderer(64, 64)
+	r, err := pix.NewOffscreenRenderer(64, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +159,7 @@ func TestSkinnedMeshDeforms(t *testing.T) {
 // bones being ordinary scene nodes is the whole point of the design (see
 // skeleton.go's Bone type).
 func TestSkinnedMeshBoneAttachment(t *testing.T) {
-	r, err := NewOffscreenRenderer(4, 4)
+	r, err := pix.NewOffscreenRenderer(4, 4)
 	if err != nil {
 		t.Fatal(err)
 	}

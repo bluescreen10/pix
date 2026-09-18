@@ -1,7 +1,9 @@
-package pix
+package pix_test
 
 import (
 	"testing"
+
+	"github.com/bluescreen10/pix"
 )
 
 // TestMaterialPoolIsNotSharedAcrossRenderers guards against caching a pool in a
@@ -9,7 +11,7 @@ import (
 // across renderers (a sync.Once especially, which cannot refire) would hand the next
 // renderer a pool whose buffer is gone, and alloc would fault writing it.
 func TestMaterialPoolIsNotSharedAcrossRenderers(t *testing.T) {
-	first, err := NewOffscreenRenderer(16, 16)
+	first, err := pix.NewOffscreenRenderer(16, 16)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -20,7 +22,7 @@ func TestMaterialPoolIsNotSharedAcrossRenderers(t *testing.T) {
 		t.Fatal("Renderer.Destroy left the material pool's buffer allocated")
 	}
 
-	second, err := NewOffscreenRenderer(16, 16)
+	second, err := pix.NewOffscreenRenderer(16, 16)
 	if err != nil {
 		t.Fatal(err)
 	}

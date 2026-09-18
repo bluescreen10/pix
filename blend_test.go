@@ -1,8 +1,9 @@
-package pix
+package pix_test
 
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/geometries"
@@ -16,7 +17,7 @@ import (
 // opaque-before-transparent ordering, and depth-test-but-no-depth-write.
 func TestTransparency(t *testing.T) {
 	const size = 96
-	r, err := NewOffscreenRenderer(size, size)
+	r, err := pix.NewOffscreenRenderer(size, size)
 	if err != nil {
 		t.Fatal(err)
 	}

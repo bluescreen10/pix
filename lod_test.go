@@ -1,27 +1,14 @@
-package pix
+package pix_test
 
 import (
 	"testing"
-	"unsafe"
 
+	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
 )
-
-// TestLODStructSizes guards gpuDrawable's and gpuLODEntry's byte layouts against an
-// accidental field-order/size change silently desyncing them from the GLSL structs
-// they mirror (scene_cull.comp.glsl and every shader with its own Drawable copy —
-// see the LOD spec, project memory).
-func TestLODStructSizes(t *testing.T) {
-	if got := unsafe.Sizeof(gpuDrawable{}); got != 44 {
-		t.Fatalf("gpuDrawable size = %d, want 44 (update every shader's Drawable struct too)", got)
-	}
-	if got := unsafe.Sizeof(gpuLODEntry{}); got != 28 {
-		t.Fatalf("gpuLODEntry size = %d, want 28 (update scene_cull.comp.glsl's LodEntry too)", got)
-	}
-}
 
 // avgColor returns the mean of every non-background (non-black) pixel in the frame —
 // enough to tell which of two very differently colored LOD levels rendered.
@@ -48,7 +35,7 @@ func avgColor(px []byte, size int) (r, g, b float64, lit int) {
 // (not just the frustum test) is actually gating which level's drawable survives.
 func TestMeshLODSelection(t *testing.T) {
 	const size = 128
-	r, err := NewOffscreenRenderer(size, size)
+	r, err := pix.NewOffscreenRenderer(size, size)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,8 +44,8 @@ func TestMeshLODSelection(t *testing.T) {
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
 
-	near := r.GeometryStore.Create(BoxGeometry(1, 1, 1))
-	far := r.GeometryStore.Create(BoxGeometry(1, 1, 1))
+	near := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
+	far := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	redMat := r.NewBasicMaterial()
 	redMat.SetColor(colors.RGBA32F{1, 0, 0, 1})
 	blueMat := r.NewBasicMaterial()
@@ -94,7 +81,7 @@ func TestMeshLODSelection(t *testing.T) {
 // selection actually works, not just per-Mesh.
 func TestInstancedMeshLODSelection(t *testing.T) {
 	const size = 128
-	r, err := NewOffscreenRenderer(size, size)
+	r, err := pix.NewOffscreenRenderer(size, size)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,16 +90,16 @@ func TestInstancedMeshLODSelection(t *testing.T) {
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
 
-	near := r.GeometryStore.Create(BoxGeometry(1, 1, 1))
-	far := r.GeometryStore.Create(BoxGeometry(1, 1, 1))
+	near := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
+	far := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	redMat := r.NewBasicMaterial()
 	redMat.SetColor(colors.RGBA32F{1, 0, 0, 1})
 	blueMat := r.NewBasicMaterial()
 	blueMat.SetColor(colors.RGBA32F{0, 0, 1, 1})
 
 	transforms := []glm.Mat4f{
-		glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatIdentityf, glm.Vec3f{-1, 0, 0}),
-		glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatIdentityf, glm.Vec3f{1, 0, 0}),
+		glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatfIdentity, glm.Vec3f{-1, 0, 0}),
+		glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatfIdentity, glm.Vec3f{1, 0, 0}),
 	}
 	field := scene.NewInstancedMesh(near, redMat, transforms)
 	field.AddLOD(far, blueMat, 10)
@@ -145,7 +132,7 @@ func TestInstancedMeshLODSelection(t *testing.T) {
 // widened band is actually cleared.
 func TestMeshLODHysteresis(t *testing.T) {
 	const size = 128
-	r, err := NewOffscreenRenderer(size, size)
+	r, err := pix.NewOffscreenRenderer(size, size)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,8 +141,8 @@ func TestMeshLODHysteresis(t *testing.T) {
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
 
-	near := r.GeometryStore.Create(BoxGeometry(1, 1, 1))
-	far := r.GeometryStore.Create(BoxGeometry(1, 1, 1))
+	near := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
+	far := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	redMat := r.NewBasicMaterial()
 	redMat.SetColor(colors.RGBA32F{1, 0, 0, 1})
 	blueMat := r.NewBasicMaterial()

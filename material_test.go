@@ -1,8 +1,9 @@
-package pix
+package pix_test
 
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
@@ -16,7 +17,7 @@ import (
 // faces angled away from the light. Exercises per-batch pipeline selection.
 func TestMaterialClasses(t *testing.T) {
 	const size = 240
-	r, err := NewOffscreenRenderer(size, size)
+	r, err := pix.NewOffscreenRenderer(size, size)
 	if err != nil {
 		t.Fatal(err)
 	}
