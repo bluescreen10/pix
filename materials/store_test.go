@@ -1,8 +1,9 @@
-package materials
+package materials_test
 
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix/materials"
 	"github.com/bluescreen10/pix/shaders"
 )
 
@@ -14,13 +15,13 @@ func TestStoreDedupsEqualBytesFromDistinctSlices(t *testing.T) {
 	store, _ := testStore(t)
 
 	copied := append([]byte(nil), shaders.BasicForward...)
-	a := store.Pool(Shader{Forward: shaders.BasicForward}, "a")
-	b := store.Pool(Shader{Forward: copied}, "b")
+	a := store.Pool(materials.Shader{Forward: shaders.BasicForward}, "a")
+	b := store.Pool(materials.Shader{Forward: copied}, "b")
 	if a != b {
 		t.Fatal("equal SPIR-V in distinct arrays produced two stores")
 	}
 	// And a genuinely different shader must NOT collide.
-	if c := store.Pool(Shader{Forward: shaders.BlinnPhongForward}, "c"); c == a {
+	if c := store.Pool(materials.Shader{Forward: shaders.BlinnPhongForward}, "c"); c == a {
 		t.Fatal("different shaders shared a store")
 	}
 }

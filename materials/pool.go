@@ -178,15 +178,27 @@ func (s *Pool) Sync(u Uploader) {
 }
 
 // RecordsAddr is the device address of the pool's record buffer, resolved at draw
-// time because it moves when the pool grows. Hash is this pool's shader identity, wide
-// enough to stand alone as its dedup key (see Store.Pool). Shader is the SPIR-V set the
-// pool is keyed by, and the source of truth for how its materials are drawn.
-func (s *Pool) RecordsAddr() uint64 { return s.buf.Addr }
-func (s *Pool) Hash() uint64        { return s.hash }
-func (s *Pool) Shader() Shader      { return s.sh }
+// time because it moves when the pool grows.
+func (s *Pool) RecordsAddr() uint64 {
+	return s.buf.Addr
+}
+
+// Hash is this pool's shader identity, wide enough to stand alone as its dedup key
+// (see Store.Pool).
+func (s *Pool) Hash() uint64 {
+	return s.hash
+}
+
+// Shader is the SPIR-V set the pool is keyed by, and the source of truth for how its
+// materials are drawn.
+func (s *Pool) Shader() Shader {
+	return s.sh
+}
 
 // Index is this pool's dense, stable position in its owning Store — see the field.
-func (s *Pool) Index() uint32 { return s.index }
+func (s *Pool) Index() uint32 {
+	return s.index
+}
 
 // IDOf names one of this pool's instances by value. Material implementations return
 // it from ID(), so none of them has to know how an identity is put together.
@@ -197,19 +209,35 @@ func (s *Pool) IDOf(r ref.Ref) ID {
 // Live reports whether slot id still holds the same instance generation gen. A
 // reference carried as plain data cannot ref-count what it names, so whoever resolves
 // one checks it here before trusting the slot.
-func (s *Pool) Live(id, gen uint32) bool { return s.validate(id, gen) }
+func (s *Pool) Live(id, gen uint32) bool {
+	return s.validate(id, gen)
+}
 
 // MarkDirty flags an instance's record for re-upload on the next Sync. A material
 // implementation must call it from every setter, or the GPU keeps rendering the
 // previous value indefinitely.
-func (s *Pool) MarkDirty(id uint32) { s.markDirty(id) }
+func (s *Pool) MarkDirty(id uint32) {
+	s.markDirty(id)
+}
 
 // Cull/Blend rasterization state, stored per instance beside the record so the
 // renderer can read it without deserializing anything.
-func (s *Pool) Cull(id uint32) CullMode         { return s.entries.Get(id).cull }
-func (s *Pool) SetCull(id uint32, c CullMode)   { s.entries.Get(id).cull = c }
-func (s *Pool) Blend(id uint32) BlendMode       { return s.entries.Get(id).blend }
-func (s *Pool) SetBlend(id uint32, b BlendMode) { s.entries.Get(id).blend = b }
+
+func (s *Pool) Cull(id uint32) CullMode {
+	return s.entries.Get(id).cull
+}
+
+func (s *Pool) SetCull(id uint32, c CullMode) {
+	s.entries.Get(id).cull = c
+}
+
+func (s *Pool) Blend(id uint32) BlendMode {
+	return s.entries.Get(id).blend
+}
+
+func (s *Pool) SetBlend(id uint32, b BlendMode) {
+	s.entries.Get(id).blend = b
+}
 
 // dispose/validate let a ref own a slot in this pool.
 

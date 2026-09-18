@@ -263,7 +263,9 @@ func (m *PBRMaterial) SetRoughnessMapSampler(sampler uint32) {
 }
 
 // TransmissionMap returns the bound transmission map.
-func (m *PBRMaterial) TransmissionMap() textures.Texture { return m.transmissionMap }
+func (m *PBRMaterial) TransmissionMap() textures.Texture {
+	return m.transmissionMap
+}
 
 // SetTransmissionMap binds a per-texel transmission mask, multiplied with the scalar
 // Transmission (glTF KHR_materials_transmission keeps it in the red channel). Use it

@@ -1,6 +1,6 @@
 //go:build darwin
 
-package materials
+package materials_test
 
 // On macOS the default GPU backend is Vulkan (via KosmicKrisp). Registering it is a
 // blank import in this build-tagged test file so the package itself never references

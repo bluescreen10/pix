@@ -40,7 +40,9 @@ func NewRawMaterial(store *Store, shader Shader, dataSize, textureSlots int) *Ra
 
 // Bytes implements Instance. It is the read side, used by Sync — call Record
 // to write, or the change is never uploaded.
-func (m *RawMaterial) Bytes() []byte { return m.data }
+func (m *RawMaterial) Bytes() []byte {
+	return m.data
+}
 
 // Record returns the material's per-instance record as a mutable byte slice — write
 // your uniform fields here — and marks it for upload in the next Sync. Interpret the
@@ -71,8 +73,10 @@ func (m *RawMaterial) SetTexture(slot int, texture textures.Texture) {
 	m.pool.MarkDirty(m.ref.ID())
 }
 
-// textures.Texture returns the texture bound in slot (or a zero handle).
-func (m *RawMaterial) Texture(slot int) textures.Texture { return m.textures[slot] }
+// Texture returns the texture bound in slot (or a zero handle).
+func (m *RawMaterial) Texture(slot int) textures.Texture {
+	return m.textures[slot]
+}
 
 // --- Material ---
 //

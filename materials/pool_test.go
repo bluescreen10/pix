@@ -1,9 +1,10 @@
-package materials
+package materials_test
 
 import (
 	"strings"
 	"testing"
 
+	"github.com/bluescreen10/pix/materials"
 	"github.com/bluescreen10/pix/shaders"
 )
 
@@ -13,8 +14,8 @@ import (
 func TestRegisterRejectsWrongRecordSize(t *testing.T) {
 	store, _ := testStore(t)
 
-	st := store.Pool(Shader{Forward: shaders.BasicForward}, "probe")
-	st.Create(&BasicMaterial{}) // sets the store's stride to the Basic record size
+	st := store.Pool(materials.Shader{Forward: shaders.BasicForward}, "probe")
+	st.Create(&materials.BasicMaterial{}) // sets the store's stride to the Basic record size
 
 	defer func() {
 		got, ok := recover().(string)
@@ -22,6 +23,6 @@ func TestRegisterRejectsWrongRecordSize(t *testing.T) {
 			t.Fatalf("want a record-size panic, got %v", got)
 		}
 	}()
-	st.Create(&PBRMaterial{}) // a longer record; would overrun the neighbouring slot
+	st.Create(&materials.PBRMaterial{}) // a longer record; would overrun the neighbouring slot
 	t.Fatal("register accepted a record of the wrong size")
 }

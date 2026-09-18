@@ -1,11 +1,13 @@
-package materials
+package materials_test
 
 import (
 	"encoding/binary"
 	"math"
 	"testing"
 
+	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/materials"
 	"github.com/bluescreen10/pix/textures"
 )
 
@@ -17,6 +19,16 @@ func u32At(t *testing.T, b []byte, off int) uint32 {
 func f32At(t *testing.T, b []byte, off int) float32 {
 	t.Helper()
 	return math.Float32frombits(binary.LittleEndian.Uint32(b[off : off+4]))
+}
+
+// countingUploader counts Copy calls, to observe whether a Sync actually re-uploaded
+// anything without reaching into the store's dirty-tracking fields.
+type countingUploader struct {
+	calls int
+}
+
+func (u *countingUploader) Copy(dst gpu.Buffer, dstOffset uint32, data []byte) {
+	u.calls++
 }
 
 // TestMaterialRecordLayouts pins each material's GPU record byte-for-byte against the
@@ -38,7 +50,7 @@ func TestMaterialRecordLayouts(t *testing.T) {
 	defer tex.Release()
 
 	t.Run("PBR", func(t *testing.T) {
-		m := NewPBRMaterial(store)
+		m := materials.NewPBRMaterial(store)
 		defer m.Release()
 		m.SetColor(colors.RGBA32F{0.1, 0.2, 0.3, 0.4})
 		m.SetEmissive(colors.RGB32F{0.5, 0.6, 0.7})
@@ -68,10 +80,10 @@ func TestMaterialRecordLayouts(t *testing.T) {
 				t.Errorf("%s at byte %d = %v, want %v", c.name, c.off, got, c.want)
 			}
 		}
-		if want := MatNormalMap | MatTransMap; u32At(t, b, 44) != want {
+		if want := materials.MatNormalMap | materials.MatTransMap; u32At(t, b, 44) != want {
 			t.Errorf("flags at byte 44 = %#x, want MatNormalMap|MatTransMap (%#x)", u32At(t, b, 44), want)
 		}
-		if got := u32At(t, b, 48); got != NoTextureIndex {
+		if got := u32At(t, b, 48); got != materials.NoTextureIndex {
 			t.Errorf("unbound colorMap at byte 48 = %d, want the no-texture sentinel", got)
 		}
 		if got := u32At(t, b, 56); got != tex.Index() {
@@ -89,7 +101,7 @@ func TestMaterialRecordLayouts(t *testing.T) {
 	})
 
 	t.Run("Basic", func(t *testing.T) {
-		m := NewBasicMaterial(store)
+		m := materials.NewBasicMaterial(store)
 		defer m.Release()
 		m.SetColor(colors.RGBA32F{0.1, 0.2, 0.3, 0.4})
 		m.SetEmissive(colors.RGB32F{0.5, 0.6, 0.7})
@@ -112,13 +124,13 @@ func TestMaterialRecordLayouts(t *testing.T) {
 		if got := u32At(t, b, 36); got != 3 {
 			t.Errorf("colorSampler at byte 36 = %d, want 3", got)
 		}
-		if got := u32At(t, b, 40); got != MatColorMap {
-			t.Errorf("flags at byte 40 = %#x, want MatColorMap (%#x)", got, MatColorMap)
+		if got := u32At(t, b, 40); got != materials.MatColorMap {
+			t.Errorf("flags at byte 40 = %#x, want MatColorMap (%#x)", got, materials.MatColorMap)
 		}
 	})
 
 	t.Run("BlinnPhong", func(t *testing.T) {
-		m := NewBlinnPhongMaterial(store)
+		m := materials.NewBlinnPhongMaterial(store)
 		defer m.Release()
 		m.SetColor(colors.RGBA32F{0.1, 0.2, 0.3, 0.4})
 		m.SetEmissive(colors.RGB32F{0.5, 0.6, 0.7})
@@ -141,7 +153,7 @@ func TestMaterialRecordLayouts(t *testing.T) {
 		if got := f32At(t, b, 36); got != 64 {
 			t.Errorf("shininess at byte 36 = %v, want 64", got)
 		}
-		if got := u32At(t, b, 40); got != NoTextureIndex {
+		if got := u32At(t, b, 40); got != materials.NoTextureIndex {
 			t.Errorf("unbound colorMap at byte 40 = %d, want the no-texture sentinel", got)
 		}
 	})
@@ -149,21 +161,24 @@ func TestMaterialRecordLayouts(t *testing.T) {
 
 // TestMaterialBytesHasNoSideEffects: Sync calls Bytes on every dirty material, so if
 // Bytes marked the record dirty (as an earlier RawMaterial.Bytes did) every material
-// would re-upload every frame forever.
+// would re-upload every frame forever. Observed through Sync's actual upload count
+// rather than the pool's internal dirty set: create a material (which dirties and
+// syncs it once), call Bytes on its own, then sync again — a second upload here means
+// Bytes had a side effect.
 func TestMaterialBytesHasNoSideEffects(t *testing.T) {
-	store, backend := testStore(t)
-	texStore := textures.NewStore(backend)
-	defer texStore.Destroy()
+	store, _ := testStore(t)
 
-	m := NewPBRMaterial(store)
+	m := materials.NewPBRMaterial(store)
 	defer m.Release()
-	st := m.pool
-	clear(st.dirty)
-	st.allDirty = false
+
+	u := &countingUploader{}
+	store.Sync(u) // uploads the record created above
+	u.calls = 0
 
 	_ = m.Bytes()
-	if len(st.dirty) != 0 || st.allDirty {
-		t.Fatalf("Bytes() dirtied the store: dirty=%v allDirty=%v", st.dirty, st.allDirty)
+	store.Sync(u)
+	if u.calls != 0 {
+		t.Fatalf("Bytes() dirtied the material: Sync issued %d uploads, want 0", u.calls)
 	}
 }
 
@@ -171,12 +186,10 @@ func TestMaterialBytesHasNoSideEffects(t *testing.T) {
 // the same object. Two objects sharing one slot would mean Sync serializes whichever
 // one the store happens to hold, silently dropping edits made through the other.
 func TestMaterialCopyIsTheSameInstance(t *testing.T) {
-	store, backend := testStore(t)
-	texStore := textures.NewStore(backend)
-	defer texStore.Destroy()
+	store, _ := testStore(t)
 
-	m := NewPBRMaterial(store)
-	dup, ok := m.Copy().(*PBRMaterial)
+	m := materials.NewPBRMaterial(store)
+	dup, ok := m.Copy().(*materials.PBRMaterial)
 	if !ok || dup != m {
 		t.Fatal("Copy returned a different object; edits through one handle would be lost")
 	}
