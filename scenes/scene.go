@@ -1,10 +1,17 @@
-package pix
+// Package scenes is a scene graph: a hierarchy of nodes with transforms, meshes,
+// instanced and skinned meshes, lights, particle systems and decals.
+//
+// It owns no GPU state and imports no renderer. What a renderer needs is published by
+// Scene.Extract as a FramePacket of plain data, and everything derived from that —
+// buffers, pipelines, shadow maps, simulation state — belongs to whoever consumes it.
+// A Scene is therefore one possible producer of frames rather than a required one; the
+// Producer interface in packet.go is the whole contract, and an ECS of your own can
+// satisfy it without any of this package's types.
+package scenes
 
 import (
-	"math"
 	"time"
 
-	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/internal/mem"
@@ -57,14 +64,15 @@ type NodeID struct {
 
 func (id NodeID) isValid() bool { return id.gen != 0 }
 
-// Scene owns the node scene graph (flat parallel arrays, linked-list hierarchy),
-// the per-node transforms, the mesh payloads (which hold ref-counted handles to
-// renderer-owned geometry/materials), the scene lights, and its own per-scene GPU
-// buffers (world matrices, drawables, cull state). It is decoupled from the concrete
-// Renderer — it depends only on gpu.Backend (obtained via Renderer.NewScene).
+// Scene owns the node scene graph (flat parallel arrays, linked-list hierarchy), the
+// per-node transforms, the mesh/skin/particle payloads (which hold ref-counted handles
+// to renderer-owned geometry and materials), and the scene lights.
+//
+// It owns no GPU state and holds no backend. What a renderer needs is published by
+// Extract as a FramePacket of plain data; everything derived from that — buffers,
+// pipelines, shadow maps, simulation state — belongs to the renderer, cached per
+// Scene.ID. A Scene is therefore one possible producer rather than a required one.
 type Scene struct {
-	backend gpu.Backend
-
 	// sourceID is this scene's identity as a packet producer, minted at construction
 	// and never reused. A renderer keys its per-source GPU cache on it, so a destroyed
 	// scene must not hand its identity to the next one — see FramePacket.Source.
@@ -118,14 +126,15 @@ type Scene struct {
 	// and drawList.sync (drawlist.go), which uploads them into one contiguous buffer.
 	instanceTransforms []glm.Mat4f
 
-	// lodEntries is the scene's shared table of LOD-group configs: one gpuLODEntry
-	// per Mesh/InstancedMesh (later SkinnedMesh) that has ever had AddLOD called on
-	// it, indexed by that object's lodGroupID. Index 0 is a reserved, unused zero
-	// entry — a gpuDrawable.lodID of 0 means "not LOD-tagged", so lodGroupID must
-	// never be 0 for an object that actually has LOD levels. See rebuildLODEntry.
-	lodEntries []gpuLODEntry
-
 	particleContainers []particleData
+	// nextParticleID mints stable per-system identities; never reused, because the
+	// renderer's buffers keyed on one ARE that system's simulation state.
+	nextParticleID ParticleID
+	// The cached particle tables Extract publishes. Newborns are DRAINED into
+	// packetNewborns each extraction rather than borrowed — a simulation step has to
+	// happen exactly once.
+	packetParticles []ParticlePacket
+	packetNewborns  []ParticleRecord
 
 	// Skinning: skeletons (bone hierarchies + inverse binds) and skinned meshes
 	// (a source geometry + a compute-derived output geometry, bound to a skeleton).
@@ -134,11 +143,12 @@ type Scene struct {
 	skeletons     mem.Slab[skeletonData]
 	skinnedMeshes mem.Slab[skinnedMeshData]
 
-	// jointBuf holds every skeleton's current joint matrices (skeleton-local space),
-	// TLSF-suballocated per skeleton. Rewritten in full every Sync — a grow only
-	// re-suballocates each skeleton's existing range (no data copy needed).
-	jointBuf  gpu.Buffer
-	jointTLSF *mem.TLSF
+	// packetJoints is every skeleton's current joint palette, laid out one skeleton
+	// after another and rewritten each Sync. Published in the packet; the buffer it is
+	// uploaded into belongs to the renderer.
+	packetJoints []glm.Mat4f
+	// packetSkins is the cached skin table Extract publishes.
+	packetSkins []SkinPacket
 
 	// Light objects the scene owns; the flat GPU table (lights) is derived from them
 	// (+ ambient) each frame in Sync.
@@ -147,37 +157,39 @@ type Scene struct {
 	dirLights   []*DirectionalLight
 	pointLights []*PointLight
 	spotLights  []*SpotLight
-	lights      *Lights
+	// nextLightID mints stable per-light identities. Never reused, so a renderer's
+	// shadow resources can be keyed on one without a dead light's map being inherited.
+	nextLightID LightID
+	// packetLights is the cached light table Extract publishes, refilled each
+	// extraction: lights are a handful of mutable value objects, so polling them is
+	// cheaper than tracking dirtiness (see docs/frame-packet.md).
+	packetLights []LightPacket
 
 	drawableDirty bool
 
-	// The last collectDrawables output, retained so a frame that changed nothing
-	// structural does not rewalk the payload lists. Valid whenever drawableDirty is
-	// false; refilled by the renderer's syncDrawList.
+	// The cached rendering description Extract publishes, rebuilt only when the scene
+	// changes structurally (drawableDirty) and borrowed by every packet in between —
+	// which is what makes extracting an unchanged scene cost slice headers rather than
+	// a walk. See extract.go.
 	//
-	// drawMaterials is the DISTINCT set of materials the drawables reference, and
-	// drawMatIndex is parallel to drawables: drawMatIndex[i] is the drawMaterials entry
-	// that drawables[i] uses. The indirection is the point. A scene draws far more
-	// objects than it has materials, so resolving a pipeline per entry in drawMaterials
-	// is O(distinct materials) where resolving it per drawable was O(objects) — and a
-	// material edit that changes a pipeline is then detected by comparing a list as long
-	// as the material set rather than as long as the scene.
-	//
-	// Both come out of the one collectDrawables walk, so nothing has to independently
-	// reproduce its ordering or its flagAttached filtering.
-	drawables     []gpuDrawable
-	drawMaterials []materials.Material
-	drawMatIndex  []uint32
-	// matSlot is collectDrawables' dedup scratch, keyed by material identity and reused
+	// packetMaterials is the DISTINCT set of materials the meshes reference; a mesh
+	// names one by its slot here. The indirection is what keeps a material edit from
+	// dirtying the mesh table, and what makes the renderer's pipeline work proportional
+	// to materials in play rather than objects on screen.
+	packetMeshes    []MeshPacket
+	packetLODs      []LODLevel
+	packetMaterials []materials.ID
+	// meshRevision advances whenever the three tables above are rebuilt, so a consumer
+	// can tell at a glance whether anything it cached is stale.
+	meshRevision uint64
+	// matSlot is the rebuild's dedup scratch, keyed by material identity and reused
 	// across rebuilds so the walk does not allocate a map every time.
 	matSlot map[materials.ID]uint32
 
-	// shadowsEnabled mirrors the renderer's global shadow toggle, written by the
-	// renderer each frame before Sync (it owns the toggle; the light table is what
-	// consumes it). False on a Scene synced without a renderer, which is the safe
-	// reading: publish no shadow maps rather than stale ones.
-	shadowsEnabled bool
-	drawList       *drawList
+	// transformsDirty says the world matrices changed since the last extraction, so
+	// whoever uploads them knows to. The scene no longer uploads them itself: the
+	// buffer they land in is the renderer's.
+	transformsDirty bool
 
 	// FrameSphere scratch, retained because it runs every frame (see prepareShadows).
 	frameCenters []glm.Vec3f
@@ -191,16 +203,20 @@ type Scene struct {
 	elapsed    float32
 }
 
-// NewScene creates an empty scene bound to a backend (usually via Renderer.NewScene).
-func NewScene(backend gpu.Backend) *Scene {
+// New creates an empty scene.
+//
+// It takes no backend, and holds none: a Scene is a description of what to draw, and
+// every GPU object that used to hang off it — the draw list, the light table, the joint
+// palette, the particle simulation buffers — now belongs to whichever Renderer consumes
+// its packets. That is what lets scene-graph and transform tests run with no GPU at
+// all, and what makes Scene replaceable by an ECS of your own: see Extract.
+func New() *Scene {
 	s := &Scene{
-		backend: backend, freeHead: invalidIdx, topoDirty: true,
+		freeHead: invalidIdx, topoDirty: true,
 		clockStart: time.Now(), sourceID: NewSourceID(),
 	}
 	s.skeletons = mem.NewSlab[skeletonData]()
 	s.skinnedMeshes = mem.NewSlab[skinnedMeshData]()
-	s.lights = NewLights(backend)
-	s.drawList = newDrawList(backend)
 	s.root = s.allocNode(KindGroup)
 	s.flags[s.root.index] = flagAlive | flagLocalVisible | flagVisible
 	return s
@@ -239,7 +255,7 @@ func (s *Scene) Fog() Fog { return s.fog }
 // AddDirectionalLight adds a directional light (dir = travel direction) and returns
 // its handle — configure it further or call CastShadow on the returned light.
 func (s *Scene) AddDirectionalLight(dir glm.Vec3f, color colors.RGB32F, intensity float32) *DirectionalLight {
-	l := &DirectionalLight{Direction: dir, Color: color, Intensity: intensity}
+	l := &DirectionalLight{Direction: dir, Color: color, Intensity: intensity, id: s.newLightID()}
 	s.dirLights = append(s.dirLights, l)
 	return l
 }
@@ -247,7 +263,7 @@ func (s *Scene) AddDirectionalLight(dir glm.Vec3f, color colors.RGB32F, intensit
 // AddPointLight adds a point light at pos with linear falloff to zero at rng and
 // returns its handle.
 func (s *Scene) AddPointLight(pos glm.Vec3f, color colors.RGB32F, intensity, rng float32) *PointLight {
-	l := &PointLight{Position: pos, Color: color, Intensity: intensity, Range: rng}
+	l := &PointLight{Position: pos, Color: color, Intensity: intensity, Range: rng, id: s.newLightID()}
 	s.pointLights = append(s.pointLights, l)
 	return l
 }
@@ -258,7 +274,7 @@ func (s *Scene) AddPointLight(pos glm.Vec3f, color colors.RGB32F, intensity, rng
 func (s *Scene) AddSpotLight(pos, dir glm.Vec3f, color colors.RGB32F, intensity, rng, angle, penumbra float32) *SpotLight {
 	l := &SpotLight{
 		Position: pos, Direction: dir, Color: color, Intensity: intensity,
-		Range: rng, Angle: angle, Penumbra: penumbra,
+		Range: rng, Angle: angle, Penumbra: penumbra, id: s.newLightID(),
 	}
 	s.spotLights = append(s.spotLights, l)
 	return l
@@ -574,8 +590,8 @@ func (s *Scene) updateTransforms() bool {
 func (s *Scene) Sync() {
 	// updateTransforms walks topoOrder, so attachment must be current first.
 	s.flushTopoIfDirty()
-	if dirty := s.updateTransforms(); dirty {
-		s.drawList.sync(s.world, s.instanceTransforms) // host-visible, direct write (not staged)
+	if s.updateTransforms() {
+		s.transformsDirty = true
 	}
 	s.syncSkinning()
 	// Light objects are mutable, so re-derive the flat GPU table each frame; rebuild
@@ -583,158 +599,11 @@ func (s *Scene) Sync() {
 	// this and drawList.sync above write straight to MemoryHost buffers — nothing
 	// scene-owned goes through the shared uploader, so a frame where nothing but
 	// (say) an animated character's pose changed stages/submits nothing extra.
-	s.lights.rebuild(s.ambient, s.fog, s.dirLights, s.pointLights, s.spotLights, s.shadowsEnabled)
-	s.lights.Sync()
 	// elapsed feeds every draw/particle root's time field (drawable.go, particle.go) —
 	// computed once here rather than by each call site, and passed explicitly rather
 	// than read back off the scene by the renderer, matching how every other
 	// per-frame value (viewProj, eye) already reaches fillDrawRoots.
 	s.elapsed = float32(time.Since(s.clockStart).Seconds())
-}
-
-// collectDrawables builds the GPU drawable table from the mesh and skinned-mesh
-// payloads, plus a parallel slice of each drawable's material (for batching + store
-// address). A skinned mesh's transformID is its skeleton root's node slot (not its
-// own) — its own local transform plays no part in rendering; see skeleton.go.
-//
-// Only nodes attached to the scene draw. Creating a mesh does NOT attach it —
-// scene.Add (or parenting it under something attached) does. An unattached node is
-// never visited by updateTransforms, so its world matrix would still be the identity
-// it was born with: drawing it anyway would silently place it at the origin,
-// ignoring every transform set on it. Skipping it instead makes the omission
-// obvious — the mesh is simply missing until it is added.
-func (s *Scene) collectDrawables() {
-	s.flushTopoIfDirty() // attachment is derived from the topological walk
-	if s.matSlot == nil {
-		s.matSlot = make(map[materials.ID]uint32)
-	}
-	clear(s.matSlot)
-	s.drawables = s.drawables[:0]
-	s.drawMatIndex = s.drawMatIndex[:0]
-	s.drawMaterials = s.drawMaterials[:0]
-	for i := range s.meshes {
-		md := &s.meshes[i]
-		if s.flags[md.ownerNode]&flagAttached == 0 {
-			continue
-		}
-		var flags uint32
-		if s.flags[md.ownerNode]&flagCastShadow != 0 {
-			flags |= DrawableCastsShadow
-		}
-		if s.flags[md.ownerNode]&flagReceiveShadow != 0 {
-			flags |= DrawableReceivesShadow
-		}
-		bounds := [4]float32{md.bounds.Center[0], md.bounds.Center[1], md.bounds.Center[2], md.bounds.Radius}
-		for lvl, l := range md.lods {
-			s.addDrawable(gpuDrawable{
-				bounds:      bounds,
-				transformID: md.ownerNode,
-				geometryID:  l.geometry.ID().Slot,
-				materialID:  l.material.ID().Slot,
-				flags:       flags,
-				lodID:       md.lodGroupID,
-				lodLevel:    uint32(lvl),
-			}, l.material)
-		}
-	}
-	for _, sm := range s.skinnedMeshes.All() {
-		// Both must be attached: the mesh node puts it in the scene, and the
-		// skeleton root supplies the transform its drawable is rendered with.
-		root := s.skeletons.Get(sm.skeleton).ownerNode
-		if s.flags[sm.ownerNode]&flagAttached == 0 || s.flags[root]&flagAttached == 0 {
-			continue
-		}
-		var flags uint32
-		if s.flags[sm.ownerNode]&flagCastShadow != 0 {
-			flags |= DrawableCastsShadow
-		}
-		if s.flags[sm.ownerNode]&flagReceiveShadow != 0 {
-			flags |= DrawableReceivesShadow
-		}
-		s.addDrawable(gpuDrawable{
-			bounds:      [4]float32{sm.bounds.Center[0], sm.bounds.Center[1], sm.bounds.Center[2], sm.bounds.Radius},
-			transformID: root,
-			geometryID:  sm.outputGeo.ID().Slot,
-			materialID:  sm.material.ID().Slot,
-			flags:       flags,
-		}, sm.material)
-	}
-	// Instance transforms are addressed as if they sit right after every real node's
-	// world matrix — see the comment on Scene.instanceTransforms and allocNode's
-	// drawableDirty trigger, which is what keeps this base offset from ever going
-	// stale between rebuilds.
-	instanceBase := uint32(len(s.world))
-	for i := range s.instancedMeshes {
-		im := &s.instancedMeshes[i]
-		if s.flags[im.ownerNode]&flagAttached == 0 {
-			continue
-		}
-		var flags uint32
-		if s.flags[im.ownerNode]&flagCastShadow != 0 {
-			flags |= DrawableCastsShadow
-		}
-		if s.flags[im.ownerNode]&flagReceiveShadow != 0 {
-			flags |= DrawableReceivesShadow
-		}
-		bounds := [4]float32{im.bounds.Center[0], im.bounds.Center[1], im.bounds.Center[2], im.bounds.Radius}
-		for j := uint32(0); j < im.count; j++ {
-			for lvl, l := range im.lods {
-				s.addDrawable(gpuDrawable{
-					bounds:      bounds,
-					transformID: instanceBase + im.transformBase + j,
-					geometryID:  l.geometry.ID().Slot,
-					materialID:  l.material.ID().Slot,
-					flags:       flags,
-					lodID:       im.lodGroupID,
-					lodLevel:    uint32(lvl),
-				}, l.material)
-			}
-		}
-	}
-}
-
-// addDrawable records one drawable and, alongside it, the slot of the material it
-// references — adding that material to the distinct set the first time it is seen.
-//
-// Instanced meshes are why the dedup pays: every instance of every LOD level emits its
-// own drawable, and all of them share the handful of materials the mesh was built with.
-// A thousand-instance field contributes a thousand drawables and one material entry.
-func (s *Scene) addDrawable(d gpuDrawable, m materials.Material) {
-	s.drawables = append(s.drawables, d)
-	id := m.ID()
-	slot, seen := s.matSlot[id]
-	if !seen {
-		slot = uint32(len(s.drawMaterials))
-		s.drawMaterials = append(s.drawMaterials, m)
-		s.matSlot[id] = slot
-	}
-	s.drawMatIndex = append(s.drawMatIndex, slot)
-}
-
-// rebuildLODEntry (re)writes the gpuLODEntry for one LOD group from its current
-// levels, allocating a slot in s.lodEntries the first time (id starts at 0, the
-// reserved "not LOD-tagged" sentinel) and overwriting it in place on every later
-// AddLOD/SetLODHysteresis call. Shared by Mesh.AddLOD and InstancedMesh.AddLOD (and
-// their SetLODHysteresis counterparts) — the entry's shape doesn't care which kind of
-// object owns it.
-func (s *Scene) rebuildLODEntry(id *uint32, lods []lodLevel, hysteresis float32) {
-	var e gpuLODEntry
-	e.hysteresis = hysteresis
-	e.levelCount = uint32(len(lods))
-	// boundaries[i] is where level i ends and level i+1 begins — i.e. level i+1's own
-	// minDistance (see lodLevel/AddLOD's doc comments).
-	for i := 0; i < len(lods)-1; i++ {
-		e.boundaries[i] = lods[i+1].minDistance
-	}
-	if *id == 0 {
-		if len(s.lodEntries) == 0 {
-			s.lodEntries = append(s.lodEntries, gpuLODEntry{}) // index 0 reserved
-		}
-		*id = uint32(len(s.lodEntries))
-		s.lodEntries = append(s.lodEntries, e)
-	} else {
-		s.lodEntries[*id] = e
-	}
 }
 
 // MeshCount returns the number of mesh nodes in the scene.
@@ -900,32 +769,4 @@ func (s *Scene) Destroy() {
 		sm.outputGeo.Release()
 		sm.material.Release()
 	}
-	if s.drawList != nil {
-		s.drawList.destroy()
-	}
-	if s.lights != nil {
-		s.lights.Destroy()
-	}
-	if s.jointBuf.IsValid() {
-		s.backend.Free(s.jointBuf)
-	}
-}
-
-// FrustumPlanes extracts the 6 normalized inward frustum planes (Gribb-Hartmann;
-// near = row2 for Vulkan/glm 0..1 clip depth) from a column-major view-projection.
-func FrustumPlanes(vp glm.Mat4f) [6][4]float32 {
-	row := func(i int) [4]float32 { return [4]float32{vp[i], vp[4+i], vp[8+i], vp[12+i]} }
-	r0, r1, r2, r3 := row(0), row(1), row(2), row(3)
-	comb := func(a, b [4]float32, sgn float32) [4]float32 {
-		return [4]float32{a[0] + sgn*b[0], a[1] + sgn*b[1], a[2] + sgn*b[2], a[3] + sgn*b[3]}
-	}
-	pl := [6][4]float32{comb(r3, r0, 1), comb(r3, r0, -1), comb(r3, r1, 1), comb(r3, r1, -1), r2, comb(r3, r2, -1)}
-	for i := range pl {
-		p := pl[i]
-		l := float32(math.Sqrt(float64(p[0]*p[0] + p[1]*p[1] + p[2]*p[2])))
-		if l > 0 {
-			pl[i] = [4]float32{p[0] / l, p[1] / l, p[2] / l, p[3] / l}
-		}
-	}
-	return pl
 }

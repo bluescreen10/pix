@@ -7,6 +7,7 @@ import (
 
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
+	"github.com/bluescreen10/pix/scenes"
 )
 
 // BenchmarkSyncDrawListPerDrawable reconstructs the pre-Materials-table shape of
@@ -21,7 +22,7 @@ func BenchmarkSyncDrawListPerDrawable(b *testing.B) {
 				b.Fatal(err)
 			}
 			defer r.Destroy()
-			scene := r.NewScene()
+			scene := scenes.New()
 			defer scene.Destroy()
 
 			geo := r.GeometryStore.Create(BoxGeometry(1, 1, 1))
@@ -31,12 +32,13 @@ func BenchmarkSyncDrawListPerDrawable(b *testing.B) {
 				xforms[i] = glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatIdentityf, glm.Vec3f{float32(i), 0, 0})
 			}
 			scene.Add(scene.NewInstancedMesh(geo, r.NewBasicMaterial(), xforms))
-			r.syncDrawList(scene)
+			r.prepareFrom(scene)
 
-			// What collectDrawables used to hand back: one material entry per drawable.
-			perDrawable := make([]materials.Material, len(scene.drawables))
+			// What the renderer used to walk: one material per drawable, resolved
+			// individually rather than once per distinct material.
+			perDrawable := make([]materials.ID, len(r.stateFor(scene.ID()).dl.drawables))
 			for i := range perDrawable {
-				perDrawable[i] = scene.drawMaterials[scene.drawMatIndex[i]]
+				perDrawable[i] = r.frame.Materials.Data[r.stateFor(scene.ID()).dl.drawMatSlot[i]]
 			}
 			pipes := make([]uint32, 0, len(perDrawable))
 			// Deliberately unequal, so the comparison runs its full length every
@@ -52,8 +54,9 @@ func BenchmarkSyncDrawListPerDrawable(b *testing.B) {
 			b.ResetTimer()
 			for b.Loop() {
 				pipes = pipes[:0]
-				for _, m := range perDrawable {
-					pipes = append(pipes, r.pipelineForMaterial(m))
+				for _, id := range perDrawable {
+					pool := r.MaterialStore.PoolAt(id.Pool)
+					pipes = append(pipes, r.pipelineForPool(pool, pool.Cull(id.Slot), pool.Blend(id.Slot)))
 				}
 				same = slices.Equal(pipes, batched)
 			}
@@ -78,7 +81,7 @@ func BenchmarkSyncDrawListStatic(b *testing.B) {
 				b.Fatal(err)
 			}
 			defer r.Destroy()
-			scene := r.NewScene()
+			scene := scenes.New()
 			defer scene.Destroy()
 
 			geo := r.GeometryStore.Create(BoxGeometry(1, 1, 1))
@@ -90,19 +93,19 @@ func BenchmarkSyncDrawListStatic(b *testing.B) {
 			}
 			scene.Add(scene.NewInstancedMesh(geo, r.NewBasicMaterial(), xforms))
 
-			r.syncDrawList(scene) // warm: build the batch layout once
-			before := scene.drawList.rebuilds
+			r.prepareFrom(scene) // warm: build the batch layout once
+			before := r.stateFor(scene.ID()).dl.rebuilds
 
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
-				r.syncDrawList(scene)
+				r.prepareFrom(scene)
 			}
 			b.StopTimer()
 
-			if scene.drawList.rebuilds != before {
+			if r.stateFor(scene.ID()).dl.rebuilds != before {
 				b.Fatalf("benchmark rebuilt the batch layout %d times; it is not measuring the static path",
-					scene.drawList.rebuilds-before)
+					r.stateFor(scene.ID()).dl.rebuilds-before)
 			}
 		})
 	}

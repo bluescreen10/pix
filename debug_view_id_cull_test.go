@@ -7,6 +7,7 @@ import (
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
+	"github.com/bluescreen10/pix/scenes"
 )
 
 // TestDebugIDShowsDoubleSidedBackfaces confirms recordDebugIDView doesn't drop a
@@ -23,7 +24,7 @@ func TestDebugIDShowsDoubleSidedBackfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
 

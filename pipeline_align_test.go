@@ -1,6 +1,10 @@
 package pix
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/bluescreen10/pix/scenes"
+)
 
 // TestPipelineAlignmentDetachedMesh pins the parallel-array contract syncDrawList
 // relies on: pipeBuf[i] must be the pipeline of the material drawables[i] references.
@@ -17,7 +21,7 @@ func TestPipelineAlignmentDetachedMesh(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 
 	geo := r.GeometryStore.Create(BoxGeometry(1, 1, 1))
@@ -30,18 +34,21 @@ func TestPipelineAlignmentDetachedMesh(t *testing.T) {
 	added := scene.NewMesh(geo, phong)
 	scene.Add(added)
 
-	r.syncDrawList(scene)
-	pipes := scene.drawList.pipeBuf
-	drawables, mats, matIdx := scene.drawables, scene.drawMaterials, scene.drawMatIndex
+	r.prepareFrom(scene)
+	pipes := r.stateFor(scene.ID()).dl.pipeBuf
+	drawables, mats, matIdx := r.stateFor(scene.ID()).dl.drawables, r.frame.Materials.Data, r.stateFor(scene.ID()).dl.drawMatSlot
 
 	if len(pipes) != len(drawables) {
-		t.Fatalf("pipeBuf has %d entries, collectDrawables emitted %d drawables", len(pipes), len(drawables))
+		t.Fatalf("pipeBuf has %d entries, expand emitted %d drawables", len(pipes), len(drawables))
 	}
 	if len(matIdx) != len(drawables) {
-		t.Fatalf("drawMatIndex has %d entries, collectDrawables emitted %d drawables", len(matIdx), len(drawables))
+		t.Fatalf("drawMatSlot has %d entries, expand emitted %d drawables", len(matIdx), len(drawables))
 	}
 	for i := range drawables {
-		if want := r.pipelineForMaterial(mats[matIdx[i]]); pipes[i] != want {
+		id := mats[matIdx[i]]
+		pool := r.MaterialStore.PoolAt(id.Pool)
+		want := r.pipelineForPool(pool, pool.Cull(id.Slot), pool.Blend(id.Slot))
+		if pipes[i] != want {
 			t.Errorf("drawable %d: pipeline %d, want %d (its own material's)", i, pipes[i], want)
 		}
 	}
@@ -61,23 +68,23 @@ func TestDrawableFlagsFollowShadowToggle(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 
 	mesh := scene.NewMesh(r.GeometryStore.Create(BoxGeometry(1, 1, 1)), r.NewBasicMaterial())
 	scene.Add(mesh)
 	mesh.SetCastShadow(false)
-	r.syncDrawList(scene)
-	if len(scene.drawables) != 1 {
-		t.Fatalf("got %d drawables, want 1", len(scene.drawables))
+	r.prepareFrom(scene)
+	if len(r.stateFor(scene.ID()).dl.drawables) != 1 {
+		t.Fatalf("got %d drawables, want 1", len(r.stateFor(scene.ID()).dl.drawables))
 	}
-	if scene.drawables[0].flags&DrawableCastsShadow != 0 {
+	if r.stateFor(scene.ID()).dl.drawables[0].flags&DrawableCastsShadow != 0 {
 		t.Fatal("drawable casts shadow with the flag off")
 	}
 
 	mesh.SetCastShadow(true)
-	r.syncDrawList(scene)
-	if scene.drawables[0].flags&DrawableCastsShadow == 0 {
+	r.prepareFrom(scene)
+	if r.stateFor(scene.ID()).dl.drawables[0].flags&DrawableCastsShadow == 0 {
 		t.Error("SetCastShadow(true) did not reach the drawable")
 	}
 }
@@ -91,20 +98,20 @@ func TestPipelineFollowsMaterialSwap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 
 	phong := r.NewBlinnPhongMaterial()
 	mesh := scene.NewMesh(r.GeometryStore.Create(BoxGeometry(1, 1, 1)), r.NewBasicMaterial())
 	scene.Add(mesh)
-	r.syncDrawList(scene)
+	r.prepareFrom(scene)
 
 	mesh.SetMaterial(phong)
-	r.syncDrawList(scene)
-	if want := r.pipelineForMaterial(phong); scene.drawList.pipeBuf[0] != want {
-		t.Errorf("after SetMaterial: pipeline %d, want %d", scene.drawList.pipeBuf[0], want)
+	r.prepareFrom(scene)
+	if want := r.pipelineForMaterial(phong); r.stateFor(scene.ID()).dl.pipeBuf[0] != want {
+		t.Errorf("after SetMaterial: pipeline %d, want %d", r.stateFor(scene.ID()).dl.pipeBuf[0], want)
 	}
-	if scene.drawables[0].materialID != phong.ID().Slot {
-		t.Errorf("drawable materialID = %d, want %d", scene.drawables[0].materialID, phong.ID().Slot)
+	if r.stateFor(scene.ID()).dl.drawables[0].materialID != phong.ID().Slot {
+		t.Errorf("drawable materialID = %d, want %d", r.stateFor(scene.ID()).dl.drawables[0].materialID, phong.ID().Slot)
 	}
 }

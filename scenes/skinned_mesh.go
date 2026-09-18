@@ -1,4 +1,4 @@
-package pix
+package scenes
 
 import (
 	"github.com/bluescreen10/pix/geometries"

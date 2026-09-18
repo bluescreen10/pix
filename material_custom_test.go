@@ -9,6 +9,7 @@ import (
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
 	"github.com/bluescreen10/pix/ref"
+	"github.com/bluescreen10/pix/scenes"
 	"github.com/bluescreen10/pix/shaders"
 )
 
@@ -80,7 +81,7 @@ func TestCustomMaterialFromOutsideThePackage(t *testing.T) {
 	}
 	defer r.Destroy()
 
-	scene := r.NewScene()
+	scene := scenes.New()
 	cube := r.GeometryStore.Create(normalCube())
 	defer cube.Release()
 

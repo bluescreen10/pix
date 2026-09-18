@@ -6,6 +6,7 @@ import (
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/scenes"
 )
 
 // TestShowFPS renders a few frames with the HUD enabled and checks the overlay text
@@ -20,7 +21,7 @@ func TestShowFPS(t *testing.T) {
 	r.fontColor = colors.RGBA32F{1, 0.9, 0.35, 1}
 	r.ShowFPS(true)
 
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 1000)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})

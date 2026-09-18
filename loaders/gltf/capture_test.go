@@ -11,6 +11,7 @@ import (
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/scenes"
 )
 
 // TestCaptureAnimatedFrames renders the capoeira actor at three points in its
@@ -29,7 +30,7 @@ func TestCaptureAnimatedFrames(t *testing.T) {
 	r.EnableShadows(true)
 	r.EnableDeferredRendering(true)
 
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 	res, err := LoadFull(r, scene, capoeiraAsset)
 	if err != nil {
@@ -41,7 +42,7 @@ func TestCaptureAnimatedFrames(t *testing.T) {
 
 	mixer := scene.NewAnimationMixer(res.Skeletons[0])
 	action := mixer.Action(res.Clips[0])
-	action.SetLoop(pix.LoopRepeat).Play()
+	action.SetLoop(scenes.LoopRepeat).Play()
 
 	cam := cameras.NewPerspectiveCamera(45, 1, 0.01, 100)
 	r.Render(scene, cam)

@@ -1,33 +1,26 @@
-package pix
+package scenes
 
 import (
 	"math/rand"
 	"testing"
 
-	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 )
 
-// topoTestScene builds a renderer + scene with a small reusable box mesh, for
-// tests that need real (not group-only) nodes with a payload.
-func topoTestScene(t *testing.T) (*Renderer, *Scene, func() Mesh) {
+// topoTestScene builds a scene plus a maker for mesh nodes, for tests that need real
+// (not group-only) nodes with a payload: swap-remove and slot reuse are payload-array
+// behaviour that groups never exercise.
+//
+// No renderer and no GPU. The geometry handle is the zero value and the material a
+// stub — nothing here asks either of them anything, because a Scene only holds the
+// handles and publishes their identities.
+func topoTestScene(t *testing.T) (*Scene, func() Mesh) {
 	t.Helper()
-	r, err := NewOffscreenRenderer(4, 4)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(r.Destroy)
-	scene := r.NewScene()
+	scene := New()
 	t.Cleanup(scene.Destroy)
-
-	geo := r.GeometryStore.Create(BoxGeometry(1, 1, 1))
-	mat := r.NewBasicMaterial()
-	mat.SetColor(colors.RGBA32F{1, 1, 1, 1})
-	t.Cleanup(func() {
-		geo.Release()
-		mat.Release()
-	})
-	return r, scene, func() Mesh { return scene.NewMesh(geo, mat) }
+	mat := newFakeMaterial()
+	return scene, func() Mesh { return scene.NewMesh(geometries.Geometry{}, mat) }
 }
 
 // collectAttached walks the REAL parent/child structure from root (firstChildren/
@@ -87,7 +80,7 @@ func assertWorldsCorrect(t *testing.T, s *Scene) {
 // chain directly — independent of whether the fast or slow topology path
 // handled any given operation.
 func TestTopologyRandomizedEquivalence(t *testing.T) {
-	_, scene, newMesh := topoTestScene(t)
+	scene, newMesh := topoTestScene(t)
 	rng := rand.New(rand.NewSource(1))
 
 	var nodes []Node
@@ -143,7 +136,7 @@ func wouldCycleForTest(s *Scene, child, newParent Node) bool {
 // TestTopologyFastPathNoRebuild proves the O(1) attach path is real: attaching
 // many leaves to an already-attached parent must never set topoDirty.
 func TestTopologyFastPathNoRebuild(t *testing.T) {
-	_, scene, newMesh := topoTestScene(t)
+	scene, newMesh := topoTestScene(t)
 	parent := scene.NewGroup()
 	scene.Add(parent)
 	scene.Sync() // settle the parent's own attach before measuring leaf attaches
@@ -162,7 +155,7 @@ func TestTopologyFastPathNoRebuild(t *testing.T) {
 // attached parents repeatedly, and checks topoOrder never ends up with more
 // than one live (non-tombstone) entry for that node's slot.
 func TestTopologyTombstoneReuse(t *testing.T) {
-	_, scene, newMesh := topoTestScene(t)
+	scene, newMesh := topoTestScene(t)
 	parentA := scene.NewGroup()
 	parentB := scene.NewGroup()
 	scene.Add(parentA)
@@ -196,7 +189,7 @@ func TestTopologyTombstoneReuse(t *testing.T) {
 // with the number of churn cycles — the guarantee behind calling this safe for
 // continuous spawn/destroy workloads (e.g. bullet-hole decals).
 func TestTopologyHoleBound(t *testing.T) {
-	_, scene, newMesh := topoTestScene(t)
+	scene, newMesh := topoTestScene(t)
 	parent := scene.NewGroup()
 	scene.Add(parent)
 	scene.Sync()
@@ -216,7 +209,7 @@ func TestTopologyHoleBound(t *testing.T) {
 // meshes) to a new parent and confirms the full-rebuild fallback keeps every
 // descendant's attachment and world matrix correct.
 func TestTopologyNonLeafFallback(t *testing.T) {
-	_, scene, newMesh := topoTestScene(t)
+	scene, newMesh := topoTestScene(t)
 	oldParent := scene.NewGroup()
 	newParent := scene.NewGroup()
 	scene.Add(oldParent)
@@ -251,7 +244,7 @@ func TestTopologyNonLeafFallback(t *testing.T) {
 // so every single-node destroy is a leaf destroy — see destroyNode's comment),
 // and that destroying a subtree with descendants still leaves the scene correct.
 func TestTopologyDestroyLeafFastPath(t *testing.T) {
-	_, scene, newMesh := topoTestScene(t)
+	scene, newMesh := topoTestScene(t)
 	parent := scene.NewGroup()
 	scene.Add(parent)
 	scene.Sync()

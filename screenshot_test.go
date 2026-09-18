@@ -10,11 +10,12 @@ import (
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/scenes"
 )
 
 // shotScene builds a renderer showing one lit cube, so a capture has something in it
 // that is neither uniform nor the clear colour.
-func shotScene(t *testing.T, w, h uint32) (*Renderer, *Scene, Camera) {
+func shotScene(t *testing.T, w, h uint32) (*Renderer, *scenes.Scene, Camera) {
 	t.Helper()
 	r, err := NewOffscreenRenderer(w, h)
 	if err != nil {
@@ -23,7 +24,7 @@ func shotScene(t *testing.T, w, h uint32) (*Renderer, *Scene, Camera) {
 	t.Cleanup(r.Destroy)
 	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
-	scene := r.NewScene()
+	scene := scenes.New()
 	t.Cleanup(scene.Destroy)
 	scene.SetAmbient(colors.RGB32F{0.3, 0.3, 0.3})
 	scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 2)

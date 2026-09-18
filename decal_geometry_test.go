@@ -9,11 +9,12 @@ import (
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
+	"github.com/bluescreen10/pix/scenes"
 )
 
 // decalTestScene builds a renderer + scene with one unit-ish box at the origin,
 // the shape every clipping test below projects onto.
-func decalTestScene(t *testing.T, w, h uint32, size float32) (*Renderer, *Scene, Mesh) {
+func decalTestScene(t *testing.T, w, h uint32, size float32) (*Renderer, *scenes.Scene, scenes.Mesh) {
 	t.Helper()
 	r, err := NewOffscreenRenderer(w, h)
 	if err != nil {
@@ -21,7 +22,7 @@ func decalTestScene(t *testing.T, w, h uint32, size float32) (*Renderer, *Scene,
 	}
 	t.Cleanup(r.Destroy)
 
-	scene := r.NewScene()
+	scene := scenes.New()
 	t.Cleanup(scene.Destroy)
 
 	geo := r.GeometryStore.Create(BoxGeometry(size, size, size))
@@ -37,11 +38,11 @@ func decalTestScene(t *testing.T, w, h uint32, size float32) (*Renderer, *Scene,
 
 // patchOf clips and returns the raw patch data, failing the test if nothing
 // survived.
-func patchOf(t *testing.T, box Mesh, pos glm.Vec3f, rot glm.Quatf, size glm.Vec3f) ([]glm.Vec3f, []glm.Vec2f, []uint32) {
+func patchOf(t *testing.T, box scenes.Mesh, pos glm.Vec3f, rot glm.Quatf, size glm.Vec3f) ([]glm.Vec3f, []glm.Vec2f, []uint32) {
 	t.Helper()
-	cfg, ok := DecalGeometry(box, pos, rot, size)
+	cfg, ok := scenes.DecalGeometry(box, pos, rot, size)
 	if !ok {
-		t.Fatal("DecalGeometry produced no patch, expected one")
+		t.Fatal("scenes.DecalGeometry produced no patch, expected one")
 	}
 	var pos3 []glm.Vec3f
 	var uvs []glm.Vec2f
@@ -133,8 +134,8 @@ func TestDecalGeometryStraddlesEdge(t *testing.T) {
 func TestDecalGeometryMisses(t *testing.T) {
 	r, _, box := decalTestScene(t, 32, 32, 2)
 
-	if _, ok := DecalGeometry(box, glm.Vec3f{50, 50, 50}, glm.QuatIdentityf, glm.Vec3f{1, 1, 1}); ok {
-		t.Error("DecalGeometry reported a patch for a box that misses the mesh entirely")
+	if _, ok := scenes.DecalGeometry(box, glm.Vec3f{50, 50, 50}, glm.QuatIdentityf, glm.Vec3f{1, 1, 1}); ok {
+		t.Error("scenes.DecalGeometry reported a patch for a box that misses the mesh entirely")
 	}
 	geo := r.NewDecalGeometry(box, glm.Vec3f{50, 50, 50}, glm.QuatIdentityf, glm.Vec3f{1, 1, 1})
 	if geo.IsValid() {
@@ -177,7 +178,7 @@ func TestDecalGeometryTargetsOneObject(t *testing.T) {
 	// even though nothing has synced the scene's world transforms yet.
 
 	// A projection volume wide enough to span both boxes, clipped against boxA.
-	cfg, ok := DecalGeometry(boxA, glm.Vec3f{0, 0, 1}, glm.QuatIdentityf, glm.Vec3f{8, 2, 4})
+	cfg, ok := scenes.DecalGeometry(boxA, glm.Vec3f{0, 0, 1}, glm.QuatIdentityf, glm.Vec3f{8, 2, 4})
 	if !ok {
 		t.Fatal("expected a patch on boxA")
 	}

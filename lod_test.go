@@ -7,6 +7,7 @@ import (
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/scenes"
 )
 
 // TestLODStructSizes guards gpuDrawable's and gpuLODEntry's byte layouts against an
@@ -52,7 +53,7 @@ func TestMeshLODSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
 
@@ -98,7 +99,7 @@ func TestInstancedMeshLODSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
 
@@ -149,7 +150,7 @@ func TestMeshLODHysteresis(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
 

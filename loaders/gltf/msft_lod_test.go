@@ -8,6 +8,7 @@ import (
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/loaders/gltf"
+	"github.com/bluescreen10/pix/scenes"
 )
 
 func avgColor(px []byte) (r, g, b float64, lit int) {
@@ -31,7 +32,7 @@ func avgColor(px []byte) (r, g, b float64, lit int) {
 // "LOD_high", carrying extensions.MSFT_lod.ids=[1,2] and
 // extras.MSFT_screencoverage=[0.5,0.2,0.01], each id a plain cube-mesh node not
 // otherwise in the scene — see testdata/msft_lod_cube.gltf) and confirms it comes
-// back as one pix.Mesh with 3 real AddLOD levels (red/green/blue, matching the
+// back as one scenes.Mesh with 3 real AddLOD levels (red/green/blue, matching the
 // asset's own materials), by rendering it at three camera distances chosen to land
 // in each level's range.
 func TestMSFTLod(t *testing.T) {
@@ -41,7 +42,7 @@ func TestMSFTLod(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
 

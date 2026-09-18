@@ -6,6 +6,7 @@ import (
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
+	"github.com/bluescreen10/pix/scenes"
 )
 
 // The drawables a scene emits reference materials through a distinct set
@@ -24,7 +25,7 @@ func TestMaterialTableDedupsAcrossInstances(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 
 	geo := r.GeometryStore.Create(BoxGeometry(1, 1, 1))
@@ -38,16 +39,16 @@ func TestMaterialTableDedupsAcrossInstances(t *testing.T) {
 	im := scene.NewInstancedMesh(geo, r.NewBasicMaterial(), xforms)
 	scene.Add(im)
 
-	r.syncDrawList(scene)
+	r.prepareFrom(scene)
 
-	if len(scene.drawables) != instances {
-		t.Fatalf("got %d drawables, want %d (one per instance)", len(scene.drawables), instances)
+	if len(r.stateFor(scene.ID()).dl.drawables) != instances {
+		t.Fatalf("got %d drawables, want %d (one per instance)", len(r.stateFor(scene.ID()).dl.drawables), instances)
 	}
-	if len(scene.drawMaterials) != 1 {
+	if len(r.frame.Materials.Data) != 1 {
 		t.Errorf("drawMaterials has %d entries, want 1: %d instances sharing one material "+
-			"must not produce %d material entries", len(scene.drawMaterials), instances, instances)
+			"must not produce %d material entries", len(r.frame.Materials.Data), instances, instances)
 	}
-	for i, slot := range scene.drawMatIndex {
+	for i, slot := range r.stateFor(scene.ID()).dl.drawMatSlot {
 		if slot != 0 {
 			t.Fatalf("drawable %d points at material slot %d, want 0", i, slot)
 		}
@@ -62,7 +63,7 @@ func TestMaterialTableKeepsDistinctMaterialsApart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 
 	geo := r.GeometryStore.Create(BoxGeometry(1, 1, 1))
@@ -77,22 +78,22 @@ func TestMaterialTableKeepsDistinctMaterialsApart(t *testing.T) {
 		mesh := scene.NewMesh(geo, m)
 		scene.Add(mesh)
 	}
-	r.syncDrawList(scene)
+	r.prepareFrom(scene)
 
-	if len(scene.drawables) != 3 {
-		t.Fatalf("got %d drawables, want 3", len(scene.drawables))
+	if len(r.stateFor(scene.ID()).dl.drawables) != 3 {
+		t.Fatalf("got %d drawables, want 3", len(r.stateFor(scene.ID()).dl.drawables))
 	}
-	if len(scene.drawMaterials) != 2 {
+	if len(r.frame.Materials.Data) != 2 {
 		t.Fatalf("drawMaterials has %d entries, want 2 (red and blue share a type, not an identity)",
-			len(scene.drawMaterials))
+			len(r.frame.Materials.Data))
 	}
 	// Every drawable must still resolve to the material it was built with: the entry the
 	// indirection lands on has to be the one whose record slot the GPU drawable carries.
-	for i := range scene.drawables {
-		got := scene.drawMaterials[scene.drawMatIndex[i]]
-		if got.ID().Slot != scene.drawables[i].materialID {
+	for i := range r.stateFor(scene.ID()).dl.drawables {
+		got := r.frame.Materials.Data[r.stateFor(scene.ID()).dl.drawMatSlot[i]]
+		if got.Slot != r.stateFor(scene.ID()).dl.drawables[i].materialID {
 			t.Errorf("drawable %d carries material slot %d but the table resolves to slot %d",
-				i, scene.drawables[i].materialID, got.ID().Slot)
+				i, r.stateFor(scene.ID()).dl.drawables[i].materialID, got.Slot)
 		}
 	}
 }
@@ -107,7 +108,7 @@ func TestStaticSceneDoesNotRebuildBatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 
 	geo := r.GeometryStore.Create(BoxGeometry(1, 1, 1))
@@ -118,29 +119,29 @@ func TestStaticSceneDoesNotRebuildBatches(t *testing.T) {
 		scene.Add(scene.NewMesh(geo, mat))
 	}
 
-	r.syncDrawList(scene)
-	after := scene.drawList.rebuilds
+	r.prepareFrom(scene)
+	after := r.stateFor(scene.ID()).dl.rebuilds
 	if after == 0 {
 		t.Fatal("first sync did not build the batch layout")
 	}
 
 	for range 10 {
-		r.syncDrawList(scene)
+		r.prepareFrom(scene)
 	}
-	if scene.drawList.rebuilds != after {
+	if r.stateFor(scene.ID()).dl.rebuilds != after {
 		t.Errorf("static scene rebuilt batches %d extra times over 10 frames",
-			scene.drawList.rebuilds-after)
+			r.stateFor(scene.ID()).dl.rebuilds-after)
 	}
 
 	mat.SetColor(colors.RGBA32F{0, 1, 0, 1})
-	r.syncDrawList(scene)
-	if scene.drawList.rebuilds != after {
+	r.prepareFrom(scene)
+	if r.stateFor(scene.ID()).dl.rebuilds != after {
 		t.Error("a tint edit rebuilt the batch layout; it changes a record, not a pipeline")
 	}
 
 	mat.SetBlend(materials.BlendAlpha)
-	r.syncDrawList(scene)
-	if scene.drawList.rebuilds == after {
+	r.prepareFrom(scene)
+	if r.stateFor(scene.ID()).dl.rebuilds == after {
 		t.Error("a blend-mode change did NOT rebuild the batch layout; it changes the pipeline")
 	}
 }

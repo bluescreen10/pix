@@ -1,4 +1,4 @@
-package pix
+package scenes
 
 import (
 	"github.com/bluescreen10/pix/geometries"
@@ -24,7 +24,6 @@ type InstancedMesh struct{ Node }
 type instancedMeshData struct {
 	lods       []lodLevel
 	hysteresis float32
-	lodGroupID uint32
 	bounds     glm.Sphere
 
 	transformBase uint32 // offset into Scene.instanceTransforms
@@ -62,7 +61,6 @@ func (m InstancedMesh) AddLOD(geo geometries.Geometry, mat materials.Material, m
 		panic("pix: InstancedMesh.AddLOD levels must be added in increasing minDistance order")
 	}
 	md.lods = append(md.lods, lodLevel{geometry: geo.Copy(), material: mat.Copy(), minDistance: minDistance})
-	m.scene.rebuildLODEntry(&md.lodGroupID, md.lods, md.hysteresis)
 	m.scene.drawableDirty = true
 	return m
 }
@@ -73,7 +71,7 @@ func (m InstancedMesh) SetLODHysteresis(h float32) InstancedMesh {
 	md := m.data()
 	md.hysteresis = h
 	if len(md.lods) > 1 {
-		m.scene.rebuildLODEntry(&md.lodGroupID, md.lods, md.hysteresis)
+		m.scene.drawableDirty = true
 	}
 	return m
 }

@@ -1,4 +1,6 @@
-package pix
+package scenes
+
+import ()
 
 import "testing"
 
@@ -6,12 +8,7 @@ import "testing"
 // node and checks the mixer's Update actually applies interpolated positions —
 // headless, no GPU involved.
 func TestAnimationMixerDrivesNode(t *testing.T) {
-	r, err := NewOffscreenRenderer(4, 4)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Destroy()
-	scene := r.NewScene()
+	scene := New()
 	defer scene.Destroy()
 
 	n := scene.NewGroup()
@@ -56,12 +53,7 @@ func TestAnimationMixerDrivesNode(t *testing.T) {
 // TestAnimationMixerLoopRepeat checks that LoopRepeat wraps time rather than
 // clamping.
 func TestAnimationMixerLoopRepeat(t *testing.T) {
-	r, err := NewOffscreenRenderer(4, 4)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Destroy()
-	scene := r.NewScene()
+	scene := New()
 	defer scene.Destroy()
 
 	n := scene.NewGroup()
@@ -94,12 +86,7 @@ func TestAnimationMixerLoopRepeat(t *testing.T) {
 // TestAnimationMixerBlendsTwoActions checks that two actions on the same node,
 // weighted 0.5/0.5, produce the midpoint between their two poses.
 func TestAnimationMixerBlendsTwoActions(t *testing.T) {
-	r, err := NewOffscreenRenderer(4, 4)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Destroy()
-	scene := r.NewScene()
+	scene := New()
 	defer scene.Destroy()
 
 	n := scene.NewGroup()

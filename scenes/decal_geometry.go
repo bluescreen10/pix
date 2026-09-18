@@ -1,10 +1,9 @@
-package pix
+package scenes
 
 import (
-	"github.com/chewxy/math32"
-
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/chewxy/math32"
 )
 
 // decalNormalCutoff rejects source triangles whose facing deviates too far from
@@ -56,19 +55,6 @@ func (v decalClipVertex) lerp(b decalClipVertex, t float32) decalClipVertex {
 //	decal.SetCastShadow(false)
 //	box.Add(decal)
 //
-// Returns the zero Geometry (Valid() reports false) when the box misses mesh
-// entirely or every candidate triangle faces away — callers must check rather
-// than assume a patch was produced. Clipping reads mesh's CPU-side vertex data,
-// so this costs one pass over the source geometry at creation and nothing per
-// frame afterward.
-func (r *Renderer) NewDecalGeometry(mesh Mesh, pos glm.Vec3f, orientation glm.Quatf, size glm.Vec3f) geometries.Geometry {
-	cfg, ok := DecalGeometry(mesh, pos, orientation, size)
-	if !ok {
-		return geometries.Geometry{}
-	}
-	return r.GeometryStore.Create(cfg)
-}
-
 // DecalGeometry builds the clipped patch for NewDecalGeometry without uploading
 // it, matching the plain-config half of every other builder in primitives.go.
 // The bool reports whether anything survived clipping.

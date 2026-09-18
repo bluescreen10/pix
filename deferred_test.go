@@ -8,6 +8,7 @@ import (
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
+	"github.com/bluescreen10/pix/scenes"
 	"github.com/bluescreen10/pix/shaders"
 )
 
@@ -23,7 +24,7 @@ func TestDeferredPBRRenders(t *testing.T) {
 	r.EnableDeferredRendering(true)
 	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.6, 0.6, 0.6})
 	light := scene.AddDirectionalLight(glm.Vec3f{-0.3, -1, -0.2}, colors.RGB32F{1, 1, 1}, 2)
@@ -70,7 +71,7 @@ func TestDeferredRenderingOffByDefault(t *testing.T) {
 	defer r.Destroy()
 	// Deliberately NOT calling EnableDeferredRendering.
 
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.6, 0.6, 0.6})
 
@@ -101,7 +102,7 @@ func TestDeferredAndForwardMixed(t *testing.T) {
 	r.EnableDeferredRendering(true)
 	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.8, 0.8, 0.8})
 
@@ -170,7 +171,7 @@ func TestDeferredEmissiveMatchesForward(t *testing.T) {
 		r.EnableDeferredRendering(deferred)
 		r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
-		scene := r.NewScene()
+		scene := scenes.New()
 		defer scene.Destroy()
 		scene.SetAmbient(colors.RGB32F{0.25, 0.25, 0.25})
 
@@ -231,7 +232,7 @@ func TestMaterialStoreDedupsOnWholeShader(t *testing.T) {
 		t.Fatal("stores with different Deferred/Lighting shaders were deduped together")
 	}
 	if forwardOnly.Shader().Deferred != nil || forwardOnly.Shader().Lighting != nil {
-		t.Fatal("forward-only store inherited another Shader's deferred path")
+		t.Fatal("forward-only store inherited another scenes.Shader's deferred path")
 	}
 	if full.Shader().Deferred == nil || full.Shader().Lighting == nil {
 		t.Fatal("PBR store lost its deferred path")
@@ -254,7 +255,7 @@ func TestDeferredBackgroundKeepsClearColor(t *testing.T) {
 	// A distinctive clear color: neither black nor anything the lit cube produces.
 	r.SetClearColor(colors.RGBA32F{0, 0, 1, 1})
 
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
 
@@ -299,7 +300,7 @@ func TestDrawListBuffersGrowOnly(t *testing.T) {
 	}
 	defer r.Destroy()
 
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.8, 0.8, 0.8})
 
@@ -312,7 +313,7 @@ func TestDrawListBuffersGrowOnly(t *testing.T) {
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
 	r.Render(scene, cam)
 
-	dl := scene.drawList
+	dl := r.stateFor(scene.ID()).dl
 	before := [...]gpu.Handle{
 		dl.drawableBuf.H, dl.indirectBuf.H, dl.regionBuf.H, dl.visibleBuf.H,
 	}

@@ -13,6 +13,7 @@ import (
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/scenes"
 )
 
 // TestMultiSceneOnlyDefault verifies the loader builds ONLY the default scene's
@@ -63,7 +64,7 @@ func TestMultiSceneOnlyDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 	n, err := Load(r, scene, path)
 	if err != nil {
@@ -129,7 +130,7 @@ func TestLoadTriangle(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 
 	n, err := Load(r, scene, writeTriangleGLTF(t))

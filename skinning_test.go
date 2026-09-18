@@ -8,6 +8,7 @@ import (
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
+	"github.com/bluescreen10/pix/scenes"
 )
 
 // riggedQuad returns a narrow 2-unit-tall quad in skeleton-local space, standing on
@@ -40,15 +41,15 @@ func riggedQuad() geometries.GeometryConfig {
 
 // twoBoneSkeleton returns a SkeletonConfig for a 2-joint chain: joint 0 at the
 // origin, joint 1 parented to it at local (0,2,0) — matching riggedQuad's bind pose.
-func twoBoneSkeleton() SkeletonConfig {
-	return SkeletonConfig{
+func twoBoneSkeleton() scenes.SkeletonConfig {
+	return scenes.SkeletonConfig{
 		Names:   []string{"base", "tip"},
 		Parents: []int32{-1, 0},
 		InverseBind: []glm.Mat4f{
 			glm.Mat4fIndentity,
 			glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatIdentityf, glm.Vec3f{0, -2, 0}),
 		},
-		BindPose: []Transform{
+		BindPose: []scenes.Transform{
 			{Rotation: glm.QuatIdentityf, Scale: glm.Vec3f{1, 1, 1}},
 			{Position: glm.Vec3f{0, 2, 0}, Rotation: glm.QuatIdentityf, Scale: glm.Vec3f{1, 1, 1}},
 		},
@@ -79,7 +80,7 @@ func TestSkinnedMeshBindPose(t *testing.T) {
 	defer r.Destroy()
 	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 
 	geo := r.GeometryStore.Create(riggedQuad())
@@ -116,7 +117,7 @@ func TestSkinnedMeshDeforms(t *testing.T) {
 	defer r.Destroy()
 	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 
 	geo := r.GeometryStore.Create(riggedQuad())
@@ -162,7 +163,7 @@ func TestSkinnedMeshBoneAttachment(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 
 	skel := scene.NewSkeleton(twoBoneSkeleton())

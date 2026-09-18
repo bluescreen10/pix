@@ -6,11 +6,12 @@ import (
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/scenes"
 	"github.com/bluescreen10/pix/textures"
 )
 
 // renderCube draws one unlit cube filling the view and returns the centre pixel.
-func renderCube(t *testing.T, r *Renderer, scene *Scene, cam Camera) (byte, byte, byte) {
+func renderCube(t *testing.T, r *Renderer, scene *scenes.Scene, cam Camera) (byte, byte, byte) {
 	t.Helper()
 	r.Render(scene, cam)
 	px := r.Pixels()
@@ -30,7 +31,7 @@ func TestMaterialEditBetweenFramesReachesGPU(t *testing.T) {
 	}
 	defer r.Destroy()
 
-	scene := r.NewScene()
+	scene := scenes.New()
 	cube := r.GeometryStore.Create(normalCube())
 	defer cube.Release()
 	mat := r.NewBasicMaterial() // unlit: pixel is the material color, no lighting
@@ -63,7 +64,7 @@ func TestMaterialStoreGrowReuploadsEveryRecord(t *testing.T) {
 	}
 	defer r.Destroy()
 
-	scene := r.NewScene()
+	scene := scenes.New()
 	cube := r.GeometryStore.Create(normalCube())
 	defer cube.Release()
 
@@ -111,7 +112,7 @@ func TestMaterialTextureRefsAreHeldByTheHandle(t *testing.T) {
 		t.Fatal("material did not keep its color map alive")
 	}
 
-	meshCopy := mat.Copy() // what Scene.NewMesh stores
+	meshCopy := mat.Copy() // what scenes.Scene.NewMesh stores
 	mat.Release()
 	if !held.IsValid() {
 		t.Fatal("releasing the authoring handle freed a texture the mesh copy still holds")

@@ -8,6 +8,7 @@ import (
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/scenes"
 )
 
 func rotY(a float32) glm.Mat4f {
@@ -60,7 +61,7 @@ func TestDirectionalLighting(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 
 	cube := r.GeometryStore.Create(normalCube())

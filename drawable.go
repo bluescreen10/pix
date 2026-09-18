@@ -21,10 +21,10 @@ const (
 // gpuDrawable is uploaded verbatim to the drawable buffer; matches Drawable in the
 // scene shaders (scalar, 44 bytes). bounds is the LOCAL bounding sphere; transformID
 // indexes the scene's world-matrix buffer (a node slot, or an InstancedMesh instance —
-// see Scene.instanceTransforms); geometryID/materialID index the renderer's
+// see FramePacket.InstanceTransforms); geometryID/materialID index the renderer's
 // geometry/material tables. lodID is 0 for an ordinary (non-LOD) drawable; otherwise it
-// indexes Scene.lodEntries, and lodLevel is this record's own 0-based level within that
-// entry — see the LOD spec: a Mesh/InstancedMesh/SkinnedMesh with N LOD levels emits N
+// indexes drawList.lodEntries, and lodLevel is this record's own 0-based level within that
+// entry — see the LOD spec: a mesh with N LOD levels expands to N
 // gpuDrawable records sharing one lodID (and, for Mesh/SkinnedMesh, one transformID),
 // and scene_cull.comp lets through at most one of them per frame.
 type gpuDrawable struct {
@@ -43,7 +43,7 @@ type gpuDrawable struct {
 // level i for i < levelCount-1 — the last level has no upper bound. hysteresis widens
 // whichever level was selected last frame (see drawList.prevLevelBuf and
 // scene_cull.comp's selectLevel) to resist flip-flopping right at a boundary.
-// Scene.lodEntries[0] is reserved/unused so a drawable's lodID of 0 unambiguously means
+// drawList.lodEntries[0] is reserved/unused so a drawable's lodID of 0 unambiguously means
 // "not LOD-tagged".
 // lodNoneSentinel marks a prevLevelBuf slot as "no level selected yet" — out of range
 // for any real levelCount (max maxLODLevels), so selectLevel's hysteresis widening
@@ -89,7 +89,7 @@ type cullRoot struct {
 	eye         glm.Vec4f
 	count       uint32
 	castersOnly uint32
-	planes      [6][4]float32
+	planes      [6]glm.Vec4f
 }
 
 // drawRoot matches DrawRoot in scene_draw.vert / material_common.glsl (scalar; mat4
@@ -107,7 +107,7 @@ type drawRoot struct {
 	lights        uint64
 	eye           glm.Vec4f
 	shadowSampler uint32 // bindless index of the PCF comparison sampler
-	// time is elapsed seconds since the scene's clock started (Scene.clockStart) —
+	// time is elapsed seconds since the producer's clock started (FramePacket.Time) —
 	// passed to every vertex/fragment shader pair unconditionally, built-in or a
 	// custom material's; nothing requires reading it (see material_common.glsl and
 	// scene_draw.vert.glsl, which both declare it but only some shaders use it).
@@ -199,13 +199,14 @@ type batch struct {
 }
 
 // pipelineRun is a contiguous span of batches sharing a pipeline, drawn with one
-// multi-draw-indirect call. mat is any material of the run (they share a store), used
-// to read the store's current record-buffer address at draw time.
+// multi-draw-indirect call. pool is the material pool every material of the run lives
+// in (a pipeline is resolved from a pool, so they cannot differ), read at draw time for
+// its current record-buffer address — which moves when the pool grows.
 type pipelineRun struct {
 	pipeline   uint32
 	firstBatch uint32
 	count      uint32
-	mat        materials.Material
+	pool       *materials.Pool
 }
 
 var (

@@ -8,6 +8,7 @@ import (
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
+	"github.com/bluescreen10/pix/scenes"
 )
 
 // TestTransparency renders an opaque red quad behind a 50%-alpha blue quad in front.
@@ -21,7 +22,7 @@ func TestTransparency(t *testing.T) {
 	}
 	defer r.Destroy()
 	r.SetClearColor([4]float32{0, 0, 0, 1})
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{1, 1, 1}) // full ambient → albedo shows directly
 

@@ -6,6 +6,8 @@ import (
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/scenes"
+	"github.com/bluescreen10/pix/textures"
 )
 
 // TestDirectionalShadowMapAllocated checks the Phase 1 infrastructure: with shadows
@@ -19,7 +21,7 @@ func TestDirectionalShadowMapAllocated(t *testing.T) {
 	defer r.Destroy()
 	r.EnableShadows(true)
 
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 1)
 	light.SetCastShadow(true)
@@ -32,18 +34,22 @@ func TestDirectionalShadowMapAllocated(t *testing.T) {
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
 	r.Render(scene, cam)
 
-	s := light.Shadow()
-	if s == nil {
+	// Settings stay on the light; the resources they asked for belong to the renderer.
+	if light.Shadow() == nil {
 		t.Fatal("light.Shadow() is nil after SetCastShadow(true)")
 	}
-	if !s.Map.IsValid() {
+	sv := r.ShadowView(scene.ID(), light.ID())
+	if sv == nil {
+		t.Fatal("renderer has no shadow resources for the casting light")
+	}
+	if !sv.Map.IsValid() {
 		t.Fatal("shadow map not allocated after render with shadows enabled")
 	}
 	// A fitted ortho camera should look at the scene (non-zero view-projection).
-	if s.Camera.ViewProjection() == (glm.Mat4f{}) {
+	if sv.Camera.ViewProjection() == (glm.Mat4f{}) {
 		t.Fatal("shadow camera view-projection is zero — not fitted")
 	}
-	t.Logf("shadow map heap index=%d size=%d", s.Map.Index(), s.Size())
+	t.Logf("shadow map heap index=%d size=%d", sv.Map.Index(), light.Shadow().Size())
 }
 
 // TestDirectionalShadowDepthPass drives the Stage B path end to end: a shadow-casting
@@ -60,7 +66,7 @@ func TestDirectionalShadowDepthPass(t *testing.T) {
 	r.EnableShadows(true)
 	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.3, 0.3, 0.3})
 	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 2)
@@ -107,7 +113,7 @@ func TestShadowsEmptyScene(t *testing.T) {
 	defer r.Destroy()
 	r.EnableShadows(true)
 
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 1)
 	light.SetCastShadow(true)
@@ -130,7 +136,7 @@ func TestSpotShadowDarkensReceiver(t *testing.T) {
 		r.EnableShadows(shadows)
 		r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
-		scene := r.NewScene()
+		scene := scenes.New()
 		defer scene.Destroy()
 		scene.SetAmbient(colors.RGB32F{0.04, 0.04, 0.04})
 		// Spot up and to the side, aimed at the scene center, so the occluder's shadow
@@ -187,7 +193,7 @@ func TestPointShadowDarkensReceiver(t *testing.T) {
 		r.EnableShadows(shadows)
 		r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
-		scene := r.NewScene()
+		scene := scenes.New()
 		defer scene.Destroy()
 		scene.SetAmbient(colors.RGB32F{0.04, 0.04, 0.04})
 		// Point light up and to the side so the occluder's shadow lands offset on the
@@ -252,7 +258,7 @@ func TestDirectionalShadowDarkensReceiver(t *testing.T) {
 		r.EnableShadows(shadows)
 		r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
-		scene := r.NewScene()
+		scene := scenes.New()
 		defer scene.Destroy()
 		scene.SetAmbient(colors.RGB32F{0.05, 0.05, 0.05}) // low fill so the shadow is visible
 		light := scene.AddDirectionalLight(glm.Vec3f{0.15, -1, 0.15}, colors.RGB32F{1, 1, 1}, 3)
@@ -304,7 +310,7 @@ func TestShadowSetSizeReallocatesMap(t *testing.T) {
 	defer r.Destroy()
 	r.EnableShadows(true)
 
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 1)
 	light.SetCastShadow(true)
@@ -318,21 +324,25 @@ func TestShadowSetSizeReallocatesMap(t *testing.T) {
 	r.Render(scene, cam)
 
 	s := light.Shadow()
-	if s.Size() != defaultShadowSize {
-		t.Fatalf("default size = %d, want %d", s.Size(), defaultShadowSize)
+	// mapOf re-reads the renderer's resource each time: a reallocation replaces the
+	// texture, so a handle captured once would go stale exactly when the test cares.
+	mapOf := func() textures.Texture { return r.ShadowView(scene.ID(), light.ID()).Map }
+
+	if s.Size() != scenes.DefaultShadowSize {
+		t.Fatalf("default size = %d, want %d", s.Size(), scenes.DefaultShadowSize)
 	}
-	first := r.TextureStore.GPU(s.Map).H
+	first := r.TextureStore.GPU(mapOf()).H
 
 	// Same size: the map must be left alone.
-	s.SetSize(defaultShadowSize)
+	s.SetSize(scenes.DefaultShadowSize)
 	r.Render(scene, cam)
-	if r.TextureStore.GPU(s.Map).H != first {
+	if r.TextureStore.GPU(mapOf()).H != first {
 		t.Error("map reallocated even though the size did not change")
 	}
 
 	// A zero size is ignored rather than producing an invalid texture.
 	s.SetSize(0)
-	if s.Size() != defaultShadowSize {
+	if s.Size() != scenes.DefaultShadowSize {
 		t.Fatalf("SetSize(0) changed size to %d", s.Size())
 	}
 
@@ -342,10 +352,10 @@ func TestShadowSetSizeReallocatesMap(t *testing.T) {
 	if s.Size() != 512 {
 		t.Fatalf("size = %d after SetSize(512)", s.Size())
 	}
-	if r.TextureStore.GPU(s.Map).H == first {
+	if r.TextureStore.GPU(mapOf()).H == first {
 		t.Fatal("map was not reallocated after SetSize changed the resolution")
 	}
-	if !s.Map.IsValid() {
+	if !mapOf().IsValid() {
 		t.Fatal("map invalid after resize")
 	}
 }
@@ -366,7 +376,7 @@ func TestEnableShadowsTogglesAtRuntime(t *testing.T) {
 	defer r.Destroy()
 	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.04, 0.04, 0.04})
 	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 3)

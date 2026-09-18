@@ -1,9 +1,10 @@
 package materials
 
 import (
-	"github.com/bluescreen10/pix/shaders"
 	"strings"
 	"testing"
+
+	"github.com/bluescreen10/pix/shaders"
 )
 
 // TestRegisterRejectsWrongRecordSize covers register's guard: a store is keyed by

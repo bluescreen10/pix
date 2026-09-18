@@ -3,7 +3,7 @@ package particles
 import (
 	"testing"
 
-	"github.com/bluescreen10/pix"
+	"github.com/bluescreen10/pix/scenes"
 )
 
 func TestRateAccumulatesFractionalBirths(t *testing.T) {
@@ -103,12 +103,12 @@ func TestBurstReset(t *testing.T) {
 }
 
 func TestSpawnFuncAdapter(t *testing.T) {
-	var got pix.Particle
-	var s pix.ParticleSpawner = SpawnFunc(func(p *pix.Particle) {
+	var got scenes.Particle
+	var s scenes.ParticleSpawner = SpawnFunc(func(p *scenes.Particle) {
 		p.Lifetime = 3
 		got = *p
 	})
-	p := pix.Particle{}
+	p := scenes.Particle{}
 	s.Spawn(&p)
 	if got.Lifetime != 3 {
 		t.Fatalf("SpawnFunc did not forward the call: got.Lifetime = %v, want 3", got.Lifetime)

@@ -1,240 +1,222 @@
-// Light types: what a user creates and configures (DirectionalLight, PointLight,
-// SpotLight) plus the per-light shadow resources. The flat GPU table these are
-// compiled into each frame lives in scene_lights.go.
+// The GPU light table: the flat, fixed-size buffer the lit shaders read, packed each
+// frame from a packet's light values and this renderer's own shadow resources. The
+// light objects a caller configures live in the scenes package; nothing here is
+// visible to a producer.
 package pix
 
 import (
-	"github.com/bluescreen10/pix/cameras"
+	"unsafe"
+
+	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/textures"
+	"github.com/bluescreen10/pix/scenes"
 )
 
-// defaultShadowSize is the default shadow-map resolution (per side).
-const defaultShadowSize uint32 = 1024
+// Light-count limits (mirror scene_lit.frag).
+const (
+	MaxDirLights   = 4
+	MaxPointLights = 16
+	MaxSpotLights  = 8
+)
 
-// defaultLocalShadowBias is the baseline depth-compare bias, in normalized depth units,
-// for lights whose shadow camera is perspective and bounded by the light's Range
-// (spot, point). Their depth range is local to the light, so a constant behaves
-// consistently — unlike a directional light's orthographic range, which spans the
-// scene and must have its bias derived from the fit (see fitDirectionalShadow).
-const defaultLocalShadowBias float32 = 0.0015
+// noShadowMap is the shadowMap sentinel: a directional light that casts no shadow
+// (or whose map isn't allocated) stores this, and the lit shaders skip sampling.
+const noShadowMap uint32 = 0xFFFFFFFF
 
-// LightShadow holds a light's shadow-map resources, created by SetCastShadow(true).
-// Camera is the light's view of the scene (orthographic for directional, perspective
-// for spot; point lights use six internally) and Map is the depth texture the shadow
-// pass renders into and the lit shaders sample — both are engine-managed and exposed
-// for inspection. Resolution and bias are settings, so they go through accessors: each
-// one has derived state to keep in step (the map's allocation, the normalized bias),
-// which a bare field could not maintain.
-type LightShadow struct {
-	Camera Camera
-	Map    textures.Texture
-
-	size uint32  // requested resolution per side
-	bias float32 // extra depth offset, in WORLD units
-
-	// ndcBias is bias (+ a term derived from the map's texel footprint) converted into
-	// the shadow camera's normalized depth units, which is what the comparison actually
-	// needs. Recomputed whenever the fit changes: an orthographic shadow camera's depth
-	// range spans the scene, so a constant in NDC is a wildly different distance in
-	// world units from one scene to the next.
-	ndcBias float32
-	// mapSize is the resolution Map (and each face map) was actually created at, so a
-	// change to size can be noticed and the map reallocated.
-	mapSize uint32
-	// Point lights render six cube faces instead of one map; faces holds their
-	// per-face camera + depth map. nil for directional/spot (which use Camera/Map).
-	faces []pointFace
+type gpuDirLight struct {
+	dir        [4]float32 // xyz = travel direction; w unused
+	color      [4]float32 // rgb; w = intensity
+	shadowVP   glm.Mat4f  // world → light clip (same matrix the depth pass rendered with)
+	shadowMap  uint32     // bindless heap index of the depth map, or noShadowMap
+	shadowBias float32    // depth-compare bias, in this camera's normalized depth units
+	pad0, pad1 uint32
 }
 
-// Size is the shadow map's resolution per side.
-func (s *LightShadow) Size() uint32 { return s.size }
-
-// SetSize sets the shadow map's resolution per side. The map is reallocated at the new
-// resolution on the next frame that renders it; a zero size is ignored.
-func (s *LightShadow) SetSize(size uint32) {
-	if size == 0 {
-		return
-	}
-	s.size = size
+type gpuPointLight struct {
+	pos        [4]float32   // xyz world; w = range
+	color      [4]float32   // rgb; w = intensity
+	shadowVP   [6]glm.Mat4f // per cube face: world → face clip
+	shadowMap  [6]uint32    // per cube face: depth map heap index, or noShadowMap
+	shadowBias float32      // depth-compare bias, in the face cameras' normalized depth units
+	pad0       uint32
 }
 
-// Bias is the extra depth offset applied to the shadow comparison, in world units.
-func (s *LightShadow) Bias() float32 { return s.bias }
-
-// SetBias sets an extra depth offset for the shadow comparison, in WORLD units, on top
-// of a bias derived from the map's texel footprint. 0 (the default) is usually right —
-// the derived term already scales with the fit, so it works at any scene scale. Raise
-// this if surfaces self-shadow (acne); it takes effect on the next frame.
-func (s *LightShadow) SetBias(bias float32) { s.bias = bias }
-
-// ensureMap allocates the depth map, or reallocates it when SetSize changed the
-// requested resolution. Point lights use ensureFaceMaps instead.
-func (s *LightShadow) ensureMap(textureStore *textures.Store) {
-	if s.Map.IsValid() && s.mapSize == s.size {
-		return
-	}
-	if s.Map.IsValid() {
-		s.Map.Release()
-	}
-	s.Map = textureStore.CreateDepthTarget(s.size, s.size)
-	s.mapSize = s.size
+type gpuSpotLight struct {
+	pos        [4]float32 // xyz world; w = range
+	dir        [4]float32 // xyz cone axis (travel); w = cosOuter (outer cutoff)
+	color      [4]float32 // rgb; w = intensity
+	shadowVP   glm.Mat4f  // world → light clip (same matrix the depth pass rendered with)
+	cosInner   float32    // inner cutoff cos (smooth edge between inner and outer)
+	shadowMap  uint32     // bindless heap index of the depth map, or noShadowMap
+	shadowBias float32    // depth-compare bias, in this camera's normalized depth units
+	pad0       uint32
 }
 
-// ensureFaceMaps is ensureMap for a point light's six cube faces, which share one
-// resolution.
-func (s *LightShadow) ensureFaceMaps(textureStore *textures.Store) {
-	stale := s.mapSize != s.size
-	for i := range s.faces {
-		f := &s.faces[i]
-		if f.m.IsValid() && !stale {
-			continue
-		}
-		if f.m.IsValid() {
-			f.m.Release()
-		}
-		f.m = textureStore.CreateDepthTarget(s.size, s.size)
-	}
-	s.mapSize = s.size
+// gpuLights is the whole light table (scalar; matches LightBuf in scene_lit.frag).
+type gpuLights struct {
+	ambient colors.RGBA32F
+	// fogColor is rgb + the fog mode in w; fogParams is (near, far, density, _).
+	// Fog rides in the light table rather than in each root because both the forward
+	// and the deferred lighting passes already carry the table, and neither push
+	// constant has to grow.
+	fogColor  colors.RGBA32F
+	fogParams colors.RGBA32F
+	numDir    uint32
+	numPoint  uint32
+	numSpot   uint32
+	pad0      uint32
+	dirs      [MaxDirLights]gpuDirLight
+	points    [MaxPointLights]gpuPointLight
+	spots     [MaxSpotLights]gpuSpotLight
 }
 
-// pointFace is one cube face of a point light's shadow: a perspective camera aimed
-// down a ±axis and the depth map it renders into.
-type pointFace struct {
-	cam Camera
-	m   textures.Texture
+var lightsSize = uint64(unsafe.Sizeof(gpuLights{}))
+
+// Lights is the scene light table: ambient + directional + point lights in one
+// fixed-size BDA buffer the lit fragment shader reads through the draw root.
+type Lights struct {
+	backend gpu.Backend
+	data    gpuLights
+	buf     gpu.Buffer
+	dirty   bool
 }
 
-func newLightShadow(cam Camera) *LightShadow {
-	return &LightShadow{Camera: cam, size: defaultShadowSize}
-}
-
-// updateOrthoBias recomputes ndcBias for an orthographic (directional) shadow camera
-// whose fitted box is radius wide and whose depth range is depthRange, both in world
-// units. Acne scales with how much world space a single shadow texel covers, so that
-// is the natural unit for the derived term; Bias adds an explicit world-space offset.
+// NewLights creates the table. ambient defaults to a low neutral fill so an
+// unlit-looking scene still shows geometry; call SetAmbient to change it.
 //
-// The division is the whole point: an orthographic shadow camera's depth range spans
-// the scene, so a bias expressed directly in normalized depth silently becomes a
-// wildly different world distance from one scene to the next.
-func (s *LightShadow) updateOrthoBias(radius, depthRange float32) {
-	if depthRange <= 0 {
-		s.ndcBias = 0
+// MemoryHost (not Device): a shadow-casting light's shadowVP is refit from the
+// current scene bounds every frame (see Renderer.prepareShadows), so any moving
+// or animated geometry — a SkinnedMesh, say — makes the table "dirty" essentially
+// every frame, not just on user edits. Staging that through the shared uploader
+// would force a real GPU submit+wait every frame just for a few KB of light data;
+// a direct host write (like worldBuf/drawableBuf already do for the same reason)
+// costs a memcpy instead.
+func NewLights(b gpu.Backend) *Lights {
+	l := &Lights{backend: b}
+	l.data.ambient = [4]float32{0.08, 0.08, 0.08, 0}
+	l.buf = b.Alloc(lightsSize, gpu.MemoryHost, "Lights")
+	l.dirty = true
+	return l
+}
+
+// rebuild derives the flat GPU light table from a packet's lights and environment,
+// plus the renderer's own shadow resources for those lights. Called every frame (the
+// values are mutable, and a casting light's fitted shadow camera moves with the view),
+// but it only marks the buffer dirty when the derived table actually changed, so a
+// static scene re-uploads nothing. Lights past the fixed caps are dropped.
+//
+// shadows reports whether shadow maps may be advertised to the shader at all — the
+// renderer's global toggle. A light whose map is still allocated but no longer being
+// re-rendered must publish noShadowMap, or the shader keeps sampling a frozen map and
+// the shadow stays on screen after it was turned off.
+func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPacket, res map[scenes.LightID]*shadowResource, shadows bool) {
+	var next gpuLights
+	next.ambient = env.Ambient.RGBA()
+	fs := env.Fog
+	next.fogColor = [4]float32{fs.Color[0], fs.Color[1], fs.Color[2], float32(fs.Mode)}
+	next.fogParams = [4]float32{fs.Near, fs.Far, fs.Density, 0}
+
+	// shadowOf is the light's resource, but only when shadows may be advertised at all.
+	shadowOf := func(lp scenes.LightPacket) *shadowResource {
+		if !shadows || !lp.CastsShadow {
+			return nil
+		}
+		return res[lp.ID]
+	}
+
+	for _, lp := range lights {
+		switch lp.Kind {
+		case scenes.LightDirectional:
+			if next.numDir >= MaxDirLights {
+				continue
+			}
+			dir := lp.Direction.Normalize()
+			gl := gpuDirLight{
+				dir:       [4]float32{dir[0], dir[1], dir[2], 0},
+				color:     [4]float32{lp.Color[0], lp.Color[1], lp.Color[2], lp.Intensity},
+				shadowMap: noShadowMap,
+			}
+			// A casting light with an allocated map contributes its view-projection (the
+			// un-flipped matrix the depth pass used) and heap index for shader sampling.
+			if s := shadowOf(lp); s != nil && s.m.IsValid() {
+				gl.shadowVP = s.cam.ViewProjection()
+				gl.shadowMap = s.m.Index()
+				gl.shadowBias = s.ndcBias
+			}
+			next.dirs[next.numDir] = gl
+			next.numDir++
+
+		case scenes.LightPoint:
+			if next.numPoint >= MaxPointLights {
+				continue
+			}
+			gp := gpuPointLight{
+				pos:   [4]float32{lp.Position[0], lp.Position[1], lp.Position[2], lp.Range},
+				color: [4]float32{lp.Color[0], lp.Color[1], lp.Color[2], lp.Intensity},
+			}
+			for f := range gp.shadowMap {
+				gp.shadowMap[f] = noShadowMap
+			}
+			if s := shadowOf(lp); s != nil {
+				gp.shadowBias = s.ndcBias
+				for f := range s.faces {
+					if s.faces[f].m.IsValid() {
+						gp.shadowVP[f] = s.faces[f].cam.ViewProjection()
+						gp.shadowMap[f] = s.faces[f].m.Index()
+					}
+				}
+			}
+			next.points[next.numPoint] = gp
+			next.numPoint++
+
+		case scenes.LightSpot:
+			if next.numSpot >= MaxSpotLights {
+				continue
+			}
+			dir := lp.Direction.Normalize()
+			gs := gpuSpotLight{
+				pos:       [4]float32{lp.Position[0], lp.Position[1], lp.Position[2], lp.Range},
+				dir:       [4]float32{dir[0], dir[1], dir[2], cos32(lp.Angle)},
+				color:     [4]float32{lp.Color[0], lp.Color[1], lp.Color[2], lp.Intensity},
+				cosInner:  cos32(lp.Angle * (1 - glm.Clamp(lp.Penumbra, 0, 1))),
+				shadowMap: noShadowMap,
+			}
+			if s := shadowOf(lp); s != nil && s.m.IsValid() {
+				gs.shadowVP = s.cam.ViewProjection()
+				gs.shadowMap = s.m.Index()
+				gs.shadowBias = s.ndcBias
+			}
+			next.spots[next.numSpot] = gs
+			next.numSpot++
+		}
+	}
+
+	// gpuLights is comparable (only fixed arrays of floats/uints), so a value compare
+	// detects any change — light edits, added/removed lights, or a moved shadow camera.
+	if next != l.data {
+		l.data = next
+		l.dirty = true
+	}
+}
+
+// Addr returns the table's device address.
+func (l *Lights) Addr() uint64 { return l.buf.Addr }
+
+// Sync writes the table directly (MemoryHost, no staging/uploader) when it
+// changed since the last call.
+func (l *Lights) Sync() {
+	if !l.dirty {
 		return
 	}
-	texel := 2 * radius / float32(s.size)
-	s.ndcBias = (texel*1.5 + s.bias) / depthRange
+	writeAt(l.buf, 0, unsafe.Slice((*byte)(unsafe.Pointer(&l.data)), lightsSize))
+	l.dirty = false
 }
 
-// updateLocalBias recomputes ndcBias for a perspective shadow camera bounded by a
-// light's range (spot, point). Perspective depth is non-linear, so there is no exact
-// world→normalized factor — scaling Bias by the range is the approximation, chosen so
-// Bias means something for every light type rather than being ignored on these two.
-func (s *LightShadow) updateLocalBias(rng float32) {
-	s.ndcBias = defaultLocalShadowBias
-	if rng > 0 {
-		s.ndcBias += s.bias / rng
+// Destroy releases the table buffer.
+func (l *Lights) Destroy() {
+	if l.buf.IsValid() {
+		l.backend.Free(l.buf)
+		l.buf = gpu.Buffer{}
 	}
-}
-
-// DirectionalLight is a distant light with parallel rays (a sun). Direction is the
-// direction the light travels (e.g. {0,-1,0} for a downward sun). Fields are exported
-// and may be changed at any time; the scene re-derives the GPU light table each frame.
-type DirectionalLight struct {
-	Direction glm.Vec3f
-	Color     colors.RGB32F
-	Intensity float32
-	shadow    *LightShadow
-}
-
-// SetCastShadow toggles shadow casting. Turning it on creates the Shadow with an
-// orthographic camera; turning it off drops it.
-func (l *DirectionalLight) SetCastShadow(on bool) {
-	switch {
-	case on && l.shadow == nil:
-		// Orthographic view; the renderer fits the frustum to the scene each frame.
-		cam := cameras.NewOrthographicCamera(-10, 10, -10, 10, 0.1, 100)
-		l.shadow = newLightShadow(cam)
-	case !on:
-		l.shadow = nil
-	}
-}
-
-// Shadow returns the light's shadow resources, or nil if it does not cast shadows.
-func (l *DirectionalLight) Shadow() *LightShadow {
-	return l.shadow
-}
-
-// PointLight is an omnidirectional light at Position with a linear falloff to zero at
-// Range. Fields are exported and may be changed at any time.
-type PointLight struct {
-	Position  glm.Vec3f
-	Color     colors.RGB32F
-	Intensity float32
-	Range     float32
-	shadow    *LightShadow
-}
-
-// cubeFaceDirs/cubeFaceUps are the six 90° cube-face view directions and their up
-// vectors (the ±Y faces use a Z up to avoid a degenerate look-at). Face order matches
-// the shader's dominant-axis selection: +X,-X,+Y,-Y,+Z,-Z.
-var cubeFaceDirs = [6]glm.Vec3f{{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}}
-var cubeFaceUps = [6]glm.Vec3f{{0, 1, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, -1}, {0, 1, 0}, {0, 1, 0}}
-
-// SetCastShadow toggles shadow casting. Turning it on creates six 90° perspective cube
-// faces (the renderer aims them from the light each frame); turning it off drops them.
-func (l *PointLight) SetCastShadow(on bool) {
-	switch {
-	case on && l.shadow == nil:
-		s := newLightShadow(nil)
-		s.faces = make([]pointFace, 6)
-		for i := range s.faces {
-			s.faces[i].cam = cameras.NewPerspectiveCamera(90, 1, 0.05, l.Range)
-		}
-		l.shadow = s
-	case !on:
-		l.shadow = nil
-	}
-}
-
-// Shadow returns the light's shadow resources, or nil if it does not cast shadows.
-func (l *PointLight) Shadow() *LightShadow {
-	return l.shadow
-}
-
-// SpotLight is a cone light at Position aimed along Direction: full intensity inside
-// the inner cone, falling to zero at the outer half-angle Angle (radians), with a
-// linear distance falloff to zero at Range. Penumbra (0..1) is the fraction of the cone
-// used for the soft edge (inner angle = Angle·(1−Penumbra)). Fields are exported and
-// may change at any time.
-type SpotLight struct {
-	Position  glm.Vec3f
-	Direction glm.Vec3f
-	Color     colors.RGB32F
-	Intensity float32
-	Range     float32
-	Angle     float32 // outer cone half-angle (radians)
-	Penumbra  float32 // 0..1 soft-edge fraction
-	shadow    *LightShadow
-}
-
-// SetCastShadow toggles shadow casting. Turning it on creates the Shadow with a
-// perspective camera matching the cone; turning it off drops it.
-func (l *SpotLight) SetCastShadow(on bool) {
-	switch {
-	case on && l.shadow == nil:
-		// Perspective view down the cone: full-angle FOV, square aspect. The renderer
-		// re-aims it (position/target/FOV/range) each frame from the light's fields.
-		fov := glm.ToDegrees(2 * l.Angle)
-		cam := cameras.NewPerspectiveCamera(fov, 1, 0.05, l.Range)
-		l.shadow = newLightShadow(cam)
-	case !on:
-		l.shadow = nil
-	}
-}
-
-// Shadow returns the light's shadow resources, or nil if it does not cast shadows.
-func (l *SpotLight) Shadow() *LightShadow {
-	return l.shadow
 }

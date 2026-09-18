@@ -7,14 +7,15 @@ import (
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
+	"github.com/bluescreen10/pix/scenes"
 )
 
-// drawList is a Scene's per-scene GPU draw/cull state: the world-matrix buffer, the
+// drawList is one packet source's GPU draw/cull state: the world-matrix buffer, the
 // drawable table, the per-batch indirect args / regions / compacted-visible buffer,
-// and the cull/draw root buffers. It is owned by the Scene (so switching scenes
-// swaps GPU state), allocated through the Scene's gpu.Backend, and populated by the
-// Renderer (which supplies geometry descriptors). No bind groups — every buffer is a
-// BDA carried in the compute/graphics root structs.
+// and the cull/draw root buffers. The renderer owns it, keyed by SourceID (see
+// renderState), and builds it from the packets that source publishes — a producer
+// never sees any of it. No bind groups: every buffer is a BDA carried in the
+// compute/graphics root structs.
 type drawList struct {
 	backend gpu.Backend
 
@@ -22,14 +23,32 @@ type drawList struct {
 	runs           []pipelineRun // contiguous same-pipeline batch spans (one MDI call each)
 	regions        []uint32      // regionBase per batch (GPU mirror)
 	template       []indirectCmd // per-batch indirect args (reset each frame)
-	pipeBuf        []uint32      // scratch: per-drawable pipeline ids, expanded from matPipe
 	roots          []drawRoot    // scratch: one drawRoot per pipeline run, pushed inline
-	matPipe        []uint32      // scratch: one pipeline id per DISTINCT material, resolved each frame
 	batchedMatPipe []uint32      // the per-material pipeline assignment the current batches were built from
-	visCap         uint32
-	numInst        uint32
-	worldCap       uint32
-	lodCount       uint32 // len(Scene.lodEntries) as of the last rebuild
+
+	// Per DISTINCT material of the current packet, refreshed every frame: its pipeline,
+	// the pool holding its record, and its blend mode. Indexed by MeshPacket.Material.
+	matPipe  []uint32
+	matPool  []*materials.Pool
+	matBlend []materials.BlendMode
+
+	// The packet's mesh table expanded into flat draw records — one per instance per
+	// LOD level — plus, parallel to it, each record's pipeline and the material slot it
+	// came from. Rebuilt only when the batch layout is.
+	drawables   []gpuDrawable
+	pipeBuf     []uint32
+	drawMatSlot []uint32
+	// lodEntries is the renderer's own GPU LOD-config table, derived from the packet
+	// (index 0 reserved, so a drawable's lodID of 0 means "not LOD-tagged"). The scene
+	// no longer supplies it: hysteresis and level boundaries reach here as mesh
+	// description, and what the cull shader reads is this side's business.
+	lodEntries []gpuLODEntry
+	// builtRevision is the mesh-table revision the current batch layout was built from.
+	builtRevision uint64
+	visCap        uint32
+	numInst       uint32
+	worldCap      uint32
+	lodCount      uint32 // len(scenes.Scene.lodEntries) as of the last rebuild
 	// rebuilds counts how many times the batch layout has been rebuilt. A diagnostic:
 	// a steady-state frame must not advance it, and neither must an edit that changes
 	// only a material's record (a tint), as opposed to its pipeline.
@@ -76,7 +95,7 @@ func newDrawList(b gpu.Backend) *drawList {
 // InstancedMesh's per-instance transforms, into one contiguous models buffer
 // (growing it as needed). transformID in drawables indexes this combined array —
 // an InstancedMesh's drawables address their slice as if it sits right after world
-// (see Scene.collectDrawables and Scene.instanceTransforms). The buffer is
+// (see FramePacket.InstanceTransforms and drawList.expand). The buffer is
 // host-visible per-frame streaming, so this is a direct write (no staging uploader).
 func (d *drawList) sync(world, instances []glm.Mat4f) {
 	n := uint32(len(world) + len(instances))
@@ -95,6 +114,67 @@ func (d *drawList) sync(world, instances []glm.Mat4f) {
 	}
 }
 
+// expand turns the packet's object-shaped mesh table into the flat draw records the
+// batcher and the GPU cull pass work on: one per instance per LOD level, each tagged
+// with its pipeline and the material slot it came from. It also derives the GPU LOD
+// config table, because level boundaries reach the renderer as mesh description and
+// what the cull shader reads is the renderer's own business.
+//
+// The iteration order is a contract, not an implementation detail: instances outer,
+// levels inner, objects in table order. Anything reproducing this expansion — a test,
+// a second consumer — has to agree, or the records line up with the wrong materials.
+func (d *drawList) expand(p *scenes.FramePacket) {
+	d.drawables = d.drawables[:0]
+	d.pipeBuf = d.pipeBuf[:0]
+	d.drawMatSlot = d.drawMatSlot[:0]
+	// Index 0 is reserved and never read: a drawable's lodID of 0 means "not LOD-tagged".
+	d.lodEntries = append(d.lodEntries[:0], gpuLODEntry{})
+
+	for _, m := range p.Meshes.Data {
+		lodID := uint32(0)
+		if m.LODRange.Count > 0 {
+			e := gpuLODEntry{hysteresis: m.LODHysteresis, levelCount: m.LODRange.Count + 1}
+			// boundaries[i] is where level i ends and level i+1 begins — which is
+			// level i+1's own MinDistance. The last level has no upper bound.
+			for i := uint32(0); i < m.LODRange.Count && int(i) < len(e.boundaries); i++ {
+				e.boundaries[i] = p.LODs.Data[m.LODRange.First+i].MinDistance
+			}
+			lodID = uint32(len(d.lodEntries))
+			d.lodEntries = append(d.lodEntries, e)
+		}
+
+		bounds := [4]float32{m.Bounds.Center[0], m.Bounds.Center[1], m.Bounds.Center[2], m.Bounds.Radius}
+		var flags uint32
+		if m.Flags&scenes.RenderCastsShadow != 0 {
+			flags |= DrawableCastsShadow
+		}
+		if m.Flags&scenes.RenderReceivesShadow != 0 {
+			flags |= DrawableReceivesShadow
+		}
+
+		for j := uint32(0); j < m.Transforms.Count; j++ {
+			for lvl := uint32(0); lvl <= m.LODRange.Count; lvl++ {
+				geo, mat := m.Geometry, m.Material
+				if lvl > 0 {
+					l := p.LODs.Data[m.LODRange.First+lvl-1]
+					geo, mat = l.Geometry, l.Material
+				}
+				d.drawables = append(d.drawables, gpuDrawable{
+					bounds:      bounds,
+					transformID: m.Transforms.First + j,
+					geometryID:  geo.Slot,
+					materialID:  p.Materials.Data[mat].Slot,
+					flags:       flags,
+					lodID:       lodID,
+					lodLevel:    lvl,
+				})
+				d.pipeBuf = append(d.pipeBuf, d.matPipe[mat])
+				d.drawMatSlot = append(d.drawMatSlot, mat)
+			}
+		}
+	}
+}
+
 // rebuild groups drawables into (pipeline, geometry) batches (one indirect command
 // each), orders them so same-pipeline batches are contiguous (one multi-draw-indirect
 // call per pipeline), lays out their visible-buffer regions, fills the indirect
@@ -106,21 +186,22 @@ func (d *drawList) sync(world, instances []glm.Mat4f) {
 //
 // Which pipeline assignment the batches were built from is remembered by syncDrawList,
 // per distinct material rather than per drawable — see batchedMatPipe.
-func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, mats []materials.Material, matIndex []uint32, geometryStore *geometries.Store, lodEntries []gpuLODEntry) {
+func (d *drawList) rebuild(geometryStore *geometries.Store) {
 	type key struct{ pipeline, geo uint32 }
 	d.rebuilds++
+	drawables, pipelines, lodEntries := d.drawables, d.pipeBuf, d.lodEntries
 
 	// First pass: unique (pipeline, geometry) batches + their instance counts, and a
-	// representative material per pipeline (any drawable using that pipeline). mats is
-	// the distinct set, so matIndex[i] is where drawables[i]'s material sits in it.
+	// representative material per pipeline (any drawable using it), kept as a slot in
+	// the packet's distinct material set rather than as a handle.
 	index := map[key]uint32{}
-	rep := map[uint32]materials.Material{}
+	rep := map[uint32]uint32{}
 	var raw []batch
 	var counts []uint32
 	for i := range drawables {
 		k := key{pipelines[i], drawables[i].geometryID}
 		if _, ok := rep[k.pipeline]; !ok {
-			rep[k.pipeline] = mats[matIndex[i]]
+			rep[k.pipeline] = d.drawMatSlot[i]
 		}
 		bid, ok := index[k]
 		if !ok {
@@ -136,8 +217,7 @@ func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, mats []m
 	// composites over the opaque scene; within each group, by pipeline (so a pipeline's
 	// commands stay contiguous for one MDI call).
 	transparent := func(pid uint32) bool {
-		m := rep[pid]
-		return m.Pool().Blend(m.ID().Slot) != materials.BlendOpaque
+		return d.matBlend[rep[pid]] != materials.BlendOpaque
 	}
 	order := make([]uint32, len(raw))
 	for i := range order {
@@ -174,7 +254,7 @@ func (d *drawList) rebuild(drawables []gpuDrawable, pipelines []uint32, mats []m
 		if n := len(d.runs); n > 0 && d.runs[n-1].pipeline == b.pipeline {
 			d.runs[n-1].count++
 		} else {
-			d.runs = append(d.runs, pipelineRun{pipeline: b.pipeline, firstBatch: uint32(len(d.batches) - 1), count: 1, mat: rep[b.pipeline]})
+			d.runs = append(d.runs, pipelineRun{pipeline: b.pipeline, firstBatch: uint32(len(d.batches) - 1), count: 1, pool: d.matPool[rep[b.pipeline]]})
 		}
 		base += padded
 	}

@@ -1,8 +1,9 @@
 package pix
 
 import (
-	"github.com/bluescreen10/pix/materials"
 	"testing"
+
+	"github.com/bluescreen10/pix/materials"
 )
 
 // TestMaterialSyncStagesManyDirtyWithoutAllocating is the point of the uploader's

@@ -7,6 +7,7 @@ import (
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
+	"github.com/bluescreen10/pix/scenes"
 )
 
 // TestMaterialClasses renders the same geometry with three different material
@@ -20,7 +21,7 @@ func TestMaterialClasses(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 
 	cube := r.GeometryStore.Create(normalCube())

@@ -6,6 +6,7 @@ import (
 	_ "github.com/bluescreen10/gamekit/gpu/vulkan"
 	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/cameras"
+	"github.com/bluescreen10/pix/scenes"
 )
 
 const capoeiraAsset = "../../examples/skinning/assets/capoeira.gltf"
@@ -21,7 +22,7 @@ func TestLoadSkinnedAnimatedAsset(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 
 	res, err := LoadFull(r, scene, capoeiraAsset)
@@ -69,7 +70,7 @@ func TestLoadSkinnedAnimatedAsset(t *testing.T) {
 	hips := skel.BoneByName("mixamorig:Hips")
 	mixer := scene.NewAnimationMixer(skel)
 	action := mixer.Action(clip)
-	action.SetLoop(pix.LoopRepeat).Play()
+	action.SetLoop(scenes.LoopRepeat).Play()
 
 	scene.Sync()
 	before := hips.WorldTransform()

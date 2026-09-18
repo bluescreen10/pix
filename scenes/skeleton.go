@@ -1,19 +1,10 @@
-package pix
+package scenes
 
 import (
-	"unsafe"
+	"slices"
 
-	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/internal/mem"
 )
-
-// jointElemSize is the byte size of one joint matrix (mat4) in the scene's joint
-// buffer, used to turn a TLSF byte offset into the joint-index base stored on
-// gpuDrawable/skinCmd.
-const jointElemSize uint32 = 64
-
-const initialJointBytes uint32 = 64 * 64 // room for 64 joints before the first grow
 
 // SkeletonConfig is a skeleton's bind-time data: parallel arrays indexed by joint.
 // Parents[i] must be < i (topological order; a root joint's parent is -1).
@@ -32,13 +23,16 @@ type SkeletonConfig struct {
 // crude per-joint scale estimate), recomputed in syncSkinning and reused by every
 // SkinnedMesh sharing this skeleton for their bounds (see skinned_mesh.go).
 type skeletonData struct {
-	bones      []NodeID
-	names      []string
-	invBind    []glm.Mat4f
-	bindPose   []Transform
-	jointAlloc mem.Allocation
-	jointBase  uint32
-	ownerNode  uint32
+	bones    []NodeID
+	names    []string
+	invBind  []glm.Mat4f
+	bindPose []Transform
+	// jointBase is this skeleton's offset into the scene's flat joint table, assigned
+	// by each syncSkinning as it lays the skeletons out one after another. There is no
+	// allocator: the whole table is rewritten every frame, so a stable address would
+	// buy nothing and cost a suballocator's worth of machinery.
+	jointBase uint32
+	ownerNode uint32
 
 	jointPos   []glm.Vec3f
 	jointScale []float32
@@ -122,74 +116,16 @@ func (s *Scene) NewSkeleton(cfg SkeletonConfig) Skeleton {
 
 	invBind := append([]glm.Mat4f(nil), cfg.InverseBind...)
 	bindPose := append([]Transform(nil), cfg.BindPose...)
-	alloc := s.allocJoints(uint32(n))
-
 	payloadIdx, _ := s.skeletons.Alloc(skeletonData{
 		bones: bones, names: names, invBind: invBind, bindPose: bindPose,
-		jointAlloc: alloc, jointBase: alloc.Offset() / jointElemSize, ownerNode: rootID.index,
+		ownerNode: rootID.index,
 	})
 	s.payload[rootID.index] = payloadIdx
 	return Skeleton{Node{scene: s, id: rootID}}
 }
 
 func (s *Scene) freeSkeleton(payloadIdx uint32) {
-	sk := s.skeletons.Get(payloadIdx)
-	if s.jointTLSF != nil {
-		s.jointTLSF.Free(sk.jointAlloc)
-	}
 	s.skeletons.Free(payloadIdx)
-}
-
-// allocJoints suballocates n joints' worth of space in the scene's joint buffer,
-// growing it (and re-suballocating every live skeleton) if needed.
-func (s *Scene) allocJoints(n uint32) mem.Allocation {
-	need := n * jointElemSize
-	if s.jointTLSF == nil {
-		initCap := initialJointBytes
-		for initCap < need {
-			initCap *= 2
-		}
-		s.jointTLSF = mem.NewTLSF(initCap)
-		s.jointBuf = s.backend.Alloc(uint64(initCap), gpu.MemoryHost, "joints")
-	}
-	if alloc, err := s.jointTLSF.Alloc(need); err == nil {
-		return alloc
-	}
-	free, _ := s.jointTLSF.StorageReport()
-	used := s.jointTLSF.Capacity() - free
-	s.growJoints(used + need)
-	alloc, err := s.jointTLSF.Alloc(need)
-	if err != nil {
-		panic("pix: joint buffer alloc failed after grow")
-	}
-	return alloc
-}
-
-// growJoints replaces the joint buffer with a larger one, re-suballocating every
-// live skeleton's range at the same size. No data is copied — syncSkinning
-// rewrites every joint matrix from scratch every frame regardless.
-func (s *Scene) growJoints(minCap uint32) {
-	newCap := s.jointTLSF.Capacity()
-	if newCap == 0 {
-		newCap = initialJointBytes
-	}
-	for newCap < minCap {
-		newCap *= 2
-	}
-	newTLSF := mem.NewTLSF(newCap)
-	for _, sk := range s.skeletons.All() {
-		alloc, err := newTLSF.Alloc(sk.jointAlloc.Size())
-		if err != nil {
-			panic("pix: joint buffer repack failed")
-		}
-		sk.jointAlloc = alloc
-		sk.jointBase = alloc.Offset() / jointElemSize
-	}
-	if s.jointBuf.IsValid() {
-		s.backend.Free(s.jointBuf)
-	}
-	s.jointBuf = s.backend.Alloc(uint64(newCap), gpu.MemoryHost, "joints")
-	s.jointTLSF = newTLSF
 }
 
 // syncSkinning recomputes every skeleton's joint matrices and per-joint scratch
@@ -200,6 +136,7 @@ func (s *Scene) growJoints(minCap uint32) {
 // SkinnedMesh's drawable, whose transformID is the skeleton root, applies the
 // remaining world transform exactly like static geometry.
 func (s *Scene) syncSkinning() {
+	s.packetJoints = s.packetJoints[:0]
 	if s.skeletons.Len() == 0 {
 		return
 	}
@@ -212,7 +149,11 @@ func (s *Scene) syncSkinning() {
 		}
 		sk.jointPos = sk.jointPos[:n]
 		sk.jointScale = sk.jointScale[:n]
-		joints := unsafe.Slice((*glm.Mat4f)(unsafe.Add(s.jointBuf.Ptr, uintptr(sk.jointAlloc.Offset()))), n)
+		sk.jointBase = uint32(len(s.packetJoints))
+		// Grow-then-reslice rather than append-a-temporary: the table keeps its capacity
+		// across frames, so this allocates only while a scene is still growing.
+		s.packetJoints = slices.Grow(s.packetJoints, n)[:int(sk.jointBase)+n]
+		joints := s.packetJoints[sk.jointBase:]
 		for j, id := range sk.bones {
 			rl := rootInv.Mul4x4(s.world[id.index])
 			joints[j] = rl.Mul4x4(sk.invBind[j])

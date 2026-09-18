@@ -1,17 +1,17 @@
 // Package particles supplies emitter and spawner helpers for pix's particle system.
 // Core types (Particle, ParticleContainer, ParticleEmitter, ParticleSpawner) live in
-// pix; this package imports pix, never the other way around. Built-in per-particle
-// update behavior is configured directly on pix.ParticleUpdate, not composed from
+// scenes; this package imports scenes, never the other way around. Built-in per-particle
+// update behavior is configured directly on scenes.ParticleUpdate, not composed from
 // constructors here — it runs as a GPU kernel, not Go code, so there is nothing to
 // construct at this layer for it.
 package particles
 
-import "github.com/bluescreen10/pix"
+import "github.com/bluescreen10/pix/scenes"
 
-// SpawnFunc adapts a plain function to pix.ParticleSpawner.
-type SpawnFunc func(*pix.Particle)
+// SpawnFunc adapts a plain function to scenes.ParticleSpawner.
+type SpawnFunc func(*scenes.Particle)
 
-func (f SpawnFunc) Spawn(p *pix.Particle) { f(p) }
+func (f SpawnFunc) Spawn(p *scenes.Particle) { f(p) }
 
 // RateEmitter requests births at a steady rate, accumulating fractional births
 // between updates so a rate like 0.5/s still produces exactly one birth every two

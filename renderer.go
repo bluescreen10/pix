@@ -15,6 +15,7 @@ import (
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
+	"github.com/bluescreen10/pix/scenes"
 	"github.com/bluescreen10/pix/shaders"
 	"github.com/bluescreen10/pix/textures"
 )
@@ -70,6 +71,16 @@ type Renderer struct {
 	drawPipelines    []gpu.Pipeline
 	drawPipelineKeys []materialPipeline
 	pipelinesReady   bool
+	// frame is the scratch packet every extraction fills. It is reused rather than
+	// freshly declared per frame so its tables keep their capacity: extracting into it
+	// allocates nothing in the steady state.
+	frame scenes.FramePacket
+	// sources is the renderer's GPU state, one entry per producer it has drawn. It is
+	// a cache keyed by identity, not a second scene graph: it holds no hierarchy and
+	// cannot read application objects to fill anything in. A producer that goes away
+	// leaves its entry behind until ReleaseSource is called for its id — the renderer
+	// is never told about a Scene being destroyed.
+	sources map[scenes.SourceID]*renderState
 	// pools indexes poolPipelines by materials.Pool.Index, so resolving a material's
 	// pipeline is an array index rather than a scan of drawPipelineKeys. Grown on
 	// demand; entries stay valid across a format change, which rebuilds the pipelines
@@ -496,6 +507,82 @@ func (r *Renderer) pipelineFor(k materialPipeline) uint32 {
 	return id
 }
 
+// renderState is everything the renderer keeps on the GPU for one packet source,
+// derived entirely from the packets that source has published.
+type renderState struct {
+	dl *drawList
+	// lights is the GPU light table this source's packets are compiled into, and
+	// shadows the depth-map resources of its casting lights, keyed by light identity.
+	// Both are derived from packets; neither is anything a producer can see.
+	lights  *Lights
+	shadows map[scenes.LightID]*shadowResource
+	// joints is the GPU palette buffer compute skinning reads, uploaded from the
+	// packet's Joints table each frame. Host-visible: the whole table is rewritten
+	// every frame anyway, so staging it would buy nothing.
+	joints    gpu.Buffer
+	jointsCap uint32
+	// particles is the GPU simulation state of this source's particle systems.
+	particles map[scenes.ParticleID]*particleState
+}
+
+// syncJoints uploads a packet's joint palettes, growing the buffer as needed. Returns
+// the device address the skinning dispatches read from.
+func (st *renderState) syncJoints(backend gpu.Backend, joints []glm.Mat4f) uint64 {
+	n := uint32(len(joints))
+	if n == 0 {
+		return st.joints.Addr
+	}
+	if n > st.jointsCap {
+		if st.joints.IsValid() {
+			backend.Free(st.joints)
+		}
+		st.jointsCap = max(n*2, 1)
+		st.joints = backend.Alloc(uint64(st.jointsCap)*64, gpu.MemoryHost, "joints")
+	}
+	writeAt(st.joints, 0, toBytes(joints))
+	return st.joints.Addr
+}
+
+// stateFor returns the GPU state for a source, creating it on first sight. First use
+// and structural growth allocate; steady-state frames reuse everything.
+func (r *Renderer) stateFor(id scenes.SourceID) *renderState {
+	if st, ok := r.sources[id]; ok {
+		return st
+	}
+	if r.sources == nil {
+		r.sources = make(map[scenes.SourceID]*renderState)
+	}
+	st := &renderState{dl: newDrawList(r.backend), lights: NewLights(r.backend)}
+	r.sources[id] = st
+	return st
+}
+
+// ReleaseSource drops the GPU state cached for a producer. Call it when a Scene is
+// destroyed, passing Scene.ID: scene teardown does not reach into a renderer to do
+// this, so nothing else will. Releasing a source that is used again is safe — it
+// initializes from the next packet's complete tables — but it throws away work.
+//
+// Renderer.Destroy releases every remaining source, so a program that tears the
+// renderer down at exit need not track this.
+func (r *Renderer) ReleaseSource(id scenes.SourceID) {
+	st, ok := r.sources[id]
+	if !ok {
+		return
+	}
+	st.dl.destroy()
+	st.lights.Destroy()
+	if st.joints.IsValid() {
+		r.backend.Free(st.joints)
+	}
+	for _, ps := range st.particles {
+		ps.destroy(r.backend)
+	}
+	for _, sh := range st.shadows {
+		sh.destroy()
+	}
+	delete(r.sources, id)
+}
+
 // pipelineUnresolved marks a cell of a pool's pipeline table that has not been built
 // yet. Zero is a perfectly good pipeline index, so it cannot double as "empty".
 const pipelineUnresolved uint32 = 0xFFFFFFFF
@@ -585,11 +672,6 @@ func sameKey(a, b materialPipeline) bool {
 
 // The named material constructors (NewBasicMaterial, NewBlinnPhongMaterial,
 // NewPBRMaterial, NewRawMaterial) are shortcuts onto MaterialStore — see materials.go.
-
-// NewScene creates a scene bound to this renderer's backend.
-func (r *Renderer) NewScene() *Scene {
-	return NewScene(r.backend)
-}
 
 // Backend exposes the underlying gpu backend (advanced/one-off use).
 func (r *Renderer) Backend() gpu.Backend {
@@ -694,7 +776,7 @@ func (r *Renderer) Console() *console.Console {
 
 // Render draws the scene from cam into the configured target (swapchain or texture).
 // The camera is not retained.
-func (r *Renderer) Render(scene *Scene, cam Camera) {
+func (r *Renderer) Render(scene scenes.Producer, cam Camera) {
 	//TODO: r.swapchain.H == 0 is a bit of a smell something like r.swapchain.IsValid()
 	// would be better
 	if !r.hasTarget && r.swapchain.H == 0 {
@@ -710,7 +792,7 @@ func (r *Renderer) Render(scene *Scene, cam Camera) {
 	cmd := r.backend.Begin()
 	r.syncScene(scene, cam, cmd)
 	vp := cam.ViewProjection()
-	planes := FrustumPlanes(vp)
+	planes := glm.FrustumPlanes(vp)
 	drawVP := flipClipY(vp)
 	eye := cam.Position()
 	if r.console != nil {
@@ -743,6 +825,12 @@ func (r *Renderer) Render(scene *Scene, cam Camera) {
 	} else {
 		r.backend.Present(r.swapchain, cmd)
 	}
+
+	// The frame is submitted, so this packet's simulation step has happened: let the
+	// producer retire it. Doing it here, after submission, is what makes the step
+	// exactly-once without an acknowledgement protocol — extraction only ever reads,
+	// and one function owns the order of the two halves.
+	scene.Rendered()
 
 	// Both paths above drain the queue, so the readback buffer holds finished pixels.
 	r.writeScreenshot()
@@ -778,18 +866,19 @@ func (r *Renderer) Pixels() []byte { return r.Capture() }
 // then the main view (cull + lit draw), plus GPU timestamps + the HUD when enabled.
 // All compute culls run first (outside any render pass), share one barrier, then the
 // shadow depth passes and the main color pass consume their results.
-func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scene, planes [6][4]float32, drawVP glm.Mat4f, eye glm.Vec3f) {
+func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene scenes.Producer, planes [6]glm.Vec4f, drawVP glm.Mat4f, eye glm.Vec3f) {
 	if r.showFPS && r.gpuPool.IsValid() {
 		cmd.ResetTimestamps(r.gpuPool, 2)
 		cmd.WriteTimestamp(r.gpuPool, 0, gpu.StageNone)
 	}
-	dl := scene.drawList
+	st := r.stateFor(scene.ID())
+	dl := st.dl
 	// Shadow views only make sense when there's geometry to cast; with an empty draw
 	// list the per-view buffers would be zero-sized (visCap == 0) and there's nothing
 	// to render into a depth map anyway, so skip all shadow work.
 	var views []shadowView
 	if dl.batchCount() > 0 {
-		views = r.collectShadowViews(scene)
+		views = r.collectShadowViews(st)
 		if len(views) > 0 {
 			dl.ensureShadowViews(len(views))
 		}
@@ -800,21 +889,21 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 	// update writes particle records that the shadow/G-buffer/forward vertex stages
 	// read (not cull — it only reads CPU-supplied bounds), so one barrier after all
 	// three covers everything.
-	hasParticles := len(scene.particleContainers) > 0
+	hasParticles := len(r.frame.Particles.Data) > 0
 	if dl.batchCount() > 0 || hasParticles {
-		if cmds := r.skinCommands(scene); len(cmds) > 0 {
-			r.dispatchSkinning(cmd, dl, cmds, scene.jointBuf.Addr)
+		if cmds := r.skinCommands(&r.frame); len(cmds) > 0 {
+			r.dispatchSkinning(cmd, dl, cmds, st.syncJoints(r.backend, r.frame.Joints.Data))
 		}
 		for i := range views {
 			v := &dl.shadowViews[i]
-			sp := FrustumPlanes(views[i].cam.ViewProjection())
+			sp := glm.FrustumPlanes(views[i].cam.ViewProjection())
 			r.cullInto(cmd, dl, v.indirectBuf, v.visibleBuf, sp, 1, eye)
 		}
 		if dl.batchCount() > 0 {
 			r.cullInto(cmd, dl, dl.indirectBuf, dl.visibleBuf, planes, 0, eye)
 		}
 		if hasParticles {
-			r.dispatchParticleUpdate(cmd, scene)
+			r.dispatchParticleUpdate(cmd, st, &r.frame)
 		}
 		cmd.Barrier(gpu.StageCompute, gpu.StageIndirect|gpu.StageVertex, 0)
 	}
@@ -830,7 +919,7 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 	// 3. Every run's drawRoot is filled once regardless of pass (same camera either
 	// way); issueDraws below then filters by pass to route it into the right render
 	// pass with the right pipeline set.
-	r.fillDrawRoots(dl, drawVP, eye, scene.lights.Addr(), scene.elapsed)
+	r.fillDrawRoots(dl, drawVP, eye, st.lights.Addr(), r.frame.Time)
 	gbufferActive := r.hasGBufferRuns(dl)
 	// A debug view needs the G-buffer to have actually been filled; with nothing
 	// rendering deferred there is nothing to show, so the frame shades normally.
@@ -876,9 +965,9 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 			// a timestamp query and never wrote it, and the next frame's blocking read
 			// hung the process.
 			r.ensureGBufferSampler()
-			r.recordDebugView(cmd, dl, target, drawVP, eye, scene.lights.Addr())
+			r.recordDebugView(cmd, dl, target, drawVP, eye, st.lights.Addr())
 		} else {
-			r.recordLighting(cmd, dl, target, drawVP, eye, scene.lights.Addr())
+			r.recordLighting(cmd, dl, target, drawVP, eye, st.lights.Addr())
 		}
 	}
 
@@ -905,7 +994,7 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene *Scen
 	if drawForward {
 		r.issueDraws(cmd, dl, passForward)
 		if hasParticles {
-			r.drawParticles(cmd, scene, drawVP, eye)
+			r.drawParticles(cmd, st, &r.frame, drawVP, eye)
 		}
 	}
 	if r.overlayActive() && r.overlay != nil {
@@ -939,32 +1028,21 @@ type shadowView struct {
 	size uint32
 }
 
-// collectShadowViews gathers every shadow-map render request in the scene: one per
-// casting directional/spot light and six per casting point light (Stage 3). Empty when
-// shadows are disabled or nothing casts.
-func (r *Renderer) collectShadowViews(scene *Scene) []shadowView {
+// collectShadowViews gathers every shadow-map render request the renderer has
+// resources for: one per casting directional/spot light and six per casting point
+// light. Empty when shadows are disabled or nothing casts.
+func (r *Renderer) collectShadowViews(st *renderState) []shadowView {
 	if !r.shadowsEnabled {
 		return nil
 	}
 	var out []shadowView
-	for _, l := range scene.dirLights {
-		if s := l.shadow; s != nil && s.Map.IsValid() {
-			out = append(out, shadowView{cam: s.Camera, m: s.Map, size: s.Size()})
+	for _, sh := range st.shadows {
+		if sh.m.IsValid() {
+			out = append(out, shadowView{cam: sh.cam, m: sh.m, size: sh.size})
 		}
-	}
-	for _, l := range scene.spotLights {
-		if s := l.shadow; s != nil && s.Map.IsValid() {
-			out = append(out, shadowView{cam: s.Camera, m: s.Map, size: s.Size()})
-		}
-	}
-	for _, l := range scene.pointLights {
-		s := l.shadow
-		if s == nil {
-			continue
-		}
-		for i := range s.faces {
-			if f := s.faces[i]; f.m.IsValid() {
-				out = append(out, shadowView{cam: f.cam, m: f.m, size: s.Size()})
+		for i := range sh.faces {
+			if f := sh.faces[i]; f.m.IsValid() {
+				out = append(out, shadowView{cam: f.cam, m: f.m, size: sh.size})
 			}
 		}
 	}
@@ -975,7 +1053,7 @@ func (r *Renderer) collectShadowViews(scene *Scene) []shadowView {
 // It resolves each mesh's draw pipeline from its material (shaders + raster) every
 // frame and rebuilds the draw list when the mesh set OR any pipeline assignment
 // changed (so a material raster/blend change re-batches without an explicit dirty).
-func (r *Renderer) syncScene(scene *Scene, cam Camera, cmd gpu.CommandBuffer) {
+func (r *Renderer) syncScene(scene scenes.Producer, cam Camera, cmd gpu.CommandBuffer) {
 	// Device-only resources (geometry streams + descriptors, material records) are
 	// staged through the shared uploader, which records the copies into the head of
 	// this frame's command buffer and barriers them against the passes that read
@@ -986,16 +1064,27 @@ func (r *Renderer) syncScene(scene *Scene, cam Camera, cmd gpu.CommandBuffer) {
 	// The light table encodes each light's shadow map for the shader, so the scene
 	// needs the global toggle before it rebuilds that table — otherwise disabling
 	// shadows only stops refreshing the maps and the shader samples the last one.
-	scene.shadowsEnabled = r.shadowsEnabled
+	st := r.stateFor(scene.ID())
+
+	// Scene.Sync settles world transforms, skinning and the clock; extraction publishes
+	// the result. Both happen exactly once per frame and before anything reads the
+	// packet — extracting twice would hand the second call a packet whose per-frame
+	// flags (TransformsDirty) the first had already consumed.
+	scene.Extract(&r.frame)
+
 	if r.shadowsEnabled {
-		r.prepareShadows(scene, cam)
+		r.prepareShadows(st, &r.frame, cam)
 	}
 	up := r.uploader
 	up.Begin(cmd)
 	r.GeometryStore.Sync(up)
 	r.MaterialStore.Sync(up)
-	scene.Sync()
 	up.End(cmd)
+
+	// The light table is the renderer's buffer, packed from the packet's light values
+	// and the shadow resources prepared above. The producer never sees a map index.
+	st.lights.rebuild(r.frame.Environment, r.frame.Lights.Data, st.shadows, r.shadowsEnabled)
+	st.lights.Sync()
 
 	r.syncDrawList(scene)
 }
@@ -1012,34 +1101,62 @@ func (r *Renderer) syncScene(scene *Scene, cam Camera, cmd gpu.CommandBuffer) {
 // the per-drawable arrays. Resolving off the collected set is also what keeps pipeBuf
 // aligned with the drawables — both come from the one collectDrawables walk, so no
 // second traversal has to reproduce its ordering and its flagAttached filtering.
-func (r *Renderer) syncDrawList(scene *Scene) {
-	dl := scene.drawList
-	if scene.drawableDirty {
-		scene.collectDrawables()
-	}
-	dl.matPipe = dl.matPipe[:0]
-	for _, m := range scene.drawMaterials {
-		dl.matPipe = append(dl.matPipe, r.pipelineForMaterial(m))
-	}
-	if !scene.drawableDirty && slices.Equal(dl.matPipe, dl.batchedMatPipe) {
-		return
-	}
-	// Something moved: expand the per-material pipelines back out to one per drawable,
-	// which is the form the batcher groups on.
-	dl.pipeBuf = dl.pipeBuf[:0]
-	for _, slot := range scene.drawMatIndex {
-		dl.pipeBuf = append(dl.pipeBuf, dl.matPipe[slot])
-	}
-	dl.rebuild(scene.drawables, dl.pipeBuf, scene.drawMaterials, scene.drawMatIndex, r.GeometryStore, scene.lodEntries)
-	dl.batchedMatPipe = append(dl.batchedMatPipe[:0], dl.matPipe...)
-	scene.drawableDirty = false
+// prepareFrom runs one frame's producer-side work — settle the scene, extract a
+// packet, refresh the draw list — without recording any GPU commands. Render does the
+// same steps as part of a frame; this is the seam tests use to inspect the derived
+// state, and it keeps them from having to know that extraction happens exactly once.
+func (r *Renderer) prepareFrom(scene scenes.Producer) {
+	scene.Extract(&r.frame)
+	r.syncDrawList(scene)
 }
 
-// prepareShadows ensures each shadow-casting directional light has a depth map and an
-// orthographic camera fitted to the camera's view frustum. Runs before the scene
-// derives its light table, so the table can carry each light's shadow map index +
-// view-projection.
-func (r *Renderer) prepareShadows(scene *Scene, cam Camera) {
+func (r *Renderer) syncDrawList(scene scenes.Producer) {
+	dl := r.stateFor(scene.ID()).dl
+	p := &r.frame
+
+	// The transform buffer is the renderer's, so the renderer fills it. The producer
+	// only says whether the matrices moved; a frame where nothing did writes nothing.
+	//
+	// A state seeing its first packet uploads regardless: the dirty flag reports change
+	// since the last EXTRACTION, which a cache created just now never saw. Without this
+	// a source released and then drawn again would render from an unwritten buffer,
+	// because the producer has no idea its consumer went away.
+	if p.TransformsDirty || !dl.worldBuf.IsValid() {
+		dl.sync(p.Transforms.Data, p.InstanceTransforms.Data)
+	}
+
+	// Resolve one pipeline per DISTINCT material, reading everything from the pool the
+	// material's identity names. This is the only place the packet's resource
+	// identities are turned back into renderer objects.
+	dl.matPipe = dl.matPipe[:0]
+	dl.matPool = dl.matPool[:0]
+	dl.matBlend = dl.matBlend[:0]
+	for _, id := range p.Materials.Data {
+		pool := r.MaterialStore.PoolAt(id.Pool)
+		blend := pool.Blend(id.Slot)
+		dl.matPool = append(dl.matPool, pool)
+		dl.matBlend = append(dl.matBlend, blend)
+		dl.matPipe = append(dl.matPipe, r.pipelineForPool(pool, pool.Cull(id.Slot), blend))
+	}
+	if dl.builtRevision == p.Meshes.Revision && slices.Equal(dl.matPipe, dl.batchedMatPipe) {
+		return
+	}
+	dl.expand(p)
+	dl.rebuild(r.GeometryStore)
+	dl.builtRevision = p.Meshes.Revision
+	dl.batchedMatPipe = append(dl.batchedMatPipe[:0], dl.matPipe...)
+}
+
+// prepareShadows gives every casting light in the packet the resources it asked for —
+// a depth map, a camera aimed or fitted for this frame — and retires the resources of
+// lights that stopped casting. Runs before the light table is packed, so the table can
+// carry each light's map index and view-projection.
+//
+// The packet says only which lights cast and at what resolution. Everything here —
+// which projection, where it points, how it is fitted to the view, what the depth bias
+// works out to in normalized units — is the renderer's, because all of it depends on
+// the view being rendered and on caster bounds the producer does not track.
+func (r *Renderer) prepareShadows(st *renderState, p *scenes.FramePacket, cam Camera) {
 	if r.shadowSampler.H == 0 {
 		r.shadowSampler = r.backend.CreateSampler(gpu.SamplerDescriptor{
 			MinLinear: true, MagLinear: true,
@@ -1048,41 +1165,106 @@ func (r *Renderer) prepareShadows(scene *Scene, cam Camera) {
 			Label:   "shadow-cmp",
 		})
 	}
-	for _, l := range scene.pointLights {
-		s := l.shadow
-		if s == nil {
+
+	// Point lights first: they are aimed from the light alone and need no scene bounds.
+	var needsFit bool
+	for _, l := range p.Lights.Data {
+		if !l.CastsShadow {
 			continue
 		}
-		aimPointShadow(r.TextureStore, s, l)
+		if l.Kind != scenes.LightPoint {
+			needsFit = true
+			continue
+		}
+		sh := st.shadowFor(l.ID)
+		sh.seen = true
+		r.aimPointShadow(sh, l)
 	}
-	if len(scene.dirLights) == 0 && len(scene.spotLights) == 0 {
+	if !needsFit {
+		st.retireUnseenShadows()
 		return
 	}
-	sceneCenter, sceneRadius := scene.FrameSphere(1.0)
+
+	center, radius := casterBounds(p)
 	corners := frustumCornersWorld(cam.ViewProjection())
-	for _, l := range scene.dirLights {
-		s := l.shadow
-		if s == nil {
+	for _, l := range p.Lights.Data {
+		if !l.CastsShadow || l.Kind == scenes.LightPoint {
 			continue
 		}
-		s.ensureMap(r.TextureStore)
-		r.fitDirectionalShadow(s, l.Direction, cam.Position(), corners, sceneCenter, sceneRadius)
-	}
-	for _, l := range scene.spotLights {
-		s := l.shadow
-		if s == nil {
-			continue
+		sh := st.shadowFor(l.ID)
+		sh.seen = true
+		switch l.Kind {
+		case scenes.LightDirectional:
+			sh.ensureOrtho()
+			sh.ensureMap(r.TextureStore, requestedSize(l))
+			r.fitDirectionalShadow(sh, l, cam.Position(), corners, center, radius)
+		case scenes.LightSpot:
+			sh.ensurePerspective(l.Angle, l.Range)
+			sh.ensureMap(r.TextureStore, requestedSize(l))
+			aimSpotShadow(sh, l)
 		}
-		s.ensureMap(r.TextureStore)
-		aimSpotShadow(s, l)
 	}
+	st.retireUnseenShadows()
+}
+
+// casterBounds is the world-space sphere enclosing everything the packet draws, which
+// is what a directional shadow falls back to when the view frustum slice is larger than
+// the scene. Derived from the packet rather than asked of the producer: the renderer
+// already holds the bounds and the transforms, and a custom producer should not have to
+// implement a bounding-volume query to get shadows.
+//
+// Recomputed per frame for now. The specification calls for caching this and
+// invalidating it on caster changes; that is worth doing when it measures, not before.
+func casterBounds(p *scenes.FramePacket) (glm.Vec3f, float32) {
+	var lo, hi glm.Vec3f
+	first := true
+	reach := func(t uint32, b glm.Sphere) {
+		m := transformAt(p, t)
+		c := m.Mul4x1(glm.Vec4f{b.Center[0], b.Center[1], b.Center[2], 1})
+		// A world matrix may scale, so the radius scales with the largest axis.
+		sx := glm.Vec3f{m[0], m[1], m[2]}.Length()
+		sy := glm.Vec3f{m[4], m[5], m[6]}.Length()
+		sz := glm.Vec3f{m[8], m[9], m[10]}.Length()
+		rr := b.Radius * max(sx, max(sy, sz))
+		cmin := glm.Vec3f{c[0] - rr, c[1] - rr, c[2] - rr}
+		cmax := glm.Vec3f{c[0] + rr, c[1] + rr, c[2] + rr}
+		if first {
+			lo, hi, first = cmin, cmax, false
+			return
+		}
+		lo = glm.Vec3f{min(lo[0], cmin[0]), min(lo[1], cmin[1]), min(lo[2], cmin[2])}
+		hi = glm.Vec3f{max(hi[0], cmax[0]), max(hi[1], cmax[1]), max(hi[2], cmax[2])}
+	}
+	for _, m := range p.Meshes.Data {
+		for j := uint32(0); j < m.Transforms.Count; j++ {
+			reach(m.Transforms.First+j, m.Bounds)
+		}
+	}
+	if first {
+		return glm.Vec3f{}, 0
+	}
+	center := lo.Add(hi).Scale(0.5)
+	return center, hi.Sub(center).Length()
+}
+
+// transformAt resolves a packet transform index, which addresses the node matrices
+// followed by the instance matrices as one array (see FramePacket.InstanceTransforms).
+func transformAt(p *scenes.FramePacket, i uint32) glm.Mat4f {
+	n := uint32(len(p.Transforms.Data))
+	if i < n {
+		return p.Transforms.Data[i]
+	}
+	if k := i - n; k < uint32(len(p.InstanceTransforms.Data)) {
+		return p.InstanceTransforms.Data[k]
+	}
+	return glm.Mat4Identity[float32]()
 }
 
 // aimPointShadow allocates (once) and re-aims a point light's six cube-face shadow
 // cameras from the light's current position and range.
-func aimPointShadow(textureStore *textures.Store, s *LightShadow, l *PointLight) {
-	s.updateLocalBias(l.Range)
-	s.ensureFaceMaps(textureStore)
+func (r *Renderer) aimPointShadow(s *shadowResource, l scenes.LightPacket) {
+	s.ensureFaceMaps(r.TextureStore, requestedSize(l))
+	s.updateLocalBias(l.Range, l.ShadowBias)
 	for i := range s.faces {
 		f := &s.faces[i]
 		c, ok := f.cam.(interface {
@@ -1103,8 +1285,8 @@ func aimPointShadow(textureStore *textures.Store, s *LightShadow, l *PointLight)
 
 // aimSpotShadow re-aims a spot light's perspective shadow camera from the light's
 // current position/direction/cone/range (all mutable each frame).
-func aimSpotShadow(s *LightShadow, l *SpotLight) {
-	c, ok := s.Camera.(interface {
+func aimSpotShadow(s *shadowResource, l scenes.LightPacket) {
+	c, ok := s.cam.(interface {
 		SetPosition(glm.Vec3f)
 		SetTarget(glm.Vec3f)
 		SetUp(glm.Vec3f)
@@ -1124,7 +1306,7 @@ func aimSpotShadow(s *LightShadow, l *SpotLight) {
 	c.SetUp(up)
 	c.SetFOV(glm.ToDegrees(2 * l.Angle))
 	c.SetFar(l.Range)
-	s.updateLocalBias(l.Range)
+	s.updateLocalBias(l.Range, l.ShadowBias)
 }
 
 // frustumCornersWorld returns the 8 world-space corners of the frustum described by
@@ -1157,8 +1339,8 @@ func frustumCornersWorld(viewProj glm.Mat4f) [8]glm.Vec3f {
 // view. The eye is pulled back along -dir across the scene so occluders between the
 // light and the frustum are still captured, and the center is snapped to the shadow
 // texel grid so edges don't crawl as the camera moves.
-func (r *Renderer) fitDirectionalShadow(s *LightShadow, dir, eye glm.Vec3f, corners [8]glm.Vec3f, sceneCenter glm.Vec3f, sceneRadius float32) {
-	f, ok := s.Camera.(interface {
+func (r *Renderer) fitDirectionalShadow(s *shadowResource, l scenes.LightPacket, eye glm.Vec3f, corners [8]glm.Vec3f, sceneCenter glm.Vec3f, sceneRadius float32) {
+	f, ok := s.cam.(interface {
 		SetPosition(glm.Vec3f)
 		SetTarget(glm.Vec3f)
 		SetUp(glm.Vec3f)
@@ -1168,7 +1350,7 @@ func (r *Renderer) fitDirectionalShadow(s *LightShadow, dir, eye glm.Vec3f, corn
 	if !ok {
 		return
 	}
-	d := dir.Normalize()
+	d := l.Direction.Normalize()
 
 	// Cap the frustum slice at the shadow distance by pulling each far corner back along
 	// its near→far edge. The default tracks the camera's distance to the scene center
@@ -1217,7 +1399,7 @@ func (r *Renderer) fitDirectionalShadow(s *LightShadow, dir, eye glm.Vec3f, corn
 	up = d.Cross(right).Normalize()
 
 	// Snap the center to the shadow texel grid in the light's right/up plane.
-	texel := 2 * radius / float32(s.Size())
+	texel := 2 * radius / float32(s.size)
 	if texel > 0 {
 		cx := snap(center.Dot(right), texel)
 		cy := snap(center.Dot(up), texel)
@@ -1234,7 +1416,7 @@ func (r *Renderer) fitDirectionalShadow(s *LightShadow, dir, eye glm.Vec3f, corn
 	f.SetClip(near, far) // depth spans the whole scene toward the light
 
 	// The renderer decides where the camera goes; the shadow owns the derived bias.
-	s.updateOrthoBias(radius, far-near)
+	s.updateOrthoBias(radius, far-near, l.ShadowBias)
 }
 
 // avgCorners averages the 4 frustum corners starting at base (0 = near, 4 = far).
@@ -1286,7 +1468,7 @@ func snap(x, step float32) float32 {
 // the same main-camera eye, not the shadow light's own position, since LOD is a
 // main-camera-relative decision regardless of which view is culling this frame. No
 // barrier — the caller batches all views behind one.
-func (r *Renderer) cullInto(cmd gpu.CommandBuffer, dl *drawList, indirect, visible gpu.Buffer, planes [6][4]float32, castersOnly uint32, eye glm.Vec3f) {
+func (r *Renderer) cullInto(cmd gpu.CommandBuffer, dl *drawList, indirect, visible gpu.Buffer, planes [6]glm.Vec4f, castersOnly uint32, eye glm.Vec3f) {
 	writeAt(indirect, 0, toBytes(dl.template))
 	cr := cullRoot{
 		drawables: dl.drawableBuf.Addr, models: dl.worldBuf.Addr, indirect: indirect.Addr,
@@ -1307,13 +1489,12 @@ func (r *Renderer) cullInto(cmd gpu.CommandBuffer, dl *drawList, indirect, visib
 //
 // Every skinned mesh is dispatched regardless of visibility — a v1 simplification;
 // a scene with many off-screen skinned meshes pays for all of them.
-func (r *Renderer) skinCommands(scene *Scene) []skinCmd {
+func (r *Renderer) skinCommands(p *scenes.FramePacket) []skinCmd {
 	r.skinScratch = r.skinScratch[:0]
-	for _, sm := range scene.skinnedMeshes.All() {
-		sk := scene.skeletons.Get(sm.skeleton)
+	for _, sp := range p.Skins.Data {
 		r.skinScratch = append(r.skinScratch, skinCmd{
-			srcDesc: sm.srcGeometry.ID().Slot, dstDesc: sm.outputGeo.ID().Slot,
-			jointBase: sk.jointBase, vertexCount: sm.vertCount,
+			srcDesc: sp.Source.Slot, dstDesc: sp.Output.Slot,
+			jointBase: sp.Joints.First, vertexCount: sp.VertexCount,
 		})
 	}
 	return r.skinScratch
@@ -1347,85 +1528,77 @@ func (r *Renderer) dispatchSkinning(cmd gpu.CommandBuffer, dl *drawList, cmds []
 // alive is advanced by the newborn count uploaded this call, never read back down as
 // particles die on the GPU: a deliberate, documented CPU-side over-estimate (see
 // particleData.alive) that trades some capacity headroom for needing no GPU readback.
-func (r *Renderer) dispatchParticleUpdate(cmd gpu.CommandBuffer, scene *Scene) {
-	for i := range scene.particleContainers {
-		d := &scene.particleContainers[i]
-		if scene.flags[d.ownerNode]&flagAttached == 0 {
+func (r *Renderer) dispatchParticleUpdate(cmd gpu.CommandBuffer, st *renderState, p *scenes.FramePacket) {
+	for _, pp := range p.Particles.Data {
+		births := pp.Newborns.Count
+		if pp.Capacity == 0 && births == 0 {
 			continue
 		}
-		pendingCount := uint32(len(d.pending))
-		if d.capacity == 0 && pendingCount == 0 {
-			continue
-		}
-		r.ensureParticleBuffers(scene, d)
+		ps := st.particleFor(pp.ID)
+		ps.seen = true
+		r.ensureParticleBuffers(ps, pp, births)
 
-		if pendingCount > 0 {
-			writeAt(d.pendingBuf, 0, toBytes(d.pending))
+		if births > 0 {
+			writeAt(ps.pendingBuf, 0, toBytes(p.Newborns.Data[pp.Newborns.First:][:births]))
 		}
-		writeAt(d.indirectBuf, 0, utils.ToBytes(&indirectCmd{
-			indexCount: r.GeometryStore.IndexCount(d.geometry.ID().Slot),
-			firstIndex: r.GeometryStore.IndexBase(d.geometry.ID().Slot),
+		writeAt(ps.indirectBuf, 0, utils.ToBytes(&indirectCmd{
+			indexCount: r.GeometryStore.IndexCount(pp.Geometry.Slot),
+			firstIndex: r.GeometryStore.IndexBase(pp.Geometry.Slot),
 		}))
 
-		dt := d.dt
-		d.dt, d.dtStaged = 0, false
-
 		var pendingAddr uint64
-		if pendingCount > 0 {
-			pendingAddr = d.pendingBuf.Addr
+		if births > 0 {
+			pendingAddr = ps.pendingBuf.Addr
 		}
 		ur := particleUpdateRoot{
-			src: d.buffers[d.current].Addr, dst: d.buffers[1-d.current].Addr,
-			pending: pendingAddr, indirect: d.indirectBuf.Addr,
-			capacity: d.capacity, pendingCount: pendingCount, dt: dt,
-			gravity: d.update.Gravity, drag: d.update.Drag,
+			src: ps.buffers[ps.current].Addr, dst: ps.buffers[1-ps.current].Addr,
+			pending: pendingAddr, indirect: ps.indirectBuf.Addr,
+			capacity: pp.Capacity, pendingCount: births, dt: pp.DT,
+			gravity: pp.Update.Gravity, drag: pp.Update.Drag,
 		}
-		if d.update.SizeOverLife.Enabled {
-			ur.sizeEnabled, ur.sizeStart, ur.sizeEnd = 1, d.update.SizeOverLife.Start, d.update.SizeOverLife.End
+		if pp.Update.SizeOverLife.Enabled {
+			ur.sizeEnabled, ur.sizeStart, ur.sizeEnd = 1, pp.Update.SizeOverLife.Start, pp.Update.SizeOverLife.End
 		}
-		if d.update.OpacityOverLife.Enabled {
-			ur.opacityEnabled, ur.opacityStart, ur.opacityEnd = 1, d.update.OpacityOverLife.Start, d.update.OpacityOverLife.End
+		if pp.Update.OpacityOverLife.Enabled {
+			ur.opacityEnabled, ur.opacityStart, ur.opacityEnd = 1, pp.Update.OpacityOverLife.Start, pp.Update.OpacityOverLife.End
 		}
-		threads := d.capacity + pendingCount
+		threads := pp.Capacity + births
 		cmd.SetPipeline(r.particleUpdatePipeline)
 		cmd.Dispatch(utils.ToBytes(&ur), (threads+63)/64, 1, 1)
 
-		d.current = 1 - d.current
-		d.alive += pendingCount
-		d.pending = d.pending[:0]
+		ps.current = 1 - ps.current
 	}
+	st.retireUnseenParticles(r.backend)
 }
 
-// ensureParticleBuffers allocates a container's ping-pong particle buffers and
-// indirect-draw args on first use (sized to capacity, which is fixed at
-// construction), and grows the pending scratch buffer to fit this frame's newborns.
-// A fresh or Cleared container's particle buffers are zeroed so every slot starts
-// dead (age 0 >= lifetime 0) rather than reading whatever was in freshly allocated
-// memory — see particle_update.comp.glsl.
-func (r *Renderer) ensureParticleBuffers(scene *Scene, d *particleData) {
-	if !d.buffersReady {
-		size := max(uint64(d.capacity)*uint64(particleRecordSize), 1)
-		for i := range d.buffers {
-			if !d.buffers[i].IsValid() || d.buffers[i].Size < size {
-				if d.buffers[i].IsValid() {
-					scene.backend.Free(d.buffers[i])
+// ensureParticleBuffers allocates a system's ping-pong particle buffers and
+// indirect-draw args on first use (sized to capacity, fixed at construction), and grows
+// the newborn scratch buffer to fit this frame's births. A fresh or cleared system's
+// particle buffers are zeroed so every slot starts dead (age 0 >= lifetime 0) rather
+// than reading whatever was in freshly allocated memory — see particle_update.comp.glsl.
+func (r *Renderer) ensureParticleBuffers(ps *particleState, pp scenes.ParticlePacket, births uint32) {
+	if !ps.ready || ps.epoch != pp.Epoch {
+		size := max(uint64(pp.Capacity)*uint64(particleRecordSize), 1)
+		for i := range ps.buffers {
+			if !ps.buffers[i].IsValid() || ps.buffers[i].Size < size {
+				if ps.buffers[i].IsValid() {
+					r.backend.Free(ps.buffers[i])
 				}
-				d.buffers[i] = scene.backend.Alloc(size, gpu.MemoryHost, "particles")
+				ps.buffers[i] = r.backend.Alloc(size, gpu.MemoryHost, "particles")
 			}
-			clear(unsafe.Slice((*byte)(d.buffers[i].Ptr), d.buffers[i].Size))
+			clear(unsafe.Slice((*byte)(ps.buffers[i].Ptr), ps.buffers[i].Size))
 		}
-		if !d.indirectBuf.IsValid() {
-			d.indirectBuf = scene.backend.Alloc(uint64(indirectSize), gpu.MemoryHost, "particles-indirect")
+		if !ps.indirectBuf.IsValid() {
+			ps.indirectBuf = r.backend.Alloc(uint64(indirectSize), gpu.MemoryHost, "particles-indirect")
 		}
-		d.current = 0
-		d.buffersReady = true
+		ps.current, ps.ready, ps.epoch = 0, true, pp.Epoch
 	}
-	if n := uint32(len(d.pending)); n > 0 {
-		if size := uint64(n) * uint64(particleRecordSize); !d.pendingBuf.IsValid() || d.pendingBuf.Size < size {
-			if d.pendingBuf.IsValid() {
-				scene.backend.Free(d.pendingBuf)
+	if births > 0 {
+		if size := uint64(births) * uint64(particleRecordSize); !ps.pendingBuf.IsValid() || ps.pendingBuf.Size < size {
+			if ps.pendingBuf.IsValid() {
+				r.backend.Free(ps.pendingBuf)
 			}
-			d.pendingBuf = scene.backend.Alloc(size, gpu.MemoryHost, "particles-pending")
+			ps.pendingBuf = r.backend.Alloc(size, gpu.MemoryHost, "particles-pending")
 		}
 	}
 }
@@ -1437,28 +1610,26 @@ func (r *Renderer) ensureParticleBuffers(scene *Scene, d *particleData) {
 // shaders — see basic_particle.go) and draws directly — unlike meshes, containers
 // are never batched into drawList's multi-draw-indirect runs (one geometry/material
 // per container already, so there is nothing to batch).
-func (r *Renderer) drawParticles(cmd gpu.CommandBuffer, scene *Scene, viewProj glm.Mat4f, eye glm.Vec3f) {
+func (r *Renderer) drawParticles(cmd gpu.CommandBuffer, st *renderState, p *scenes.FramePacket, viewProj glm.Mat4f, eye glm.Vec3f) {
 	idx := r.GeometryStore.IndexBuffer()
-	for i := range scene.particleContainers {
-		d := &scene.particleContainers[i]
-		if scene.flags[d.ownerNode]&flagAttached == 0 || !d.buffersReady {
+	for _, pp := range p.Particles.Data {
+		ps, ok := st.particles[pp.ID]
+		if !ok || !ps.ready {
 			continue
 		}
-		if !d.pipelineValid {
-			d.pipelineIdx = r.pipelineForMaterial(d.material)
-			d.pipelineValid = true
-		}
+		id := p.Materials.Data[pp.Material]
+		pool := r.MaterialStore.PoolAt(id.Pool)
 		dr := particleDrawRoot{
 			viewProj: viewProj,
 			pos:      r.GeometryStore.PositionsAddr(), attr: r.GeometryStore.AttributesAddr(), descs: r.GeometryStore.DescriptorsAddr(),
-			models: scene.drawList.worldBuf.Addr, particles: d.buffers[d.current].Addr,
-			materials: d.material.Pool().RecordsAddr(), lights: scene.lights.Addr(),
+			models: st.dl.worldBuf.Addr, particles: ps.buffers[ps.current].Addr,
+			materials: pool.RecordsAddr(), lights: st.lights.Addr(),
 			eye:        glm.Vec4f{eye[0], eye[1], eye[2], 1},
-			geometryID: d.geometry.ID().Slot, materialID: d.material.ID().Slot, transformID: d.ownerNode,
-			time: scene.elapsed,
+			geometryID: pp.Geometry.Slot, materialID: id.Slot, transformID: pp.Transform,
+			time: p.Time,
 		}
-		cmd.SetPipeline(r.drawPipelines[d.pipelineIdx])
-		cmd.DrawIndexedIndirect(utils.ToBytes(&dr), idx, gpu.IndexUint32, d.indirectBuf, 0, 1, indirectSize)
+		cmd.SetPipeline(r.drawPipelines[r.pipelineForPool(pool, pool.Cull(id.Slot), pool.Blend(id.Slot))])
+		cmd.DrawIndexedIndirect(utils.ToBytes(&dr), idx, gpu.IndexUint32, ps.indirectBuf, 0, 1, indirectSize)
 	}
 }
 
@@ -1510,7 +1681,7 @@ func (r *Renderer) fillDrawRoots(dl *drawList, viewProj glm.Mat4f, eye glm.Vec3f
 			models:        dl.worldBuf.Addr,
 			drawables:     dl.drawableBuf.Addr,
 			visible:       dl.visibleBuf.Addr,
-			materials:     run.mat.Pool().RecordsAddr(),
+			materials:     run.pool.RecordsAddr(),
 			lights:        lightsAddr,
 			eye:           glm.Vec4f{eye[0], eye[1], eye[2], 1},
 			shadowSampler: r.shadowSampler.Index,
@@ -1654,6 +1825,9 @@ func flipClipY(m glm.Mat4f) glm.Mat4f {
 
 // Destroy releases the renderer's GPU resources and the backend it owns.
 func (r *Renderer) Destroy() {
+	for id := range r.sources {
+		r.ReleaseSource(id)
+	}
 	if r.overlay != nil {
 		r.overlay.destroy()
 	}

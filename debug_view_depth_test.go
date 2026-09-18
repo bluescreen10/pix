@@ -6,6 +6,7 @@ import (
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/scenes"
 )
 
 // TestDepthDebugPolarity confirms near reads dark, far reads brighter, and background
@@ -23,7 +24,7 @@ func TestDepthDebugPolarity(t *testing.T) {
 	}
 	defer r.Destroy()
 	r.EnableDeferredRendering(true)
-	scene := r.NewScene()
+	scene := scenes.New()
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
 
