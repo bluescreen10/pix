@@ -486,7 +486,7 @@ func (l *loader) loadSkins() {
 
 		invBind := make([]glm.Mat4f, n)
 		for i := range invBind {
-			invBind[i] = glm.Mat4fIndentity
+			invBind[i] = glm.Mat4fIdentity
 		}
 		if sk.InverseBindMatrices != nil {
 			m := castTo[glm.Mat4f](l.accessorBytes(*sk.InverseBindMatrices))
@@ -524,7 +524,7 @@ func (l *loader) relativeMatrix(idx, stopAt int) glm.Mat4f {
 	for cur := idx; cur != stopAt && cur != -1; cur = l.parent[cur] {
 		chain = append(chain, cur)
 	}
-	m := glm.Mat4fIndentity
+	m := glm.Mat4fIdentity
 	for i := len(chain) - 1; i >= 0; i-- {
 		m = m.Mul4x4(nodeLocalMatrix(l.doc.Nodes[chain[i]]))
 	}

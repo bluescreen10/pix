@@ -293,8 +293,8 @@ func (s *Scene) allocNode(kind NodeKind) NodeID {
 		s.lastChildren = append(s.lastChildren, NodeID{})
 		s.nextSiblings = append(s.nextSiblings, NodeID{})
 		s.prevSiblings = append(s.prevSiblings, NodeID{})
-		s.local = append(s.local, glm.Mat4fIndentity)
-		s.world = append(s.world, glm.Mat4fIndentity)
+		s.local = append(s.local, glm.Mat4fIdentity)
+		s.world = append(s.world, glm.Mat4fIdentity)
 		s.transforms = append(s.transforms, defaultTransform)
 		s.flags = append(s.flags, flagAlive|flagLocalVisible|flagCastShadow|flagReceiveShadow|flagDirty|flagVisibleDirty)
 		s.generation = append(s.generation, 1)
@@ -319,8 +319,8 @@ func (s *Scene) resetSlot(idx uint32, kind NodeKind) {
 	s.lastChildren[idx] = NodeID{}
 	s.nextSiblings[idx] = NodeID{}
 	s.prevSiblings[idx] = NodeID{}
-	s.local[idx] = glm.Mat4fIndentity
-	s.world[idx] = glm.Mat4fIndentity
+	s.local[idx] = glm.Mat4fIdentity
+	s.world[idx] = glm.Mat4fIdentity
 	s.transforms[idx] = defaultTransform
 	s.flags[idx] = flagAlive | flagLocalVisible | flagCastShadow | flagReceiveShadow | flagDirty | flagVisibleDirty
 	s.kind[idx] = kind

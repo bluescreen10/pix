@@ -46,7 +46,7 @@ func twoBoneSkeleton() scenes.SkeletonConfig {
 		Names:   []string{"base", "tip"},
 		Parents: []int32{-1, 0},
 		InverseBind: []glm.Mat4f{
-			glm.Mat4fIndentity,
+			glm.Mat4fIdentity,
 			glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatIdentityf, glm.Vec3f{0, -2, 0}),
 		},
 		BindPose: []scenes.Transform{
