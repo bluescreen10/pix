@@ -4,6 +4,7 @@ import (
 	"sort"
 
 	"github.com/bluescreen10/gamekit/gpu"
+	"github.com/bluescreen10/gamekit/utils"
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
@@ -107,10 +108,10 @@ func (d *drawList) sync(world, instances []glm.Mat4f) {
 		d.worldBuf = d.backend.Alloc(uint64(d.worldCap)*64, gpu.MemoryHost, "world")
 	}
 	if len(world) > 0 {
-		writeAt(d.worldBuf, 0, toBytes(world))
+		d.worldBuf.Write(utils.ToBytesSlice(world), 0)
 	}
 	if len(instances) > 0 {
-		writeAt(d.worldBuf, uint32(len(world))*64, toBytes(instances))
+		d.worldBuf.Write(utils.ToBytesSlice(instances), uint64(len(world))*64)
 	}
 }
 
@@ -273,13 +274,13 @@ func (d *drawList) rebuild(geometryStore *geometries.Store) {
 	d.lodCount = uint32(len(lodEntries))
 	d.ensureBuffers()
 	if len(drawables) > 0 {
-		writeAt(d.drawableBuf, 0, toBytes(drawables))
+		d.drawableBuf.Write(utils.ToBytesSlice(drawables), 0)
 	}
 	if len(d.regions) > 0 {
-		writeAt(d.regionBuf, 0, toBytes(d.regions))
+		d.regionBuf.Write(utils.ToBytesSlice(d.regions), 0)
 	}
 	if len(lodEntries) > 0 {
-		writeAt(d.lodTableBuf, 0, toBytes(lodEntries))
+		d.lodTableBuf.Write(utils.ToBytesSlice(lodEntries), 0)
 	}
 	// Reset every slot's hysteresis state: a structural change may have added,
 	// removed, or reassigned lodID/lodLevel, so stale "level shown last frame" state
@@ -294,7 +295,7 @@ func (d *drawList) rebuild(geometryStore *geometries.Store) {
 	for i := range d.lodScratch {
 		d.lodScratch[i] = lodNoneSentinel
 	}
-	writeAt(d.prevLevelBuf, 0, toBytes(d.lodScratch))
+	d.prevLevelBuf.Write(utils.ToBytesSlice(d.lodScratch), 0)
 }
 
 // ensureBuffers owns every buffer the draw list allocates. The count-dependent ones

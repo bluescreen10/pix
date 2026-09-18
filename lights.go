@@ -8,6 +8,7 @@ import (
 	"unsafe"
 
 	"github.com/bluescreen10/gamekit/gpu"
+	"github.com/bluescreen10/gamekit/utils"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
@@ -212,7 +213,7 @@ func (l *Lights) Sync() {
 	if !l.dirty {
 		return
 	}
-	writeAt(l.buf, 0, unsafe.Slice((*byte)(unsafe.Pointer(&l.data)), lightsSize))
+	l.buf.Write(utils.ToBytes(&l.data), 0)
 	l.dirty = false
 }
 

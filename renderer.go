@@ -553,7 +553,7 @@ func (st *renderState) syncJoints(backend gpu.Backend, joints []glm.Mat4f) uint6
 		st.jointsCap = max(n*2, 1)
 		st.joints = backend.Alloc(uint64(st.jointsCap)*64, gpu.MemoryHost, "joints")
 	}
-	writeAt(st.joints, 0, toBytes(joints))
+	st.joints.Write(utils.ToBytesSlice(joints), 0)
 	return st.joints.Addr
 }
 
@@ -1473,7 +1473,7 @@ func snap(x, step float32) float32 {
 // main-camera-relative decision regardless of which view is culling this frame. No
 // barrier — the caller batches all views behind one.
 func (r *Renderer) cullInto(cmd gpu.CommandBuffer, dl *drawList, indirect, visible gpu.Buffer, planes [6]glm.Vec4f, castersOnly uint32, eye glm.Vec3f) {
-	writeAt(indirect, 0, toBytes(dl.template))
+	indirect.Write(utils.ToBytesSlice(dl.template), 0)
 	cr := cullRoot{
 		drawables: dl.drawableBuf.Addr, models: dl.worldBuf.Addr, indirect: indirect.Addr,
 		regions: dl.regionBuf.Addr, visible: visible.Addr,
@@ -1543,12 +1543,13 @@ func (r *Renderer) dispatchParticleUpdate(cmd gpu.CommandBuffer, st *renderState
 		r.ensureParticleBuffers(ps, pp, births)
 
 		if births > 0 {
-			writeAt(ps.pendingBuf, 0, toBytes(p.Newborns.Data[pp.Newborns.First:][:births]))
+			ps.pendingBuf.Write(utils.ToBytesSlice(p.Newborns.Data[pp.Newborns.First:][:births]), 0)
 		}
-		writeAt(ps.indirectBuf, 0, utils.ToBytes(&indirectCmd{
+		data := utils.ToBytes(&indirectCmd{
 			indexCount: r.GeometryStore.IndexCount(pp.Geometry.Slot),
 			firstIndex: r.GeometryStore.IndexBase(pp.Geometry.Slot),
-		}))
+		})
+		ps.indirectBuf.Write(data, 0)
 
 		var pendingAddr uint64
 		if births > 0 {
