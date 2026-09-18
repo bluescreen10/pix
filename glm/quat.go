@@ -158,4 +158,4 @@ func Slerp(q1, q2 Quatf, t float32) Quatf {
 // aliases
 type Quatf = Quat[float32]
 
-var QuatIdentityf = QuatIdentity[float32]()
+var QuatfIdentity = QuatIdentity[float32]()

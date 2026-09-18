@@ -9,7 +9,7 @@
 // position/attribute streams (allocated once at SkinnedMesh creation — see
 // geometrySystem.createSkinOutput in geometry.go). Output is in skeleton-local
 // space (joints already carry rootWorldInv * boneWorld * invBind — see
-// Scene.syncSkinning), so the drawable's own transformID (the skeleton root node)
+// Scene.updateSkinning), so the drawable's own transformID (the skeleton root node)
 // applies the remaining world transform exactly like static geometry:
 // scene_cull.comp / scene_draw.vert / scene_shadow.vert are untouched by skinning.
 // One dispatch per skinned mesh (see Renderer.dispatchSkinning).

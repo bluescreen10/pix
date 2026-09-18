@@ -58,7 +58,7 @@ func (m Mesh) SetMaterial(mat materials.Material) {
 	newRef := mat.Copy()
 	md.lods[0].material.Release()
 	md.lods[0].material = newRef
-	m.scene.drawableDirty = true
+	m.scene.packetDirty = true
 }
 
 // BoundingSphere returns the mesh's local bounding sphere.
@@ -86,7 +86,7 @@ func (m Mesh) AddLOD(geo geometries.Geometry, mat materials.Material, minDistanc
 		panic("pix: Mesh.AddLOD levels must be added in increasing minDistance order")
 	}
 	md.lods = append(md.lods, lodLevel{geometry: geo.Copy(), material: mat.Copy(), minDistance: minDistance})
-	m.scene.drawableDirty = true
+	m.scene.packetDirty = true
 	return m
 }
 
@@ -97,7 +97,7 @@ func (m Mesh) SetLODHysteresis(h float32) Mesh {
 	md := m.data()
 	md.hysteresis = h
 	if len(md.lods) > 1 {
-		m.scene.drawableDirty = true
+		m.scene.packetDirty = true
 	}
 	return m
 }
@@ -105,7 +105,7 @@ func (m Mesh) SetLODHysteresis(h float32) Mesh {
 // NewMesh creates a mesh node from a geometry + material (both renderer-owned). The
 // scene takes its own references (Copy), so the caller may Release theirs.
 func (s *Scene) NewMesh(geo geometries.Geometry, mat materials.Material) Mesh {
-	id := s.allocNode(KindMesh)
+	id := s.allocNode(kindMesh)
 	payloadIdx := uint32(len(s.meshes))
 	s.meshes = append(s.meshes, meshData{
 		lods:      []lodLevel{{geometry: geo.Copy(), material: mat.Copy()}},
@@ -113,6 +113,6 @@ func (s *Scene) NewMesh(geo geometries.Geometry, mat materials.Material) Mesh {
 		ownerNode: id.index,
 	})
 	s.payload[id.index] = payloadIdx
-	s.drawableDirty = true
+	s.packetDirty = true
 	return Mesh{Node{scene: s, id: id}}
 }

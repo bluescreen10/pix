@@ -1,12 +1,9 @@
-// Package scenes is a scene graph: a hierarchy of nodes with transforms, meshes,
+// Package scenes provides a scene graph: a hierarchy of nodes with transforms, meshes,
 // instanced and skinned meshes, lights, particle systems and decals.
 //
-// It owns no GPU state and imports no renderer. What a renderer needs is published by
-// Scene.Extract as a FramePacket of plain data, and everything derived from that —
-// buffers, pipelines, shadow maps, simulation state — belongs to whoever consumes it.
 // A Scene is therefore one possible producer of frames rather than a required one; the
-// Producer interface in packet.go is the whole contract, and an ECS of your own can
-// satisfy it without any of this package's types.
+// Producer interface is the whole contract, and an ECS can satisfy it without using
+// any of this package's types.
 package scenes
 
 import (
@@ -18,45 +15,41 @@ import (
 	"github.com/bluescreen10/pix/materials"
 )
 
-const invalidIdx = ^uint32(0)
+const invalidIndex = ^uint32(0)
 
-// NodeKind tags a node's payload table.
-type NodeKind uint8
+// nodeKind tags a node's payload table.
+type nodeKind uint8
 
 const (
-	KindGroup NodeKind = iota
-	KindMesh
-	KindInstancedMesh
-	KindInstance
-	KindBone
-	KindSkeleton
-	KindSkinnedMesh
-	KindAmbientLight
-	KindDirectionalLight
-	KindSpotLight
-	KindPointLight
-	KindParticleContainer
+	kindGroup nodeKind = iota
+	kindMesh
+	kindInstancedMesh
+	kindBone
+	kindSkeleton
+	kindSkinnedMesh
+	kindParticleContainer
 )
 
-// NodeFlags is the per-node flag bitset.
-type NodeFlags uint32
+// nodeFlags is the per-node flag bitset.
+type nodeFlags uint32
 
 const (
-	flagAlive NodeFlags = 1 << iota
+	flagAlive nodeFlags = 1 << iota
 	flagCastShadow
 	flagReceiveShadow
-	flagDirty
+	flagTransformDirty
 	flagLocalVisible
 	flagVisibleDirty
 	flagVisible
 	// flagAttached marks a node reachable from the scene root. Maintained by
-	// flushTopoIfDirty, which already computes exactly that set. Only attached
+	// updateTopology, which already computes exactly that set. Only attached
 	// nodes get their world matrix updated, so only attached meshes may draw —
 	// see collectDrawables.
 	flagAttached
 )
 
-// NodeID is a generation-counted handle. Zero value is invalid (gen starts at 1).
+// NodeID is a generation-counted handle. Its zero value is invalid because generations
+// start at 1.
 type NodeID struct {
 	index uint32
 	gen   uint32
@@ -66,170 +59,156 @@ func (id NodeID) isValid() bool {
 	return id.gen != 0
 }
 
-// Scene owns the node scene graph (flat parallel arrays, linked-list hierarchy), the
-// per-node transforms, the mesh/skin/particle payloads (which hold ref-counted handles
-// to renderer-owned geometry and materials), and the scene lights.
-//
-// It owns no GPU state and holds no backend. What a renderer needs is published by
-// Extract as a FramePacket of plain data; everything derived from that — buffers,
-// pipelines, shadow maps, simulation state — belongs to the renderer, cached per
-// Scene.ID. A Scene is therefore one possible producer rather than a required one.
+// Scene manages a node hierarchy, transforms, drawable payloads, and lights. Extract
+// publishes the current rendering description.
 type Scene struct {
-	// sourceID is this scene's identity as a packet producer, minted at construction
-	// and never reused. A renderer keys its per-source GPU cache on it, so a destroyed
-	// scene must not hand its identity to the next one — see FramePacket.Source.
-	sourceID SourceID
+	// root is the permanent root group created with the scene.
+	root NodeID
 
-	parents       []NodeID
+	// parents records each live node's parent. Freed slots use the index as the
+	// next link in the free list.
+	parents []NodeID
+
+	// firstChildren records the first child in each node's sibling list.
 	firstChildren []NodeID
-	lastChildren  []NodeID
-	nextSiblings  []NodeID
-	prevSiblings  []NodeID
 
-	local []glm.Mat4f
-	world []glm.Mat4f
+	// lastChildren records the last child in each node's sibling list.
+	lastChildren []NodeID
 
-	transforms []Transform
+	// nextSiblings links each node to its next sibling.
+	nextSiblings []NodeID
 
-	flags      []NodeFlags
-	generation []uint32
-	kind       []NodeKind
-	payload    []uint32
-	// names is optional, per-node: empty ("") for a node nobody named. Set by a
-	// loader from the source asset (see loaders/gltf) or by a caller via
-	// Node.SetName; not otherwise used or required by anything in the scene graph.
-	names []string
+	// prevSiblings links each node to its previous sibling.
+	prevSiblings []NodeID
 
+	// freeHead is the first reusable node slot, or invalidIndex when none are free.
 	freeHead uint32
 
-	topoOrder []uint32
-	topoDirty bool
-	// topoPos is topoOrder's reverse index: topoPos[idx] is idx's own position in
-	// topoOrder, or invalidIdx if idx has no live entry there (never attached, or
-	// its entry was tombstoned — see detachFromParent/reparent's fast paths).
-	// Rebuilt in full by flushTopoIfDirty, so it stays authoritative even across
-	// fast-path appends that a later full rebuild supersedes.
-	topoPos []uint32
-	// topoHoles counts tombstoned (invalidIdx) entries currently sitting in
-	// topoOrder, put there by detachFromParent's fast path instead of a full
-	// rebuild. Bounded to under half of len(topoOrder) — see detachFromParent —
-	// so a scene that only ever attaches/detaches leaves never grows topoOrder
-	// unboundedly full of dead entries.
-	topoHoles int
-	root      NodeID
+	// local caches each node's local transform matrix.
+	local []glm.Mat4f
 
+	// world caches each node's world-space transform matrix.
+	world []glm.Mat4f
+
+	// transforms stores the editable transform components for each node.
+	transforms []Transform
+
+	// flags stores lifecycle, visibility, shadow, and transform state for each node.
+	flags []nodeFlags
+
+	// generation stores the current generation for each node slot. A NodeID captures
+	// this value when created so validation can reject stale handles after slot reuse.
+	generation []uint32
+
+	// kind identifies the payload table used by each node.
+	kind []nodeKind
+
+	// payload stores each node's index in its kind-specific payload table.
+	payload []uint32
+
+	// names stores optional user-facing node names; an empty string means unnamed.
+	names []string
+
+	// topologyOrder lists attached node slots in parent-before-child order. Detached
+	// leaves may leave invalidIndex tombstones until the next full rebuild.
+	topologyOrder []uint32
+
+	// topologyPositions maps each node slot to its position in topologyOrder, or to
+	// invalidIndex when it has no live entry.
+	topologyPositions []uint32
+
+	// topologyHoles counts invalidIndex tombstones in topologyOrder.
+	topologyHoles int
+
+	// topologyDirty requests a full topology rebuild before the next traversal.
+	topologyDirty bool
+
+	// meshes stores the payload for every regular mesh node.
 	meshes []meshData
 
+	// instancedMeshes stores the payload for every instanced mesh node.
 	instancedMeshes []instancedMeshData
-	// instanceTransforms is a flat, append-only array of per-instance transforms for
-	// every InstancedMesh, separate from s.world (which is one-slot-per-scene-node and
-	// tied to updateTransforms's hierarchy walk — instances have none). Addressed in
-	// drawable transformIDs as if it sits right after s.world — see collectDrawables
-	// and drawList.sync (drawlist.go), which uploads them into one contiguous buffer.
+
+	// instanceTransforms stores per-instance matrices outside the node hierarchy. Frame
+	// packets address them immediately after the node world matrices.
 	instanceTransforms []glm.Mat4f
 
+	// particleContainers stores the payload for every particle container node.
 	particleContainers []particleData
-	// nextParticleID mints stable per-system identities; never reused, because the
-	// renderer's buffers keyed on one ARE that system's simulation state.
-	nextParticleID ParticleID
-	// The cached particle tables Extract publishes. Newborns are DRAINED into
-	// packetNewborns each extraction rather than borrowed — a simulation step has to
-	// happen exactly once.
-	packetParticles []ParticlePacket
-	packetNewborns  []ParticleRecord
 
-	// Skinning: skeletons (bone hierarchies + inverse binds) and skinned meshes
-	// (a source geometry + a compute-derived output geometry, bound to a skeleton).
-	// Both use a Slab rather than swap-remove: skinnedMeshData.skeleton stores a
-	// skeletons slab id, which a swap-remove would silently invalidate.
-	skeletons     mem.Slab[skeletonData]
+	// nextParticleID is the last stable particle-system identity issued by the scene.
+	nextParticleID ParticleID
+
+	// skeletons stores stable slab entries for bone hierarchies and inverse bind data.
+	skeletons mem.Slab[skeletonData]
+
+	// skinnedMeshes stores stable slab entries because each entry refers to a skeleton
+	// by slab ID.
 	skinnedMeshes mem.Slab[skinnedMeshData]
 
-	// packetJoints is every skeleton's current joint palette, laid out one skeleton
-	// after another and rewritten each Sync. Published in the packet; the buffer it is
-	// uploaded into belongs to the renderer.
-	packetJoints []glm.Mat4f
-	// packetSkins is the cached skin table Extract publishes.
-	packetSkins []SkinPacket
+	// fog is the active distance-fog model, or nil when fog is disabled.
+	fog Fog
 
-	// Light objects the scene owns; the flat GPU table (lights) is derived from them
-	// (+ ambient) each frame in Sync.
-	ambient     colors.RGB32F
-	fog         Fog
-	dirLights   []*DirectionalLight
+	// ambient is the scene-wide ambient light term.
+	ambient colors.RGB32F
+
+	// dirLights contains the scene's directional lights.
+	dirLights []*DirectionalLight
+
+	// pointLights contains the scene's point lights.
 	pointLights []*PointLight
-	spotLights  []*SpotLight
-	// nextLightID mints stable per-light identities. Never reused, so a renderer's
-	// shadow resources can be keyed on one without a dead light's map being inherited.
+
+	// spotLights contains the scene's spot lights.
+	spotLights []*SpotLight
+
+	// nextLightID is the last stable light identity issued by the scene.
 	nextLightID LightID
-	// packetLights is the cached light table Extract publishes, refilled each
-	// extraction: lights are a handful of mutable value objects, so polling them is
-	// cheaper than tracking dirtiness (see docs/frame-packet.md).
-	packetLights []LightPacket
 
-	drawableDirty bool
-
-	// The cached rendering description Extract publishes, rebuilt only when the scene
-	// changes structurally (drawableDirty) and borrowed by every packet in between —
-	// which is what makes extracting an unchanged scene cost slice headers rather than
-	// a walk. See extract.go.
-	//
-	// packetMaterials is the DISTINCT set of materials the meshes reference; a mesh
-	// names one by its slot here. The indirection is what keeps a material edit from
-	// dirtying the mesh table, and what makes the renderer's pipeline work proportional
-	// to materials in play rather than objects on screen.
-	packetMeshes    []MeshPacket
-	packetLODs      []LODLevel
-	packetMaterials []materials.ID
-	// meshRevision advances whenever the three tables above are rebuilt, so a consumer
-	// can tell at a glance whether anything it cached is stale.
-	meshRevision uint64
-	// matSlot is the rebuild's dedup scratch, keyed by material identity and reused
-	// across rebuilds so the walk does not allocate a map every time.
+	// matSlot maps material identities to packet.Materials slots while rebuilding the
+	// packet and is retained to avoid repeated allocation.
 	matSlot map[materials.ID]uint32
 
-	// transformsDirty says the world matrices changed since the last extraction, so
-	// whoever uploads them knows to. The scene no longer uploads them itself: the
-	// buffer they land in is the renderer's.
-	transformsDirty bool
+	// packet caches the frame description and owns the reusable backing slices that
+	// Extract lends to callers. Scene graph storage such as world remains separate and
+	// is referenced by the packet rather than copied into it.
+	packet FramePacket
 
-	// FrameSphere scratch, retained because it runs every frame (see prepareShadows).
+	// packetDirty requests a rebuild of the cached mesh, LOD, and material tables.
+	packetDirty bool
+
+	// frameCenters retains world-space center scratch used by FrameSphere.
 	frameCenters []glm.Vec3f
-	frameReach   []float32
+
+	// frameReach retains per-object radius scratch used by FrameSphere.
+	frameReach []float32
+
+	// frameScratch retains scalar selection scratch used by FrameSphere.
 	frameScratch []float32
 
-	// clockStart anchors elapsed (below), recomputed each Sync — set once here so
-	// every draw/particle root's time field (drawable.go, particle.go) shares one
-	// scene-wide clock without each caller inventing its own.
+	// clockStart anchors the scene-wide elapsed time reported by packet.Time.
 	clockStart time.Time
-	elapsed    float32
 }
 
-// New creates an empty scene.
-//
-// It takes no backend, and holds none: a Scene is a description of what to draw, and
-// every GPU object that used to hang off it — the draw list, the light table, the joint
-// palette, the particle simulation buffers — now belongs to whichever Renderer consumes
-// its packets. That is what lets scene-graph and transform tests run with no GPU at
-// all, and what makes Scene replaceable by an ECS of your own: see Extract.
+// New creates an empty scene with a root group. The scene owns no backend or GPU state;
+// Extract publishes plain frame data for a renderer to consume.
 func New() *Scene {
 	s := &Scene{
-		freeHead: invalidIdx, topoDirty: true,
-		clockStart: time.Now(), sourceID: NewSourceID(),
+		packet:        FramePacket{Source: NewSourceID()},
+		freeHead:      invalidIndex,
+		topologyDirty: true,
+		clockStart:    time.Now(),
 	}
 	s.skeletons = mem.NewSlab[skeletonData]()
 	s.skinnedMeshes = mem.NewSlab[skinnedMeshData]()
-	s.root = s.allocNode(KindGroup)
+	s.root = s.allocNode(kindGroup)
 	s.flags[s.root.index] = flagAlive | flagLocalVisible | flagVisible
 	return s
 }
 
-// ID is the scene's identity as a packet producer. A renderer caches GPU state per
-// source, so pass this to Renderer.ReleaseSource when the scene is done with — scene
-// teardown does not reach into a renderer to do it, and a renderer that never hears
-// about the destruction would hold the cache forever.
+// ID returns the scene's stable identity as a packet producer. Consumers can use it to
+// cache per-scene state; IDs are never reused.
 func (s *Scene) ID() SourceID {
-	return s.sourceID
+	return s.packet.Source
 }
 
 // Root returns the scene's root node.
@@ -238,13 +217,13 @@ func (s *Scene) Root() Node {
 }
 
 // Add parents a node under the scene root.
-func (s *Scene) Add(n SceneNode) {
-	s.reparent(n.ID(), s.root)
+func (s *Scene) Add(node SceneNode) {
+	s.reparent(node.ID(), s.root)
 }
 
 // NewGroup creates an empty group node (hierarchy only).
 func (s *Scene) NewGroup() Group {
-	return Group{Node{scene: s, id: s.allocNode(KindGroup)}}
+	return Group{Node: Node{scene: s, id: s.allocNode(kindGroup)}}
 }
 
 // SetAmbient sets the ambient light term.
@@ -252,7 +231,7 @@ func (s *Scene) SetAmbient(color colors.RGB32F) {
 	s.ambient = color
 }
 
-// SetFog sets the scene's distance fog, or clears it when f is nil (the default).
+// SetFog sets the scene's distance fog, or clears it when fog is nil (the default).
 // Pass one of the fog models — scene.SetFog(pix.NewExp2Fog(color, 60000)) — and keep
 // the returned value if you want to animate its fields; they are re-read every frame.
 func (s *Scene) SetFog(fog Fog) {
@@ -264,37 +243,56 @@ func (s *Scene) Fog() Fog {
 	return s.fog
 }
 
-// AddDirectionalLight adds a directional light (dir = travel direction) and returns
-// its handle — configure it further or call CastShadow on the returned light.
-func (s *Scene) AddDirectionalLight(dir glm.Vec3f, color colors.RGB32F, intensity float32) *DirectionalLight {
-	l := &DirectionalLight{Direction: dir, Color: color, Intensity: intensity, id: s.newLightID()}
-	s.dirLights = append(s.dirLights, l)
-	return l
-}
-
-// AddPointLight adds a point light at pos with linear falloff to zero at rng and
-// returns its handle.
-func (s *Scene) AddPointLight(pos glm.Vec3f, color colors.RGB32F, intensity, rng float32) *PointLight {
-	l := &PointLight{Position: pos, Color: color, Intensity: intensity, Range: rng, id: s.newLightID()}
-	s.pointLights = append(s.pointLights, l)
-	return l
-}
-
-// AddSpotLight adds a cone light at pos aimed along dir, full inside the inner cone and
-// falling to zero at half-angle angle (radians) / distance rng. penumbra (0..1) sets
-// the soft-edge fraction. Returns its handle.
-func (s *Scene) AddSpotLight(pos, dir glm.Vec3f, color colors.RGB32F, intensity, rng, angle, penumbra float32) *SpotLight {
-	l := &SpotLight{
-		Position: pos, Direction: dir, Color: color, Intensity: intensity,
-		Range: rng, Angle: angle, Penumbra: penumbra, id: s.newLightID(),
+// AddDirectionalLight adds a directional light and returns its handle. Direction is
+// the direction in which the light travels. Configure the returned light further or
+// call SetCastShadow to enable shadows.
+func (s *Scene) AddDirectionalLight(direction glm.Vec3f, color colors.RGB32F, intensity float32) *DirectionalLight {
+	light := &DirectionalLight{
+		Direction: direction,
+		Color:     color,
+		Intensity: intensity,
+		id:        s.newLightID(),
 	}
-	s.spotLights = append(s.spotLights, l)
-	return l
+	s.dirLights = append(s.dirLights, light)
+	return light
 }
 
-func (s *Scene) allocNode(kind NodeKind) NodeID {
+// AddPointLight adds a point light at position with linear falloff to zero at
+// maxDistance and returns its handle.
+func (s *Scene) AddPointLight(position glm.Vec3f, color colors.RGB32F, intensity, maxDistance float32) *PointLight {
+	light := &PointLight{
+		Position:  position,
+		Color:     color,
+		Intensity: intensity,
+		Range:     maxDistance,
+		id:        s.newLightID(),
+	}
+	s.pointLights = append(s.pointLights, light)
+	return light
+}
+
+// AddSpotLight adds a cone light at position aimed along direction. It has full
+// intensity inside the inner cone and falls to zero at the outer half-angle and at
+// maxDistance. The outer angle is measured in radians; penumbra (0..1) sets the
+// soft-edge fraction.
+func (s *Scene) AddSpotLight(position, direction glm.Vec3f, color colors.RGB32F, intensity, maxDistance, outerAngle, penumbra float32) *SpotLight {
+	light := &SpotLight{
+		Position:  position,
+		Direction: direction,
+		Color:     color,
+		Intensity: intensity,
+		Range:     maxDistance,
+		Angle:     outerAngle,
+		Penumbra:  penumbra,
+		id:        s.newLightID(),
+	}
+	s.spotLights = append(s.spotLights, light)
+	return light
+}
+
+func (s *Scene) allocNode(kind nodeKind) NodeID {
 	var idx uint32
-	if s.freeHead != invalidIdx {
+	if s.freeHead != invalidIndex {
 		idx = s.freeHead
 		s.freeHead = s.parents[idx].index
 		s.resetSlot(idx, kind)
@@ -308,24 +306,24 @@ func (s *Scene) allocNode(kind NodeKind) NodeID {
 		s.local = append(s.local, glm.Mat4fIdentity)
 		s.world = append(s.world, glm.Mat4fIdentity)
 		s.transforms = append(s.transforms, defaultTransform)
-		s.flags = append(s.flags, flagAlive|flagLocalVisible|flagCastShadow|flagReceiveShadow|flagDirty|flagVisibleDirty)
+		s.flags = append(s.flags, flagAlive|flagLocalVisible|flagCastShadow|flagReceiveShadow|flagTransformDirty|flagVisibleDirty)
 		s.generation = append(s.generation, 1)
 		s.kind = append(s.kind, kind)
 		s.payload = append(s.payload, 0)
 		s.names = append(s.names, "")
-		s.topoPos = append(s.topoPos, invalidIdx)
+		s.topologyPositions = append(s.topologyPositions, invalidIndex)
 		// A grown s.world shifts where collectDrawables addresses instanceTransforms
 		// (InstancedMesh drawables use len(s.world) as their base offset — see
 		// instanced_mesh.go) — every drawable built against the old length would read
 		// the wrong row otherwise. Marking dirty here, on every new slot regardless of
 		// this node's own kind, guarantees drawables are never rebuilt against a stale
 		// length.
-		s.drawableDirty = true
+		s.packetDirty = true
 	}
 	return NodeID{index: idx, gen: s.generation[idx]}
 }
 
-func (s *Scene) resetSlot(idx uint32, kind NodeKind) {
+func (s *Scene) resetSlot(idx uint32, kind nodeKind) {
 	s.parents[idx] = NodeID{}
 	s.firstChildren[idx] = NodeID{}
 	s.lastChildren[idx] = NodeID{}
@@ -334,16 +332,16 @@ func (s *Scene) resetSlot(idx uint32, kind NodeKind) {
 	s.local[idx] = glm.Mat4fIdentity
 	s.world[idx] = glm.Mat4fIdentity
 	s.transforms[idx] = defaultTransform
-	s.flags[idx] = flagAlive | flagLocalVisible | flagCastShadow | flagReceiveShadow | flagDirty | flagVisibleDirty
+	s.flags[idx] = flagAlive | flagLocalVisible | flagCastShadow | flagReceiveShadow | flagTransformDirty | flagVisibleDirty
 	s.kind[idx] = kind
 	s.payload[idx] = 0
 	s.names[idx] = ""
-	// Not necessarily invalidIdx already: this slot may be a recycled node whose
-	// old topoOrder entry (if any) is still a live tombstone target for
+	// Not necessarily invalidIndex already: this slot may be a recycled node whose
+	// old topologyOrder entry (if any) is still a live tombstone target for
 	// detachFromParent/reparent's fast paths to find — but that entry belonged to
-	// the PREVIOUS occupant, already invalidated when it was destroyed (destroyNode
+	// the previous occupant, already invalidated when it was destroyed (destroyNode
 	// always detaches first). A fresh slot starts detached either way.
-	s.topoPos[idx] = invalidIdx
+	s.topologyPositions[idx] = invalidIndex
 }
 
 func (s *Scene) validate(id NodeID) {
@@ -374,9 +372,9 @@ func (s *Scene) reparent(child, newParent NodeID) {
 		s.prevSiblings[child.index] = last
 	}
 	s.lastChildren[newParent.index] = child
-	s.flags[child.index] |= flagDirty
+	s.flags[child.index] |= flagTransformDirty
 	// A leaf attaching under an already-attached parent can be appended straight
-	// to the end of topoOrder: the parent (and everything above it) is already
+	// to the end of topologyOrder: the parent (and everything above it) is already
 	// somewhere earlier in the array, so parent-before-child holds trivially — no
 	// walk needed. detachFromParent just ran above, so if child had a live entry
 	// from a previous attachment it is already tombstoned; this never leaves two
@@ -386,21 +384,21 @@ func (s *Scene) reparent(child, newParent NodeID) {
 	// rebuild.
 	leaf := !s.firstChildren[child.index].isValid()
 	parentAttached := s.flags[newParent.index]&flagAttached != 0
-	if leaf && parentAttached && !s.topoDirty {
-		s.topoPos[child.index] = uint32(len(s.topoOrder))
-		s.topoOrder = append(s.topoOrder, child.index)
+	if leaf && parentAttached && !s.topologyDirty {
+		s.topologyPositions[child.index] = uint32(len(s.topologyOrder))
+		s.topologyOrder = append(s.topologyOrder, child.index)
 		s.flags[child.index] |= flagAttached
 	} else {
-		s.topoDirty = true
+		s.topologyDirty = true
 	}
 	// Reparenting can change flagAttached for child (and everything under it) once
-	// flushTopoIfDirty runs — which shifts every OTHER attached mesh's position in
+	// updateTopology runs — which shifts every other attached mesh's position in
 	// whatever collectDrawables produces next, not just child's own. Unconditional
 	// here for the same reason destroyNode's is: cheap to over-trigger, and a
 	// narrower "only if this specific node..." check would miss the reindexing
 	// risk to unrelated meshes. Separate concern from the topology bookkeeping
 	// above, which is why it doesn't follow the fast/slow branch.
-	s.drawableDirty = true
+	s.packetDirty = true
 }
 
 func (s *Scene) detachFromParent(child NodeID) {
@@ -423,39 +421,39 @@ func (s *Scene) detachFromParent(child NodeID) {
 	s.parents[child.index] = NodeID{}
 	s.prevSiblings[child.index] = NodeID{}
 	s.nextSiblings[child.index] = NodeID{}
-	// A leaf (no children) can be pulled out of topoOrder in place, without the
+	// A leaf (no children) can be pulled out of topologyOrder in place, without the
 	// full rebuild every other case needs: nothing else in the tree depends on
 	// its position, and it has no descendants whose own flagAttached would go
-	// stale. Tombstone its entry (a live entry can never equal invalidIdx) rather
-	// than compact the array, so this stays O(1) instead of an O(topoOrder) shift;
-	// flushTopoIfDirty is what eventually reclaims the dead slot (see its comment).
-	// A node WITH children still needs the full rebuild — nothing else recomputes
+	// stale. Tombstone its entry (a live entry can never equal invalidIndex) rather
+	// than compact the array, so this stays O(1) instead of an O(topologyOrder) shift;
+	// updateTopology is what eventually reclaims the dead slot (see its comment).
+	// A node with children still needs the full rebuild — nothing else recomputes
 	// flagAttached for a whole detached subtree — so it falls back to the
-	// unconditional topoDirty every other structural change already used.
-	if leaf := !s.firstChildren[child.index].isValid(); leaf && !s.topoDirty {
-		if pos := s.topoPos[child.index]; pos != invalidIdx {
-			s.topoOrder[pos] = invalidIdx
-			s.topoPos[child.index] = invalidIdx
-			s.topoHoles++
+	// unconditional topologyDirty every other structural change already used.
+	if leaf := !s.firstChildren[child.index].isValid(); leaf && !s.topologyDirty {
+		if position := s.topologyPositions[child.index]; position != invalidIndex {
+			s.topologyOrder[position] = invalidIndex
+			s.topologyPositions[child.index] = invalidIndex
+			s.topologyHoles++
 		}
 		s.flags[child.index] &^= flagAttached
-		// Keep tombstones under half the array: bounds topoOrder's growth for a
+		// Keep tombstones under half the array: bounds topologyOrder's growth for a
 		// scene that only ever attaches/detaches leaves (e.g. continuous
 		// bullet-hole-style spawning) instead of letting it fill up with dead
 		// entries forever. The 64 floor avoids rebuilding a tiny scene on every
 		// other churn.
-		if s.topoHoles > len(s.topoOrder)/2 && len(s.topoOrder) > 64 {
-			s.topoDirty = true
+		if s.topologyHoles > len(s.topologyOrder)/2 && len(s.topologyOrder) > 64 {
+			s.topologyDirty = true
 		}
 	} else {
-		s.topoDirty = true
+		s.topologyDirty = true
 	}
 	// See reparent's comment: detaching (whether standalone via Node.Remove, or as
 	// reparent's first step) can drop child out of flagAttached, reindexing every
-	// OTHER attached mesh in collectDrawables' next output. Drawable-list content
+	// other attached mesh in collectDrawables' next output. Drawable-list content
 	// is a separate concern from the topology bookkeeping above — unconditional
 	// here regardless of which path that took.
-	s.drawableDirty = true
+	s.packetDirty = true
 }
 
 func (s *Scene) wouldCycle(child, newParent NodeID) bool {
@@ -489,24 +487,24 @@ func (s *Scene) destroyNode(id NodeID) {
 	idx := id.index
 	s.detachFromParent(id)
 	switch s.kind[idx] {
-	case KindMesh:
+	case kindMesh:
 		s.swapRemoveMesh(s.payload[idx])
-	case KindSkinnedMesh:
+	case kindSkinnedMesh:
 		s.freeSkinnedMesh(s.payload[idx])
-	case KindSkeleton:
+	case kindSkeleton:
 		s.freeSkeleton(s.payload[idx])
-	case KindParticleContainer:
+	case kindParticleContainer:
 		s.swapRemoveParticles(s.payload[idx])
-	case KindInstancedMesh:
+	case kindInstancedMesh:
 		s.swapRemoveInstancedMesh(s.payload[idx])
 	}
 	s.flags[idx] &^= flagAlive
 	s.generation[idx]++
 	s.parents[idx] = NodeID{index: s.freeHead}
 	s.freeHead = idx
-	//TODO: in the future detect if drawable needs to be rebuilt
-	s.drawableDirty = true
-	// No topoDirty here: detachFromParent above already set it correctly (fast or
+	// TODO: Detect whether the packet needs to be rebuilt.
+	s.packetDirty = true
+	// No topologyDirty here: detachFromParent above already set it correctly (fast or
 	// slow path). destroyNode is only ever reached from destroySubtree, bottom-up
 	// after every descendant is already gone (grep confirms the sole call site),
 	// so idx is always a leaf here — every single-node destroy is fast-path
@@ -528,20 +526,20 @@ func (s *Scene) swapRemoveMesh(payloadIdx uint32) {
 	s.meshes = s.meshes[:last]
 }
 
-func (s *Scene) flushTopoIfDirty() {
-	if !s.topoDirty {
+func (s *Scene) updateTopology() {
+	if !s.topologyDirty {
 		return
 	}
-	s.topoOrder = s.topoOrder[:0]
+	s.topologyOrder = s.topologyOrder[:0]
 	for i := range s.flags {
 		s.flags[i] &^= flagAttached
-		// Full rebuild is the authoritative reset for topoPos too: whatever a
+		// Full rebuild is the authoritative reset for topologyPositions too: whatever a
 		// fast-path append left behind (detachFromParent/reparent) gets wiped here
 		// regardless, so those paths never need to stay consistent with a rebuild
 		// that supersedes them.
-		s.topoPos[i] = invalidIdx
+		s.topologyPositions[i] = invalidIndex
 	}
-	s.topoHoles = 0
+	s.topologyHoles = 0
 	queue := []uint32{s.root.index}
 	for len(queue) > 0 {
 		idx := queue[0]
@@ -549,8 +547,8 @@ func (s *Scene) flushTopoIfDirty() {
 		if s.flags[idx]&flagAlive == 0 {
 			continue
 		}
-		s.topoPos[idx] = uint32(len(s.topoOrder))
-		s.topoOrder = append(s.topoOrder, idx)
+		s.topologyPositions[idx] = uint32(len(s.topologyOrder))
+		s.topologyOrder = append(s.topologyOrder, idx)
 		s.flags[idx] |= flagAttached
 		child := s.firstChildren[idx]
 		for child.isValid() {
@@ -558,64 +556,62 @@ func (s *Scene) flushTopoIfDirty() {
 			child = s.nextSiblings[child.index]
 		}
 	}
-	s.topoDirty = false
+	s.topologyDirty = false
 }
 
 // updateTransforms recomputes local + world matrices for dirty nodes in topological
 // (parent-before-child) order. Returns true if anything changed. Called only from
-// Sync, which flushes topology once up front — this assumes topoOrder/flagAttached
+// Sync, which flushes topology once up front — this assumes topologyOrder/flagAttached
 // are already current and does not flush them itself.
-func (s *Scene) updateTransforms() bool {
+func (s *Scene) updateTransforms() {
 	anyDirty := false
-	for _, i := range s.topoOrder {
+	for _, i := range s.topologyOrder {
 		// A tombstone left by detachFromParent's fast path (see its doc comment) —
 		// not a real node index.
-		if i == invalidIdx {
+		if i == invalidIndex {
 			continue
 		}
-		if s.flags[i]&flagDirty == 0 {
+
+		if s.flags[i]&flagTransformDirty == 0 {
 			continue
 		}
+
 		anyDirty = true
+
+		// update local transform
 		s.local[i] = s.transforms[i].Matrix()
-		p := s.parents[i]
-		if !p.isValid() {
+
+		// update world transform
+		parent := s.parents[i]
+		if !parent.isValid() {
 			s.world[i] = s.local[i]
 		} else {
-			s.world[i] = s.world[p.index].Mul4x4(s.local[i])
+			s.world[i] = s.world[parent.index].Mul4x4(s.local[i])
 		}
-		s.flags[i] &^= flagDirty
+
+		// mark self as non-dirty
+		s.flags[i] &^= flagTransformDirty
+
+		// mark children as dirty
 		child := s.firstChildren[i]
 		for child.isValid() {
-			s.flags[child.index] |= flagDirty
+			s.flags[child.index] |= flagTransformDirty
 			child = s.nextSiblings[child.index]
 		}
 	}
-	return anyDirty
+	if anyDirty {
+		s.packet.TransformsDirty = true
+	}
 }
 
-// Sync writes the scene's own per-scene GPU state: the world matrices (recomputed
-// from dirty transforms), skinning (joint matrices + bounds), and the light table.
-// All of it lands in MemoryHost buffers the scene owns directly — no uploader. The
-// renderer drives geometry/pipeline syncing (which do need staging, into shared
-// MemoryDevice buffers) and the draw-list rebuild separately.
+// Sync updates derived per-frame scene state, including world transforms, skinning
+// data, and elapsed time. Extract calls Sync automatically; call it directly before
+// reading cached world transforms or bounds.
 func (s *Scene) Sync() {
-	// updateTransforms walks topoOrder, so attachment must be current first.
-	s.flushTopoIfDirty()
-	if s.updateTransforms() {
-		s.transformsDirty = true
-	}
-	s.syncSkinning()
-	// Light objects are mutable, so re-derive the flat GPU table each frame; rebuild
-	// only marks the buffer dirty (→ re-writes) when the derived table changed. Both
-	// this and drawList.sync above write straight to MemoryHost buffers — nothing
-	// scene-owned goes through the shared uploader, so a frame where nothing but
-	// (say) an animated character's pose changed stages/submits nothing extra.
-	// elapsed feeds every draw/particle root's time field (drawable.go, particle.go) —
-	// computed once here rather than by each call site, and passed explicitly rather
-	// than read back off the scene by the renderer, matching how every other
-	// per-frame value (viewProj, eye) already reaches fillDrawRoots.
-	s.elapsed = float32(time.Since(s.clockStart).Seconds())
+	s.updateTopology()
+	s.updateTransforms()
+	s.updateSkinning()
+	s.packet.Time = float32(time.Since(s.clockStart).Seconds())
 }
 
 // MeshCount returns the number of mesh nodes in the scene.
@@ -637,9 +633,10 @@ func (s *Scene) FindByName(name string) (Node, bool) {
 	return Node{}, false
 }
 
-// FrameSphere returns a robust center + radius for the mesh nodes' world-space
-// bounds (median center, percentile-of-center-distances). Run Sync first.
-func (s *Scene) FrameSphere(pct float32) (center glm.Vec3f, radius float32) {
+// FrameSphere returns a robust center and radius for the mesh nodes' world-space
+// bounds (median center, percentile-of-center-distances). Values outside the
+// percentile range [0, 1] are clamped. Run Sync first.
+func (s *Scene) FrameSphere(percentile float32) (center glm.Vec3f, radius float32) {
 	n := len(s.meshes) + s.skinnedMeshes.Len()
 	if n == 0 {
 		return glm.Vec3f{}, 1
@@ -696,7 +693,7 @@ func (s *Scene) FrameSphere(pct float32) (center glm.Vec3f, radius float32) {
 	for i, c := range centers {
 		scratch[i] = c.Sub(center).Length() + reach[i]
 	}
-	radius = selectNth(scratch, int(float32(n-1)*clamp01(pct)))
+	radius = selectNth(scratch, int(float32(n-1)*clamp01(percentile)))
 	if radius <= 0 {
 		radius = 1
 	}
@@ -761,7 +758,7 @@ func partitionFloat32(v []float32, lo, hi int) int {
 	}
 }
 
-// Destroy releases the scene's GPU buffers, lights and mesh resource references.
+// Destroy releases the geometry and material references retained by the scene.
 func (s *Scene) Destroy() {
 	for i := range s.meshes {
 		for _, l := range s.meshes[i].lods {

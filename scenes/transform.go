@@ -14,6 +14,6 @@ func (t Transform) Matrix() glm.Mat4f {
 }
 
 var defaultTransform = Transform{
-	Rotation: glm.QuatIdentityf,
+	Rotation: glm.QuatfIdentity,
 	Scale:    glm.Vec3f{1, 1, 1},
 }

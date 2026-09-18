@@ -109,15 +109,6 @@ func (n Node) Transform() glm.Mat4f {
 	return n.scene.local[n.slot()]
 }
 
-// WorldTransformInv computes the inverse of the cached world-space matrix.
-// Computed on demand rather than cached: the only other reader is skeleton
-// root inversion (Scene.syncSkinning), which computes its own directly, so a
-// scene of many moving nodes was previously paying this inverse for every one
-// of them regardless of whether anything ever read it.
-func (n Node) WorldTransformInv() glm.Mat4f {
-	return n.scene.world[n.slot()].Inv()
-}
-
 // Flags
 
 func (n Node) Visible() bool {
@@ -145,7 +136,7 @@ func (n Node) SetCastShadow(b bool) {
 	// Both bits are baked into gpuDrawable.flags by collectDrawables, so a toggle
 	// after the draw list was last built is invisible until the drawables are
 	// rebuilt from the new flags.
-	n.scene.drawableDirty = true
+	n.scene.packetDirty = true
 }
 
 func (n Node) ReceiveShadow() bool {
@@ -161,7 +152,7 @@ func (n Node) SetReceiveShadow(b bool) {
 	// Both bits are baked into gpuDrawable.flags by collectDrawables, so a toggle
 	// after the draw list was last built is invisible until the drawables are
 	// rebuilt from the new flags.
-	n.scene.drawableDirty = true
+	n.scene.packetDirty = true
 }
 
 // Destroy removes this node and its entire subtree.
@@ -177,7 +168,7 @@ func (n Node) Position() glm.Vec3f {
 
 func (n Node) SetPosition(pos glm.Vec3f) {
 	n.transform().Position = pos
-	n.scene.flags[n.slot()] |= flagDirty
+	n.scene.flags[n.slot()] |= flagTransformDirty
 }
 
 func (n Node) SetPositionXYZ(x, y, z float32) {
@@ -254,7 +245,7 @@ func (n Node) RotationQuat() glm.Quatf {
 
 func (n Node) SetRotationQuat(rot glm.Quatf) {
 	n.transform().Rotation = rot
-	n.scene.flags[n.slot()] |= flagDirty
+	n.scene.flags[n.slot()] |= flagTransformDirty
 }
 
 func (n Node) SetRotation(rot glm.Vec3f) {
@@ -321,7 +312,7 @@ func (n Node) Scale() glm.Vec3f {
 
 func (n Node) SetScale(scale glm.Vec3f) {
 	n.transform().Scale = scale
-	n.scene.flags[n.slot()] |= flagDirty
+	n.scene.flags[n.slot()] |= flagTransformDirty
 }
 
 func (n Node) SetScaleXYZ(x, y, z float32) {

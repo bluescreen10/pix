@@ -17,33 +17,36 @@ func (s *Scene) Extract(p *FramePacket) {
 	// Settle first: world transforms, skinning and the clock all feed the tables below,
 	// so extraction owns that rather than leaving a consumer to remember the order.
 	s.Sync()
-	if s.drawableDirty {
+	if s.packetDirty {
 		s.rebuildPacketTables()
-		s.meshRevision++
-		s.drawableDirty = false
+		revision := s.packet.Meshes.Revision + 1
+		s.packet.Meshes.Revision = revision
+		s.packet.LODs.Revision = revision
+		s.packet.Materials.Revision = revision
+		s.packetDirty = false
 	}
-
-	p.Source = s.sourceID
-	p.Frame++
-	p.Time = s.elapsed
 
 	// Transforms carry no revision yet: they are rewritten and re-uploaded every frame,
 	// so a consumer has nothing to skip. Ranged invalidation is a later phase.
-	p.Transforms.Data = s.world
-	p.InstanceTransforms.Data = s.instanceTransforms
-	p.TransformsDirty = s.transformsDirty
-	s.transformsDirty = false
+	s.packet.Transforms.Data = s.world
+	s.packet.InstanceTransforms.Data = s.instanceTransforms
 
 	// One revision covers all three object tables. They are rebuilt by the same walk
 	// and cannot disagree, so splitting them would mean three counters that always move
 	// together — the revisions worth separating are the ones with different causes.
-	s.extractLights(p)
-	s.extractSkins(p)
-	s.extractParticles(p)
+	s.extractLights()
+	s.extractSkins()
+	s.extractParticles()
 
-	p.Meshes = Table[MeshPacket]{Revision: s.meshRevision, Data: s.packetMeshes}
-	p.LODs = Table[LODLevel]{Revision: s.meshRevision, Data: s.packetLODs}
-	p.Materials = Table[materials.ID]{Revision: s.meshRevision, Data: s.packetMaterials}
+	s.packet.Frame++
+	views := p.Views
+	*p = s.packet
+	// Views are supplied by the caller rather than the scene. Preserve them when the
+	// rest of the destination is replaced by the prepared packet.
+	p.Views = views
+	// Transform dirtiness is edge-triggered: this packet carries it, and later Sync
+	// calls accumulate changes until the next extraction.
+	s.packet.TransformsDirty = false
 }
 
 // rebuildPacketTables rewalks the payload lists into the packet tables. Called only
@@ -61,9 +64,9 @@ func (s *Scene) rebuildPacketTables() {
 		s.matSlot = make(map[materials.ID]uint32)
 	}
 	clear(s.matSlot)
-	s.packetMeshes = s.packetMeshes[:0]
-	s.packetLODs = s.packetLODs[:0]
-	s.packetMaterials = s.packetMaterials[:0]
+	s.packet.Meshes.Data = s.packet.Meshes.Data[:0]
+	s.packet.LODs.Data = s.packet.LODs.Data[:0]
+	s.packet.Materials.Data = s.packet.Materials.Data[:0]
 
 	for i := range s.meshes {
 		md := &s.meshes[i]
@@ -86,7 +89,7 @@ func (s *Scene) rebuildPacketTables() {
 		if s.flags[sm.ownerNode]&flagAttached == 0 || s.flags[root]&flagAttached == 0 {
 			continue
 		}
-		s.packetMeshes = append(s.packetMeshes, MeshPacket{
+		s.packet.Meshes.Data = append(s.packet.Meshes.Data, MeshPacket{
 			ID:         s.objectID(sm.ownerNode),
 			Transforms: IndexRange{First: root, Count: 1},
 			Geometry:   sm.outputGeo.ID(),
@@ -122,16 +125,16 @@ func (s *Scene) rebuildPacketTables() {
 func (s *Scene) addMesh(mp MeshPacket, lods []lodLevel) {
 	mp.Geometry = lods[0].geometry.ID()
 	mp.Material = s.materialSlot(lods[0].material)
-	mp.LODRange = IndexRange{First: uint32(len(s.packetLODs))}
+	mp.LODRange = IndexRange{First: uint32(len(s.packet.LODs.Data))}
 	for _, l := range lods[1:] {
-		s.packetLODs = append(s.packetLODs, LODLevel{
+		s.packet.LODs.Data = append(s.packet.LODs.Data, LODLevel{
 			Geometry:    l.geometry.ID(),
 			Material:    s.materialSlot(l.material),
 			MinDistance: l.minDistance,
 		})
 		mp.LODRange.Count++
 	}
-	s.packetMeshes = append(s.packetMeshes, mp)
+	s.packet.Meshes.Data = append(s.packet.Meshes.Data, mp)
 }
 
 // materialSlot returns m's slot in the distinct material table, appending it the first
@@ -144,8 +147,8 @@ func (s *Scene) materialSlot(m materials.Material) uint32 {
 	id := m.ID()
 	slot, seen := s.matSlot[id]
 	if !seen {
-		slot = uint32(len(s.packetMaterials))
-		s.packetMaterials = append(s.packetMaterials, id)
+		slot = uint32(len(s.packet.Materials.Data))
+		s.packet.Materials.Data = append(s.packet.Materials.Data, id)
 		s.matSlot[id] = slot
 	}
 	return slot
@@ -182,8 +185,8 @@ func (s *Scene) newLightID() LightID {
 // rather than tracked: their fields are exported and mutable, so there is no setter to
 // hang dirtiness off, and there are a handful of them against thousands of objects.
 // This is O(lights) per frame by design — see docs/frame-packet.md.
-func (s *Scene) extractLights(p *FramePacket) {
-	out := s.packetLights[:0]
+func (s *Scene) extractLights() {
+	out := s.packet.Lights.Data[:0]
 	for _, l := range s.dirLights {
 		lp := LightPacket{
 			ID: l.id, Kind: LightDirectional, Direction: l.Direction,
@@ -209,9 +212,8 @@ func (s *Scene) extractLights(p *FramePacket) {
 		applyShadowSettings(&lp, l.shadow)
 		out = append(out, lp)
 	}
-	s.packetLights = out
-	p.Lights.Data = out
-	p.Environment = EnvironmentPacket{Ambient: s.ambient, Fog: StateOf(s.fog)}
+	s.packet.Lights.Data = out
+	s.packet.Environment = EnvironmentPacket{Ambient: s.ambient, Fog: StateOf(s.fog)}
 }
 
 // applyShadowSettings copies a light's shadow settings into its packet. A nil shadow
@@ -229,8 +231,8 @@ func applyShadowSettings(lp *LightPacket, sh *LightShadow) {
 // extractSkins refills the published skin table. Like lights, skinned meshes are few
 // and polled rather than tracked; unlike lights, the palettes they index were already
 // recomputed by Scene.Sync, so this only records ranges into that table.
-func (s *Scene) extractSkins(p *FramePacket) {
-	out := s.packetSkins[:0]
+func (s *Scene) extractSkins() {
+	out := s.packet.Skins.Data[:0]
 	for _, sm := range s.skinnedMeshes.All() {
 		sk := s.skeletons.Get(sm.skeleton)
 		out = append(out, SkinPacket{
@@ -240,9 +242,7 @@ func (s *Scene) extractSkins(p *FramePacket) {
 			VertexCount: sm.vertCount,
 		})
 	}
-	s.packetSkins = out
-	p.Skins.Data = out
-	p.Joints.Data = s.packetJoints
+	s.packet.Skins.Data = out
 }
 
 // newParticleID mints the next stable particle-system identity.
@@ -252,17 +252,17 @@ func (s *Scene) newParticleID() ParticleID {
 }
 
 // extractParticles publishes each attached system's description and the simulation
-// step it currently has queued. Like every other table, it BORROWS: the pending births
-// stay on the container until retireParticleStep says the step was actually rendered.
+// step it currently has queued. Like every other table, it borrows: the pending births
+// stay on the container until Rendered confirms that the step was submitted.
 //
 // That split is what makes a simulation step exactly-once without any acknowledgement
 // protocol. Extracting without rendering costs nothing — the same births are published
 // again next time, and alive is not advanced, so capacity accounting stays right.
 // Rendering is what consumes them, and Render owns both halves, so the two cannot drift
 // apart.
-func (s *Scene) extractParticles(p *FramePacket) {
-	out := s.packetParticles[:0]
-	newborns := s.packetNewborns[:0]
+func (s *Scene) extractParticles() {
+	out := s.packet.Particles.Data[:0]
+	newborns := s.packet.Newborns.Data[:0]
 	for i := range s.particleContainers {
 		d := &s.particleContainers[i]
 		if s.flags[d.ownerNode]&flagAttached == 0 {
@@ -282,9 +282,8 @@ func (s *Scene) extractParticles(p *FramePacket) {
 		newborns = append(newborns, d.pending...)
 		out = append(out, pp)
 	}
-	s.packetParticles, s.packetNewborns = out, newborns
-	p.Particles.Data = out
-	p.Newborns.Data = newborns
+	s.packet.Particles.Data = out
+	s.packet.Newborns.Data = newborns
 }
 
 // Rendered implements Producer: it consumes the simulation step the packet just

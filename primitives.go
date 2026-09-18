@@ -306,5 +306,17 @@ func (r *Renderer) NewCapsuleGeometry(radius, length float32, capSegments, radia
 	return r.GeometryStore.Create(CapsuleGeometry(radius, length, capSegments, radialSegments))
 }
 
-// NewDecalGeometry is in decal_geometry.go: unlike the builders above it derives
-// its shape from an existing mesh rather than from parameters alone.
+// NewDecalGeometry clips geometry against a projection box and returns the resulting
+// patch. Position, orientation, and size use the source geometry's local space, and
+// the returned geometry uses that same space.
+//
+//	geo := r.NewDecalGeometry(box.Geometry(), localHit, orientation, glm.Vec3f{0.5, 0.5, 0.5})
+//	decal := scene.NewMesh(geo, decalMat)
+//	decal.SetCastShadow(false)
+//	box.Add(decal)
+//
+// It returns the zero Geometry when the box misses the source or every candidate
+// triangle faces away. The result belongs to the source geometry's Store.
+func (r *Renderer) NewDecalGeometry(geometry geometries.Geometry, position glm.Vec3f, orientation glm.Quatf, size glm.Vec3f) geometries.Geometry {
+	return geometry.Clip(position, orientation, size)
+}

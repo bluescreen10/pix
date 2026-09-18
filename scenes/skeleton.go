@@ -20,7 +20,7 @@ type SkeletonConfig struct {
 
 // skeletonData is the per-skeleton payload: bones[i] is joint i's scene node.
 // jointPos/jointScale are per-frame scratch (skeleton-local bone positions + a
-// crude per-joint scale estimate), recomputed in syncSkinning and reused by every
+// crude per-joint scale estimate), recomputed in updateSkinning and reused by every
 // SkinnedMesh sharing this skeleton for their bounds (see skinned_mesh.go).
 type skeletonData struct {
 	bones    []NodeID
@@ -28,7 +28,7 @@ type skeletonData struct {
 	invBind  []glm.Mat4f
 	bindPose []Transform
 	// jointBase is this skeleton's offset into the scene's flat joint table, assigned
-	// by each syncSkinning as it lays the skeletons out one after another. There is no
+	// by each updateSkinning as it lays the skeletons out one after another. There is no
 	// allocator: the whole table is rewritten every frame, so a stable address would
 	// buy nothing and cost a suballocator's worth of machinery.
 	jointBase uint32
@@ -78,11 +78,11 @@ func (s Skeleton) Pose() {
 	d := s.data()
 	for i, id := range d.bones {
 		s.scene.transforms[id.index] = d.bindPose[i]
-		s.scene.flags[id.index] |= flagDirty
+		s.scene.flags[id.index] |= flagTransformDirty
 	}
 }
 
-// NewSkeleton builds a bone hierarchy from cfg: one KindBone node per joint,
+// NewSkeleton builds a bone hierarchy from cfg: one bone node per joint,
 // parented per cfg.Parents, and allocates the skeleton's range in the scene's
 // joint-matrix buffer. The returned Skeleton is the root of that hierarchy.
 func (s *Scene) NewSkeleton(cfg SkeletonConfig) Skeleton {
@@ -95,21 +95,21 @@ func (s *Scene) NewSkeleton(cfg SkeletonConfig) Skeleton {
 		names = make([]string, n)
 	}
 
-	rootID := s.allocNode(KindSkeleton)
+	rootID := s.allocNode(kindSkeleton)
 	bones := make([]NodeID, n)
 	for i := range n {
 		p := cfg.Parents[i]
 		if p >= int32(i) {
 			panic("pix: SkeletonConfig.Parents[i] must be < i (topological order)")
 		}
-		id := s.allocNode(KindBone)
+		id := s.allocNode(kindBone)
 		if p < 0 {
 			s.reparent(id, rootID)
 		} else {
 			s.reparent(id, bones[p])
 		}
 		s.transforms[id.index] = cfg.BindPose[i]
-		s.flags[id.index] |= flagDirty
+		s.flags[id.index] |= flagTransformDirty
 		s.names[id.index] = names[i]
 		bones[i] = id
 	}
@@ -128,15 +128,15 @@ func (s *Scene) freeSkeleton(payloadIdx uint32) {
 	s.skeletons.Free(payloadIdx)
 }
 
-// syncSkinning recomputes every skeleton's joint matrices and per-joint scratch
+// updateSkinning recomputes every skeleton's joint matrices and per-joint scratch
 // (skeleton-local bone positions + scale) from the just-updated world transforms,
 // then each SkinnedMesh's world-pose bounding sphere from that scratch (see
 // skinned_mesh.go). Joints are written directly into the joint buffer (MemoryHost,
 // no staging) in skeleton-local space: rootWorldInv * boneWorld * invBind — so a
 // SkinnedMesh's drawable, whose transformID is the skeleton root, applies the
 // remaining world transform exactly like static geometry.
-func (s *Scene) syncSkinning() {
-	s.packetJoints = s.packetJoints[:0]
+func (s *Scene) updateSkinning() {
+	s.packet.Joints.Data = s.packet.Joints.Data[:0]
 	if s.skeletons.Len() == 0 {
 		return
 	}
@@ -149,11 +149,11 @@ func (s *Scene) syncSkinning() {
 		}
 		sk.jointPos = sk.jointPos[:n]
 		sk.jointScale = sk.jointScale[:n]
-		sk.jointBase = uint32(len(s.packetJoints))
+		sk.jointBase = uint32(len(s.packet.Joints.Data))
 		// Grow-then-reslice rather than append-a-temporary: the table keeps its capacity
 		// across frames, so this allocates only while a scene is still growing.
-		s.packetJoints = slices.Grow(s.packetJoints, n)[:int(sk.jointBase)+n]
-		joints := s.packetJoints[sk.jointBase:]
+		s.packet.Joints.Data = slices.Grow(s.packet.Joints.Data, n)[:int(sk.jointBase)+n]
+		joints := s.packet.Joints.Data[sk.jointBase:]
 		for j, id := range sk.bones {
 			rl := rootInv.Mul4x4(s.world[id.index])
 			joints[j] = rl.Mul4x4(sk.invBind[j])

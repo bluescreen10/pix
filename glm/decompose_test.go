@@ -9,8 +9,8 @@ func TestDecomposeMat4fRoundTrip(t *testing.T) {
 		rot   Quatf
 		pos   Vec3f
 	}{
-		{"identity", Vec3f{1, 1, 1}, QuatIdentityf, Vec3f{0, 0, 0}},
-		{"translated", Vec3f{1, 1, 1}, QuatIdentityf, Vec3f{3, -2, 5}},
+		{"identity", Vec3f{1, 1, 1}, QuatfIdentity, Vec3f{0, 0, 0}},
+		{"translated", Vec3f{1, 1, 1}, QuatfIdentity, Vec3f{3, -2, 5}},
 		{"rotated-y", Vec3f{1, 1, 1}, NewQuat(1.2, Vec3f{0, 1, 0}), Vec3f{0, 0, 0}},
 		{"rotated-arbitrary", Vec3f{1, 1, 1}, NewQuat(0.7, Vec3f{0.4, 0.6, 0.7}.Normalize()), Vec3f{1, 2, 3}},
 		{"nonuniform-scale", Vec3f{2, 0.5, 3}, NewQuat(0.9, Vec3f{0, 0, 1}), Vec3f{-1, 4, 2}},

@@ -55,7 +55,7 @@ func (m SkinnedMesh) SetMaterial(mat materials.Material) {
 	newRef := mat.Copy()
 	md.material.Release()
 	md.material = newRef
-	m.scene.drawableDirty = true
+	m.scene.packetDirty = true
 }
 
 // Skeleton returns the skeleton this mesh is bound to.
@@ -82,7 +82,7 @@ func (m SkinnedMesh) BoundingSphere() glm.Sphere {
 // destroying the skeleton first leaves it pointing at a freed slot.
 func (s *Scene) NewSkinnedMesh(geo geometries.Geometry, mat materials.Material, skel Skeleton) SkinnedMesh {
 	s.validate(skel.id)
-	if s.kind[skel.slot()] != KindSkeleton {
+	if s.kind[skel.slot()] != kindSkeleton {
 		panic("pix: NewSkinnedMesh requires a Skeleton")
 	}
 	skelIdx := s.payload[skel.slot()]
@@ -95,7 +95,7 @@ func (s *Scene) NewSkinnedMesh(geo geometries.Geometry, mat materials.Material, 
 		unitScale[i] = 1
 	}
 
-	id := s.allocNode(KindSkinnedMesh)
+	id := s.allocNode(kindSkinnedMesh)
 	payloadIdx, _ := s.skinnedMeshes.Alloc(skinnedMeshData{
 		srcGeometry: geo.Copy(),
 		outputGeo:   geo.SkinOutput(),
@@ -109,7 +109,7 @@ func (s *Scene) NewSkinnedMesh(geo geometries.Geometry, mat materials.Material, 
 		ownerNode: id.index,
 	})
 	s.payload[id.index] = payloadIdx
-	s.drawableDirty = true
+	s.packetDirty = true
 	return SkinnedMesh{Node{scene: s, id: id}}
 }
 

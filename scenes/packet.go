@@ -11,7 +11,7 @@ import (
 
 // A FramePacket is how a renderer is told what to draw, without being told what the
 // thing describing it is. Scene produces one; so could an ECS, an editor, or a test
-// with no scene graph at all. See docs/frame-packet.md for the full specification.
+// with no scene graph at all.
 //
 // It is a borrowed view of the producer's cached tables, not a copy of the world. Each
 // table carries a revision, so a renderer that already saw revision N re-reads nothing;
@@ -83,11 +83,9 @@ type FramePacket struct {
 	// description and this frame's simulation step. Newborns is the flat table the
 	// steps' ranges point into.
 	//
-	// Particles are the one place where a packet is not purely declarative: the step
-	// must happen exactly once, so extraction DRAINS the producer's pending births
-	// rather than borrowing them. A packet that is extracted and then not rendered
-	// loses that step. The specification's receipt/commit protocol exists to close
-	// that hole; until it lands, extract-then-render is the supported sequence.
+	// Particles are the one place where a packet carries work that must happen exactly
+	// once. Extraction copies pending births into borrowed packet storage without
+	// consuming them; Producer.Rendered retires the step only after submission.
 	Particles Table[ParticlePacket]
 	Newborns  Table[ParticleRecord]
 }

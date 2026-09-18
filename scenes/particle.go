@@ -239,7 +239,7 @@ func (s *Scene) NewParticleContainer(config ParticleConfig, capacity int) Partic
 		emitters[i] = e
 	}
 
-	id := s.allocNode(KindParticleContainer)
+	id := s.allocNode(kindParticleContainer)
 	payloadIdx := uint32(len(s.particleContainers))
 	s.particleContainers = append(s.particleContainers, particleData{
 		geometry:  config.Geometry.Copy(),

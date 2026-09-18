@@ -539,7 +539,7 @@ func nodeLocalMatrix(gn node) glm.Mat4f {
 		copy(m[:], gn.Matrix)
 		return m
 	}
-	pos, rot, scale := glm.Vec3f{}, glm.QuatIdentityf, glm.Vec3f{1, 1, 1}
+	pos, rot, scale := glm.Vec3f{}, glm.QuatfIdentity, glm.Vec3f{1, 1, 1}
 	if len(gn.Translation) == 3 {
 		pos = glm.Vec3f{gn.Translation[0], gn.Translation[1], gn.Translation[2]}
 	}
@@ -853,7 +853,7 @@ func decomposeMatrix(m glm.Mat4f) (pos glm.Vec3f, rot glm.Quatf, scale glm.Vec3f
 	sz := float32(math.Sqrt(float64(m[8]*m[8] + m[9]*m[9] + m[10]*m[10])))
 	scale = glm.Vec3f{sx, sy, sz}
 	if sx == 0 || sy == 0 || sz == 0 {
-		return pos, glm.QuatIdentityf, scale
+		return pos, glm.QuatfIdentity, scale
 	}
 	r := [9]float32{m[0] / sx, m[1] / sx, m[2] / sx, m[4] / sy, m[5] / sy, m[6] / sy, m[8] / sz, m[9] / sz, m[10] / sz}
 	return pos, rotMatToQuat(r), scale

@@ -67,7 +67,7 @@ func (m InstancedMesh) AddLOD(geo geometries.Geometry, mat materials.Material, m
 		panic("pix: InstancedMesh.AddLOD levels must be added in increasing minDistance order")
 	}
 	md.lods = append(md.lods, lodLevel{geometry: geo.Copy(), material: mat.Copy(), minDistance: minDistance})
-	m.scene.drawableDirty = true
+	m.scene.packetDirty = true
 	return m
 }
 
@@ -77,7 +77,7 @@ func (m InstancedMesh) SetLODHysteresis(h float32) InstancedMesh {
 	md := m.data()
 	md.hysteresis = h
 	if len(md.lods) > 1 {
-		m.scene.drawableDirty = true
+		m.scene.packetDirty = true
 	}
 	return m
 }
@@ -94,7 +94,7 @@ func (s *Scene) NewInstancedMesh(geo geometries.Geometry, mat materials.Material
 		panic("pix: NewInstancedMesh requires at least one transform")
 	}
 
-	id := s.allocNode(KindInstancedMesh)
+	id := s.allocNode(kindInstancedMesh)
 	payloadIdx := uint32(len(s.instancedMeshes))
 	transformBase := uint32(len(s.instanceTransforms))
 	s.instanceTransforms = append(s.instanceTransforms, transforms...)
@@ -106,7 +106,7 @@ func (s *Scene) NewInstancedMesh(geo geometries.Geometry, mat materials.Material
 		ownerNode:     id.index,
 	})
 	s.payload[id.index] = payloadIdx
-	s.drawableDirty = true
+	s.packetDirty = true
 	return InstancedMesh{Node{scene: s, id: id}}
 }
 
