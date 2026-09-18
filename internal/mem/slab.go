@@ -1,6 +1,7 @@
-// Package slab is a slot-stable, generation-counted free list shared by the
-// engine and the gpu layer. Slots are recycled on Free; the generation
-// counter prevents stale-handle (ABA) aliasing.
+// Package mem provides low-level memory allocation helpers shared by the
+// engine and the gpu layer: Slab, a slot-stable, generation-counted free
+// list (slots are recycled on Free; the generation counter prevents
+// stale-handle (ABA) aliasing), and a TLSF byte-range allocator.
 package mem
 
 import "iter"
@@ -71,7 +72,9 @@ func (s *Slab[T]) Alive(id uint32) bool {
 
 // Len returns the number of slots ever allocated (including freed ones), i.e. one
 // past the largest index handed out. Parallel arrays keyed by index size to this.
-func (s *Slab[T]) Len() int { return len(s.entries) }
+func (s *Slab[T]) Len() int {
+	return len(s.entries)
+}
 
 // All iterates live slots, yielding each slot's index and a pointer to its value
 // (so callers can mutate in place). Unlike Items, which yields value copies.
@@ -88,7 +91,7 @@ func (s *Slab[T]) All() iter.Seq2[uint32, *T] {
 	}
 }
 
-// Range calls fn for each live value.
+// Items iterates live slots, yielding each slot's value.
 func (s *Slab[T]) Items() iter.Seq[T] {
 	return func(yield func(T) bool) {
 		for _, e := range s.entries {

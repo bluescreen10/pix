@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
-	"strconv"
 )
 
 const magic = "PIXMTL01"
@@ -108,7 +107,18 @@ func Translate(spirv []byte, entry string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	options := []string{"--msl", "--msl-version", "30000", "--msl-argument-buffers", "--msl-argument-buffer-tier", "1", "--msl-device-argument-buffer", "1", "--msl-device-argument-buffer", "2", "--msl-device-argument-buffer", "3", "--msl-decoration-binding", "--rename-entry-point", entry, "main0", stage}
+	options := []string{
+		"--msl",
+		"--msl-version", "30000",
+		"--msl-argument-buffers",
+		"--msl-argument-buffer-tier", "1",
+		"--msl-device-argument-buffer", "1",
+		"--msl-device-argument-buffer", "2",
+		"--msl-device-argument-buffer", "3",
+		"--msl-decoration-binding",
+		"--rename-entry-point", entry, "main0",
+		stage,
+	}
 	if stage == "vert" {
 		options = append(options, "--flip-vert-y")
 	}
@@ -173,7 +183,7 @@ func remap(data []byte) ([]byte, error) {
 			case 34:
 				binding, ok := bindings[id]
 				if !ok {
-					return nil, fmt.Errorf("descriptor %s lacks binding", strconv.Itoa(int(id)))
+					return nil, fmt.Errorf("descriptor %d lacks binding", id)
 				}
 				words[i+3] = 1
 				if binding == 2 {

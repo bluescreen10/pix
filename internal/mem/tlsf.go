@@ -112,9 +112,9 @@ func (t *TLSF) Alloc(size uint32) (Allocation, error) {
 		}
 	}
 
-	reminderSize := nodeTotalSize - size
-	if reminderSize > 0 {
-		newNodeIndex := t.insertNode(reminderSize, nodeOffset+size)
+	remainderSize := nodeTotalSize - size
+	if remainderSize > 0 {
+		newNodeIndex := t.insertNode(remainderSize, nodeOffset+size)
 
 		if nodeNext != unusedNode {
 			t.nodes[nodeNext].prev = newNodeIndex
@@ -128,34 +128,33 @@ func (t *TLSF) Alloc(size uint32) (Allocation, error) {
 }
 
 func (t *TLSF) Free(alloc Allocation) error {
+	n := t.nodes[alloc.id]
 
-	node := t.nodes[alloc.id]
-
-	if !node.used {
+	if !n.used {
 		return ErrInvalidBuffer
 	}
 
-	offset := node.offset
-	size := node.size
+	offset := n.offset
+	size := n.size
 
-	if (node.prev != unusedNode) && !t.nodes[node.prev].used {
-		prevNode := t.nodes[node.prev]
+	if (n.prev != unusedNode) && !t.nodes[n.prev].used {
+		prevNode := t.nodes[n.prev]
 		offset = prevNode.offset
 		size += prevNode.size
 
-		t.removeNode(node.prev)
-		node.prev = prevNode.prev
+		t.removeNode(n.prev)
+		n.prev = prevNode.prev
 	}
 
-	if (node.next != unusedNode) && !t.nodes[node.next].used {
-		nextNode := t.nodes[node.next]
+	if (n.next != unusedNode) && !t.nodes[n.next].used {
+		nextNode := t.nodes[n.next]
 		size += nextNode.size
-		t.removeNode(node.next)
-		node.next = nextNode.next
+		t.removeNode(n.next)
+		n.next = nextNode.next
 	}
 
-	next := node.next
-	prev := node.prev
+	next := n.next
+	prev := n.prev
 
 	t.freeNodes = append(t.freeNodes, alloc.id)
 	combinedNodeIndex := t.insertNode(size, offset)
@@ -240,22 +239,22 @@ func (t *TLSF) insertNode(size uint32, dataOffset uint32) nodeId {
 }
 
 func (t *TLSF) removeNode(nodeIndex nodeId) {
-	node := t.nodes[nodeIndex]
+	n := t.nodes[nodeIndex]
 
-	if node.binPrev != unusedNode {
-		t.nodes[node.binPrev].binNext = node.binNext
-		if node.binNext != unusedNode {
-			t.nodes[node.binNext].binPrev = node.binPrev
+	if n.binPrev != unusedNode {
+		t.nodes[n.binPrev].binNext = n.binNext
+		if n.binNext != unusedNode {
+			t.nodes[n.binNext].binPrev = n.binPrev
 		}
 	} else {
-		binIndex := t.roundDown(node.size)
+		binIndex := t.roundDown(n.size)
 
 		topBinIndex := binIndex >> topBinIndexShift
 		leafBinIndex := binIndex & leafBinIndexMask
 
-		t.bins[binIndex] = node.binNext
-		if node.binNext != unusedNode {
-			t.nodes[node.binNext].binPrev = unusedNode
+		t.bins[binIndex] = n.binNext
+		if n.binNext != unusedNode {
+			t.nodes[n.binNext].binPrev = unusedNode
 		}
 
 		if t.bins[binIndex] == unusedNode {
@@ -269,7 +268,7 @@ func (t *TLSF) removeNode(nodeIndex nodeId) {
 	}
 
 	t.freeNodes = append(t.freeNodes, nodeIndex)
-	t.freeSpace -= node.size
+	t.freeSpace -= n.size
 }
 
 func (t *TLSF) getFreeNodeIndex() nodeId {
