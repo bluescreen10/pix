@@ -18,6 +18,7 @@ import (
 	"github.com/bluescreen10/pix/scenes"
 	"github.com/bluescreen10/pix/shaders"
 	"github.com/bluescreen10/pix/textures"
+	"github.com/chewxy/math32"
 )
 
 // Renderer is the single entry point. It obtains a gpu backend from the registry
@@ -1312,7 +1313,7 @@ func aimSpotShadow(s *shadowResource, l scenes.LightPacket) {
 	}
 	d := l.Direction.Normalize()
 	up := glm.Vec3f{0, 1, 0}
-	if abs32(d.Dot(up)) > 0.99 {
+	if math32.Abs(d.Dot(up)) > 0.99 {
 		up = glm.Vec3f{0, 0, 1}
 	}
 	c.SetPosition(l.Position)
@@ -1406,7 +1407,7 @@ func (r *Renderer) fitDirectionalShadow(s *shadowResource, l scenes.LightPacket,
 
 	// A stable light basis (avoid the degenerate LookAt when dir ∥ world-up).
 	up := glm.Vec3f{0, 1, 0}
-	if abs32(d.Dot(up)) > 0.99 {
+	if math32.Abs(d.Dot(up)) > 0.99 {
 		up = glm.Vec3f{0, 0, 1}
 	}
 	right := up.Cross(d).Normalize()
@@ -1454,21 +1455,7 @@ func boundingSphere(p [8]glm.Vec3f) (glm.Vec3f, float32) {
 			radius = dsq
 		}
 	}
-	return center, sqrt32(radius)
-}
-
-// small float32 math helpers for the shadow fit.
-
-func abs32(x float32) float32 {
-	return float32(math.Abs(float64(x)))
-}
-
-func sqrt32(x float32) float32 {
-	return float32(math.Sqrt(float64(x)))
-}
-
-func cos32(x float32) float32 {
-	return float32(math.Cos(float64(x)))
+	return center, math32.Sqrt(radius)
 }
 
 // snap rounds x down to the nearest multiple of step (for texel-grid alignment).

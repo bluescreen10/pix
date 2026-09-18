@@ -4,6 +4,7 @@ import (
 	"slices"
 
 	"github.com/bluescreen10/pix/glm"
+	"github.com/chewxy/math32"
 )
 
 // SkeletonConfig is a skeleton's bind-time data: parallel arrays indexed by joint.
@@ -173,7 +174,7 @@ func (s *Scene) updateSkinning() {
 func maxColumnLength(m glm.Mat4f) float32 {
 	col := func(base int) float32 {
 		x, y, z := m[base], m[base+1], m[base+2]
-		return sqrt32(x*x + y*y + z*z)
+		return math32.Sqrt(x*x + y*y + z*z)
 	}
 	a, b, c := col(0), col(4), col(8)
 	if b > a {

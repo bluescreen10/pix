@@ -11,6 +11,7 @@ import (
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
+	"github.com/chewxy/math32"
 )
 
 // Light-count limits (mirror scene_lit.frag).
@@ -177,9 +178,9 @@ func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPack
 			dir := lp.Direction.Normalize()
 			gs := gpuSpotLight{
 				pos:       [4]float32{lp.Position[0], lp.Position[1], lp.Position[2], lp.Range},
-				dir:       [4]float32{dir[0], dir[1], dir[2], cos32(lp.Angle)},
+				dir:       [4]float32{dir[0], dir[1], dir[2], math32.Cos(lp.Angle)},
 				color:     [4]float32{lp.Color[0], lp.Color[1], lp.Color[2], lp.Intensity},
-				cosInner:  cos32(lp.Angle * (1 - glm.Clamp(lp.Penumbra, 0, 1))),
+				cosInner:  math32.Cos(lp.Angle * (1 - glm.Clamp(lp.Penumbra, 0, 1))),
 				shadowMap: noShadowMap,
 			}
 			if s := shadowOf(lp); s != nil && s.m.IsValid() {
