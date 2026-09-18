@@ -21,7 +21,7 @@ func (t Texture) Release() {
 	t.ref.Release()
 }
 
-// Valid reports whether the underlying texture is still alive.
+// IsValid reports whether the underlying texture is still alive.
 func (t Texture) IsValid() bool {
 	return t.ref.IsValid()
 }

@@ -55,7 +55,9 @@ func NewStore(backend gpu.Backend) *Store {
 }
 
 // DefaultSampler returns the heap index of the linear/repeat sampler.
-func (t *Store) DefaultSampler() uint32 { return t.defaultSampler }
+func (t *Store) DefaultSampler() uint32 {
+	return t.defaultSampler
+}
 
 // CreateSampler creates (and retains) a sampler, returning its heap index.
 func (t *Store) CreateSampler(d gpu.SamplerDescriptor) uint32 {
@@ -70,7 +72,9 @@ func (t *Store) CreateSampler(d gpu.SamplerDescriptor) uint32 {
 func (t *Store) Create(rgba []byte, w, h int, format Format) Texture {
 	channels := format.channels()
 	base := format.repack(rgba, w, h)
-	levels, sizes := mipChain(base, w, h, channels, format == SRGB, format == Normal)
+	// The backend derives each level's extent from the mip index, so mipChain's
+	// per-level sizes aren't needed here.
+	levels, _ := mipChain(base, w, h, channels, format == SRGB, format == Normal)
 
 	tex := t.backend.CreateTexture(gpu.TextureDescriptor{
 		Kind: gpu.Texture2D, Width: uint32(w), Height: uint32(h),
@@ -99,7 +103,6 @@ func (t *Store) Create(rgba []byte, w, h int, format Format) Texture {
 	}
 	put(0, base)
 	for i, l := range levels {
-		_ = sizes[i] // the backend derives each level's extent from the mip index
 		put(uint32(i+1), l)
 	}
 	cmd.PrepareSampled(tex, gpu.StageFragment)
