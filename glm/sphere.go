@@ -5,7 +5,9 @@ import "math"
 // Sphere is a bounding sphere: a center and radius in whatever space it was
 // computed (local, world, etc. — the caller tracks which).
 type Sphere struct {
+	// Center is the sphere's center point.
 	Center Vec3f
+	// Radius is the distance from Center to the sphere's surface.
 	Radius float32
 }
 

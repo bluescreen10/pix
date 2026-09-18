@@ -6,6 +6,8 @@ import (
 	"github.com/chewxy/math32"
 )
 
+// PerspectiveRH returns a right-handed perspective projection matrix with a
+// depth range of [0, 1]. The vertical field of view is expressed in radians.
 func PerspectiveRH[T number](fovYrad, aspectRatio, zNear, zFar T) Mat4[T] {
 	sinFov, cosFov := math.Sincos(float64(0.5) * float64(fovYrad))
 	h := T(cosFov) / T(sinFov)
@@ -50,19 +52,22 @@ func OrthoFullRevZRH[T number](left, right, bottom, top, near, far T) Mat4[T] {
 	return OrthoFullRH(left, right, bottom, top, far, near)
 }
 
+// LookAtRH returns a right-handed view matrix looking from eye toward center.
 func LookAtRH[T number](eye, center, up Vec3[T]) Mat4[T] {
-	f := (center.Sub(eye)).Normalize()
-	s := f.Cross(up).Normalize()
-	u := s.Cross(f)
+	forward := center.Sub(eye).Normalize()
+	right := forward.Cross(up).Normalize()
+	viewUp := right.Cross(forward)
 
 	return Mat4[T]{
-		s[0], u[0], -f[0], 0,
-		s[1], u[1], -f[1], 0,
-		s[2], u[2], -f[2], 0,
-		-eye.Dot(s), -eye.Dot(u), eye.Dot(f), 1,
+		right[0], viewUp[0], -forward[0], 0,
+		right[1], viewUp[1], -forward[1], 0,
+		right[2], viewUp[2], -forward[2], 0,
+		-eye.Dot(right), -eye.Dot(viewUp), eye.Dot(forward), 1,
 	}
 }
 
+// OrthoRH returns a centered right-handed orthographic projection matrix with
+// the supplied aspect ratio and a depth range of [0, 1].
 func OrthoRH[T number](aspectRatio, zNear, zFar T) Mat4[T] {
 	h := T(1)
 	w := h / aspectRatio
@@ -76,6 +81,8 @@ func OrthoRH[T number](aspectRatio, zNear, zFar T) Mat4[T] {
 	}
 }
 
+// OrthoFullRH returns a right-handed orthographic projection matrix for the
+// supplied view volume and a depth range of [0, 1].
 func OrthoFullRH[T number](left, right, bottom, top, near, far T) Mat4[T] {
 	return Mat4[T]{
 		2 / (right - left), 0, 0, 0,
@@ -85,6 +92,7 @@ func OrthoFullRH[T number](left, right, bottom, top, near, far T) Mat4[T] {
 	}
 }
 
+// ToRadians converts an angle in degrees to radians.
 func ToRadians[T number](angle T) T {
 	switch any(angle).(type) {
 	case float32:
@@ -94,6 +102,7 @@ func ToRadians[T number](angle T) T {
 	}
 }
 
+// ToDegrees converts an angle in radians to degrees.
 func ToDegrees[T number](angle T) T {
 	switch any(angle).(type) {
 	case float32:
@@ -103,11 +112,13 @@ func ToDegrees[T number](angle T) T {
 	}
 }
 
-func Clamp[T number](x, min, max T) T {
-	if x < min {
-		return min
-	} else if x > max {
-		return max
+// Clamp constrains value to the inclusive range [minimum, maximum].
+func Clamp[T number](value, minimum, maximum T) T {
+	if value < minimum {
+		return minimum
 	}
-	return x
+	if value > maximum {
+		return maximum
+	}
+	return value
 }
