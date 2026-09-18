@@ -109,7 +109,9 @@ func New(in Input) *Console {
 }
 
 // FontSize is the console's glyph height in logical points.
-func (c *Console) FontSize() float32 { return c.fontSize }
+func (c *Console) FontSize() float32 {
+	return c.fontSize
+}
 
 // SetFontSize sets the glyph height in LOGICAL POINTS — not device pixels, so the
 // console is the same physical size on a HiDPI display as on a 1x one.
@@ -129,7 +131,9 @@ func (c *Console) SetFontSize(px float32) {
 // input handling while it is: the console captures typed text but does not and cannot
 // stop a camera controller from polling the same keys. Through the renderer,
 // pix.Renderer.IsConsoleOpen is the same check without needing to hold the Console.
-func (c *Console) Visible() bool { return c.visible }
+func (c *Console) Visible() bool {
+	return c.visible
+}
 
 // Show opens or closes the console. Closing does not clear the edit line.
 func (c *Console) Show(on bool) {
@@ -154,7 +158,9 @@ func (c *Console) Printf(format string, args ...any) {
 
 // Lines returns the scrollback, oldest first. The slice aliases the console's own
 // storage — read it, do not keep it.
-func (c *Console) Lines() []string { return c.lines }
+func (c *Console) Lines() []string {
+	return c.lines
+}
 
 // Update drains a frame's input: the toggle key always, and everything else only
 // while the console is open. Call once per frame, before Draw.
@@ -265,10 +271,7 @@ func (c *Console) recall(dir int) {
 	if len(c.history) == 0 {
 		return
 	}
-	pos := c.histPos + dir
-	if pos < 0 {
-		pos = 0
-	}
+	pos := max(c.histPos+dir, 0)
 	if pos >= len(c.history) {
 		c.histPos = len(c.history)
 		c.edit, c.cursor = c.edit[:0], 0

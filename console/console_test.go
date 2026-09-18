@@ -1,10 +1,12 @@
-package console
+package console_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/console"
 	"github.com/bluescreen10/pix/input"
 )
 
@@ -27,28 +29,57 @@ func (f *fakeInput) Keys() []input.KeyEvent {
 	return out
 }
 
-func (f *fakeInput) typeStr(s string) { f.chars = append(f.chars, []rune(s)...) }
+func (f *fakeInput) typeStr(s string) {
+	f.chars = append(f.chars, []rune(s)...)
+}
 
 func (f *fakeInput) press(k input.Key) {
 	f.keys = append(f.keys, input.KeyEvent{Key: k, Action: input.KeyPress})
 }
 
 // newTest returns an open console (skipping the toggle dance) and its input.
-func newTest(t *testing.T) (*Console, *fakeInput) {
+func newTest(t *testing.T) (*console.Console, *fakeInput) {
 	t.Helper()
 	in := &fakeInput{}
-	c := New(in)
+	c := console.New(in)
 	c.Show(true)
-	c.lines = c.lines[:0] // drop the banner so tests assert on their own output
+	c.Exec("clear") // drop the banner so tests assert on their own output
 	return c, in
 }
 
 // lastLine is the most recent scrollback line.
-func lastLine(c *Console) string {
-	if len(c.lines) == 0 {
+func lastLine(c *console.Console) string {
+	lines := c.Lines()
+	if len(lines) == 0 {
 		return ""
 	}
-	return c.lines[len(c.lines)-1]
+	return lines[len(lines)-1]
+}
+
+// lastEcho is the most recent "] <line>" submit echo — what a line recalled from
+// history was, regardless of whatever Exec printed afterward (an unregistered name
+// like "b 2" also prints an "unknown variable" line right after its echo).
+func lastEcho(c *console.Console) string {
+	lines := c.Lines()
+	for _, line := range slices.Backward(lines) {
+		if strings.HasPrefix(line, "] ") {
+			return line
+		}
+	}
+	return ""
+}
+
+// editLine returns what the console is currently showing as the prompt + typed text.
+// Draw is the only public window onto the edit line's content, so tests that need to
+// see it (rather than what it produces once submitted) go through a fakePainter.
+func editLine(t *testing.T, c *console.Console) string {
+	t.Helper()
+	p := &fakePainter{scale: 1}
+	c.Draw(p, 800, 600)
+	if len(p.texts) == 0 {
+		t.Fatal("Draw produced nothing while the console was visible")
+	}
+	return p.texts[0].s
 }
 
 // TestSetRoutesParsedValueToBinding is the core promise: text typed at the prompt
@@ -56,7 +87,7 @@ func lastLine(c *Console) string {
 func TestSetRoutesParsedValueToBinding(t *testing.T) {
 	c, in := newTest(t)
 	var speed float32
-	Bind(c, "xyz", &speed, "")
+	console.Bind(c, "xyz", &speed, "")
 
 	in.typeStr("set xyz 23")
 	in.press(input.KeyEnter)
@@ -75,7 +106,7 @@ func TestSetRoutesParsedValueToBinding(t *testing.T) {
 func TestBareNameGetsAndAssigns(t *testing.T) {
 	c, _ := newTest(t)
 	v := 7
-	Bind(c, "count", &v, "")
+	console.Bind(c, "count", &v, "")
 
 	c.Exec("count")
 	if got := lastLine(c); got != "count = 7" {
@@ -92,7 +123,7 @@ func TestBareNameGetsAndAssigns(t *testing.T) {
 func TestBadValueReportsAndLeavesValueAlone(t *testing.T) {
 	c, _ := newTest(t)
 	v := float32(1.5)
-	Bind(c, "x", &v, "")
+	console.Bind(c, "x", &v, "")
 
 	c.Exec("set x banana")
 	if v != 1.5 {
@@ -108,7 +139,7 @@ func TestBadValueReportsAndLeavesValueAlone(t *testing.T) {
 func TestBoolAcceptsWordForms(t *testing.T) {
 	c, _ := newTest(t)
 	var on bool
-	Bind(c, "deferred", &on, "")
+	console.Bind(c, "deferred", &on, "")
 
 	for _, word := range []string{"on", "yes", "true", "1"} {
 		on = false
@@ -130,7 +161,7 @@ func TestBoolAcceptsWordForms(t *testing.T) {
 // loud, not accept them into the void.
 func TestReadOnlyVariableIsReported(t *testing.T) {
 	c, _ := newTest(t)
-	BindFunc(c, "fps", func() float64 { return 60 }, nil, "")
+	console.BindFunc(c, "fps", func() float64 { return 60 }, nil, "")
 
 	c.Exec("set fps 12")
 	if got := lastLine(c); !strings.Contains(got, "read-only") {
@@ -155,7 +186,7 @@ func TestUnknownNameIsReported(t *testing.T) {
 func TestQuotedStringKeepsSpaces(t *testing.T) {
 	c, _ := newTest(t)
 	var s string
-	Bind(c, "title", &s, "")
+	console.Bind(c, "title", &s, "")
 
 	c.Exec(`set title "hello there"`)
 	if s != "hello there" {
@@ -170,52 +201,106 @@ func TestScrollbackIsCapped(t *testing.T) {
 	for i := range 100 {
 		c.Printf("line %d", i)
 	}
-	if len(c.lines) != 8 {
-		t.Fatalf("scrollback held %d lines, want the cap of 8", len(c.lines))
+	if len(c.Lines()) != 8 {
+		t.Fatalf("scrollback held %d lines, want the cap of 8", len(c.Lines()))
 	}
 	if got := lastLine(c); got != "line 99" {
 		t.Fatalf("cap dropped the newest line: last = %q", got)
 	}
 }
 
-// TestHistoryIsCappedAndRecalls covers up/down recall plus its own cap.
+// TestHistoryIsCappedAndRecalls: recalling past the cap must not reach an entry that
+// was evicted. Recall content is only observable by submitting what was recalled and
+// reading the echo, so that is how this drives and checks it.
 func TestHistoryIsCappedAndRecalls(t *testing.T) {
-	c, _ := newTest(t)
+	c, in := newTest(t)
 	c.MaxHistory = 3
 	for _, line := range []string{"a 1", "b 2", "c 3", "d 4"} {
-		c.edit = []rune(line)
-		c.cursor = len(c.edit)
-		c.submit()
-	}
-	if len(c.history) != 3 {
-		t.Fatalf("history held %d lines, want the cap of 3", len(c.history))
+		in.typeStr(line)
+		in.press(input.KeyEnter)
+		c.Update()
 	}
 
-	c.key(input.KeyEvent{Key: input.KeyUp})
-	if got := string(c.edit); got != "d 4" {
-		t.Fatalf("first recall = %q, want the newest entry", got)
+	// Four ups from the fresh (post-submit) position would reach "a 1" if history
+	// still held it. The cap should have evicted it, so the fourth Up must clamp at
+	// the oldest surviving entry, "b 2", instead.
+	for range 4 {
+		in.press(input.KeyUp)
+		c.Update()
 	}
-	c.key(input.KeyEvent{Key: input.KeyUp})
-	if got := string(c.edit); got != "c 3" {
-		t.Fatalf("second recall = %q", got)
+	in.press(input.KeyEnter)
+	c.Update()
+	if got := lastEcho(c); got != "] b 2" {
+		t.Fatalf("recall after eviction submitted %q, want the oldest surviving entry b 2 (a 1 should have been capped out)", got)
 	}
-	c.key(input.KeyEvent{Key: input.KeyDown})
-	c.key(input.KeyEvent{Key: input.KeyDown})
-	if got := string(c.edit); got != "" {
-		t.Fatalf("walking past the newest entry left %q, want an empty line", got)
+}
+
+// TestRecallWalksNewestToOldestThenBack covers up/down recall order and returning to
+// the empty line once every entry has been stepped past.
+func TestRecallWalksNewestToOldestThenBack(t *testing.T) {
+	c, in := newTest(t)
+	for _, line := range []string{"a 1", "b 2"} {
+		in.typeStr(line)
+		in.press(input.KeyEnter)
+		c.Update()
+	}
+
+	in.press(input.KeyUp)
+	c.Update()
+	in.press(input.KeyEnter)
+	c.Update()
+	if got := lastEcho(c); got != "] b 2" {
+		t.Fatalf("first recall submitted %q, want the newest entry b 2", got)
+	}
+
+	in.press(input.KeyUp)
+	c.Update()
+	in.press(input.KeyUp)
+	c.Update()
+	in.press(input.KeyEnter)
+	c.Update()
+	if got := lastEcho(c); got != "] a 1" {
+		t.Fatalf("recalling two steps back submitted %q, want a 1", got)
+	}
+
+	// Stepping past the newest entry (more Downs than there is history) must land on
+	// an empty line: submitting it is a no-op rather than echoing something stale.
+	before := len(c.Lines())
+	in.press(input.KeyDown)
+	c.Update()
+	in.press(input.KeyDown)
+	c.Update()
+	in.press(input.KeyEnter)
+	c.Update()
+	if len(c.Lines()) != before {
+		t.Fatal("submitting after walking past the newest entry printed something; want a no-op empty-line submit")
 	}
 }
 
 // TestRepeatedSubmitDoesNotFloodHistory: holding Enter should not bury the history.
+// Since duplicate entries are indistinguishable by content, this bookends the run of
+// duplicates with a distinct marker and checks how many recalls it takes to reach it.
 func TestRepeatedSubmitDoesNotFloodHistory(t *testing.T) {
-	c, _ := newTest(t)
+	c, in := newTest(t)
+	in.typeStr("start")
+	in.press(input.KeyEnter)
+	c.Update()
 	for range 5 {
-		c.edit = []rune("same")
-		c.cursor = 4
-		c.submit()
+		in.typeStr("same")
+		in.press(input.KeyEnter)
+		c.Update()
 	}
-	if len(c.history) != 1 {
-		t.Fatalf("history has %d entries for one repeated line, want 1", len(c.history))
+
+	// If the duplicate submits were not deduped, "start" would sit five slots further
+	// back; two Ups from the fresh position would still land on a "same" entry.
+	in.press(input.KeyUp)
+	c.Update()
+	in.press(input.KeyUp)
+	c.Update()
+	in.press(input.KeyEnter)
+	c.Update()
+	if got := lastEcho(c); got != "] start" {
+		t.Fatalf("two ups after five duplicate submits reached %q, want the earlier distinct entry \"start\" (duplicates were not deduped)", got)
 	}
 }
 
@@ -226,25 +311,29 @@ func TestEditingMovesAndDeletes(t *testing.T) {
 	in.typeStr("abcd")
 	c.Update()
 
-	c.key(input.KeyEvent{Key: input.KeyLeft})
-	c.key(input.KeyEvent{Key: input.KeyLeft})
-	in.typeStr("X") // insert in the middle
-	c.Update()
-	if got := string(c.edit); got != "abXcd" {
-		t.Fatalf("insert at cursor = %q, want abXcd", got)
+	in.press(input.KeyLeft)
+	in.press(input.KeyLeft)
+	c.Update() // move the cursor left twice; no characters in this update
+	in.typeStr("X")
+	c.Update() // insert at the now-repositioned cursor
+	if got := editLine(t, c); got != "> abXcd" {
+		t.Fatalf("insert at cursor = %q, want > abXcd", got)
 	}
 
-	c.key(input.KeyEvent{Key: input.KeyBackspace})
-	if got := string(c.edit); got != "abcd" {
-		t.Fatalf("backspace at cursor = %q, want abcd", got)
+	in.press(input.KeyBackspace)
+	c.Update()
+	if got := editLine(t, c); got != "> abcd" {
+		t.Fatalf("backspace at cursor = %q, want > abcd", got)
 	}
-	c.key(input.KeyEvent{Key: input.KeyDelete})
-	if got := string(c.edit); got != "abd" {
-		t.Fatalf("delete at cursor = %q, want abd", got)
+	in.press(input.KeyDelete)
+	c.Update()
+	if got := editLine(t, c); got != "> abd" {
+		t.Fatalf("delete at cursor = %q, want > abd", got)
 	}
-	c.key(input.KeyEvent{Key: input.KeyHome})
-	c.key(input.KeyEvent{Key: input.KeyBackspace})
-	if got := string(c.edit); got != "abd" {
+	in.press(input.KeyHome)
+	in.press(input.KeyBackspace)
+	c.Update()
+	if got := editLine(t, c); got != "> abd" {
 		t.Fatalf("backspace at the start deleted something: %q", got)
 	}
 }
@@ -253,7 +342,7 @@ func TestEditingMovesAndDeletes(t *testing.T) {
 // character, which must not land in the fresh edit line.
 func TestToggleKeyDoesNotTypeItself(t *testing.T) {
 	in := &fakeInput{}
-	c := New(in)
+	c := console.New(in)
 
 	in.press(c.ToggleKey)
 	in.typeStr("`") // the character GLFW reports for that same keystroke
@@ -262,15 +351,15 @@ func TestToggleKeyDoesNotTypeItself(t *testing.T) {
 	if !c.Visible() {
 		t.Fatal("toggle key did not open the console")
 	}
-	if got := string(c.edit); got != "" {
-		t.Fatalf("edit line = %q, want empty — the toggle char leaked in", got)
+	if got := editLine(t, c); got != "> " {
+		t.Fatalf("edit line = %q, want \"> \" — the toggle char leaked in", got)
 	}
 
 	// And typing after it works normally.
 	in.typeStr("hi")
 	c.Update()
-	if got := string(c.edit); got != "hi" {
-		t.Fatalf("edit line = %q, want hi", got)
+	if got := editLine(t, c); got != "> hi" {
+		t.Fatalf("edit line = %q, want > hi", got)
 	}
 }
 
@@ -278,13 +367,14 @@ func TestToggleKeyDoesNotTypeItself(t *testing.T) {
 // player is pressing.
 func TestHiddenConsoleIgnoresTyping(t *testing.T) {
 	in := &fakeInput{}
-	c := New(in)
+	c := console.New(in)
 
 	in.typeStr("wasd")
 	in.press(input.KeyEnter)
 	c.Update()
 
-	if got := string(c.edit); got != "" {
+	c.Show(true) // Draw is a no-op while hidden, so open it to inspect what landed
+	if got := editLine(t, c); got != "> " {
 		t.Fatalf("hidden console captured %q", got)
 	}
 }
@@ -292,22 +382,24 @@ func TestHiddenConsoleIgnoresTyping(t *testing.T) {
 // TestCompleteFillsCommonPrefix pins tab completion to the longest unambiguous
 // prefix rather than to the first match.
 func TestCompleteFillsCommonPrefix(t *testing.T) {
-	c, _ := newTest(t)
+	c, in := newTest(t)
 	var a, b float32
-	Bind(c, "shadow.distance", &a, "")
-	Bind(c, "shadow.bias", &b, "")
+	console.Bind(c, "shadow.distance", &a, "")
+	console.Bind(c, "shadow.bias", &b, "")
 
-	c.edit = []rune("sha")
-	c.cursor = 3
-	c.complete()
-	if got := string(c.edit); got != "shadow." {
-		t.Fatalf("completion = %q, want the common prefix shadow.", got)
+	in.typeStr("sha")
+	c.Update()
+	in.press(input.KeyTab)
+	c.Update()
+	if got := editLine(t, c); got != "> shadow." {
+		t.Fatalf("completion = %q, want > shadow.", got)
 	}
 
-	c.edit = []rune("shadow.d")
-	c.cursor = len(c.edit)
-	c.complete()
-	if got := string(c.edit); got != "shadow.distance" {
+	in.typeStr("d")
+	c.Update()
+	in.press(input.KeyTab)
+	c.Update()
+	if got := editLine(t, c); got != "> shadow.distance" {
 		t.Fatalf("unambiguous completion = %q", got)
 	}
 }
@@ -317,12 +409,12 @@ func TestCompleteFillsCommonPrefix(t *testing.T) {
 func TestListShowsRegisteredVariables(t *testing.T) {
 	c, _ := newTest(t)
 	v := float32(2.5)
-	Bind(c, "shadow.distance", &v, "fit distance")
+	console.Bind(c, "shadow.distance", &v, "fit distance")
 	other := 1
-	Bind(c, "other", &other, "")
+	console.Bind(c, "other", &other, "")
 
 	c.Exec("list")
-	joined := strings.Join(c.lines, "\n")
+	joined := strings.Join(c.Lines(), "\n")
 	if !strings.Contains(joined, "shadow.distance") || !strings.Contains(joined, "2.5") {
 		t.Fatalf("list did not show the variable and value:\n%s", joined)
 	}
@@ -330,9 +422,9 @@ func TestListShowsRegisteredVariables(t *testing.T) {
 		t.Fatalf("list dropped the description:\n%s", joined)
 	}
 
-	c.lines = c.lines[:0]
+	c.Exec("clear")
 	c.Exec("list shadow.")
-	joined = strings.Join(c.lines, "\n")
+	joined = strings.Join(c.Lines(), "\n")
 	if strings.Contains(joined, "other") {
 		t.Fatalf("prefix filter leaked an unrelated variable:\n%s", joined)
 	}
@@ -344,7 +436,7 @@ func TestBindFuncRunsTheSetter(t *testing.T) {
 	c, _ := newTest(t)
 	got := 0
 	calls := 0
-	BindFunc(c, "n",
+	console.BindFunc(c, "n",
 		func() int { return got },
 		func(v int) error { calls++; got = v * 2; return nil }, "")
 
@@ -359,7 +451,7 @@ func TestBindFuncRunsTheSetter(t *testing.T) {
 func TestParseRejectsOutOfRange(t *testing.T) {
 	c, _ := newTest(t)
 	var small int8
-	Bind(c, "small", &small, "")
+	console.Bind(c, "small", &small, "")
 
 	c.Exec("set small 9000")
 	if small != 0 {
@@ -382,7 +474,9 @@ type fakePainter struct {
 	rects int
 }
 
-func (p *fakePainter) Rect(x, y, w, h float32, c colors.RGBA32F) { p.rects++ }
+func (p *fakePainter) Rect(x, y, w, h float32, c colors.RGBA32F) {
+	p.rects++
+}
 
 func (p *fakePainter) Text(s string, x, y, size float32, c colors.RGBA32F) {
 	p.texts = append(p.texts, struct {
@@ -396,7 +490,9 @@ func (p *fakePainter) Measure(s string, size float32) float32 {
 	return float32(len([]rune(s))) * 8 * (size / 16)
 }
 
-func (p *fakePainter) Scale() float32 { return p.scale }
+func (p *fakePainter) Scale() float32 {
+	return p.scale
+}
 
 // SnapSize mirrors pix's real rule — floor to a whole 16px cell, minimum one. A fake
 // that rounded differently would quietly make these tests disagree with what actually
@@ -433,30 +529,34 @@ func TestFontSizeIsLogicalPoints(t *testing.T) {
 }
 
 // TestLineSpacingFollowsTheSnappedSize: the painter rounds the glyph height, so line
-// spacing has to be derived from what it rounded to. Deriving it from the requested
-// size instead would overlap or strand lines by the rounding error.
+// spacing has to be derived from what it rounded to, not the raw requested size.
+// Proven here without pinning the exact spacing ratio (a private constant): two
+// requested sizes that both snap to the same 16px cell must produce the same line
+// step, which could only happen if the step is computed from the snapped size.
 func TestLineSpacingFollowsTheSnappedSize(t *testing.T) {
-	c, _ := newTest(t)
-	c.SetFontSize(12) // snaps up to 16 at 1x
-	c.Print("one")
-	c.Print("two")
+	stepFor := func(fontSize float32) float32 {
+		c, _ := newTest(t)
+		c.SetFontSize(fontSize)
+		c.Print("one")
+		c.Print("two")
 
-	p := &fakePainter{scale: 1}
-	c.Draw(p, 800, 600)
-	if len(p.texts) < 3 { // prompt + two lines
-		t.Fatalf("drew %d texts, want the prompt and two scrollback lines", len(p.texts))
+		p := &fakePainter{scale: 1}
+		c.Draw(p, 800, 600)
+		if len(p.texts) < 3 { // prompt + two lines
+			t.Fatalf("drew %d texts, want the prompt and two scrollback lines", len(p.texts))
+		}
+		if got := p.texts[0].size; got != 16 {
+			t.Fatalf("glyph height = %v, want the snapped 16", got)
+		}
+		return p.texts[1].y - p.texts[2].y
 	}
-	drawn := p.texts[0].size
-	if drawn != 16 {
-		t.Fatalf("glyph height = %v, want the snapped 16", drawn)
+
+	a, b := stepFor(12), stepFor(15) // both snap to 16
+	if a != b {
+		t.Fatalf("line step depends on the requested size (12pt: %v, 15pt: %v) rather than the snapped one", a, b)
 	}
-	// Consecutive scrollback lines must step by the snapped size, not the 12 asked for.
-	step := p.texts[1].y - p.texts[2].y
-	if step <= drawn {
-		t.Fatalf("line step %v is not clear of the %v glyph height — lines would touch", step, drawn)
-	}
-	if want := drawn * lineSpacing; abs32(step-want) > 0.01 {
-		t.Fatalf("line step = %v, want %v (derived from the snapped size)", step, want)
+	if a <= 16 {
+		t.Fatalf("line step %v is not clear of the 16 glyph height — lines would touch", a)
 	}
 }
 
@@ -482,8 +582,8 @@ func TestDefaultConsoleDrawsOneCellOnHiDPI(t *testing.T) {
 // divide by zero downstream.
 func TestSetFontSizeRejectsNonsense(t *testing.T) {
 	c, _ := newTest(t)
-	if got := c.FontSize(); got != DefaultFontSize {
-		t.Fatalf("default font size = %v, want %v", got, DefaultFontSize)
+	if got := c.FontSize(); got != console.DefaultFontSize {
+		t.Fatalf("default font size = %v, want %v", got, console.DefaultFontSize)
 	}
 	c.SetFontSize(24)
 	c.SetFontSize(0)
@@ -491,13 +591,6 @@ func TestSetFontSizeRejectsNonsense(t *testing.T) {
 	if got := c.FontSize(); got != 24 {
 		t.Fatalf("a nonsense size changed the font size to %v", got)
 	}
-}
-
-func abs32(f float32) float32 {
-	if f < 0 {
-		return -f
-	}
-	return f
 }
 
 // TestCommandRunsWithArgs: a command is the "do something" half of the console, so it
@@ -532,17 +625,18 @@ func TestCommandErrorIsReported(t *testing.T) {
 // TestCommandsAreCompletedAndListed: a registered command has to be discoverable the
 // same way variables are, or nobody finds it.
 func TestCommandsAreCompletedAndListed(t *testing.T) {
-	c, _ := newTest(t)
+	c, in := newTest(t)
 	c.Command("screenshot", "save a PNG", func([]string) error { return nil })
 
-	c.edit = []rune("scre")
-	c.cursor = 4
-	c.complete()
-	if got := string(c.edit); got != "screenshot" {
-		t.Fatalf("completion = %q, want screenshot", got)
+	in.typeStr("scre")
+	c.Update()
+	in.press(input.KeyTab)
+	c.Update()
+	if got := editLine(t, c); got != "> screenshot" {
+		t.Fatalf("completion = %q, want > screenshot", got)
 	}
 
-	c.lines = c.lines[:0]
+	c.Exec("clear")
 	c.Exec("help")
 	if joined := strings.Join(c.Lines(), "\n"); !strings.Contains(joined, "screenshot") ||
 		!strings.Contains(joined, "save a PNG") {
@@ -566,4 +660,6 @@ var errTest = errKaboom{}
 
 type errKaboom struct{}
 
-func (errKaboom) Error() string { return "kaboom" }
+func (errKaboom) Error() string {
+	return "kaboom"
+}
