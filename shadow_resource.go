@@ -38,9 +38,17 @@ type shadowResource struct {
 	// orthographic shadow camera's depth range spans the scene, so a constant in NDC is
 	// a wildly different world distance from one scene to the next.
 	ndcBias float32
-	// size is the resolution the map was created at, so a settings change can be
-	// noticed and the map reallocated.
-	size uint32
+	// fit carries the angle-dependent scales an orthographic fit leaves to the shader.
+	// Zero for the warps, which bias by their own rules and want no normal offset.
+	fit orthoFit
+	// cascades are the fitted slices when the algorithm is ShadowCascaded, innermost
+	// first, sharing one map laid out side by side. Empty for every other algorithm,
+	// which fits cam alone.
+	cascades []cascadeLevel
+	// width and height are the resolution the map was created at, so a settings change
+	// can be noticed and the map reallocated. They differ from each other for a cascade
+	// atlas, which is one square per slice laid out along the width.
+	width, height uint32
 	// faces is the six per-face camera + map pairs of a point light; nil otherwise.
 	faces []pointFace
 	// seen marks the resource as referenced by the current frame's light table, so
@@ -58,13 +66,46 @@ type shadowResource struct {
 // the scene, so a bias expressed directly in normalized depth silently becomes a
 // wildly different world distance from one scene to the next.
 func (s *shadowResource) updateOrthoBias(radius, depthRange, bias float32) {
-	if depthRange <= 0 {
-		s.ndcBias = 0
-		return
-	}
-	texel := 2 * radius / float32(s.size)
-	s.ndcBias = (texel*1.5 + bias) / depthRange
+	s.fit = orthoBias(radius, depthRange, s.width, bias)
+	s.ndcBias = s.fit.bias
 }
+
+// orthoFit is what an orthographic fit hands back: the constant part of its depth bias,
+// already in normalized units, plus the two scales the lit shader needs to finish the
+// job per fragment.
+//
+// The constant is deliberately small. Most of the bias a surface needs depends on how it
+// is turned relative to the light, which the fit cannot know — see ShadowOffsets in
+// lighting.glsl.
+type orthoFit struct {
+	bias float32
+	// texel is how much world space one shadow texel covers, which is the unit the
+	// angle-dependent offsets are measured in.
+	texel float32
+	// depthScale converts a world-space depth offset into this camera's normalized
+	// depth, so the shader can add a world-sized slope bias to a normalized comparison.
+	depthScale float32
+}
+
+// orthoBias derives the above from a fitted box, split out from the resource so a
+// cascade can ask for one per slice: each covers a different range and so implies a
+// different texel footprint.
+func orthoBias(radius, depthRange float32, size uint32, bias float32) orthoFit {
+	if depthRange <= 0 || size == 0 {
+		return orthoFit{}
+	}
+	texel := 2 * radius / float32(size)
+	return orthoFit{
+		bias:       (texel*orthoConstantTexels + bias) / depthRange,
+		texel:      texel,
+		depthScale: 1 / depthRange,
+	}
+}
+
+// orthoConstantTexels is the angle-independent part of an orthographic fit's bias, in
+// texels. It only has to cover the filter's own footprint; the part that varies with the
+// surface is applied per fragment, where the normal is known.
+const orthoConstantTexels float32 = 0.5
 
 // updateLocalBias recomputes ndcBias for a perspective shadow camera bounded by a
 // light's range (spot, point). Perspective depth is non-linear, so there is no exact
@@ -78,6 +119,26 @@ func (s *shadowResource) updateLocalBias(rng, bias float32) {
 	}
 }
 
+// size is the resolution of one square a fit renders into: the whole map for a single
+// fit, or one cascade's slot in the atlas. Both layouts keep the map's height as that
+// square's side, so this needs no special case.
+func (s *shadowResource) size() uint32 {
+	return s.height
+}
+
+// ensureCascades makes sure count cascade levels exist, each with its own orthographic
+// camera. The cameras persist between frames so a fit only has to re-aim them.
+func (s *shadowResource) ensureCascades(count int) {
+	if len(s.cascades) > count {
+		s.cascades = s.cascades[:count]
+	}
+	for len(s.cascades) < count {
+		s.cascades = append(s.cascades, cascadeLevel{
+			cam: cameras.NewOrthographicCamera(-10, 10, -10, 10, 0.1, 100),
+		})
+	}
+}
+
 // requestedSize is the resolution to allocate for a light, honouring its setting and
 // falling back to the default when it asks for none.
 func requestedSize(l scenes.LightPacket) uint32 {
@@ -87,13 +148,34 @@ func requestedSize(l scenes.LightPacket) uint32 {
 	return l.ShadowSize
 }
 
-// ensureOrtho gives a directional light its orthographic camera. The renderer creates
-// it, not the light: which projection a shadow needs follows from how the renderer
-// intends to render it, and the fit is recomputed from the view every frame anyway.
-func (s *shadowResource) ensureOrtho() {
-	if s.cam == nil {
+// maxShadowMapWidth bounds the shadow atlas so it cannot be asked for a texture wider
+// than a backend will create. Cascades lay their squares out along the width, so the
+// width is the requested resolution MULTIPLIED by the number of slices — four cascades
+// of a 4096 map is already 16384, and one more of either overruns a limit that is 16384
+// on the common backends. The RHI does not publish the limit, so this is the widely
+// supported floor rather than a query; exceeding it is not a soft failure but a driver
+// assertion that takes the process with it.
+const maxShadowMapWidth uint32 = 16384
+
+// cascadeAtlas is the texture size for count slices of a requested square resolution,
+// laid out along the width, reduced to fit maxShadowMapWidth. Halving keeps the squares
+// square, which everything downstream assumes.
+func cascadeAtlas(size, count uint32) (width, height uint32) {
+	for size > 1 && size*count > maxShadowMapWidth {
+		size /= 2
+	}
+	return size * count, size
+}
+
+// orthoCamera returns this resource's orthographic camera, creating it (or replacing a
+// camera of another kind, left behind by a different shadow algorithm) as needed. The
+// renderer chooses the projection, not the light: which one a shadow needs follows from
+// how the renderer intends to render it, and the fit is recomputed every frame anyway.
+func (s *shadowResource) orthoCamera() Camera {
+	if _, ok := s.cam.(*cameras.OrthographicCamera); !ok {
 		s.cam = cameras.NewOrthographicCamera(-10, 10, -10, 10, 0.1, 100)
 	}
+	return s.cam
 }
 
 // ensurePerspective gives a spot light its camera, matching the cone.
@@ -105,15 +187,15 @@ func (s *shadowResource) ensurePerspective(angle, rng float32) {
 
 // ensureMap allocates the depth map, or reallocates it when the requested resolution
 // changed. Point lights use ensureFaceMaps instead.
-func (s *shadowResource) ensureMap(store *textures.Store, size uint32) {
-	if s.m.IsValid() && s.size == size {
+func (s *shadowResource) ensureMap(store *textures.Store, width, height uint32) {
+	if s.m.IsValid() && s.width == width && s.height == height {
 		return
 	}
 	if s.m.IsValid() {
 		s.m.Release()
 	}
-	s.size = size
-	s.m = store.CreateDepthTarget(size, size)
+	s.width, s.height = width, height
+	s.m = store.CreateDepthTarget(width, height)
 }
 
 // ensureFaceMaps does the same for a point light's six cube faces.
@@ -126,10 +208,10 @@ func (s *shadowResource) ensureFaceMaps(store *textures.Store, size uint32) {
 			s.faces[i].cam = cameras.NewPerspectiveCamera(90, 1, 0.05, 1)
 		}
 	}
-	if s.faces[0].m.IsValid() && s.size == size {
+	if s.faces[0].m.IsValid() && s.width == size && s.height == size {
 		return
 	}
-	s.size = size
+	s.width, s.height = size, size
 	for i := range s.faces {
 		if s.faces[i].m.IsValid() {
 			s.faces[i].m.Release()
@@ -186,6 +268,14 @@ type ShadowView struct {
 	Camera Camera
 	Map    textures.Texture
 	Faces  []pointFace
+	// Cascades is one camera per slice when the light was fitted with ShadowCascaded,
+	// innermost first, all rendering into Map side by side. Empty otherwise, and Camera
+	// is then the only fit. When it is not empty Camera is its innermost slice, so a
+	// caller that only wants "the shadow camera" still gets a useful one.
+	Cascades []Camera
+	// Splits[i] is the view distance Cascades[i] covers out to, which is where the lit
+	// shader stops using it. Same length as Cascades.
+	Splits []float32
 }
 
 // ShadowView returns the shadow resources the renderer holds for one light of one
@@ -205,8 +295,15 @@ func (r *Renderer) ShadowView(source scenes.SourceID, light scenes.LightID) *Sha
 		return nil
 	}
 	v := &ShadowView{Camera: s.cam, Map: s.m, Faces: s.faces}
-	if len(s.faces) > 0 {
+	for _, c := range s.cascades {
+		v.Cascades = append(v.Cascades, c.cam)
+		v.Splits = append(v.Splits, c.far)
+	}
+	switch {
+	case len(s.faces) > 0:
 		v.Camera, v.Map = s.faces[0].cam, s.faces[0].m
+	case len(v.Cascades) > 0:
+		v.Camera = v.Cascades[0]
 	}
 	return v
 }

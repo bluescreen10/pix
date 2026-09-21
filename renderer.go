@@ -2,7 +2,6 @@ package pix
 
 import (
 	"fmt"
-	"math"
 	"os"
 	"slices"
 	"time"
@@ -18,7 +17,6 @@ import (
 	"github.com/bluescreen10/pix/scenes"
 	"github.com/bluescreen10/pix/shaders"
 	"github.com/bluescreen10/pix/textures"
-	"github.com/chewxy/math32"
 )
 
 // Renderer is the single entry point. It obtains a gpu backend from the registry
@@ -109,10 +107,17 @@ type Renderer struct {
 	// the position-only depth-pass pipeline (rebuilt with the others on format change).
 	// shadowDistance caps how far down the view frustum directional shadows are fit
 	// (0 = auto: reach the far side of the scene sphere).
+	// shadowAlgorithm picks how directional shadow cameras are fitted (see
+	// ShadowAlgorithm and shadow_fit.go). Spot and point lights ignore it.
 	shadowsEnabled bool
 	shadowSampler  gpu.Sampler
 	shadowPipeline gpu.Pipeline
 	shadowDistance float32
+	shadowNear     float32
+	shadowFilter   ShadowFilter
+	// shadows is how directional lights are fitted plus that fit's own settings; nil
+	// means ShadowUniform (see Renderer.Shadows).
+	shadows ShadowSettings
 
 	// pendingShot is a queued frame capture, recorded into the frame being built (see
 	// screenshot.go).
@@ -213,6 +218,8 @@ func (r *Renderer) SetFontColor(rgba colors.RGBA32F) {
 // are fit: a smaller distance packs the shadow map's resolution into the near view for
 // sharper shadows, at the cost of no shadows beyond it. Pass 0 for the automatic
 // default (fit reaches the far side of the scene's bounding sphere).
+// It has no effect while ShadowCascaded is using explicit Steps: the outermost step is
+// where shadows stop, and one setting owning the far end is better than two.
 func (r *Renderer) SetShadowDistance(distance float32) {
 	r.shadowDistance = distance
 }
@@ -369,12 +376,15 @@ func (r *Renderer) buildPipelines() {
 	r.particleUpdatePipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleUpdate), Entry: "main", Label: "particle-update"})
 	// Shadow depth pass: position-only vertex-pull, no color attachment, writes depth.
 	// Cull is disabled so thin geometry still occludes from the light's view.
-	r.shadowPipeline = r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
-		VertexShader: shaders.ForBackend(r.backend, shaders.SceneShadowVert), FragmentShader: shaders.ForBackend(r.backend, shaders.SceneShadowFrag),
-		Topology: gpu.TopologyTriangles, DepthFormat: gpu.FormatDepth32F,
-		DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareGreater,
-		CullMode: gpu.CullNone, Label: "scene-shadow",
-	})
+	shadowPipe := func(frag []byte, label string) gpu.Pipeline {
+		return r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
+			VertexShader: shaders.ForBackend(r.backend, shaders.SceneShadowVert), FragmentShader: shaders.ForBackend(r.backend, frag),
+			Topology: gpu.TopologyTriangles, DepthFormat: gpu.FormatDepth32F,
+			DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareGreater,
+			CullMode: gpu.CullNone, Label: label,
+		})
+	}
+	r.shadowPipeline = shadowPipe(shaders.SceneShadowFrag, "scene-shadow")
 	for i, k := range r.drawPipelineKeys {
 		r.drawPipelines[i] = r.buildDrawPipe(k)
 	}
@@ -827,7 +837,8 @@ func (r *Renderer) Render(scene scenes.Producer, cam Camera) {
 	r.encode(cmd, target, scene, planes, drawVP, eye)
 	// Recorded after everything is drawn but before the frame is submitted, so a
 	// windowed capture reads the image while it is still ours (see screenshot.go).
-	// TODO: screenshot should not show console or overlays
+	// encode has usually done it already, just before drawing the overlay; this covers
+	// the frames with no overlay to exclude, and recordScreenshot only copies once.
 	r.recordScreenshot(cmd, target)
 	cpu += time.Since(encStart)
 	r.stats.AddCPUTime(cpu)
@@ -1013,6 +1024,20 @@ func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene scene
 		}
 	}
 	if r.overlayActive() && r.overlay != nil {
+		// A capture is of the SCENE, not of the tools used to inspect it, so the copy
+		// goes in before the overlay. That means breaking the pass, since a copy cannot
+		// happen inside one — only on frames that actually capture, and only when there
+		// is an overlay to exclude.
+		if r.pendingShot != nil {
+			cmd.EndRenderPass()
+			r.recordScreenshot(cmd, target)
+			cmd.BeginRenderPass(gpu.RenderTargets{
+				Color: []gpu.ColorAttachment{{Texture: target, Load: gpu.LoadKeep, Store: gpu.StoreKeep}},
+				Depth: &gpu.DepthAttachment{Texture: r.depth, Load: gpu.LoadKeep, Store: gpu.StoreKeep},
+			})
+			cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
+			cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
+		}
 		r.overlay.draw(cmd, float32(r.width), float32(r.height))
 	}
 	cmd.EndRenderPass()
@@ -1038,9 +1063,15 @@ func (r *Renderer) hasGBufferRuns(dl *drawList) bool {
 // castersOnly, depth pass, hand to the samplers — so light types don't leak into the
 // GPU-driven path.
 type shadowView struct {
-	cam  Camera
-	m    textures.Texture
-	size uint32
+	cam           Camera
+	m             textures.Texture
+	width, height uint32
+	// x is where this view's square starts along the map's width, which is how cascades
+	// share one texture (see collectShadowViews).
+	x int32
+	// clear reports whether this view is the one that clears the map. Views sharing a
+	// texture must agree that exactly one does, or each would wipe what the others drew.
+	clear bool
 }
 
 // collectShadowViews gathers every shadow-map render request the renderer has
@@ -1052,12 +1083,26 @@ func (r *Renderer) collectShadowViews(st *renderState) []shadowView {
 	}
 	var out []shadowView
 	for _, sh := range st.shadows {
-		if sh.m.IsValid() {
-			out = append(out, shadowView{cam: sh.cam, m: sh.m, size: sh.size})
+		switch {
+		case !sh.m.IsValid():
+		case len(sh.cascades) > 0:
+			// Every cascade renders into the same texture, so exactly one of them may
+			// clear it and the rest must load what the others wrote.
+			side := sh.size()
+			for i, c := range sh.cascades {
+				out = append(out, shadowView{
+					cam: c.cam, m: sh.m, x: int32(i) * int32(side),
+					width: side, height: side, clear: i == 0,
+				})
+			}
+		default:
+			out = append(out, shadowView{
+				cam: sh.cam, m: sh.m, width: sh.width, height: sh.height, clear: true,
+			})
 		}
 		for i := range sh.faces {
 			if f := sh.faces[i]; f.m.IsValid() {
-				out = append(out, shadowView{cam: f.cam, m: f.m, size: sh.size})
+				out = append(out, shadowView{cam: f.cam, m: f.m, width: sh.width, height: sh.height, clear: true})
 			}
 		}
 	}
@@ -1098,7 +1143,7 @@ func (r *Renderer) syncScene(scene scenes.Producer, cam Camera, cmd gpu.CommandB
 
 	// The light table is the renderer's buffer, packed from the packet's light values
 	// and the shadow resources prepared above. The producer never sees a map index.
-	st.lights.rebuild(r.frame.Environment, r.frame.Lights.Data, st.shadows, r.shadowsEnabled)
+	st.lights.rebuild(r.frame.Environment, r.frame.Lights.Data, st.shadows, r.shadowsEnabled, r.shadowFilter)
 	st.lights.Sync()
 
 	r.syncDrawList(scene)
@@ -1201,7 +1246,7 @@ func (r *Renderer) prepareShadows(st *renderState, p *scenes.FramePacket, cam Ca
 	}
 
 	center, radius := casterBounds(p)
-	corners := frustumCornersWorld(cam.ViewProjection())
+	fit := r.shadowFitFor(cam, center, radius, r.shadowReach())
 	for _, l := range p.Lights.Data {
 		if !l.CastsShadow || l.Kind == scenes.LightPoint {
 			continue
@@ -1210,12 +1255,18 @@ func (r *Renderer) prepareShadows(st *renderState, p *scenes.FramePacket, cam Ca
 		sh.seen = true
 		switch l.Kind {
 		case scenes.LightDirectional:
-			sh.ensureOrtho()
-			sh.ensureMap(r.TextureStore, requestedSize(l))
-			r.fitDirectionalShadow(sh, l, cam.Position(), corners, center, radius)
+			// The map has to exist before the fit: every algorithm derives its depth
+			// bias from how much world space one of its texels covers. Its shape is the
+			// algorithm's to choose.
+			// One square per slice, laid out along the width: four 1024 cascades is a
+			// single 4096x1024 texture, each rendered through its own scissor. A single
+			// fit reports one level, so this is its natural size.
+			width, height := cascadeAtlas(requestedSize(l), uint32(r.Shadows().levels()))
+			sh.ensureMap(r.TextureStore, width, height)
+			r.fitDirectional(sh, l, fit)
 		case scenes.LightSpot:
 			sh.ensurePerspective(l.Angle, l.Range)
-			sh.ensureMap(r.TextureStore, requestedSize(l))
+			sh.ensureMap(r.TextureStore, requestedSize(l), requestedSize(l))
 			aimSpotShadow(sh, l)
 		}
 	}
@@ -1312,10 +1363,7 @@ func aimSpotShadow(s *shadowResource, l scenes.LightPacket) {
 		return
 	}
 	d := l.Direction.Normalize()
-	up := glm.Vec3f{0, 1, 0}
-	if math32.Abs(d.Dot(up)) > 0.99 {
-		up = glm.Vec3f{0, 0, 1}
-	}
+	_, up := lightBasis(d)
 	c.SetPosition(l.Position)
 	c.SetTarget(l.Position.Add(d))
 	c.SetUp(up)
@@ -1345,122 +1393,6 @@ func frustumCornersWorld(viewProj glm.Mat4f) [8]glm.Vec3f {
 		}
 	}
 	return c
-}
-
-// fitDirectionalShadow aims the light's orthographic camera to cover the slice of the
-// view frustum within the shadow distance, sized to enclose it. When that slice is as
-// large as the whole scene (zoomed out) it falls back to the scene sphere, so it's
-// never worse than a whole-scene fit; zoomed in, it packs resolution into the near
-// view. The eye is pulled back along -dir across the scene so occluders between the
-// light and the frustum are still captured, and the center is snapped to the shadow
-// texel grid so edges don't crawl as the camera moves.
-func (r *Renderer) fitDirectionalShadow(s *shadowResource, l scenes.LightPacket, eye glm.Vec3f, corners [8]glm.Vec3f, sceneCenter glm.Vec3f, sceneRadius float32) {
-	f, ok := s.cam.(interface {
-		SetPosition(glm.Vec3f)
-		SetTarget(glm.Vec3f)
-		SetUp(glm.Vec3f)
-		SetFrustum(l, r, b, t float32)
-		SetClip(near, far float32)
-	})
-	if !ok {
-		return
-	}
-	d := l.Direction.Normalize()
-
-	// Cap the frustum slice at the shadow distance by pulling each far corner back along
-	// its near→far edge. The default tracks the camera's distance to the scene center
-	// (so dollying in shrinks the box → more texels per pixel) rather than always
-	// spanning the whole scene depth. A small floor keeps the box from collapsing when
-	// the camera sits right on the scene. Override with Renderer.SetShadowDistance.
-	shadowDist := r.shadowDistance
-	if shadowDist <= 0 {
-		shadowDist = max(eye.Sub(sceneCenter).Length(), sceneRadius*0.15)
-	}
-	nearCenter := avgCorners(corners, 0)
-	farCenter := avgCorners(corners, 4)
-	nearDist := nearCenter.Sub(eye).Length()
-	farDist := farCenter.Sub(eye).Length()
-	t := float32(1)
-	if farDist > nearDist {
-		t = glm.Clamp((shadowDist-nearDist)/(farDist-nearDist), 0, 1)
-	}
-	var pts [8]glm.Vec3f
-	for j := range 4 {
-		pts[j] = corners[j]
-		pts[j+4] = corners[j].Add(corners[j+4].Sub(corners[j]).Scale(t))
-	}
-
-	// Bounding sphere of the capped slice; fall back to the scene sphere when the fit
-	// isn't tighter (e.g. zoomed out), so we never do worse than whole-scene.
-	center, radius := boundingSphere(pts)
-	if radius >= sceneRadius {
-		center, radius = sceneCenter, sceneRadius
-	}
-
-	// Quantize the radius to a fixed grid so the texel size only changes in small,
-	// discrete steps as the camera zooms. A continuously-resizing box would keep moving
-	// the texel grid under the geometry, which is what makes the edges crawl — snapping
-	// the center only helps while the texel size holds still.
-	if step := sceneRadius / 64; step > 0 {
-		radius = float32(math.Ceil(float64(radius/step))) * step
-	}
-
-	// A stable light basis (avoid the degenerate LookAt when dir ∥ world-up).
-	up := glm.Vec3f{0, 1, 0}
-	if math32.Abs(d.Dot(up)) > 0.99 {
-		up = glm.Vec3f{0, 0, 1}
-	}
-	right := up.Cross(d).Normalize()
-	up = d.Cross(right).Normalize()
-
-	// Snap the center to the shadow texel grid in the light's right/up plane.
-	texel := 2 * radius / float32(s.size)
-	if texel > 0 {
-		cx := snap(center.Dot(right), texel)
-		cy := snap(center.Dot(up), texel)
-		cz := center.Dot(d)
-		center = right.Scale(cx).Add(up.Scale(cy)).Add(d.Scale(cz))
-	}
-
-	const near, farScale = float32(0.01), float32(4)
-	far := sceneRadius * farScale
-	f.SetUp(up)
-	f.SetPosition(center.Sub(d.Scale(sceneRadius * 2))) // back up across the scene
-	f.SetTarget(center)
-	f.SetFrustum(-radius, radius, -radius, radius)
-	f.SetClip(near, far) // depth spans the whole scene toward the light
-
-	// The renderer decides where the camera goes; the shadow owns the derived bias.
-	s.updateOrthoBias(radius, far-near, l.ShadowBias)
-}
-
-// avgCorners averages the 4 frustum corners starting at base (0 = near, 4 = far).
-func avgCorners(c [8]glm.Vec3f, base int) glm.Vec3f {
-	sum := c[base].Add(c[base+1]).Add(c[base+2]).Add(c[base+3])
-	return sum.Scale(0.25)
-}
-
-// boundingSphere returns a center + radius enclosing the 8 points (centroid + max
-// distance; not minimal, but stable under rotation, which matters for shadow shimmer).
-func boundingSphere(p [8]glm.Vec3f) (glm.Vec3f, float32) {
-	var center glm.Vec3f
-	for _, v := range p {
-		center = center.Add(v)
-	}
-	center = center.Scale(1.0 / 8.0)
-	var radius float32
-	for _, v := range p {
-		d := v.Sub(center)
-		if dsq := d.Dot(d); dsq > radius {
-			radius = dsq
-		}
-	}
-	return center, math32.Sqrt(radius)
-}
-
-// snap rounds x down to the nearest multiple of step (for texel-grid alignment).
-func snap(x, step float32) float32 {
-	return float32(math.Floor(float64(x/step))) * step
 }
 
 // cullInto dispatches the frustum-cull compute into one view's indirect + visible
@@ -1643,7 +1575,7 @@ func (r *Renderer) drawParticles(cmd gpu.CommandBuffer, st *renderState, p *scen
 // and a single position-only MDI over every batch — material/pipeline don't matter
 // for depth, so all batches draw with the one shadow pipeline.
 func (r *Renderer) recordShadowDepth(cmd gpu.CommandBuffer, dl *drawList, v *drawView, sv shadowView) {
-	size := sv.size
+	width, height := sv.width, sv.height
 	sr := shadowRoot{
 		viewProj:  sv.cam.ViewProjection(),
 		pos:       r.GeometryStore.PositionsAddr(),
@@ -1652,11 +1584,18 @@ func (r *Renderer) recordShadowDepth(cmd gpu.CommandBuffer, dl *drawList, v *dra
 		drawables: dl.drawableBuf.Addr,
 		visible:   v.visibleBuf.Addr,
 	}
+	// Cascades share a texture, so only the first view clears it; the rest load what the
+	// earlier ones drew and confine themselves to their own square with the scissor.
+	load := gpu.LoadKeep
+	if sv.clear {
+		load = gpu.LoadClear
+	}
 	cmd.BeginRenderPass(gpu.RenderTargets{
-		Depth: &gpu.DepthAttachment{Texture: r.TextureStore.GPU(sv.m), Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: 0.0},
+		Depth: &gpu.DepthAttachment{Texture: r.TextureStore.GPU(sv.m), Load: load, Store: gpu.StoreKeep, Clear: 0.0},
 	})
-	cmd.SetViewport(0, 0, float32(size), float32(size), 0, 1)
-	cmd.SetScissor(0, 0, int32(size), int32(size))
+	cmd.SetViewport(float32(sv.x), 0, float32(width), float32(height), 0, 1)
+	cmd.SetScissor(sv.x, 0, int32(width), int32(height))
+
 	cmd.SetPipeline(r.shadowPipeline)
 	cmd.DrawIndexedIndirect(utils.ToBytes(&sr), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, v.indirectBuf, 0, uint32(dl.batchCount()), indirectSize)
 	cmd.EndRenderPass()

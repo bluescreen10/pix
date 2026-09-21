@@ -216,7 +216,7 @@ vec3 shadeSurface(Surface s, vec3 worldPos, vec3 V, uint shadowSamp, float diffu
     vec3 lo = vec3(0.0);
     for (uint i = 0u; i < L.numDir; i++) {
         DirLight dl = L.dirs[i];
-        float sh = receives ? shadowFactor(dl.shadowVP, dl.shadowMap, worldPos, shadowSamp, dl.shadowBias) : 1.0;
+        float sh = receives ? dirShadowFactor(dl, worldPos, s.normal, length(pc.eye.xyz - worldPos), shadowSamp) : 1.0;
         lo += sh * cookTorrance(s.normal, V, normalize(-dl.dir.xyz), dl.color.rgb * dl.color.w,
                                 s.albedo, pbrMetallic(s), pbrRoughness(s), diffuseScale);
     }
@@ -238,7 +238,7 @@ vec3 shadeSurface(Surface s, vec3 worldPos, vec3 V, uint shadowSamp, float diffu
         vec3 Ldir = d / max(dist, 1e-4);
         float atten = spotAttenuation(sl, worldPos, Ldir, dist);
         if (atten <= 0.0) continue;
-        float sh = receives ? shadowFactor(sl.shadowVP, sl.shadowMap, worldPos, shadowSamp, sl.shadowBias) : 1.0;
+        float sh = receives ? shadowFactor(sl.shadowVP, sl.shadowMap, worldPos, shadowSamp, sl.shadowBias, 0u, 1u, 1u, SHADOW_FILTER_HARD) : 1.0;
         lo += sh * cookTorrance(s.normal, V, Ldir, sl.color.rgb * sl.color.w * atten,
                                 s.albedo, pbrMetallic(s), pbrRoughness(s), diffuseScale);
     }

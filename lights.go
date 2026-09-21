@@ -27,12 +27,28 @@ const (
 const noShadowMap uint32 = 0xFFFFFFFF
 
 type gpuDirLight struct {
-	dir        [4]float32 // xyz = travel direction; w unused
-	color      [4]float32 // rgb; w = intensity
-	shadowVP   glm.Mat4f  // world → light clip (same matrix the depth pass rendered with)
-	shadowMap  uint32     // bindless heap index of the depth map, or noShadowMap
-	shadowBias float32    // depth-compare bias, in this camera's normalized depth units
-	pad0, pad1 uint32
+	dir   [4]float32 // xyz = travel direction; w unused
+	color [4]float32 // rgb; w = intensity
+	// shadowVP is world → light clip, the same matrix the depth pass rendered with, one
+	// per cascade. Every algorithm but ShadowCascaded fills only the first and leaves
+	// cascades at 1, which collapses the lookup's cascade selection to index 0.
+	shadowVP [MaxShadowCascades]glm.Mat4f
+	// shadowSplit[i] is the view distance cascade i covers out to; shadowBias[i] is the
+	// constant part of that cascade's depth bias, in its own normalized depth units.
+	shadowSplit [MaxShadowCascades]float32
+	shadowBias  [MaxShadowCascades]float32
+	// shadowTexel[i] is how much world space one of that cascade's texels covers, and
+	// shadowDepthScale[i] converts a world depth offset into its normalized depth. The
+	// lit shader needs both to size the offsets that depend on the surface normal, which
+	// the fit cannot know. Zero disables those, which is what the warps want.
+	shadowTexel      [MaxShadowCascades]float32
+	shadowDepthScale [MaxShadowCascades]float32
+	shadowMap        uint32 // bindless heap index of the depth map, or noShadowMap
+	cascades         uint32 // how many of shadowVP/shadowSplit/shadowBias are filled
+	// mapSide is one cascade square's resolution in texels, which a wide kernel needs in
+	// order to step by texels; filter is the renderer's ShadowFilter.
+	mapSide uint32
+	filter  uint32
 }
 
 type gpuPointLight struct {
@@ -108,11 +124,13 @@ func NewLights(b gpu.Backend) *Lights {
 // but it only marks the buffer dirty when the derived table actually changed, so a
 // static scene re-uploads nothing. Lights past the fixed caps are dropped.
 //
+// filter is the kernel directional lookups use, which the shader reads per light.
+//
 // shadows reports whether shadow maps may be advertised to the shader at all — the
 // renderer's global toggle. A light whose map is still allocated but no longer being
 // re-rendered must publish noShadowMap, or the shader keeps sampling a frozen map and
 // the shadow stays on screen after it was turned off.
-func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPacket, res map[scenes.LightID]*shadowResource, shadows bool) {
+func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPacket, res map[scenes.LightID]*shadowResource, shadows bool, filter ShadowFilter) {
 	var next gpuLights
 	next.ambient = env.Ambient.RGBA()
 	fs := env.Fog
@@ -142,9 +160,25 @@ func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPack
 			// A casting light with an allocated map contributes its view-projection (the
 			// un-flipped matrix the depth pass used) and heap index for shader sampling.
 			if s := shadowOf(lp); s != nil && s.m.IsValid() {
-				gl.shadowVP = s.cam.ViewProjection()
 				gl.shadowMap = s.m.Index()
-				gl.shadowBias = s.ndcBias
+				gl.mapSide = max(s.size(), 1)
+				gl.filter = uint32(filter)
+				if n := len(s.cascades); n > 0 {
+					gl.cascades = uint32(n)
+					for i, c := range s.cascades {
+						gl.shadowVP[i] = c.cam.ViewProjection()
+						gl.shadowSplit[i] = c.far
+						gl.shadowBias[i] = c.fit.bias
+						gl.shadowTexel[i] = c.fit.texel
+						gl.shadowDepthScale[i] = c.fit.depthScale
+					}
+				} else {
+					gl.cascades = 1
+					gl.shadowVP[0] = s.cam.ViewProjection()
+					gl.shadowBias[0] = s.ndcBias
+					gl.shadowTexel[0] = s.fit.texel
+					gl.shadowDepthScale[0] = s.fit.depthScale
+				}
 			}
 			next.dirs[next.numDir] = gl
 			next.numDir++

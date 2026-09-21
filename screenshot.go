@@ -21,6 +21,9 @@ import (
 type screenshot struct {
 	path string
 	done func(path string, err error)
+	// recorded stops the second of the frame's two capture points copying over the
+	// first — see recordScreenshot.
+	recorded bool
 }
 
 // Screenshot queues a PNG of the next completed frame and calls done (which may be
@@ -40,13 +43,20 @@ func (r *Renderer) Screenshot(path string, done func(path string, err error)) {
 	r.pendingShot = &screenshot{path: path, done: done}
 }
 
-// recordScreenshot copies the frame's colour target into the readback buffer. Called
-// with the frame's command buffer still open, after everything has been drawn into
-// target, so the capture includes the overlay and console exactly as presented.
+// recordScreenshot copies the frame's colour target into the readback buffer, with the
+// frame's command buffer still open and the scene already drawn into target.
+//
+// It is called twice per frame and copies at most once, which is what keeps the overlay
+// out of the image: the first call sits between the scene and the overlay, where there
+// is one, and the second catches frames that had no overlay to exclude. Capturing what
+// the scene looks like is the point — the console is the instrument, not the subject —
+// and it would otherwise cover a third of the frame in exactly the cases where someone
+// is capturing to inspect something.
 func (r *Renderer) recordScreenshot(cmd gpu.CommandBuffer, target gpu.Texture) {
-	if r.pendingShot == nil {
+	if r.pendingShot == nil || r.pendingShot.recorded {
 		return
 	}
+	r.pendingShot.recorded = true
 	n := int(r.width * r.height * 4)
 	if !r.readback.IsValid() || len(r.pixels) < n {
 		if r.readback.IsValid() {

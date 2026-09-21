@@ -1,23 +1,23 @@
-// Package metalshader translates the GPU RHI's SPIR-V shader ABI into native Metal
-// shaders at build time. It invokes the SPIRV-Cross executable, not a GPU API.
-package metalshader
+package main
 
 import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 )
 
-const magic = "PIXMTL01"
+const metalMagic = "PIXMTL01"
 
-// Encode preserves the shader's local workgroup size alongside MSL or metallib
+// encodeMetal preserves the shader's local workgroup size alongside metallib
 // bytes. Metal needs this metadata for dispatch; it is not a pipeline setting.
-func Encode(code []byte, group [3]uint32) []byte {
+func encodeMetal(code []byte, group [3]uint32) []byte {
 	out := make([]byte, 20, len(code)+20)
-	copy(out, magic)
+	copy(out, metalMagic)
 	for i, n := range group {
 		if n == 0 {
 			n = 1
@@ -27,11 +27,9 @@ func Encode(code []byte, group [3]uint32) []byte {
 	return append(out, code...)
 }
 
-// Decode accepts either an encoded shader or raw MSL/metallib (one thread per
-// group). The returned code aliases data.
-func Decode(data []byte) (code []byte, group [3]uint32, err error) {
+func decodeMetal(data []byte) (code []byte, group [3]uint32, err error) {
 	group = [3]uint32{1, 1, 1}
-	if !bytes.HasPrefix(data, []byte(magic)) {
+	if !bytes.HasPrefix(data, []byte(metalMagic)) {
 		return data, group, nil
 	}
 	if len(data) < 20 {
@@ -46,12 +44,40 @@ func Decode(data []byte) (code []byte, group [3]uint32, err error) {
 	return data[20:], group, nil
 }
 
-// Translate converts SPIR-V using spirv-cross on PATH. The input must follow
-// gpu's ABI: one 64-bit push constant root, set 0 binding 0 sampled textures,
-// binding 1 storage textures, and binding 2 samplers. The result contains MSL
-// plus reflected local-size metadata and uses the entry point main0.
-// Conversion is intended for go generate; applications embed the result.
-func Translate(spirv []byte, entry string) ([]byte, error) {
+func compileMetallib(dir string, spirv []byte, entry string) ([]byte, error) {
+	data, err := translateMetal(spirv, entry)
+	if err != nil {
+		return nil, err
+	}
+	source, group, err := decodeMetal(data)
+	if err != nil {
+		return nil, err
+	}
+	src := filepath.Join(dir, "shader.metal")
+	air := filepath.Join(dir, "shader.air")
+	lib := filepath.Join(dir, "shader.metallib")
+	if err := os.WriteFile(src, source, 0600); err != nil {
+		return nil, err
+	}
+	steps := [][]string{
+		{"-sdk", "macosx", "metal", "-std=metal3.0", "-mmacosx-version-min=13.0", "-c", src, "-o", air},
+		{"-sdk", "macosx", "metallib", air, "-o", lib},
+	}
+	for _, args := range steps {
+		if err := command("xcrun", args...); err != nil {
+			return nil, err
+		}
+	}
+	compiled, err := os.ReadFile(lib)
+	if err != nil {
+		return nil, err
+	}
+	return encodeMetal(compiled, group), nil
+}
+
+// translateMetal converts SPIR-V using spirv-cross on PATH. The input must
+// follow gpu's ABI and the resulting MSL entry point is named main0.
+func translateMetal(spirv []byte, entry string) ([]byte, error) {
 	if entry == "" {
 		entry = "main"
 	}
@@ -88,8 +114,8 @@ func Translate(spirv []byte, entry string) ([]byte, error) {
 			stage = e.Mode
 			if stage == "comp" {
 				group = e.Size
-				for _, s := range e.Spec {
-					if s {
+				for _, specialized := range e.Spec {
+					if specialized {
 						return nil, fmt.Errorf("specialized workgroup sizes are not supported")
 					}
 				}
@@ -103,7 +129,7 @@ func Translate(spirv []byte, entry string) ([]byte, error) {
 	if len(info.Push) > 1 {
 		return nil, fmt.Errorf("expected at most one root push constant")
 	}
-	remapped, err := remap(spirv)
+	remapped, err := remapMetalBindings(spirv)
 	if err != nil {
 		return nil, err
 	}
@@ -126,8 +152,6 @@ func Translate(spirv []byte, entry string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// SPIRV-Cross's CLI places push constants after argument tables. Normalize
-	// only the reflected root argument, leaving table slots 1, 2, and 3 untouched.
 	if len(info.Push) == 1 {
 		name := regexp.QuoteMeta(info.Push[0].Name)
 		re := regexp.MustCompile(`\b` + name + `\s+\[\[buffer\([0-9]+\)\]\]`)
@@ -136,13 +160,12 @@ func Translate(spirv []byte, entry string) ([]byte, error) {
 		}
 		source = re.ReplaceAllLiteral(source, []byte(info.Push[0].Name+" [[buffer(0)]]"))
 	}
-	return Encode(source, group), nil
+	return encodeMetal(source, group), nil
 }
 
-// remap separates unsized descriptor arrays into distinct Metal argument tables.
-// SPIRV-Cross otherwise aliases their storage because each unsized array is
-// represented as a one-element member. This copy is used only for translation.
-func remap(data []byte) ([]byte, error) {
+// remapMetalBindings separates unsized descriptor arrays into distinct Metal
+// argument tables. SPIRV-Cross otherwise aliases their storage.
+func remapMetalBindings(data []byte) ([]byte, error) {
 	if len(data) < 20 || len(data)%4 != 0 || binary.LittleEndian.Uint32(data) != 0x07230203 {
 		return nil, fmt.Errorf("invalid SPIR-V")
 	}
@@ -197,8 +220,8 @@ func remap(data []byte) ([]byte, error) {
 		i += n
 	}
 	out := make([]byte, len(data))
-	for i, w := range words {
-		binary.LittleEndian.PutUint32(out[i*4:], w)
+	for i, word := range words {
+		binary.LittleEndian.PutUint32(out[i*4:], word)
 	}
 	return out, nil
 }

@@ -48,7 +48,7 @@ void main() {
     vec3 lit = L.ambient.rgb * albedo;
     for (uint i = 0u; i < L.numDir; i++) {
         DirLight dl = L.dirs[i];
-        float sh = receives ? shadowFactor(dl.shadowVP, dl.shadowMap, vWorldPos, shadowSamp, dl.shadowBias) : 1.0;
+        float sh = receives ? dirShadowFactor(dl, vWorldPos, N, length(pc.eye.xyz - vWorldPos), shadowSamp) : 1.0;
         lit += sh * blinnPhong(N, V, normalize(-dl.dir.xyz), dl.color.rgb * dl.color.w, albedo, m.specular, m.shininess);
     }
     for (uint i = 0u; i < L.numPoint; i++) {
@@ -68,7 +68,7 @@ void main() {
         vec3 Ldir = d / max(dist, 1e-4);
         float atten = spotAttenuation(sl, vWorldPos, Ldir, dist);
         if (atten <= 0.0) continue;
-        float sh = receives ? shadowFactor(sl.shadowVP, sl.shadowMap, vWorldPos, shadowSamp, sl.shadowBias) : 1.0;
+        float sh = receives ? shadowFactor(sl.shadowVP, sl.shadowMap, vWorldPos, shadowSamp, sl.shadowBias, 0u, 1u, 1u, SHADOW_FILTER_HARD) : 1.0;
         lit += sh * blinnPhong(N, V, Ldir, sl.color.rgb * sl.color.w * atten, albedo, m.specular, m.shininess);
     }
 

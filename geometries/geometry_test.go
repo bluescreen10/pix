@@ -1,9 +1,9 @@
-package pix_test
+package geometries_test
 
 import (
 	"testing"
 
-	"github.com/bluescreen10/pix"
+	gputest "github.com/bluescreen10/gamekit/gpu/test"
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 )
@@ -11,15 +11,16 @@ import (
 // TestAttributeRoundTrip verifies AttributeData[T] returns what NewGeometry stored
 // and SetAttributeData[T] replaces it in place.
 func TestAttributeRoundTrip(t *testing.T) {
-	r, err := pix.NewOffscreenRenderer(64, 64)
-	if err != nil {
+	backend := gputest.New()
+	if err := backend.Init(); err != nil {
 		t.Fatal(err)
 	}
-	defer r.Destroy()
+	defer backend.Destroy()
 
+	store := geometries.NewStore(backend)
 	positions := []glm.Vec3f{{-1, -1, 0}, {1, -1, 0}, {0, 1, 0}}
 	uvs := []glm.Vec2f{{0, 0}, {1, 0}, {0.5, 1}}
-	geo := r.GeometryStore.Create(geometries.GeometryConfig{
+	geo := store.Create(geometries.GeometryConfig{
 		Attributes: []geometries.Attribute{
 			geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, positions),
 			geometries.NewAttribute(geometries.AttributeUV, geometries.Float32x2, uvs),
