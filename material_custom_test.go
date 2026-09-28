@@ -29,7 +29,7 @@ type customMaterial struct {
 }
 
 func newCustomMaterial(store *materials.Store) *customMaterial {
-	p := store.Pool(materials.Shader{Forward: shaders.BasicForward}, "custom")
+	p := store.Pool(materials.Shader{Fragment: shaders.BasicFragment}, "custom")
 	m := &customMaterial{pool: p, color: colors.RGBA32F{0, 1, 0, 1}}
 	m.ref = p.Create(m)
 	return m

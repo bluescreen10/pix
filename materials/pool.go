@@ -55,6 +55,12 @@ type Pool struct {
 	cap    uint32     // records the device buffer holds
 	buf    gpu.Buffer // MemoryDevice; written only by Sync
 
+	// rasterRevision counts changes to any instance's cull or blend mode. Those two
+	// are the whole of what a pipeline's identity adds to the pool's shader, so a
+	// consumer that resolved pipelines from this pool can tell they are stale by
+	// comparing one number — without keeping a copy of every material it looked at.
+	rasterRevision uint64
+
 	dirty    map[uint32]struct{} // ids changed since the last Sync
 	allDirty bool                // every live record needs re-upload (set by grow)
 	scratch  []byte              // serialization buffer, reused across Syncs
@@ -203,7 +209,7 @@ func (s *Pool) Index() uint32 {
 // IDOf names one of this pool's instances by value. Material implementations return
 // it from ID(), so none of them has to know how an identity is put together.
 func (s *Pool) IDOf(r ref.Ref) ID {
-	return ID{Pool: s.index, Slot: r.ID(), Gen: r.Gen()}
+	return ID{PoolID: s.index, Slot: r.ID(), Gen: r.Gen()}
 }
 
 // Live reports whether slot id still holds the same instance generation gen. A
@@ -223,20 +229,42 @@ func (s *Pool) MarkDirty(id uint32) {
 // Cull/Blend rasterization state, stored per instance beside the record so the
 // renderer can read it without deserializing anything.
 
-func (s *Pool) Cull(id uint32) CullMode {
+func (s *Pool) CullAt(id uint32) CullMode {
 	return s.entries.Value(id).cull
 }
 
-func (s *Pool) SetCull(id uint32, c CullMode) {
-	s.entries.Value(id).cull = c
+func (s *Pool) SetCullAt(id uint32, c CullMode) {
+	e := s.entries.Value(id)
+	if e.cull == c {
+		return
+	}
+	e.cull = c
+	s.rasterRevision++
 }
 
-func (s *Pool) Blend(id uint32) BlendMode {
+func (s *Pool) BlendAt(id uint32) BlendMode {
 	return s.entries.Value(id).blend
 }
 
-func (s *Pool) SetBlend(id uint32, b BlendMode) {
-	s.entries.Value(id).blend = b
+func (s *Pool) SetBlendAt(id uint32, b BlendMode) {
+	e := s.entries.Value(id)
+	if e.blend == b {
+		return
+	}
+	e.blend = b
+	s.rasterRevision++
+}
+
+// RasterRevision changes whenever any instance's cull or blend mode does, and so
+// whenever a pipeline resolved from this pool might have become the wrong one.
+//
+// It is deliberately per pool rather than per instance: every material in a pool shares
+// its shader, so cull and blend are all that can move a material to a different
+// pipeline, and one counter covers every instance at once. A consumer holding pipelines
+// for a whole scene can check a handful of these instead of remembering which materials
+// it resolved and re-resolving each of them every frame.
+func (s *Pool) RasterRevision() uint64 {
+	return s.rasterRevision
 }
 
 // dispose/validate let a ref own a slot in this pool.

@@ -38,19 +38,18 @@ const (
 	BlendAdditive                  // add
 )
 
-// Shader is a material type's GPU programs. The vertex-pull stage is shared, so Vertex
-// is usually nil (defaults to the scene vertex shader). Forward is the material's
-// always-required forward shader (surface + inline lighting, in one pass). Deferred and
-// Lighting are optional: a material that supplies BOTH renders through the G-buffer
-// (Deferred fills it, Lighting shades it in a fullscreen pass keyed to that shading
-// model); a material that supplies neither always renders forward. Custom material
-// types may supply any combination — the renderer reads the eligibility off the pool,
-// so it is fixed for every material sharing that pool.
+// Shader is a material type's GPU programs: a vertex stage and a fragment stage, and
+// nothing else. The vertex-pull stage is shared, so Vertex is usually nil and defaults
+// to the scene vertex shader; Fragment is required and does surface and lighting
+// together, in one pass.
+//
+// There used to be four stages here — a G-buffer fill and a fullscreen lighting pass
+// alongside these two — so that a material could opt into deferred shading. The
+// renderer is forward-only now, which removes not just the two blobs but the question
+// a material type had to answer about which combination it supplied.
 type Shader struct {
 	Vertex   []byte // Backend-native bytes; nil => the default scene vertex-pull shader
-	Forward  []byte // Backend-native bytes; required — surface + lighting in one pass, outputs color
-	Deferred []byte // Backend-native bytes; optional — fills the G-buffer (Surface only, no lighting)
-	Lighting []byte // Backend-native bytes; optional — fullscreen deferred lighting pass for this model
+	Fragment []byte // Backend-native bytes; required — surface + lighting in one pass, outputs color
 }
 
 // Built-ins identify shaders from the shaders package. Store.Pool selects the
@@ -71,9 +70,9 @@ type Shader struct {
 // slot to the next one, and a stale Slot would then name a live material that is not
 // the one it was taken from. Gen is what distinguishes them — see Pool.Live.
 type ID struct {
-	Pool uint32 // Pool index within the owning Store (see Pool.Index).
-	Slot uint32 // Record index inside that pool.
-	Gen  uint32 // Slot generation, to survive reuse.
+	PoolID uint32 // Pool index within the owning Store (see Pool.Index).
+	Slot   uint32 // Record index inside that pool.
+	Gen    uint32 // Slot generation, to survive reuse.
 }
 
 // Material is the handle a mesh holds. Each material type owns its own storage (a
@@ -113,14 +112,10 @@ type Material interface {
 	// change for its lifetime), the per-slot cull and blend modes, the record buffer
 	// address, and a dense index to key per-pool state by.
 	//
-	// This pair replaces the eight methods the interface used to require — Vertex,
-	// Forward, Deferred, Lighting, Cull, Blend, Hash, RecordsAddr. Every one of them
-	// was a pure forward to this pool in every implementation that ever existed, which
-	// is the evidence that none was a question a material should have been answering.
-	// Asking the pool instead also makes a whole class of answer unrepresentable: a
-	// material that returned a non-nil Deferred() over a pool whose Shader().Deferred
-	// is nil used to have the renderer build a G-buffer pipeline out of missing SPIR-V,
-	// and nothing could stop it while the answer was the material's to give.
+	// This pair replaces the methods the interface used to require — Vertex, Forward,
+	// Cull, Blend, Hash, RecordsAddr. Every one of them was a pure forward to this pool
+	// in every implementation that ever existed, which is the evidence that none was a
+	// question a material should have been answering.
 	//
 	// Cull and Blend are gone from this interface but remain on the concrete types,
 	// where they are ordinary accessors for application code rather than something the
@@ -162,8 +157,7 @@ func MapFlag(t textures.Texture, flag uint32) uint32 {
 // reading any of it. Distinct arrays holding equal bytes return false — that is a
 // miss, not an error, and falls through to the hash + compare path.
 func sameShaderData(a, b Shader) bool {
-	return SameSPIRV(a.Vertex, b.Vertex) && SameSPIRV(a.Forward, b.Forward) &&
-		SameSPIRV(a.Deferred, b.Deferred) && SameSPIRV(a.Lighting, b.Lighting)
+	return SameSPIRV(a.Vertex, b.Vertex) && SameSPIRV(a.Fragment, b.Fragment)
 }
 
 // SameSPIRV reports whether two SPIR-V slices are the very same bytes (same backing
@@ -191,13 +185,10 @@ type Uploader interface {
 func hashShader(sh Shader) uint64 {
 	const prime = uint64(1099511628211)
 	h := HashBytes(sh.Vertex)
-	for _, b := range [][]byte{sh.Forward, sh.Deferred, sh.Lighting} {
-		for _, c := range b {
-			h = (h ^ uint64(c)) * prime
-		}
-		h = (h ^ 0xFF) * prime // stage separator, so concatenations can't alias
+	for _, c := range sh.Fragment {
+		h = (h ^ uint64(c)) * prime
 	}
-	return h
+	return (h ^ 0xFF) * prime // stage separator, so concatenations can't alias
 }
 
 // HashBytes is FNV-1a over bytes. Computed once per pool, so shader identity

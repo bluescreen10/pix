@@ -11,12 +11,17 @@ import (
 )
 
 // TestDepthDebugPolarity confirms near reads dark, far reads brighter, and background
-// (nothing drawn there) reads brightest — with a large near/far ratio (~12000:1,
-// matching examples/beach's cameras) so the log2 remap actually gets exercised. The
-// old sqrt(1-d) remap saturated to white almost everywhere once near/far exceeded a
-// few hundred:1, since reversed-Z d is approximately near/z: any on-screen content
-// beyond a few hundred units already had d well under 0.1, and both (1-d) and its
-// sqrt stayed close to 1 regardless of how much farther the actual geometry was.
+// (nothing drawn there) reads brightest — with a large near/far ratio (~12000:1, matching
+// examples/beach's cameras) so the log2 remap actually gets exercised. The old
+// sqrt(1-d) remap saturated almost everywhere once near/far exceeded a few hundred:1,
+// since reversed-Z d is approximately near/z: any on-screen content beyond a few
+// hundred units already had d well under 0.1, and both (1-d) and its sqrt stayed close
+// to 1 regardless of how much farther the actual geometry was.
+//
+// Background is the part a geometry pass does not get for free: the G-buffer view this
+// replaces shaded every pixel, so undrawn area landed at the far-most value on its own.
+// Here nothing is drawn there, so the pass clears the depth view to white to put it at
+// the same end of the ramp (see debugClear).
 func TestDepthDebugPolarity(t *testing.T) {
 	const size = 64
 	r, err := pix.NewOffscreenRenderer(size, size)
@@ -24,13 +29,10 @@ func TestDepthDebugPolarity(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Destroy()
-	r.EnableDeferredRendering(true)
 	scene := scenes.New()
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
 
-	// PBR is deferred-capable; BasicMaterial is forward-only and never fills the
-	// G-buffer, so it wouldn't exercise this view at all.
 	mat := r.NewPBRMaterial()
 	nearGeo := r.GeometryStore.Create(pix.BoxGeometry(10, 10, 10))
 	nearBox := scene.NewMesh(nearGeo, mat)

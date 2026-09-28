@@ -59,8 +59,19 @@ func compileMetallib(dir string, spirv []byte, entry string) ([]byte, error) {
 	if err := os.WriteFile(src, source, 0600); err != nil {
 		return nil, err
 	}
+	// -fpreserve-invariance is what makes [[position, invariant]] mean anything. The
+	// attribute is emitted (SPIRV-Cross translates SPIR-V's Invariant decoration into
+	// it), but Metal ignores it by default and is free to fuse a multiply-add in one
+	// program and not in another. Two shaders computing the same clip position then
+	// disagree by a fraction of an ULP, which is exactly what a depth prepass cannot
+	// tolerate: the shading pass meets depth written by a different program, and every
+	// fragment that landed a hair behind fails the test and is dropped.
+	//
+	// It shows up only on geometry with a rotation in its model matrix — an axis-aligned
+	// transform is exact, so the two programs agree by luck — and only on Metal, since
+	// Vulkan drivers honour the SPIR-V decoration natively.
 	steps := [][]string{
-		{"-sdk", "macosx", "metal", "-std=metal3.0", "-mmacosx-version-min=13.0", "-c", src, "-o", air},
+		{"-sdk", "macosx", "metal", "-std=metal3.0", "-mmacosx-version-min=13.0", "-fpreserve-invariance", "-c", src, "-o", air},
 		{"-sdk", "macosx", "metallib", air, "-o", lib},
 	}
 	for _, args := range steps {

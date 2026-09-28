@@ -50,10 +50,7 @@ type PBRMaterial struct {
 // NewPBRMaterial creates a PBR material with four unbound maps: color, normal,
 // metallic and roughness.
 func NewPBRMaterial(store *Store) *PBRMaterial {
-	st := store.Pool(
-		Shader{Forward: shaders.PBRForward, Deferred: shaders.PBRDeferred, Lighting: shaders.PBRLighting},
-		"PBR Material",
-	)
+	st := store.Pool(Shader{Fragment: shaders.PBRFragment}, "PBR Material")
 	m := &PBRMaterial{color: colors.RGBA32F{1, 1, 1, 1}, roughness: 0.5}
 	m.pool = st
 	m.ref = st.Create(m)
@@ -313,12 +310,12 @@ func (m *PBRMaterial) IsValid() bool {
 
 // Cull reports which triangle faces are discarded.
 func (m *PBRMaterial) Cull() CullMode {
-	return m.pool.Cull(m.ref.ID())
+	return m.pool.CullAt(m.ref.ID())
 }
 
 // SetCull sets which faces are culled (CullNone = double-sided).
 func (m *PBRMaterial) SetCull(mode CullMode) {
-	m.pool.SetCull(m.ref.ID(), mode)
+	m.pool.SetCullAt(m.ref.ID(), mode)
 }
 
 // SetDoubleSided is a convenience for SetCull(CullNone) / SetCull(CullBack).
@@ -334,12 +331,12 @@ func (m *PBRMaterial) SetDoubleSided(enabled bool) {
 // material to the forward path — the G-buffer holds one surface per pixel, so it
 // cannot represent a fragment that composites over what is behind it.
 func (m *PBRMaterial) Blend() BlendMode {
-	return m.pool.Blend(m.ref.ID())
+	return m.pool.BlendAt(m.ref.ID())
 }
 
 // SetBlend sets the material's blend mode (Opaque/Alpha/Additive).
 func (m *PBRMaterial) SetBlend(mode BlendMode) {
-	m.pool.SetBlend(m.ref.ID(), mode)
+	m.pool.SetBlendAt(m.ref.ID(), mode)
 }
 
 // Pool returns the pool this material's records live in — its shader, pipeline

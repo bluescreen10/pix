@@ -457,42 +457,46 @@ func TestExplicitStepsAreHonoured(t *testing.T) {
 		return 2 / (glm.Vec3f{row[0], row[1], row[2]}.Length() * mapSide)
 	}
 
-	fit := func(set pix.ShadowSettings) (*pix.ShadowView, func()) {
+	// One renderer at a time. Holding two alive and tearing them down together is not
+	// something a renderer should mind, but it is not what this test is about, and it
+	// currently takes the Vulkan backend's device teardown down with it — so the numbers
+	// come out before the renderer goes away.
+	fit := func(set pix.ShadowSettings) (splits []float32, outerTexel float32) {
 		r, err := pix.NewOffscreenRenderer(256, 256)
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer r.Destroy()
 		r.SetShadows(set)
 		r.EnableShadows(true)
+
 		scene, cam, id := bigScene(t, r, 1024)
+		defer scene.Destroy()
 		r.Render(scene, cam)
+
 		view := r.ShadowView(scene.ID(), id)
-		if view == nil {
+		if view == nil || len(view.Cascades) == 0 {
 			t.Fatal("the renderer fitted no shadow camera")
 		}
-		return view, func() { scene.Destroy(); r.Destroy() }
+		return append([]float32(nil), view.Splits...), texel(view.Cascades[len(view.Cascades)-1], 1024)
 	}
 
 	steps := []float32{8, 25, 80}
-	explicit, done := fit(pix.ShadowCascaded{Steps: steps})
-	defer done()
+	explicitSplits, explicitOuter := fit(pix.ShadowCascaded{Steps: steps})
 
-	if len(explicit.Splits) != len(steps) {
-		t.Fatalf("asked for %d steps, got %d slices", len(steps), len(explicit.Splits))
+	if len(explicitSplits) != len(steps) {
+		t.Fatalf("asked for %d steps, got %d slices", len(steps), len(explicitSplits))
 	}
 	for i, want := range steps {
-		if got := explicit.Splits[i]; got != want {
+		if got := explicitSplits[i]; got != want {
 			t.Errorf("step %d came back as %v, want %v", i, got, want)
 		}
 	}
 
 	// Against the derived split over the same scene, whose outermost slice spans most of
 	// it and is correspondingly coarse.
-	derived, doneAuto := fit(pix.ShadowCascaded{Levels: len(steps)})
-	defer doneAuto()
+	_, derivedOuter := fit(pix.ShadowCascaded{Levels: len(steps)})
 
-	explicitOuter := texel(explicit.Cascades[len(steps)-1], 1024)
-	derivedOuter := texel(derived.Cascades[len(steps)-1], 1024)
 	if explicitOuter >= derivedOuter/2 {
 		t.Errorf("the outermost slice's texel is %.3f world units against the derived "+
 			"split's %.3f; choosing the boundaries is supposed to be what reins that in",

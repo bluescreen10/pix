@@ -38,7 +38,7 @@ struct Drawable {
     uint lodLevel;
 };
 struct IndirectCmd { uint indexCount; uint instanceCount; uint firstIndex; int vertexOffset; uint firstInstance; };
-struct LodEntry {
+struct LOD {
     float boundaries[3]; // ascending; boundaries[i] is level i's far edge, i < levelCount-1
     float hysteresis;
     uint levelCount;
@@ -48,9 +48,8 @@ struct LodEntry {
 layout(buffer_reference, scalar) readonly buffer DrawableBuf { Drawable v[]; };
 layout(buffer_reference, scalar) readonly buffer ModelBuf { mat4 v[]; };
 layout(buffer_reference, scalar) buffer IndirectBuf { IndirectCmd v[]; };
-layout(buffer_reference, scalar) readonly buffer RegionBuf { uint v[]; };
 layout(buffer_reference, scalar) buffer VisibleBuf { uint v[]; };
-layout(buffer_reference, scalar) readonly buffer LodBuf { LodEntry v[]; };
+layout(buffer_reference, scalar) readonly buffer LodBuf { LOD v[]; };
 layout(buffer_reference, scalar) buffer PrevLevelBuf { uint v[]; };
 
 // Pushed inline rather than behind a device address: it fits in push constants on
@@ -61,7 +60,6 @@ layout(push_constant, scalar) uniform PC {
     DrawableBuf drawables;
     ModelBuf models;
     IndirectBuf indirect;
-    RegionBuf regions;
     VisibleBuf visible;
     LodBuf lods;
     PrevLevelBuf prevLevel;
@@ -86,7 +84,7 @@ const uint FLAG_CASTS_SHADOW = 2u;
 // them ends up agreeing it's the current level, without the threads needing to
 // coordinate directly. See the LOD spec for why this specific formulation avoids the
 // race a naive per-thread "am I in range" check would have near a boundary.
-uint selectLevel(float dist, uint prevLevel, LodEntry le) {
+uint selectLevel(float dist, uint prevLevel, LOD le) {
     if (prevLevel < le.levelCount) {
         float nearB = (prevLevel == 0u) ? 0.0 : le.boundaries[prevLevel - 1u];
         float farB = (prevLevel + 1u < le.levelCount) ? le.boundaries[prevLevel] : 3.4e38;
@@ -119,7 +117,7 @@ void main() {
 
     uint bid = d.batchID;
     if (d.lodID != 0u) {
-        LodEntry le = pc.lods.v[d.lodID];
+        LOD le = pc.lods.v[d.lodID];
         uint prev = pc.prevLevel.v[d.transformID];
         float dist = distance(center, pc.eye.xyz);
         uint selected = selectLevel(dist, prev, le);
@@ -127,6 +125,9 @@ void main() {
         pc.prevLevel.v[d.transformID] = selected;
     }
 
+    // A batch's region of the visible buffer starts at its own firstInstance: the draw
+    // reads its instances from there, so the cull must write them there, and the
+    // command already carries the number — no separate table of region bases needed.
     uint slot = atomicAdd(pc.indirect.v[bid].instanceCount, 1u);
-    pc.visible.v[pc.regions.v[bid] + slot] = i;
+    pc.visible.v[pc.indirect.v[bid].firstInstance + slot] = i;
 }

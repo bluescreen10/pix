@@ -14,14 +14,14 @@ import (
 func TestStoreDedupsEqualBytesFromDistinctSlices(t *testing.T) {
 	store, _ := testStore(t)
 
-	copied := append([]byte(nil), shaders.BasicForward...)
-	a := store.Pool(materials.Shader{Forward: shaders.BasicForward}, "a")
-	b := store.Pool(materials.Shader{Forward: copied}, "b")
+	copied := append([]byte(nil), shaders.BasicFragment...)
+	a := store.Pool(materials.Shader{Fragment: shaders.BasicFragment}, "a")
+	b := store.Pool(materials.Shader{Fragment: copied}, "b")
 	if a != b {
 		t.Fatal("equal SPIR-V in distinct arrays produced two stores")
 	}
 	// And a genuinely different shader must NOT collide.
-	if c := store.Pool(materials.Shader{Forward: shaders.BlinnPhongForward}, "c"); c == a {
+	if c := store.Pool(materials.Shader{Fragment: shaders.BlinnPhongFragment}, "c"); c == a {
 		t.Fatal("different shaders shared a store")
 	}
 }

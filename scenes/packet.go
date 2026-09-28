@@ -1,6 +1,7 @@
 package scenes
 
 import (
+	"iter"
 	"sync/atomic"
 
 	"github.com/bluescreen10/pix/colors"
@@ -57,12 +58,6 @@ type FramePacket struct {
 	// LODs holds the coarser levels of every LOD-tagged mesh, addressed by
 	// MeshPacket.LODRange. Level 0 lives on the MeshPacket itself.
 	LODs Table[LODLevel]
-	// Materials is the DISTINCT set of materials the meshes reference, indexed by
-	// MeshPacket.Material. The indirection is what keeps a material edit from dirtying
-	// the mesh table, and what makes pipeline work proportional to materials in play
-	// rather than objects on screen.
-	Materials Table[materials.ID]
-
 	// Lights carries light VALUES and shadow SETTINGS — never shadow maps, cameras, or
 	// fitted matrices. Those are renderer-owned resources, cached per light identity;
 	// a producer says "this light casts shadows at 2048px", not where the depth buffer
@@ -100,7 +95,7 @@ type ParticlePacket struct {
 	ID        ParticleID
 	Transform uint32 // Slot in FramePacket.Transforms.
 	Geometry  geometries.ID
-	Material  uint32 // Slot in FramePacket.Materials.
+	Material  materials.ID
 	Capacity  uint32
 	Update    ParticleUpdate
 
@@ -259,6 +254,16 @@ type Table[T any] struct {
 	Dirty        []IndexRange
 }
 
+func (t Table[T]) Entries() iter.Seq2[int, T] {
+	return func(yield func(int, T) bool) {
+		for i, v := range t.Data {
+			if !yield(i, v) {
+				break
+			}
+		}
+	}
+}
+
 // RenderFlags are the per-drawable bits the renderer's culling and shading consume.
 type RenderFlags uint32
 
@@ -283,10 +288,9 @@ type MeshPacket struct {
 	// expansion loop is the same code for one instance as for ten thousand.
 	Transforms IndexRange
 	// Geometry and Material are LOD level 0 — the mesh as created, before any coarser
-	// level was added. Material is a slot in FramePacket.Materials, NOT a material
-	// record index: go through the table.
+	// level was added.
 	Geometry geometries.ID
-	Material uint32
+	Material materials.ID
 	// Bounds is in local space, transformed by each entry in Transforms. Every LOD
 	// level shares it: a coarser level approximates the same object.
 	Bounds glm.Sphere
@@ -305,7 +309,7 @@ type MeshPacket struct {
 // mesh with no LOD at all.
 type LODLevel struct {
 	Geometry geometries.ID
-	Material uint32 // Slot in FramePacket.Materials.
+	Material materials.ID
 	// MinDistance is the camera distance at which this level takes over from the
 	// previous one. Levels are ordered nearest-first, so these ascend.
 	MinDistance float32

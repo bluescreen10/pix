@@ -159,23 +159,23 @@ func (g *Store) IndexBuffer() gpu.Buffer {
 }
 
 // IndexCount returns a geometry's index count, for building an indirect draw command.
-func (g *Store) IndexCount(id uint32) uint32 {
+func (g *Store) IndexCountAt(id uint32) uint32 {
 	return g.descs[id].IndexCount
 }
 
 // IndexBase returns a geometry's first-index offset into the shared index buffer
 // (see IndexBuffer).
-func (g *Store) IndexBase(id uint32) uint32 {
+func (g *Store) IndexBaseAt(id uint32) uint32 {
 	return g.descs[id].IndexBase
 }
 
 // BoundingSphere returns a geometry's local bounding sphere.
-func (g *Store) BoundingSphere(id uint32) glm.Sphere {
+func (g *Store) BoundingSphereAt(id uint32) glm.Sphere {
 	return g.entries.Value(id).boundingSphere
 }
 
 // Generation returns the current generation of a geometry id (for stale checks).
-func (g *Store) Generation(id uint32) uint32 {
+func (g *Store) GenerationAt(id uint32) uint32 {
 	return g.entries.Generation(id)
 }
 
@@ -191,7 +191,7 @@ func (g *Store) validate(id, gen uint32) bool {
 // Create allocates a geometry from cfg and returns a fresh single-ref handle.
 func (g *Store) Create(cfg GeometryConfig) Geometry {
 	id, gen := g.alloc(cfg)
-	return Geometry{ref: ref.New(id, gen, g.dispose, g.validate), store: g, boundingSphere: g.BoundingSphere(id)}
+	return Geometry{ref: ref.New(id, gen, g.dispose, g.validate), store: g, boundingSphere: g.BoundingSphereAt(id)}
 }
 
 // alloc allocates a generation-stamped geometry id from cfg, uploads its streams,

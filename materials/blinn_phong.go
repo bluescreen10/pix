@@ -33,10 +33,7 @@ type BlinnPhongMaterial struct {
 // NewBlinnPhongMaterial creates a Blinn-Phong material with an unbound color map.
 // Defaults to white with a soft highlight.
 func NewBlinnPhongMaterial(store *Store) *BlinnPhongMaterial {
-	// Forward-only for now: a deferred path means a Deferred pass that packs
-	// (specular, shininess) into the G-buffer's model-defined material channel, plus a
-	// matching Lighting pass. See shaders/src/gbuffer.glsl.
-	st := store.Pool(Shader{Forward: shaders.BlinnPhongForward}, "BlinnPhong Material")
+	st := store.Pool(Shader{Fragment: shaders.BlinnPhongFragment}, "BlinnPhong Material")
 	m := &BlinnPhongMaterial{color: colors.RGBA32F{1, 1, 1, 1}, specular: 0.3, shininess: 32}
 	m.pool = st
 	m.ref = st.Create(m)
@@ -145,8 +142,6 @@ func (m *BlinnPhongMaterial) SetColorMapSampler(sampler uint32) {
 
 // --- Material ---
 //
-// BlinnPhongMaterial has no deferred path yet, so Deferred and Lighting are nil
-// and it always renders through Forward.
 // Every method below is a plain store lookup. They are spelled out here, rather than
 // inherited from a shared base, so that this file is the whole of BlinnPhongMaterial.
 
@@ -171,12 +166,12 @@ func (m *BlinnPhongMaterial) IsValid() bool {
 
 // Cull reports which triangle faces are discarded.
 func (m *BlinnPhongMaterial) Cull() CullMode {
-	return m.pool.Cull(m.ref.ID())
+	return m.pool.CullAt(m.ref.ID())
 }
 
 // SetCull sets which faces are culled (CullNone = double-sided).
 func (m *BlinnPhongMaterial) SetCull(mode CullMode) {
-	m.pool.SetCull(m.ref.ID(), mode)
+	m.pool.SetCullAt(m.ref.ID(), mode)
 }
 
 // SetDoubleSided is a convenience for SetCull(CullNone) / SetCull(CullBack).
@@ -192,12 +187,12 @@ func (m *BlinnPhongMaterial) SetDoubleSided(enabled bool) {
 // material to the forward path — the G-buffer holds one surface per pixel, so it
 // cannot represent a fragment that composites over what is behind it.
 func (m *BlinnPhongMaterial) Blend() BlendMode {
-	return m.pool.Blend(m.ref.ID())
+	return m.pool.BlendAt(m.ref.ID())
 }
 
 // SetBlend sets the material's blend mode (Opaque/Alpha/Additive).
 func (m *BlinnPhongMaterial) SetBlend(mode BlendMode) {
-	m.pool.SetBlend(m.ref.ID(), mode)
+	m.pool.SetBlendAt(m.ref.ID(), mode)
 }
 
 // Pool returns the pool this material's records live in — its shader, pipeline

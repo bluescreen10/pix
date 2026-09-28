@@ -47,12 +47,6 @@ func TestBuiltinVarsDriveRendererState(t *testing.T) {
 		t.Errorf("shadow.distance = %v, want 42.5", got)
 	}
 
-	r.EnableDeferredRendering(false)
-	c.Exec("set deferred true")
-	if !r.DeferredEnabled() {
-		t.Error("set deferred true did not enable deferred")
-	}
-
 	r.ShowFPS(false)
 	c.Exec("set stats on")
 	if !r.StatsVisible() {
@@ -195,7 +189,7 @@ func TestBuiltinsAreListedBeforeAnyAppBinding(t *testing.T) {
 	_, c := consoleFor(t)
 	c.Exec("list")
 	listing := strings.Join(c.Lines(), "\n")
-	for _, want := range []string{"shadows", "shadow.distance", "deferred", "stats", "clear.color"} {
+	for _, want := range []string{"shadows", "shadow.distance", "depthprepass", "stats", "clear.color"} {
 		if !strings.Contains(listing, want) {
 			t.Errorf("list did not mention %q:\n%s", want, listing)
 		}

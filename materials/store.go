@@ -32,9 +32,7 @@ func NewStore(backend gpu.Backend) *Store {
 // holds its own references.
 func (s *Store) Pool(sh Shader, label string) *Pool {
 	sh.Vertex = shaders.ForBackend(s.backend, sh.Vertex)
-	sh.Forward = shaders.ForBackend(s.backend, sh.Forward)
-	sh.Deferred = shaders.ForBackend(s.backend, sh.Deferred)
-	sh.Lighting = shaders.ForBackend(s.backend, sh.Lighting)
+	sh.Fragment = shaders.ForBackend(s.backend, sh.Fragment)
 	// Fast path. Every built-in constructor hands us the same //go:embed slices on
 	// every call, so matching slice headers settle it outright — worth a special case
 	// because the slow path below hashes ~19KB of SPIR-V, which measured as ~99% of
@@ -45,11 +43,10 @@ func (s *Store) Pool(sh Shader, label string) *Pool {
 		}
 	}
 	// Slow path: a caller holding its own copy of SPIR-V that some pool already has.
-	// The hash covers every stage, so it settles pool identity on its own — matching on
-	// Forward alone would silently hand a caller another Shader's Deferred/Lighting
-	// (routing it through the G-buffer against a record layout it never asked for, or
-	// losing its deferred path, depending on creation order), and confirming a 32-bit
-	// match by comparing every byte of every stage is what this width replaces.
+	// The hash covers both stages, so it settles pool identity on its own — matching on
+	// the fragment stage alone would hand a caller a pool whose vertex stage it never
+	// asked for. Confirming a 32-bit match by comparing every byte is what this width
+	// replaces.
 	h := hashShader(sh)
 	for _, p := range s.pools {
 		if p.hash == h {

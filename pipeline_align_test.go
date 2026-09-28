@@ -143,3 +143,45 @@ func TestPipelineFollowsMaterialSwap(t *testing.T) {
 		t.Fatalf("after swap to blue Blinn-Phong: center pixel = (%d,%d,%d), want blue", px[i], px[i+1], px[i+2])
 	}
 }
+
+// TestMaterialSwapWithinOnePool: two materials of the same type share a pool and so
+// resolve to the same pipeline. Nothing about the draw changes except the record slot
+// the drawable points at — which is now read straight off the mesh entry rather than
+// through a table the producer deduped.
+//
+// The cross-pool swap above would still pass if that slot were wrong, because there the
+// pipeline changes too and that alone repaints the frame. Here the pipeline is
+// identical, so the colour can only come from the slot.
+func TestMaterialSwapWithinOnePool(t *testing.T) {
+	r, err := pix.NewOffscreenRenderer(64, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	scene := scenes.New()
+	defer scene.Destroy()
+	scene.SetAmbient(colors.RGB32F{0.8, 0.8, 0.8})
+
+	red := r.NewBasicMaterial()
+	red.SetColor(colors.RGBA32F{1, 0, 0, 1})
+	green := r.NewBasicMaterial()
+	green.SetColor(colors.RGBA32F{0, 1, 0, 1})
+
+	mesh := scene.NewMesh(r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1)), red)
+	scene.Add(mesh)
+
+	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam.SetPosition(glm.Vec3f{0, 0, 3})
+	i := (32*64 + 32) * 4
+
+	r.Render(scene, cam)
+	if px := r.Pixels(); px[i] < 200 || px[i+1] > 40 {
+		t.Fatalf("before swap: center pixel = (%d,%d,%d), want red", px[i], px[i+1], px[i+2])
+	}
+
+	mesh.SetMaterial(green)
+	r.Render(scene, cam)
+	if px := r.Pixels(); px[i+1] < 200 || px[i] > 40 {
+		t.Fatalf("after swap to a second Basic material: center pixel = (%d,%d,%d), want green", px[i], px[i+1], px[i+2])
+	}
+}

@@ -58,3 +58,58 @@ func TestTransparency(t *testing.T) {
 		t.Fatalf("no blend at overlap: (%d,%d,%d) — red should show through the blue", rr, gg, bb)
 	}
 }
+
+// TestBlendChangeRebatches: turning a material transparent after it has already been
+// drawn must re-batch the scene, not keep drawing it through the opaque pipeline it
+// resolved to the first time.
+//
+// The mesh table does not move when this happens — the same objects are drawn with the
+// same materials — so the scene's own revision cannot report it. What reports it is the
+// material pool's rasterization revision, which blend and cull are the whole of (see
+// materials.Pool.RasterRevision and Renderer.isLayoutStale).
+func TestBlendChangeRebatches(t *testing.T) {
+	const size = 96
+	r, err := pix.NewOffscreenRenderer(size, size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	r.SetClearColor([4]float32{0, 0, 0, 1})
+	scene := scenes.New()
+	defer scene.Destroy()
+	scene.SetAmbient(colors.RGB32F{1, 1, 1}) // full ambient → albedo shows directly
+
+	quad := func(z float32) geometries.Geometry {
+		return r.GeometryStore.Create(geometries.GeometryConfig{
+			Attributes: []geometries.Attribute{
+				geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, []glm.Vec3f{{-0.8, -0.8, z}, {0.8, -0.8, z}, {0.8, 0.8, z}, {-0.8, 0.8, z}}),
+			},
+			Indices: []uint32{0, 1, 2, 0, 2, 3},
+		})
+	}
+
+	red := r.NewPBRMaterial()
+	red.SetColor(colors.RGBA32F{1, 0, 0, 1})
+	blue := r.NewPBRMaterial()
+	blue.SetColor(colors.RGBA32F{0, 0, 1, 0.5}) // alpha set now, but still opaque-blended
+	scene.Add(scene.NewMesh(quad(-0.5), red))
+	scene.Add(scene.NewMesh(quad(0), blue))
+
+	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 1000)
+	cam.SetPosition(glm.Vec3f{0, 0, 2})
+	i := (size/2*size + size/2) * 4
+
+	// Opaque to begin with: the blue quad in front hides the red one entirely.
+	r.Render(scene, cam)
+	if px := r.Pixels(); px[i] > 40 || px[i+2] < 200 {
+		t.Fatalf("before the change: center = (%d,%d,%d), want opaque blue", px[i], px[i+1], px[i+2])
+	}
+
+	blue.SetBlend(materials.BlendAlpha)
+	r.Render(scene, cam)
+	px := r.Pixels()
+	if px[i] < 40 || px[i+2] < 40 {
+		t.Fatalf("after SetBlend: center = (%d,%d,%d), want red showing through blue — "+
+			"the draw list kept the opaque pipeline it batched with", px[i], px[i+1], px[i+2])
+	}
+}

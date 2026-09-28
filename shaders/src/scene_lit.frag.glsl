@@ -30,7 +30,12 @@ vec3 blinnPhong(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float specSt
     float diff = max(dot(N, L), 0.0);
     vec3 H = normalize(L + V);
     float spec = pow(max(dot(N, H), 0.0), shininess) * specStrength;
-    return radiance * (albedo * diff + vec3(spec));
+    // Gate the highlight on the light actually reaching the surface. Without this a
+    // light BEHIND a surface still puts a specular glint on it whenever the half vector
+    // happens to line up, which is wrong on its own account and also means the whole
+    // term cannot be skipped when the light is behind — and skipping it is what lets the
+    // shadow lookup be skipped with it.
+    return radiance * (albedo * diff + vec3(spec) * step(0.0, dot(N, L)));
 }
 
 void main() {
@@ -46,10 +51,14 @@ void main() {
     bool receives = (vFlags & FLAG_RECEIVES_SHADOW) != 0u;
 
     vec3 lit = L.ambient.rgb * albedo;
+    float viewDist = length(pc.eye.xyz - vWorldPos);
     for (uint i = 0u; i < L.numDir; i++) {
-        DirLight dl = L.dirs[i];
-        float sh = receives ? dirShadowFactor(dl, vWorldPos, N, length(pc.eye.xyz - vWorldPos), shadowSamp) : 1.0;
-        lit += sh * blinnPhong(N, V, normalize(-dl.dir.xyz), dl.color.rgb * dl.color.w, albedo, m.specular, m.shininess);
+        vec3 Ldir = normalize(-L.dirs[i].dir.xyz);
+        // Nothing reaches a surface turned away from the light, so neither the shading
+        // nor the shadow lookup that would scale it is worth paying for.
+        if (dot(N, Ldir) <= 0.0) continue;
+        float sh = receives ? dirShadowFactor(L, i, vWorldPos, N, viewDist, shadowSamp) : 1.0;
+        lit += sh * blinnPhong(N, V, Ldir, L.dirs[i].color.rgb * L.dirs[i].color.w, albedo, m.specular, m.shininess);
     }
     for (uint i = 0u; i < L.numPoint; i++) {
         PointLight pl = L.points[i];

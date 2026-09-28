@@ -14,7 +14,7 @@ import (
 var particleRecordSize = uint32(unsafe.Sizeof(scenes.ParticleRecord{}))
 
 // particleUpdateRoot matches PC in particle_update.comp.glsl (scalar; pointers
-// first, then plain fields). One per container per frame — see dispatchParticleUpdate.
+// first, then plain fields). One per container per frame — see encodeParticleSimulation.
 type particleUpdateRoot struct {
 	src, dst, pending, indirect uint64
 	capacity, pendingCount      uint32

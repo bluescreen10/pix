@@ -13,12 +13,12 @@ import (
 // unlit look (base color × color × color map, plus emissive), but rendering
 // through pix's dedicated particle shaders instead of the mesh vertex-pull/Drawable
 // contract — see particle_common.glsl for why particles need their own contract
-// rather than reusing a mesh material's Forward(). This is the only material type
+// rather than reusing a mesh material's fragment shader. This is the only material type
 // pix.ParticleConfig.Material accepts today: unlike Material generally, a
 // particle-safe shader pair can't be discovered structurally (BlinnPhongMaterial and
 // PBRMaterial expose the same Color()/Emissive()/ColorMap() accessor names but write
 // unrelated, larger GPU records), so rather than gate that with an interface marker,
-// the type itself simply IS the particle shader pair — Vertex/Forward below are
+// the type itself simply IS the particle shader pair — Vertex/Fragment below are
 // shaders.ParticleDraw/ParticleBasicForward, not a mesh shader.
 type BasicParticleMaterial struct {
 	pool *Pool
@@ -34,7 +34,7 @@ type BasicParticleMaterial struct {
 // NewBasicParticleMaterial creates an unlit particle material with an unbound color
 // map.
 func NewBasicParticleMaterial(store *Store) *BasicParticleMaterial {
-	st := store.Pool(Shader{Vertex: shaders.ParticleDraw, Forward: shaders.ParticleBasicForward}, "Basic Particle Material")
+	st := store.Pool(Shader{Vertex: shaders.ParticleDraw, Fragment: shaders.ParticleBasicFragment}, "Basic Particle Material")
 	m := &BasicParticleMaterial{color: colors.RGBA32F{1, 1, 1, 1}}
 	m.pool = st
 	m.ref = st.Create(m)
@@ -138,12 +138,12 @@ func (m *BasicParticleMaterial) IsValid() bool {
 
 // Cull reports which triangle faces are discarded.
 func (m *BasicParticleMaterial) Cull() CullMode {
-	return m.pool.Cull(m.ref.ID())
+	return m.pool.CullAt(m.ref.ID())
 }
 
 // SetCull sets which faces are culled (CullNone = double-sided).
 func (m *BasicParticleMaterial) SetCull(mode CullMode) {
-	m.pool.SetCull(m.ref.ID(), mode)
+	m.pool.SetCullAt(m.ref.ID(), mode)
 }
 
 // SetDoubleSided is a convenience for SetCull(CullNone) / SetCull(CullBack).
@@ -157,14 +157,14 @@ func (m *BasicParticleMaterial) SetDoubleSided(enabled bool) {
 
 // Blend reports the material's blend mode.
 func (m *BasicParticleMaterial) Blend() BlendMode {
-	return m.pool.Blend(m.ref.ID())
+	return m.pool.BlendAt(m.ref.ID())
 }
 
 // SetBlend sets the material's blend mode (Opaque/Alpha/Additive) — most particle
 // effects (smoke, fire, sparks) want BlendAlpha or BlendAdditive; the default
 // constructed value is BlendOpaque, matching every other material type's default.
 func (m *BasicParticleMaterial) SetBlend(mode BlendMode) {
-	m.pool.SetBlend(m.ref.ID(), mode)
+	m.pool.SetBlendAt(m.ref.ID(), mode)
 }
 
 // Pool returns the pool this material's records live in.

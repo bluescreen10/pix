@@ -42,8 +42,6 @@ layout(push_constant, scalar) uniform PC {
     ModelBuf models;
     DrawableBuf drawables;
     VisibleBuf visible;
-    uint mode;
-    uint pad0;
 } pc;
 
 layout(location = 0) flat out uint vObjectID;

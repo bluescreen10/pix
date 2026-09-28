@@ -2,11 +2,17 @@ package pix
 
 import (
 	"fmt"
+	"image"
+	"image/png"
+	"math"
 	"os"
-	"slices"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 	"unsafe"
 
+	"github.com/bluescreen10/gamekit"
 	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/gamekit/utils"
 	"github.com/bluescreen10/pix/colors"
@@ -53,15 +59,16 @@ type Renderer struct {
 	uploader *uploader
 
 	cullPipeline           gpu.Pipeline
-	skinPipeline           gpu.Pipeline // compute pre-skinning (scene_skin.comp) — see dispatchSkinning
-	particleUpdatePipeline gpu.Pipeline // compute particle simulation (particle_update.comp) — see dispatchParticleUpdate
-	// skinScratch collects the frame's compute-skinning dispatches (see skinCommands);
-	// reused every frame rather than reallocated.
+	skinPipeline           gpu.Pipeline // compute pre-skinning (scene_skin.comp) — see encodeSkinning
+	particleUpdatePipeline gpu.Pipeline // compute particle simulation (particle_update.comp) — see encodeParticleSimulation
+	// skinScratch and shadowViews collect the frame's skinning jobs and shadow views
+	// (see skinCommands, collectShadowViews); reused every frame rather than
+	// reallocated.
 	skinScratch []skinCmd
+	shadowViews []view
 	// Draw pipelines, one per distinct material pipeline key (shaders + cull + blend).
-	// drawPipelineKeys is parallel so pipelineFor can dedup and buildPipelines can rebuild
-	// them all when the target format changes. A key's pass says whether it belongs to
-	// the G-buffer fill or the forward pass (see encode/issueDraws).
+	// drawPipelineKeys is parallel so pipelineFor can dedup and buildPipelines can
+	// rebuild them all when the target format changes.
 	drawPipelines    []gpu.Pipeline
 	drawPipelineKeys []materialPipeline
 	pipelinesReady   bool
@@ -81,27 +88,11 @@ type Renderer struct {
 	// in place and leaves their indices alone.
 	pools []poolPipelines
 
-	// Deferred: global toggle (off by default — every material renders Forward() until
-	// enabled) + the G-buffer targets (recreated with the depth buffer on resize) + the
-	// plain (non-comparison) sampler used to read them and depth in the lighting pass.
-	// lightingPipelines is one fullscreen pipeline per unique Lighting() shader (a
-	// shading model); lightingKeys is parallel, for dedup + rebuilds. lightingScratch
-	// is reused each frame to collect the models a frame actually references.
-	deferredEnabled   bool
-	diffuseTexture    gpu.Texture
-	normalTexture     gpu.Texture
-	materialTexture   gpu.Texture
-	emissiveTexture   gpu.Texture
-	gbufferSampler    gpu.Sampler
-	lightingPipelines []gpu.Pipeline
-	lightingKeys      []lightingPipelineKey
-	lightingScratch   []uint32
-
-	// debugView displays one G-buffer target instead of the shaded frame; its pipeline
-	// is built on first use since most frames never need it (see debug_view.go).
-	debugView       DebugView
-	debugPipeline   gpu.Pipeline
-	debugIDPipeline gpu.Pipeline // DebugObjectID/DebugTriangleID's own pipeline (see recordDebugIDView)
+	// debugView draws the scene with a dedicated fragment shader instead of shading it;
+	// one pipeline per view, built on first use since most frames never need any of
+	// them (see debug_view.go).
+	debugView      DebugView
+	debugPipelines [debugViewCount]gpu.Pipeline
 
 	// Shadows: global toggle + the shared PCF comparison sampler (created lazily) +
 	// the position-only depth-pass pipeline (rebuilt with the others on format change).
@@ -112,9 +103,13 @@ type Renderer struct {
 	shadowsEnabled bool
 	shadowSampler  gpu.Sampler
 	shadowPipeline gpu.Pipeline
-	shadowDistance float32
-	shadowNear     float32
-	shadowFilter   ShadowFilter
+	// prepassPipelines fill depth for the forward pass so shading runs once per pixel
+	// (see Renderer.EnableDepthPrepass), one per materials.CullMode.
+	prepassPipelines [3]gpu.Pipeline
+	depthPrepass     bool
+	shadowDistance   float32
+	shadowNear       float32
+	shadowFilter     ShadowFilter
 	// shadows is how directional lights are fitted plus that fit's own settings; nil
 	// means ShadowUniform (see Renderer.Shadows).
 	shadows ShadowSettings
@@ -127,101 +122,12 @@ type Renderer struct {
 	// so either one being active is what keeps the overlay alive.
 	console *console.Console
 
-	// Stats / debug HUD.
-	stats     *RendererStats
+	// Stats HUD, and the profiler it reads (see profiler.go). GPU timing is armed only
+	// while the HUD is showing.
+	profiler  Profiler
 	fontColor colors.RGBA32F
 	showFPS   bool
 	overlay   *overlay
-	gpuPool   gpu.QueryPool
-	gpuValid  bool
-}
-
-// EnableShadows globally enables or disables shadow rendering. When off, no shadow
-// views are culled and no shadow passes run.
-func (r *Renderer) EnableShadows(on bool) {
-	r.shadowsEnabled = on
-}
-
-// EnableDeferredRendering globally toggles the deferred (G-buffer) path. Off by
-// default: every material renders through Forward() regardless of whether it also
-// supplies Deferred+Lighting. When on, an eligible Opaque material (one
-// providing both) renders through the G-buffer instead; everything else still uses
-// Forward(). Takes effect on the next Render call (pipeline routing is resolved fresh
-// each frame, so no explicit invalidation is needed).
-func (r *Renderer) EnableDeferredRendering(on bool) {
-	r.deferredEnabled = on
-}
-
-// Scale is framebuffer pixels per logical point (see RendererConfig.Scale). Sizes the
-// renderer draws for a human to read — the HUD, the console — are given in logical
-// points and multiplied by this, so they stay the same physical size on any display.
-func (r *Renderer) Scale() float32 {
-	return r.scale
-}
-
-// SetScale updates the display scale, for a window moved between displays of
-// different densities. Values <= 0 are ignored.
-func (r *Renderer) SetScale(s float32) {
-	if s > 0 {
-		r.scale = s
-		if r.overlay != nil {
-			r.overlay.scale = s
-		}
-	}
-}
-
-// ShadowsEnabled, DeferredEnabled and ShadowDistance report the current setting of
-// the matching Enable*/Set* call. They exist so these toggles can be bound to
-// something that has to read them back — a console variable, a settings panel —
-// without the caller keeping its own shadow copy in sync.
-func (r *Renderer) ShadowsEnabled() bool {
-	return r.shadowsEnabled
-}
-
-func (r *Renderer) DeferredEnabled() bool {
-	return r.deferredEnabled
-}
-
-func (r *Renderer) ShadowDistance() float32 {
-	return r.shadowDistance
-}
-
-// StatsVisible reports whether the debug HUD is showing (see ShowFPS).
-func (r *Renderer) StatsVisible() bool {
-	return r.showFPS
-}
-
-// Stats returns the renderer's rolling frame-time statistics (CPU/GPU ms, FPS —
-// the same numbers ShowFPS draws onscreen), for callers that want them
-// programmatically (e.g. an automated before/after comparison) rather than reading
-// the HUD. GPU timestamps are only recorded while ShowFPS(true) is active.
-func (r *Renderer) Stats() *RendererStats {
-	return r.stats
-}
-
-// ClearColor is the colour the frame is cleared to (see SetClearColor).
-func (r *Renderer) ClearColor() colors.RGBA32F {
-	return r.clear
-}
-
-// FontColor is the colour the debug HUD's text is drawn in.
-func (r *Renderer) FontColor() colors.RGBA32F {
-	return r.fontColor
-}
-
-// SetFontColor sets the colour of the debug HUD's text.
-func (r *Renderer) SetFontColor(rgba colors.RGBA32F) {
-	r.fontColor = rgba
-}
-
-// SetShadowDistance caps how far along the camera's view frustum directional shadows
-// are fit: a smaller distance packs the shadow map's resolution into the near view for
-// sharper shadows, at the cost of no shadows beyond it. Pass 0 for the automatic
-// default (fit reaches the far side of the scene's bounding sphere).
-// It has no effect while ShadowCascaded is using explicit Steps: the outermost step is
-// where shadows stop, and one setting owning the far end is better than two.
-func (r *Renderer) SetShadowDistance(distance float32) {
-	r.shadowDistance = distance
 }
 
 // NewRenderer creates a renderer from cfg: it selects and initializes a registered
@@ -265,7 +171,6 @@ func NewRenderer(cfg *RendererConfig) (*Renderer, error) {
 		GeometryStore: geometries.NewStore(backend),
 		TextureStore:  textures.NewStore(backend),
 		MaterialStore: materials.NewStore(backend),
-		stats:         newRendererStats(60),
 	}
 
 	switch {
@@ -280,19 +185,38 @@ func NewRenderer(cfg *RendererConfig) (*Renderer, error) {
 	return r, nil
 }
 
+// NewOffscreenRenderer is a convenience for a headless renderer with an internally-
+// owned RGBA8 target of the given size (read it with Pixels/Capture). Equivalent to
+// NewRenderer(&RendererConfig{Width, Height}); kept as an ergonomic shorthand.
+func NewOffscreenRenderer(w, h uint32) (*Renderer, error) {
+	return NewRenderer(&RendererConfig{Width: w, Height: h})
+}
+
+// attachWindow lets the windowing package own platform handles and surface
+// creation. Pix only needs the resulting opaque surface and swapchain extent.
+func (r *Renderer) attachWindow(w *gamekit.Window, width, height uint32) error {
+	surface, err := w.CreateSurface(r.backend)
+	if err != nil {
+		return err
+	}
+	r.swapchain = r.backend.CreateSwapchain(surface, width, height)
+	sizer, ok := r.backend.(swapchainSizer)
+	if !ok {
+		return fmt.Errorf("backend does not expose swapchain size")
+	}
+	sw, sh := sizer.SwapchainSize(r.swapchain)
+	r.hasTarget = false
+	r.clear = colors.RGBA32F{}
+	r.configure(sw, sh, r.backend.SwapchainFormat(r.swapchain))
+	return nil
+}
+
 // attachTexture configures an internally-owned RGBA8 render target of w×h.
 func (r *Renderer) attachTexture(w, h uint32) {
 	tex := r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: w, Height: h,
 		Format: gpu.FormatRGBA8Unorm, Usage: gpu.TextureRenderTarget | gpu.TextureTransfer})
 	r.ownsTarget = true
 	r.SetRenderTarget(tex, w, h, gpu.FormatRGBA8Unorm)
-}
-
-// NewOffscreenRenderer is a convenience for a headless renderer with an internally-
-// owned RGBA8 target of the given size (read it with Pixels/Capture). Equivalent to
-// NewRenderer(&RendererConfig{Width, Height}); kept as an ergonomic shorthand.
-func NewOffscreenRenderer(w, h uint32) (*Renderer, error) {
-	return NewRenderer(&RendererConfig{Width: w, Height: h})
 }
 
 // SetRenderTarget renders into tex (headless). The renderer (re)creates its depth
@@ -307,395 +231,24 @@ func (r *Renderer) SetRenderTarget(tex gpu.Texture, w, h uint32, format gpu.Form
 	r.configure(w, h, format)
 }
 
-// configure sets the size/format, (re)creates the depth buffer and the pipelines, and
-// drops any G-buffer targets so they're re-made at the new size on the next deferred
-// frame (see ensureGBuffer — they are not created here, since most renderers never
-// enable deferred rendering and they cost 16 bytes/pixel; see gbuffer.glsl).
+// configure sets the size/format and (re)creates the depth buffer and the pipelines.
 func (r *Renderer) configure(w, h uint32, format gpu.Format) {
 	r.width, r.height, r.color = w, h, format
 	if r.depth.IsValid() {
 		r.backend.DestroyTexture(r.depth)
 	}
-	// Sampled too: the deferred lighting pass reads depth back to reconstruct position.
+	// Sampled too, so a pass can read depth back rather than only test against it.
 	r.depth = r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: w, Height: h,
 		Format: gpu.FormatDepth32F, Usage: gpu.TextureDepth | gpu.TextureSampled, Label: "depth"})
-	r.destroyGBuffer()
 	r.buildPipelines()
 }
 
-// ensureGBuffer creates the G-buffer targets at the current size if they aren't already
-// (they're dropped on resize by configure). Called on the first deferred frame, so a
-// renderer that never enables deferred rendering never allocates them.
+// --------------------------------------------------------------------------------------
+// Settings and inspection
 //
-// NOTE: the backend hands out bindless heap slots monotonically and DestroyTexture does
-// not reclaim them, so each resize while deferred is enabled permanently consumes four
-// sampled-image slots. Fine for now; reclaiming slots is a backend-wide change.
-func (r *Renderer) ensureGBuffer() {
-	if r.diffuseTexture.IsValid() {
-		return
-	}
-	rt := func(format gpu.Format, label string) gpu.Texture {
-		return r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: r.width, Height: r.height,
-			Format: format, Usage: gpu.TextureRenderTarget | gpu.TextureSampled, Label: label})
-	}
-	// See gbuffer.glsl for the channel layout; `material` is model-defined.
-	r.diffuseTexture = rt(gpu.FormatRGBA8Unorm, "gbuffer-diffuse")
-	r.normalTexture = rt(gpu.FormatRG16F, "gbuffer-normal")
-	r.materialTexture = rt(gpu.FormatRGBA8Unorm, "gbuffer-material")
-	r.emissiveTexture = rt(gpu.FormatRGBA8Unorm, "gbuffer-emissive")
-}
-
-// destroyGBuffer releases the G-buffer targets and marks them absent.
-func (r *Renderer) destroyGBuffer() {
-	for _, t := range []*gpu.Texture{&r.diffuseTexture, &r.normalTexture, &r.materialTexture, &r.emissiveTexture} {
-		if t.IsValid() {
-			r.backend.DestroyTexture(*t)
-			*t = gpu.Texture{}
-		}
-	}
-}
-
-// buildPipelines (re)creates the cull pipeline and every draw pipeline (forward,
-// G-buffer, and deferred lighting) from the registered material shaders (called on
-// target/format change).
-func (r *Renderer) buildPipelines() {
-	if r.pipelinesReady {
-		r.backend.DestroyPipeline(r.cullPipeline)
-		r.backend.DestroyPipeline(r.skinPipeline)
-		r.backend.DestroyPipeline(r.particleUpdatePipeline)
-		r.backend.DestroyPipeline(r.shadowPipeline)
-		for _, p := range r.drawPipelines {
-			r.backend.DestroyPipeline(p)
-		}
-		for _, p := range r.lightingPipelines {
-			r.backend.DestroyPipeline(p)
-		}
-	}
-	r.cullPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.SceneCull), Entry: "main", Label: "scene-cull"})
-	r.skinPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.SceneSkin), Entry: "main", Label: "scene-skin"})
-	r.particleUpdatePipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleUpdate), Entry: "main", Label: "particle-update"})
-	// Shadow depth pass: position-only vertex-pull, no color attachment, writes depth.
-	// Cull is disabled so thin geometry still occludes from the light's view.
-	shadowPipe := func(frag []byte, label string) gpu.Pipeline {
-		return r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
-			VertexShader: shaders.ForBackend(r.backend, shaders.SceneShadowVert), FragmentShader: shaders.ForBackend(r.backend, frag),
-			Topology: gpu.TopologyTriangles, DepthFormat: gpu.FormatDepth32F,
-			DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareGreater,
-			CullMode: gpu.CullNone, Label: label,
-		})
-	}
-	r.shadowPipeline = shadowPipe(shaders.SceneShadowFrag, "scene-shadow")
-	for i, k := range r.drawPipelineKeys {
-		r.drawPipelines[i] = r.buildDrawPipe(k)
-	}
-	for i, k := range r.lightingKeys {
-		r.lightingPipelines[i] = r.buildLightingPipe(k.fragment)
-	}
-	r.pipelinesReady = true
-	if r.overlay != nil {
-		r.overlay.destroy()
-		r.overlay = newOverlay(r.backend, r.TextureStore, r.scale, r.color, gpu.FormatDepth32F)
-	}
-}
-
-// pass distinguishes a material pipeline's draw pass: forward (shade + output color in
-// one pass) or gbuffer (fill the G-buffer; a separate deferred lighting pass shades it).
-type pass uint8
-
-const (
-	passForward pass = iota
-	passGBuffer
-)
-
-// materialPipeline is a material's full pipeline identity: shaders + raster state +
-// which pass it belongs to. For a gbuffer pipeline, lightingIdx is the index into
-// r.lightingPipelines that shades it (materials sharing a Lighting() shader share a
-// lighting pipeline — a shading model).
-type materialPipeline struct {
-	pass             pass
-	shaderHash       uint64 // cached (vertex,fragment) identity — the dedup key
-	vertex, fragment []byte // kept only to build the pipeline
-	cull             materials.CullMode
-	blend            materials.BlendMode
-	lightingIdx      uint32 // valid iff pass == passGBuffer
-}
-
-// buildDrawPipe creates a graphics pipeline for a material pipeline key against the
-// current color/depth formats. The vertex-pull stage is shared unless the material
-// supplies its own vertex program. A gbuffer-pass key targets the three G-buffer
-// formats plus the main color target (for emissive), always opaque; a forward-pass key
-// targets the main color target alone, with its material's blend mode.
-func (r *Renderer) buildDrawPipe(k materialPipeline) gpu.Pipeline {
-	vert := k.vertex
-	if vert == nil {
-		vert = shaders.SceneDraw
-	}
-	if k.pass == passGBuffer {
-		return r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
-			VertexShader: shaders.ForBackend(r.backend, vert), FragmentShader: shaders.ForBackend(r.backend, k.fragment),
-			Topology:     gpu.TopologyTriangles,
-			ColorFormats: []gpu.Format{gpu.FormatRGBA8Unorm, gpu.FormatRG16F, gpu.FormatRGBA8Unorm, gpu.FormatRGBA8Unorm},
-			DepthFormat:  gpu.FormatDepth32F, DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareGreater,
-			CullMode: gpu.CullMode(k.cull), FrontFaceCW: true,
-		})
-	}
-	var blend []gpu.BlendState
-	switch k.blend {
-	case materials.BlendAlpha:
-		blend = []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}}}
-	case materials.BlendAdditive:
-		blend = []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOne, Op: gpu.BlendAdd}}}
-	}
-	// Transparent (blended) materials test depth against opaque geometry but do NOT
-	// write depth, so they don't occlude each other and blend correctly.
-	depthWrite := k.blend == materials.BlendOpaque
-	return r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
-		VertexShader: shaders.ForBackend(r.backend, vert), FragmentShader: shaders.ForBackend(r.backend, k.fragment),
-		Topology: gpu.TopologyTriangles, ColorFormats: []gpu.Format{r.color},
-		DepthFormat: gpu.FormatDepth32F, DepthTest: true, DepthWrite: depthWrite, DepthCompare: gpu.CompareGreater,
-		// The renderer flips clip-space Y (Vulkan NDC is Y-down), which reverses
-		// triangle winding, so front faces are clockwise on screen.
-		CullMode: gpu.CullMode(k.cull), FrontFaceCW: true, Blend: blend,
-	})
-}
-
-// buildLightingPipe creates the fullscreen deferred-lighting pipeline for one shading
-// model: no vertex input, and it *replaces* the main color target rather than blending
-// (the shader already sums ambient + lighting + emissive in linear space and encodes
-// once, so there is nothing to accumulate; the pass clears to the scene clear color, so
-// rejected background pixels keep it).
-//
-// The G-buffer's depth is bound read-only and tested with CompareLess against the
-// fullscreen triangle's depth of 0 (see fullscreen.vert), so the hardware rejects
-// background pixels — those still holding the 0 clear value — before the fragment
-// shader runs at all. Under reversed-Z the background is 0 and geometry is greater,
-// so the sense is the mirror of the conventional arrangement. Without it every pixel
-// in the viewport pays for an invocation and a depth sample just to discard.
-func (r *Renderer) buildLightingPipe(fragment []byte) gpu.Pipeline {
-	return r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
-		VertexShader: shaders.ForBackend(r.backend, shaders.FullscreenVert), FragmentShader: shaders.ForBackend(r.backend, fragment),
-		Topology: gpu.TopologyTriangles, ColorFormats: []gpu.Format{r.color},
-		DepthFormat: gpu.FormatDepth32F, DepthTest: true, DepthWrite: false, DepthCompare: gpu.CompareLess,
-		CullMode: gpu.CullNone,
-	})
-}
-
-// lightingPipelineKey identifies one deferred shading model: the hash of its Lighting()
-// shader (the dedup key) plus the SPIR-V itself, kept only to rebuild the pipeline on a
-// format change — the same shape as materialPipeline.
-type lightingPipelineKey struct {
-	hash     uint64
-	fragment []byte
-}
-
-// lightingPipelineFor resolves a material's Lighting() shader to a lighting-pipeline
-// index, building and caching it the first time a given shader is seen (one fullscreen
-// pipeline per unique shading model, shared by every material using that Lighting()).
-//
-// This deliberately keys on the shader rather than on Material.Hash: two different
-// material TYPES that share a shading model must share one fullscreen pass, and their
-// Hashes differ (each covers its own forward/deferred shaders too). Identity is a
-// slice-header compare first — every built-in hands over the same //go:embed slice on
-// every call, so that hits without reading any SPIR-V — falling back to a byte hash
-// only for a distinct slice, which is then cached on the key.
-func (r *Renderer) lightingPipelineFor(lightingShader []byte) uint32 {
-	for i := range r.lightingKeys {
-		if materials.SameSPIRV(r.lightingKeys[i].fragment, lightingShader) {
-			return uint32(i)
-		}
-	}
-	hash := materials.HashBytes(lightingShader)
-	for i := range r.lightingKeys {
-		if r.lightingKeys[i].hash == hash {
-			return uint32(i)
-		}
-	}
-	id := uint32(len(r.lightingKeys))
-	r.lightingKeys = append(r.lightingKeys, lightingPipelineKey{hash: hash, fragment: lightingShader})
-	r.lightingPipelines = append(r.lightingPipelines, r.buildLightingPipe(lightingShader))
-	return id
-}
-
-// pipelineFor resolves a material pipeline key to a draw-pipeline index, building and
-// caching a pipeline the first time a given key is seen (shaders deduped by SPIR-V
-// slice identity + cull/blend). Custom materials register here too.
-func (r *Renderer) pipelineFor(k materialPipeline) uint32 {
-	for i := range r.drawPipelineKeys {
-		if sameKey(r.drawPipelineKeys[i], k) {
-			return uint32(i)
-		}
-	}
-	id := uint32(len(r.drawPipelineKeys))
-	r.drawPipelineKeys = append(r.drawPipelineKeys, k)
-	r.drawPipelines = append(r.drawPipelines, r.buildDrawPipe(k))
-	return id
-}
-
-// renderState is everything the renderer keeps on the GPU for one packet source,
-// derived entirely from the packets that source has published.
-type renderState struct {
-	dl *drawList
-	// lights is the GPU light table this source's packets are compiled into, and
-	// shadows the depth-map resources of its casting lights, keyed by light identity.
-	// Both are derived from packets; neither is anything a producer can see.
-	lights  *Lights
-	shadows map[scenes.LightID]*shadowResource
-	// joints is the GPU palette buffer compute skinning reads, uploaded from the
-	// packet's Joints table each frame. Host-visible: the whole table is rewritten
-	// every frame anyway, so staging it would buy nothing.
-	joints    gpu.Buffer
-	jointsCap uint32
-	// particles is the GPU simulation state of this source's particle systems.
-	particles map[scenes.ParticleID]*particleState
-}
-
-// syncJoints uploads a packet's joint palettes, growing the buffer as needed. Returns
-// the device address the skinning dispatches read from.
-func (st *renderState) syncJoints(backend gpu.Backend, joints []glm.Mat4f) uint64 {
-	n := uint32(len(joints))
-	if n == 0 {
-		return st.joints.Addr
-	}
-	if n > st.jointsCap {
-		if st.joints.IsValid() {
-			backend.Free(st.joints)
-		}
-		st.jointsCap = max(n*2, 1)
-		st.joints = backend.Alloc(uint64(st.jointsCap)*64, gpu.MemoryHost, "joints")
-	}
-	st.joints.Write(utils.ToBytesSlice(joints), 0)
-	return st.joints.Addr
-}
-
-// stateFor returns the GPU state for a source, creating it on first sight. First use
-// and structural growth allocate; steady-state frames reuse everything.
-func (r *Renderer) stateFor(id scenes.SourceID) *renderState {
-	if st, ok := r.sources[id]; ok {
-		return st
-	}
-	if r.sources == nil {
-		r.sources = make(map[scenes.SourceID]*renderState)
-	}
-	st := &renderState{dl: newDrawList(r.backend), lights: NewLights(r.backend)}
-	r.sources[id] = st
-	return st
-}
-
-// ReleaseSource drops the GPU state cached for a producer. Call it when a Scene is
-// destroyed, passing Scene.ID: scene teardown does not reach into a renderer to do
-// this, so nothing else will. Releasing a source that is used again is safe — it
-// initializes from the next packet's complete tables — but it throws away work.
-//
-// Renderer.Destroy releases every remaining source, so a program that tears the
-// renderer down at exit need not track this.
-func (r *Renderer) ReleaseSource(id scenes.SourceID) {
-	st, ok := r.sources[id]
-	if !ok {
-		return
-	}
-	st.dl.destroy()
-	st.lights.Destroy()
-	if st.joints.IsValid() {
-		r.backend.Free(st.joints)
-	}
-	for _, ps := range st.particles {
-		ps.destroy(r.backend)
-	}
-	for _, sh := range st.shadows {
-		sh.destroy()
-	}
-	delete(r.sources, id)
-}
-
-// pipelineUnresolved marks a cell of a pool's pipeline table that has not been built
-// yet. Zero is a perfectly good pipeline index, so it cannot double as "empty".
-const pipelineUnresolved uint32 = 0xFFFFFFFF
-
-// poolPipelines is every draw pipeline the instances of one material pool can select
-// between. A pool is keyed by a Shader that never changes for its lifetime, so the
-// only things that vary within it are the per-instance cull and blend modes, plus the
-// pass the renderer picks. Cull and blend have three values each and there are two
-// passes, so the entire space is a fixed table indexed directly — no hashing, no
-// scan, no map — filled lazily because most pools use one or two of the cells.
-type poolPipelines struct {
-	table [2][3][3]uint32 // [pass][cull][blend]
-}
-
-func newPoolPipelines() poolPipelines {
-	var pp poolPipelines
-	for p := range pp.table {
-		for c := range pp.table[p] {
-			for b := range pp.table[p][c] {
-				pp.table[p][c][b] = pipelineUnresolved
-			}
-		}
-	}
-	return pp
-}
-
-// pipelineForPool resolves the draw pipeline for one material of a pool, given that
-// material's rasterization state. When deferred rendering is enabled
-// (EnableDeferredRendering), an opaque material whose pool supplies both Deferred and
-// Lighting renders through the G-buffer; everything else (blended, deferred disabled,
-// or a pool missing either shader) renders forward. Blended materials are forced
-// forward: the G-buffer holds one surface per pixel, so it cannot represent a fragment
-// that composites over what is behind it.
-//
-// Eligibility is asked of the pool rather than the material because the pool is keyed
-// by those very shaders — a material cannot disagree with it, and so cannot ask for a
-// G-buffer pipeline built out of SPIR-V its pool does not have.
-func (r *Renderer) pipelineForPool(p *materials.Pool, cull materials.CullMode, blend materials.BlendMode) uint32 {
-	for uint32(len(r.pools)) <= p.Index() {
-		r.pools = append(r.pools, newPoolPipelines())
-	}
-	pp := &r.pools[p.Index()]
-
-	sh := p.Shader()
-	ps := passForward
-	if r.deferredEnabled && blend == materials.BlendOpaque && sh.Deferred != nil && sh.Lighting != nil {
-		ps = passGBuffer
-	}
-	// The toggle is part of the index, not a reason to invalidate: flipping deferred
-	// rendering selects the other row and finds whatever was already built there.
-	if id := pp.table[ps][cull][blend]; id != pipelineUnresolved {
-		return id
-	}
-
-	key := materialPipeline{
-		pass: passForward, shaderHash: p.Hash(), vertex: sh.Vertex, fragment: sh.Forward,
-		cull: cull, blend: blend,
-	}
-	if ps == passGBuffer {
-		key = materialPipeline{
-			pass: passGBuffer, shaderHash: p.Hash(), vertex: sh.Vertex, fragment: sh.Deferred,
-			cull: cull, lightingIdx: r.lightingPipelineFor(sh.Lighting),
-		}
-	}
-	id := r.pipelineFor(key)
-	pp.table[ps][cull][blend] = id
-	return id
-}
-
-// pipelineForMaterial resolves the draw pipeline for a material. Everything it needs
-// lives in the material's pool; the material itself only says which pool and which
-// slot within it.
-func (r *Renderer) pipelineForMaterial(m materials.Material) uint32 {
-	p, id := m.Pool(), m.ID()
-	return r.pipelineForPool(p, p.Cull(id.Slot), p.Blend(id.Slot))
-}
-
-// sameKey compares two pipeline keys. lightingIdx is part of the identity: a gbuffer
-// key hashes only (Vertex, Deferred), so two materials sharing a Deferred shader but
-// using different Lighting shaders would otherwise collapse onto one pipeline — and
-// recordLighting reads lightingIdx off the stored key, shading the second material's
-// pixels with the first one's lighting model.
-func sameKey(a, b materialPipeline) bool {
-	return a.pass == b.pass && a.shaderHash == b.shaderHash &&
-		a.cull == b.cull && a.blend == b.blend && a.lightingIdx == b.lightingIdx
-}
-
-// The named material constructors (NewBasicMaterial, NewBlinnPhongMaterial,
-// NewPBRMaterial, NewRawMaterial) are shortcuts onto MaterialStore — see materials.go.
+// The public knobs: what the renderer draws into, how it looks, what it shows, and the
+// read-only views into what it has computed.
+// --------------------------------------------------------------------------------------
 
 // Backend exposes the underlying gpu backend (advanced/one-off use).
 func (r *Renderer) Backend() gpu.Backend {
@@ -712,50 +265,200 @@ func (r *Renderer) Aspect() float32 {
 	return float32(r.width) / float32(r.height)
 }
 
+// Scale is framebuffer pixels per logical point (see RendererConfig.Scale). Sizes the
+// renderer draws for a human to read — the HUD, the console — are given in logical
+// points and multiplied by this, so they stay the same physical size on any display.
+func (r *Renderer) Scale() float32 {
+	return r.scale
+}
+
+// SetScale updates the display scale, for a window moved between displays of
+// different densities. Values <= 0 are ignored.
+func (r *Renderer) SetScale(s float32) {
+	if s > 0 {
+		r.scale = s
+		if r.overlay != nil {
+			r.overlay.scale = s
+		}
+	}
+}
+
+// ClearColor is the colour the frame is cleared to (see SetClearColor).
+func (r *Renderer) ClearColor() colors.RGBA32F {
+	return r.clear
+}
+
 // SetClearColor sets the color the framebuffer is cleared to each frame.
 func (r *Renderer) SetClearColor(rgba colors.RGBA32F) {
 	r.clear = rgba
 }
 
+// FontColor is the colour the debug HUD's text is drawn in.
+func (r *Renderer) FontColor() colors.RGBA32F {
+	return r.fontColor
+}
+
+// SetFontColor sets the colour of the debug HUD's text.
+func (r *Renderer) SetFontColor(rgba colors.RGBA32F) {
+	r.fontColor = rgba
+}
+
 // ShowFPS toggles the debug HUD (FPS + CPU + GPU frame times, in the bitmap font).
 func (r *Renderer) ShowFPS(on bool) {
 	r.showFPS = on
-	if on {
-		r.ensureOverlay()
-		if !r.gpuPool.IsValid() {
-			r.gpuPool = r.backend.CreateTimestampPool(2)
-		}
+	if !on {
+		r.profiler.disableGPUProfiling(r.backend)
+		return
 	}
+	r.ensureOverlay()
+	r.profiler.enableGPUProfiling(r.backend)
 }
 
-// ensureOverlay creates the shared debug overlay if a consumer (the FPS HUD or the
-// console) needs it and the pipelines it depends on exist yet. It is deferred rather
-// than created up front because a renderer that never shows either should not pay for
-// the pipeline.
-func (r *Renderer) ensureOverlay() {
-	if r.overlay == nil && r.pipelinesReady {
-		r.overlay = newOverlay(r.backend, r.TextureStore, r.scale, r.color, gpu.FormatDepth32F)
+// StatsVisible reports whether the debug HUD is showing (see ShowFPS).
+func (r *Renderer) StatsVisible() bool {
+	return r.showFPS
+}
+
+// Profiler reports where recent frames spent their time — the same numbers ShowFPS
+// draws onscreen, for callers that want them programmatically (an automated
+// before/after comparison, say) rather than off the HUD. GPU figures are only recorded
+// while ShowFPS(true) is active.
+func (r *Renderer) Profiler() *Profiler {
+	return &r.profiler
+}
+
+// EnableShadows globally enables or disables shadow rendering. When off, no shadow
+// views are culled and no shadow passes run.
+func (r *Renderer) EnableShadows(on bool) {
+	r.shadowsEnabled = on
+}
+
+// ShadowsEnabled and ShadowDistance report the current setting of
+// the matching Enable*/Set* call. They exist so these toggles can be bound to
+// something that has to read them back — a console variable, a settings panel —
+// without the caller keeping its own shadow copy in sync.
+func (r *Renderer) ShadowsEnabled() bool {
+	return r.shadowsEnabled
+}
+
+func (r *Renderer) ShadowDistance() float32 {
+	return r.shadowDistance
+}
+
+// SetShadowDistance caps how far along the camera's view frustum directional shadows
+// are fit: a smaller distance packs the shadow map's resolution into the near view for
+// sharper shadows, at the cost of no shadows beyond it. Pass 0 for the automatic
+// default (fit reaches the far side of the scene's bounding sphere).
+// It has no effect while ShadowCascaded is using explicit Steps: the outermost step is
+// where shadows stop, and one setting owning the far end is better than two.
+func (r *Renderer) SetShadowDistance(distance float32) {
+	r.shadowDistance = distance
+}
+
+// ShadowNear reports the distance ShadowCascaded starts its split from, or 0 when it is
+// derived from the view.
+func (r *Renderer) ShadowNear() float32 {
+	return r.shadowNear
+}
+
+// SetShadowNear sets the distance, in world units from the eye, that ShadowCascaded
+// starts its cascade split from. Zero (the default) derives it from the covered range.
+//
+// Geometry nearer than this is still shadowed — the first cascade is fitted from the
+// camera's real near plane, and only the BOUNDARIES are computed from this. What it
+// controls is the ratio between consecutive cascades, and that ratio is the whole story
+// for quality: each boundary drops texel density by exactly that factor, so a split
+// starting far too close forces large ratios and a visible cliff at every boundary. Set
+// it to roughly where the nearest geometry the camera can see begins.
+func (r *Renderer) SetShadowNear(distance float32) {
+	r.shadowNear = distance
+}
+
+// Shadows reports how directional shadow cameras are fitted, and that fit's settings.
+func (r *Renderer) Shadows() ShadowSettings {
+	if r.shadows == nil {
+		return ShadowUniform{}
 	}
+	return r.shadows
 }
 
-// overlayActive reports whether anything wants the overlay drawn this frame.
-func (r *Renderer) overlayActive() bool {
-	return r.showFPS || r.IsConsoleOpen()
+// SetShadows selects how directional shadow cameras are fitted — see ShadowSettings.
+// It takes effect on the next Render: the fit is recomputed every frame, and a shadow
+// map is reallocated only if the number of slices changed.
+//
+// This is not Renderer.EnableShadows, which turns shadow rendering on and off; this
+// chooses how it is done when it is on.
+func (r *Renderer) SetShadows(s ShadowSettings) {
+	if s == nil {
+		s = ShadowUniform{}
+	}
+	r.shadows = s
 }
 
-// IsConsoleOpen reports whether the console is enabled and currently open. It is the
-// check an application makes to stand its own input down:
+// ShadowFilter reports which kernel directional shadow lookups use.
+func (r *Renderer) ShadowFilter() ShadowFilter {
+	return r.shadowFilter
+}
+
+// SetShadowFilter selects the kernel directional shadow lookups use — see ShadowFilter.
+// It takes effect on the next Render; nothing needs reallocating.
+func (r *Renderer) SetShadowFilter(filter ShadowFilter) {
+	r.shadowFilter = filter
+}
+
+// ShadowView returns the shadow resources the renderer holds for one light of one
+// source, or nil if it has none — the light does not cast, shadows are disabled, or
+// nothing has been rendered yet.
 //
-//	if !r.IsConsoleOpen() {
-//	    controls.Update()
-//	}
+// This is the resource half of what LightShadow used to be. The settings half stayed on
+// the light (see LightShadow); what could not stay is anything whose value depends on
+// the view being rendered, which is all of this.
+func (r *Renderer) ShadowView(source scenes.SourceID, light scenes.LightID) *ShadowView {
+	st, ok := r.sources[source]
+	if !ok {
+		return nil
+	}
+	s, ok := st.shadows[light]
+	if !ok {
+		return nil
+	}
+	v := &ShadowView{Camera: s.cam, Map: s.m, Faces: s.faces}
+	for _, c := range s.cascades {
+		v.Cascades = append(v.Cascades, c.cam)
+		v.Splits = append(v.Splits, c.far)
+	}
+	switch {
+	case len(s.faces) > 0:
+		v.Camera, v.Map = s.faces[0].cam, s.faces[0].m
+	case len(v.Cascades) > 0:
+		v.Camera = v.Cascades[0]
+	}
+	return v
+}
+
+// DepthPrepassEnabled reports whether the forward pass is preceded by a depth-only pass.
+func (r *Renderer) DepthPrepassEnabled() bool {
+	return r.depthPrepass
+}
+
+// EnableDepthPrepass turns on a depth-only pass over opaque geometry before the forward
+// pass, so shading runs once per visible pixel instead of once per fragment drawn.
 //
-// The console captures typed text but cannot stop anything else from polling the same
-// keys, so without this the camera flies around while the user types `set`. Safe on a
-// renderer that never enabled a console — it is simply false, so a caller need not
-// know whether one exists.
-func (r *Renderer) IsConsoleOpen() bool {
-	return r.console != nil && r.console.Visible()
+// Worth it when the frame is fragment-bound and overdrawn; a cost when it is not, since
+// the geometry is submitted twice.
+func (r *Renderer) EnableDepthPrepass(on bool) {
+	r.depthPrepass = on
+}
+
+// DebugView reports which view is being displayed.
+func (r *Renderer) DebugView() DebugView {
+	return r.debugView
+}
+
+// SetDebugView draws the scene with one debug fragment shader instead of its
+// materials'. DebugOff restores normal shading. Takes effect on the next Render.
+func (r *Renderer) SetDebugView(v DebugView) {
+	r.debugView = v
 }
 
 // EnableConsole turns on the developer console, reading from in, and returns it so
@@ -765,7 +468,7 @@ func (r *Renderer) IsConsoleOpen() bool {
 //	console.Bind(c, "shadow.distance", &shadowDistance, "directional shadow fit")
 //
 // The console starts hidden; the user opens it with its toggle key (` by default).
-// The renderer's own switches (shadows, deferred, stats, the clear and HUD colours,
+// The renderer's own switches (shadows, the depth prepass, stats, the clear and HUD colours,
 // and the read-only size/aspect) are registered automatically, so `list` is useful
 // before the application binds anything of its own.
 //
@@ -798,70 +501,36 @@ func (r *Renderer) Console() *console.Console {
 	return r.console
 }
 
-// Render draws the scene from cam into the configured target (swapchain or texture).
-// The camera is not retained.
-func (r *Renderer) Render(scene scenes.Producer, cam Camera) {
-	//TODO: r.swapchain.H == 0 is a bit of a smell something like r.swapchain.IsValid()
-	// would be better
-	if !r.hasTarget && r.swapchain.H == 0 {
-		panic("renderer has no target")
+// IsConsoleOpen reports whether the console is enabled and currently open. It is the
+// check an application makes to stand its own input down:
+//
+//	if !r.IsConsoleOpen() {
+//	    controls.Update()
+//	}
+//
+// The console captures typed text but cannot stop anything else from polling the same
+// keys, so without this the camera flies around while the user types `set`. Safe on a
+// renderer that never enabled a console — it is simply false, so a caller need not
+// know whether one exists.
+func (r *Renderer) IsConsoleOpen() bool {
+	return r.console != nil && r.console.Visible()
+}
+
+// Screenshot queues a PNG of the next completed frame and calls done (which may be
+// nil) once it has been written or has failed.
+//
+// An empty path writes a timestamped file in the working directory. The callback is
+// invoked from Render, on the frame that produced the image, so a console command can
+// report the result into its own scrollback.
+//
+// It relies on the frame's colour target being readable, which for a window means the
+// swapchain was created with transfer-source usage. Where a driver does not allow that,
+// the callback reports it rather than the renderer failing quietly.
+func (r *Renderer) Screenshot(path string, done func(path string, err error)) {
+	if path == "" {
+		path = fmt.Sprintf("screenshot-%s.png", time.Now().Format("20060102-150405"))
 	}
-	r.stats.StartFrame()
-	prepStart := time.Now()
-	// One command buffer for the whole frame: the staged uploads record into its
-	// head and are ordered against the rest by a barrier (see uploader.End), rather
-	// than taking a submit + queue drain of their own before the frame even starts.
-	// Recording can begin before AcquireNext — the acquire semaphore is waited on at
-	// submit time, not at record time.
-	cmd := r.backend.Begin()
-	r.syncScene(scene, cam, cmd)
-	vp := cam.ViewProjection()
-	planes := glm.FrustumPlanes(vp)
-	drawVP := flipClipY(vp)
-	eye := cam.Position()
-	if r.console != nil {
-		r.console.Update()
-	}
-	if r.overlayActive() {
-		r.buildOverlay()
-	}
-	cpu := time.Since(prepStart)
-
-	target := r.target
-
-	if !r.hasTarget {
-		// Windowed: AcquireNext blocks on vsync (not CPU cost) — outside the timing.
-		target, _ = r.backend.AcquireNext(r.swapchain)
-	}
-	encStart := time.Now()
-	r.encode(cmd, target, scene, planes, drawVP, eye)
-	// Recorded after everything is drawn but before the frame is submitted, so a
-	// windowed capture reads the image while it is still ours (see screenshot.go).
-	// encode has usually done it already, just before drawing the overlay; this covers
-	// the frames with no overlay to exclude, and recordScreenshot only copies once.
-	r.recordScreenshot(cmd, target)
-	cpu += time.Since(encStart)
-	r.stats.AddCPUTime(cpu)
-
-	if r.hasTarget {
-		// Offscreen: submit the frame ourselves (windowed rendering submits via Present).
-		// Capture's readback submits after this on the same queue, so it sees the result.
-		r.backend.Wait(r.backend.Submit(cmd))
-	} else {
-		r.backend.Present(r.swapchain, cmd)
-	}
-
-	// The frame is submitted, so this packet's simulation step has happened: let the
-	// producer retire it. Doing it here, after submission, is what makes the step
-	// exactly-once without an acknowledgement protocol — extraction only ever reads,
-	// and one function owns the order of the two halves.
-	scene.Rendered()
-
-	// Both paths above drain the queue, so the readback buffer holds finished pixels.
-	r.writeScreenshot()
-
-	r.readGPU()
-	r.stats.EndFrame()
+	r.pendingShot = &screenshot{path: path, done: done}
 }
 
 // Capture copies the current render target into a CPU buffer and returns it as RGBA8
@@ -888,389 +557,1398 @@ func (r *Renderer) Pixels() []byte {
 	return r.Capture()
 }
 
-// encode records the frame: the shadow views (cull + depth pass per casting light),
-// then the main view (cull + lit draw), plus GPU timestamps + the HUD when enabled.
-// All compute culls run first (outside any render pass), share one barrier, then the
-// shadow depth passes and the main color pass consume their results.
-func (r *Renderer) encode(cmd gpu.CommandBuffer, target gpu.Texture, scene scenes.Producer, planes [6]glm.Vec4f, drawVP glm.Mat4f, eye glm.Vec3f) {
-	if r.showFPS && r.gpuPool.IsValid() {
-		cmd.ResetTimestamps(r.gpuPool, 2)
-		cmd.WriteTimestamp(r.gpuPool, 0, gpu.StageNone)
+// --------------------------------------------------------------------------------------
+// Resources
+//
+// Conveniences that create materials and geometry in the renderer's stores.
+// --------------------------------------------------------------------------------------
+
+// Shortcuts for the built-in material types on this renderer's MaterialStore.
+//
+// Geometry and textures need no equivalent: their store is the natural receiver, so
+// r.GeometryStore.Create(cfg) already reads well. A material type has its own
+// constructor per type, which pushes the store down into an argument —
+// materials.NewPBRMaterial(r.MaterialStore) — and these hand that boilerplate back.
+//
+// They are shortcuts, not the API: a custom material type outside this package calls
+// materials.New*/Pool.Create against r.MaterialStore directly, exactly as these do.
+
+// NewBasicMaterial creates an unlit material with an unbound color map.
+func (r *Renderer) NewBasicMaterial() *materials.BasicMaterial {
+	return materials.NewBasicMaterial(r.MaterialStore)
+}
+
+// NewBasicParticleMaterial creates an unlit particle material with an unbound color
+// map — the only material type ParticleConfig.Material accepts (see NewParticleContainer).
+func (r *Renderer) NewBasicParticleMaterial() *materials.BasicParticleMaterial {
+	return materials.NewBasicParticleMaterial(r.MaterialStore)
+}
+
+// NewBlinnPhongMaterial creates a Blinn-Phong material with an unbound color map.
+func (r *Renderer) NewBlinnPhongMaterial() *materials.BlinnPhongMaterial {
+	return materials.NewBlinnPhongMaterial(r.MaterialStore)
+}
+
+// NewPBRMaterial creates a PBR material with four unbound maps: color, normal,
+// metallic and roughness.
+func (r *Renderer) NewPBRMaterial() *materials.PBRMaterial {
+	return materials.NewPBRMaterial(r.MaterialStore)
+}
+
+// NewRawMaterial creates a self-describing material from your own shader and record
+// size: the store allocates storage from dataSize, and you write the record bytes
+// yourself (see materials.RawMaterial).
+func (r *Renderer) NewRawMaterial(shader materials.Shader, dataSize, textureSlots int) *materials.RawMaterial {
+	return materials.NewRawMaterial(r.MaterialStore, shader, dataSize, textureSlots)
+}
+
+// NewBoxGeometry uploads a BoxGeometry and returns its handle.
+func (r *Renderer) NewBoxGeometry(width, height, depth float32) geometries.Geometry {
+	return r.GeometryStore.Create(BoxGeometry(width, height, depth))
+}
+
+// NewPlaneGeometry uploads a PlaneGeometry and returns its handle.
+func (r *Renderer) NewPlaneGeometry(width, depth float32, widthSegments, depthSegments int) geometries.Geometry {
+	return r.GeometryStore.Create(PlaneGeometry(width, depth, widthSegments, depthSegments))
+}
+
+// NewSphereGeometry uploads a SphereGeometry and returns its handle.
+func (r *Renderer) NewSphereGeometry(radius float32, widthSegments, heightSegments int) geometries.Geometry {
+	return r.GeometryStore.Create(SphereGeometry(radius, widthSegments, heightSegments))
+}
+
+// NewCylinderGeometry uploads a CylinderGeometry and returns its handle.
+func (r *Renderer) NewCylinderGeometry(radiusTop, radiusBottom, height float32, radialSegments, heightSegments int) geometries.Geometry {
+	return r.GeometryStore.Create(CylinderGeometry(radiusTop, radiusBottom, height, radialSegments, heightSegments))
+}
+
+// NewCapsuleGeometry uploads a CapsuleGeometry and returns its handle.
+func (r *Renderer) NewCapsuleGeometry(radius, length float32, capSegments, radialSegments int) geometries.Geometry {
+	return r.GeometryStore.Create(CapsuleGeometry(radius, length, capSegments, radialSegments))
+}
+
+// NewDecalGeometry clips geometry against a projection box and returns the resulting
+// patch. Position, orientation, and size use the source geometry's local space, and
+// the returned geometry uses that same space.
+//
+//	geo := r.NewDecalGeometry(box.Geometry(), localHit, orientation, glm.Vec3f{0.5, 0.5, 0.5})
+//	decal := scene.NewMesh(geo, decalMat)
+//	decal.SetCastShadow(false)
+//	box.Add(decal)
+//
+// It returns the zero Geometry when the box misses the source or every candidate
+// triangle faces away. The result belongs to the source geometry's Store.
+func (r *Renderer) NewDecalGeometry(geometry geometries.Geometry, position glm.Vec3f, orientation glm.Quatf, size glm.Vec3f) geometries.Geometry {
+	return geometry.Clip(position, orientation, size)
+}
+
+// --------------------------------------------------------------------------------------
+// The frame
+//
+// The forward path, from a scene to pixels. Render is the recipe, and every step it calls
+// follows in the order it calls them, so this section reads top to bottom as a frame.
+// --------------------------------------------------------------------------------------
+
+// Render draws one frame of the scene, seen from cam, into the renderer's target — a
+// window's swapchain or an offscreen texture. The camera is not retained.
+func (r *Renderer) Render(scene scenes.Producer, cam Camera) {
+
+	if !r.hasTarget && !r.swapchain.IsValid() {
+		panic("renderer has no target")
 	}
+
+	// 1. Begin the frame. One command buffer holds all of it: the shared uploads record
+	// into it ahead of the frame's work, ordered against it by a barrier, rather than
+	// paying for a submit of their own.
+	r.profiler.beginFrame()
+	cmd := r.backend.Begin()
+
+	// 2. Extract: compare the scene's packet against this source's GPU state, and
+	// re-sync whatever has gone stale.
+	st, views := r.extract(scene, cam)
+
+	// 3. Build the overlay — the HUD and the console — on the CPU.
+	r.buildOverlay()
+
+	// 4. Acquire the target, upload the resources every scene shares, and encode the
+	// frame's GPU work.
+	//
+	// The upload comes after the acquire deliberately. A shared store may reallocate a
+	// buffer while it syncs, and the acquire is what waits out the frame still using the
+	// old one — uploading earlier could swap resources out from under a frame in flight.
+	// It also has to precede everything that builds a root, since those read the
+	// buffers' device addresses.
+	target := r.acquireTarget()
+	r.uploadSharedResources(cmd)
+	r.encode(st, views, target, cmd)
+
+	// 5. Capture, before the overlay goes on top: a screenshot is of the scene, not of
+	// the tools used to inspect it.
+	r.recordScreenshot(target, cmd)
+
+	// 6. Draw the overlay.
+	r.encodeOverlay(target, cmd)
+
+	// 7. Submit, then finish the frame.
+	r.submit(cmd)
+	r.finishFrame()
+}
+
+// ---------------------------------------------------------------------------------------
+// 2. Extract
+// ---------------------------------------------------------------------------------------
+
+// extract brings one source's GPU state up to date with the frame its scene describes,
+// and returns that state along with the views the frame renders from.
+//
+// Everything a packet says becomes renderer-owned state here, and nowhere else. Once it
+// returns, nothing downstream reads the scene.
+func (r *Renderer) extract(scene scenes.Producer, cam Camera) (*renderState, frameViews) {
+	// 2a. Look up the source's state, and take the scene's packet. Extraction settles
+	// the scene first — transforms, skinning, the clock — and must happen exactly once
+	// a frame: a second call would get a packet whose per-frame flags, such as
+	// TransformsDirty, the first had already consumed.
 	st := r.stateFor(scene.ID())
-	dl := st.dl
-	// Shadow views only make sense when there's geometry to cast; with an empty draw
-	// list the per-view buffers would be zero-sized (visCap == 0) and there's nothing
-	// to render into a depth map anyway, so skip all shadow work.
-	var views []shadowView
-	if dl.batchCount() > 0 {
-		views = r.collectShadowViews(st)
-		if len(views) > 0 {
-			dl.ensureShadowViews(len(views))
+	scene.Extract(&r.frame)
+	p := &r.frame
+
+	// 2b–2f. Re-sync each part of the state that the packet describes.
+	r.extractTransforms(p, st)
+	views := r.extractViews(cam, p, st)
+	r.extractLights(p, st)
+	r.collectDrawables(p, st)
+	r.extractParticles(p, st)
+
+	// Everything the packet describes is now renderer-owned — its particle births are
+	// copied out of the scene, not borrowed — so the producer can retire this frame's
+	// simulation step. One function owning both extract and retire is what makes each
+	// step happen exactly once without an acknowledgement protocol.
+	scene.Rendered()
+	return st, views
+}
+
+// extractTransforms uploads the matrices the vertex stages read: every node's world
+// matrix followed by every instanced mesh's per-instance transforms, as one array, and
+// the joint palettes compute skinning reads.
+//
+// gpuDrawable.transformID indexes the combined world array — an instanced mesh's
+// drawables address their slice as if it sits right after the node matrices, which is
+// exactly where it does sit.
+func (r *Renderer) extractTransforms(p *scenes.FramePacket, st *renderState) {
+	// The producer says whether the matrices moved; a frame where nothing did writes
+	// nothing. A state seeing its first packet uploads regardless: the dirty flag reports
+	// change since the last EXTRACTION, which a state created just now never saw, and a
+	// source released and drawn again would otherwise render from an unwritten buffer.
+	if p.TransformsDirty || !st.worldBuf.IsValid() {
+		nodes := p.Transforms.Data
+		instances := p.InstanceTransforms.Data
+
+		r.growBuffer(&st.worldBuf, uint64(len(nodes)+len(instances))*matrixSize, "world")
+		if len(nodes) > 0 {
+			st.worldBuf.Write(utils.ToBytesSlice(nodes), 0)
+		}
+		if len(instances) > 0 {
+			st.worldBuf.Write(utils.ToBytesSlice(instances), uint64(len(nodes))*matrixSize)
 		}
 	}
 
-	// 1. Compute pre-skinning, then cull every view (shadow views filter to
-	// casters), then simulate particles. Skinning writes positions and particle
-	// update writes particle records that the shadow/G-buffer/forward vertex stages
-	// read (not cull — it only reads CPU-supplied bounds), so one barrier after all
-	// three covers everything.
-	hasParticles := len(r.frame.Particles.Data) > 0
-	if dl.batchCount() > 0 || hasParticles {
-		if cmds := r.skinCommands(&r.frame); len(cmds) > 0 {
-			r.dispatchSkinning(cmd, dl, cmds, st.syncJoints(r.backend, r.frame.Joints.Data))
-		}
-		for i := range views {
-			v := &dl.shadowViews[i]
-			sp := glm.FrustumPlanes(views[i].cam.ViewProjection())
-			r.cullInto(cmd, dl, v.indirectBuf, v.visibleBuf, sp, 1, eye)
-		}
-		if dl.batchCount() > 0 {
-			r.cullInto(cmd, dl, dl.indirectBuf, dl.visibleBuf, planes, 0, eye)
-		}
-		if hasParticles {
-			r.dispatchParticleUpdate(cmd, st, &r.frame)
-		}
-		cmd.Barrier(gpu.StageCompute, gpu.StageIndirect|gpu.StageVertex, 0)
+	if joints := p.Joints.Data; len(joints) > 0 {
+		r.growBuffer(&st.jointBuf, uint64(len(joints))*matrixSize, "joints")
+		st.jointBuf.Write(utils.ToBytesSlice(joints), 0)
+	}
+}
+
+// matrixSize is the size of one world or joint matrix in a GPU buffer.
+const matrixSize = 64
+
+// extractViews works out every camera the frame renders from: the main camera, and —
+// when shadows are on — a camera for every shadow map region, fitted to this frame.
+func (r *Renderer) extractViews(cam Camera, p *scenes.FramePacket, st *renderState) frameViews {
+	vp := cam.ViewProjection()
+	views := frameViews{
+		main: view{viewProj: flipClipY(vp), planes: glm.FrustumPlanes(vp), cull: &st.mainCull},
+		eye:  cam.Position(),
+	}
+	if !r.shadowsEnabled {
+		return views
 	}
 
-	// 2. Shadow depth passes: fill each view's map, then hand it to the samplers.
+	r.fitShadows(cam, p, st)
+	views.shadows = r.collectShadowViews(p, st)
+	return views
+}
+
+// fitShadows gives every casting light the depth maps and cameras it needs this frame,
+// and retires the resources of lights that stopped casting.
+//
+// The packet says only which lights cast and at what resolution. Everything here —
+// which projection, where it points, how it is fitted to the view, what the depth bias
+// works out to — is the renderer's, because it all depends on the view being rendered
+// and on caster bounds the producer does not track.
+//
+// Depth maps are ensured here rather than when they are drawn into, for two reasons: the
+// fit derives its depth bias from how much world one texel covers, and the light table
+// built next carries each map's bindless index.
+func (r *Renderer) fitShadows(cam Camera, p *scenes.FramePacket, st *renderState) {
+	r.ensureShadowSampler()
+
+	// Point lights first: they are aimed from the light alone and need no scene bounds.
+	var needsFit bool
+	for _, light := range p.Lights.Data {
+		if !light.CastsShadow {
+			continue
+		}
+		if light.Kind != scenes.LightPoint {
+			needsFit = true
+			continue
+		}
+		r.aimPointShadow(r.shadowResourceFor(light.ID, st), light)
+	}
+
+	if needsFit {
+		center, radius := casterBounds(p)
+		fit := r.shadowFitFor(cam, center, radius, r.shadowReach())
+		for _, light := range p.Lights.Data {
+			if !light.CastsShadow || light.Kind == scenes.LightPoint {
+				continue
+			}
+			sh := r.shadowResourceFor(light.ID, st)
+			switch light.Kind {
+			case scenes.LightDirectional:
+				// One square per cascade, laid out along the width: four 1024 cascades
+				// are a single 4096x1024 texture, each rendered through its own scissor.
+				width, height := cascadeAtlas(requestedSize(light), uint32(r.Shadows().levels()))
+				sh.ensureMap(r.TextureStore, width, height)
+				r.fitDirectional(sh, light, fit)
+			case scenes.LightSpot:
+				sh.ensurePerspective(light.Angle, light.Range)
+				sh.ensureMap(r.TextureStore, requestedSize(light), requestedSize(light))
+				aimSpotShadow(sh, light)
+			}
+		}
+	}
+
+	r.retireUnusedShadows(st)
+}
+
+// collectShadowViews turns the fitted shadow resources into views, in packet light order
+// so a frame's shadow passes run in the same order every time.
+//
+// A directional or spot light contributes one view, a cascaded light one per cascade —
+// all sharing its atlas, with only the first clearing it — and a point light one per
+// cube face. After this, light types no longer matter: every view is culled for casters
+// and drawn into its region the same way.
+func (r *Renderer) collectShadowViews(p *scenes.FramePacket, st *renderState) []view {
+	views := r.shadowViews[:0]
+	for _, light := range p.Lights.Data {
+		sh, ok := st.shadows[light.ID]
+		if !light.CastsShadow || !ok {
+			continue
+		}
+		switch {
+		case len(sh.faces) > 0:
+			for _, face := range sh.faces {
+				if face.m.IsValid() {
+					views = append(views, shadowView(face.cam, face.m, 0, sh.width, sh.height, true))
+				}
+			}
+		case !sh.m.IsValid():
+		case len(sh.cascades) > 0:
+			side := sh.size()
+			for i, cascade := range sh.cascades {
+				views = append(views, shadowView(cascade.cam, sh.m, int32(i)*int32(side), side, side, i == 0))
+			}
+		default:
+			views = append(views, shadowView(sh.cam, sh.m, 0, sh.width, sh.height, true))
+		}
+	}
+
+	// Each view gets its own cull buffers. The pool is grown before any pointer into it
+	// is taken, so no pointer is left behind by a reallocation.
+	for len(st.shadowCulls) < len(views) {
+		st.shadowCulls = append(st.shadowCulls, cullBuffers{})
+	}
 	for i := range views {
-		r.recordShadowDepth(cmd, dl, &dl.shadowViews[i], views[i])
-		//FIXME: use VK_KHR_unified_image_layouts
-		// this should remove the PreparedSampled from the RHI API
-		cmd.PrepareSampled(r.TextureStore.GPU(views[i].m), gpu.StageFragment)
+		views[i].cull = &st.shadowCulls[i]
 	}
 
-	// 3. Every run's drawRoot is filled once regardless of pass (same camera either
-	// way); issueDraws below then filters by pass to route it into the right render
-	// pass with the right pipeline set.
-	r.fillDrawRoots(dl, drawVP, eye, st.lights.Addr(), r.frame.Time)
-	gbufferActive := r.hasGBufferRuns(dl)
-	// A debug view needs the G-buffer to have actually been filled; with nothing
-	// rendering deferred there is nothing to show, so the frame shades normally.
-	debugShown := gbufferActive && r.debugViewActive()
-	// Object/triangle id views are a separate, self-contained geometry pass (see
-	// recordDebugIDView) — they replace the G-buffer fill + lighting entirely,
-	// regardless of whether anything would have gone through the deferred path this
-	// frame at all.
-	idShown := r.idViewActive()
+	r.shadowViews = views
+	return views
+}
 
-	// 4. G-buffer fill + deferred lighting, only when something renders that way —
-	// skipped entirely in favor of the id pass below when one is active.
-	if idShown {
-		r.recordDebugIDView(cmd, dl, target, drawVP)
-	} else if gbufferActive {
-		r.ensureGBuffer()
-		cmd.BeginRenderPass(gpu.RenderTargets{
-			Color: []gpu.ColorAttachment{
-				{Texture: r.diffuseTexture, Load: gpu.LoadClear, Store: gpu.StoreKeep},
-				{Texture: r.normalTexture, Load: gpu.LoadClear, Store: gpu.StoreKeep},
-				{Texture: r.materialTexture, Load: gpu.LoadClear, Store: gpu.StoreKeep},
-				{Texture: r.emissiveTexture, Load: gpu.LoadClear, Store: gpu.StoreKeep},
-			},
-			Depth: &gpu.DepthAttachment{Texture: r.depth, Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: 0.0},
-		})
-		cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
-		cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
-		r.issueDraws(cmd, dl, passGBuffer)
-		cmd.EndRenderPass()
+// shadowView is a view rendering one region of a shadow map from cam.
+func shadowView(cam Camera, shadowMap textures.Texture, x int32, width, height uint32, clearsMap bool) view {
+	vp := cam.ViewProjection()
+	return view{
+		viewProj:    vp,
+		planes:      glm.FrustumPlanes(vp),
+		castersOnly: true,
+		shadowMap:   shadowMap,
+		x:           x,
+		width:       width,
+		height:      height,
+		clearsMap:   clearsMap,
+	}
+}
 
-		cmd.PrepareSampled(r.diffuseTexture, gpu.StageFragment)
-		cmd.PrepareSampled(r.normalTexture, gpu.StageFragment)
-		cmd.PrepareSampled(r.materialTexture, gpu.StageFragment)
-		cmd.PrepareSampled(r.emissiveTexture, gpu.StageFragment)
-		cmd.PrepareSampled(r.depth, gpu.StageFragment)
-		if debugShown {
-			// Show one G-buffer target instead of shading it. The geometry pass above
-			// ran either way, so toggling a view changes only what reaches the screen.
-			//
-			// This REPLACES the lighting pass but must not short-circuit the rest of
-			// encode: the forward pass below still has to run for the overlay, and the
-			// closing GPU timestamp still has to be written. Returning early here reset
-			// a timestamp query and never wrote it, and the next frame's blocking read
-			// hung the process.
-			r.ensureGBufferSampler()
-			r.recordDebugView(cmd, dl, target, drawVP, eye, st.lights.Addr())
-		} else {
-			r.recordLighting(cmd, dl, target, drawVP, eye, st.lights.Addr())
+// extractLights packs the packet's lights and the shadow resources fitted above into the
+// GPU light table. The producer never sees a map index.
+//
+// The global shadow toggle goes in with them: without it, disabling shadows would only
+// stop the maps being refreshed, and the shader would keep sampling the last ones.
+func (r *Renderer) extractLights(p *scenes.FramePacket, st *renderState) {
+	st.lights.rebuild(p.Environment, p.Lights.Data, st.shadows, r.shadowsEnabled, r.shadowFilter)
+	st.lights.Sync()
+}
+
+// collectDrawables rebuilds the draw layout and its buffers when the layout no longer
+// describes the scene, and does nothing otherwise — rebuilding walks every drawable in
+// the scene, so a steady frame must not pay for it.
+func (r *Renderer) collectDrawables(p *scenes.FramePacket, st *renderState) {
+	if !isLayoutStale(p, &st.layout) {
+		return
+	}
+
+	buildDrawables(p, &st.layout, r.MaterialStore)
+	orderBatches(&st.layout, r.GeometryStore)
+	r.uploadLayout(st)
+	st.layout.meshRevision = p.Meshes.Revision
+}
+
+// uploadLayout writes the layout's tables into the buffers the GPU reads them from. The
+// cull buffers are sized later, per view, when the cull is encoded.
+func (r *Renderer) uploadLayout(st *renderState) {
+	layout := &st.layout
+	r.growBuffer(&st.drawableBuf, uint64(max(len(layout.drawables), 1))*uint64(drawableSize), "drawables")
+	r.growBuffer(&st.lodTableBuf, uint64(len(layout.lods))*uint64(lodEntrySize), "lod-table")
+
+	if len(layout.drawables) > 0 {
+		st.drawableBuf.Write(utils.ToBytesSlice(layout.drawables), 0)
+	}
+	st.lodTableBuf.Write(utils.ToBytesSlice(layout.lods), 0)
+
+	// Reset every transform's LOD hysteresis. A rebuild may have added, removed or
+	// reassigned lodID/lodLevel, so stale "level shown last frame" state could pick a
+	// level that no longer matches this drawable set. Losing stickiness for one frame
+	// right after a rebuild is an accepted tradeoff — rebuilds are already disruptive.
+	transformSlots := max(st.worldBuf.Size/matrixSize, 1)
+	r.growBuffer(&st.prevLevelBuf, transformSlots*4, "lod-prev-level")
+	reset := make([]uint32, transformSlots)
+	for i := range reset {
+		reset[i] = lodNoneSentinel
+	}
+	st.prevLevelBuf.Write(utils.ToBytesSlice(reset), 0)
+}
+
+// extractParticles readies every particle system in the packet for this frame's step:
+// its simulation buffers, this frame's births, and a fresh indirect command for the
+// kernel to count survivors into. Systems that left the packet are retired, and their
+// simulation with them — there is nothing on the CPU to restore it from.
+func (r *Renderer) extractParticles(p *scenes.FramePacket, st *renderState) {
+	for _, pp := range p.Particles.Data {
+		births := pp.Newborns.Count
+		if pp.Capacity == 0 && births == 0 {
+			continue
+		}
+
+		ps := r.particleStateFor(pp.ID, st)
+		r.ensureParticleBuffers(ps, pp, births)
+		if births > 0 {
+			ps.pendingBuf.Write(utils.ToBytesSlice(p.Newborns.Data[pp.Newborns.First:][:births]), 0)
+		}
+		ps.indirectBuf.Write(utils.ToBytes(&indirectCmd{
+			indexCount: r.GeometryStore.IndexCountAt(pp.Geometry.Slot),
+			firstIndex: r.GeometryStore.IndexBaseAt(pp.Geometry.Slot),
+		}), 0)
+	}
+
+	r.retireUnusedParticles(st)
+}
+
+// buildOverlay composes this frame's overlay from everything that draws into it: the
+// FPS HUD and the console, in that order (the console panel covers the HUD when open).
+func (r *Renderer) buildOverlay() {
+	// The console reads its input every frame, open or not: the key that opens it
+	// arrives while it is closed.
+	if r.console != nil {
+		r.console.Update()
+	}
+	if !r.overlayActive() {
+		return
+	}
+
+	r.ensureOverlay()
+	if r.overlay == nil {
+		return
+	}
+	r.overlay.reset()
+	if r.showFPS {
+		// Logical points, scaled and snapped by the overlay (which rounds down to a
+		// whole multiple of the font's cell, so this is an upper bound, not exact).
+		const pt, gap, inset = 12, 15, 8
+		size := r.scale * pt
+		ms := func(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
+		x, y := r.scale*inset, r.scale*inset
+		step := r.scale * gap
+		r.overlay.text(fmt.Sprintf("FPS %.0f", r.profiler.FPS()), x, y, size, r.fontColor)
+		r.overlay.text(fmt.Sprintf("CPU %.2f ms", ms(r.profiler.CPUTime())), x, y+step, size, r.fontColor)
+		if gpuTime := r.profiler.GPUTime(); gpuTime > 0 {
+			r.overlay.text(fmt.Sprintf("GPU %.2f ms", ms(gpuTime)), x, y+2*step, size, r.fontColor)
+			// The per-pass breakdown is the half of this worth reading: a total says
+			// the budget is gone, the split says which pass spent it.
+			row := 3
+			for _, p := range []GPUPass{GPUPassCull, GPUPassShadow, GPUPassPrepass, GPUPassForward} {
+				if !r.profiler.IsPassRecorded(p) {
+					continue
+				}
+				// A pass that ran but measured zero is not the same as one that did not
+				// run, and hiding it says the wrong thing (see Profiler.IsPassRecorded). Plain
+				// ASCII, because the HUD font is a hand-drawn bitmap with no dashes to
+				// spare.
+				line := fmt.Sprintf("  %-8s  n/a", p)
+				if d := r.profiler.PassTime(p); d > 0 {
+					line = fmt.Sprintf("  %-8s %.2f", p, ms(d))
+				}
+				r.overlay.text(line, x, y+float32(row)*step, size, r.fontColor)
+				row++
+			}
 		}
 	}
-
-	// 5. Forward pass: transparents, and any Opaque material that did not
-	// qualify for deferred. If the G-buffer ran, its color+depth are loaded (not
-	// cleared) so forward geometry composites over the already-lit scene and depth-
-	// tests correctly against it; otherwise this is the only pass, so it clears.
-	colorLoad, depthLoad := gpu.LoadClear, gpu.LoadClear
-	if gbufferActive || idShown {
-		colorLoad, depthLoad = gpu.LoadKeep, gpu.LoadKeep
+	if r.console != nil {
+		r.console.Draw(consolePainter{r.overlay}, float32(r.width), float32(r.height))
 	}
-	// Forward geometry is suppressed while a G-buffer view or an id view is up: the
-	// point is to see that target on its own, not transparents composited over it.
-	drawForward := !debugShown && !idShown
+}
 
-	// The pass itself still runs even when drawForward is false — it is what draws
-	// the overlay and closes the frame.
+// ---------------------------------------------------------------------------------------
+// 4. Encode
+// ---------------------------------------------------------------------------------------
+
+// acquireTarget returns the texture this frame draws into. For a window that means
+// blocking on vsync for the next swapchain image; it happens this late deliberately, so
+// everything before it overlaps the display's flip.
+func (r *Renderer) acquireTarget() gpu.Texture {
+	if r.hasTarget {
+		return r.target
+	}
+	r.profiler.beginWait(WaitAcquire)
+	target, _ := r.backend.AcquireNext(r.swapchain)
+	r.profiler.endWait(WaitAcquire)
+	return target
+}
+
+// uploadSharedResources stages the resources every source shares — geometry streams and
+// descriptors, material records — into device memory. The uploader records the copies
+// into the head of the frame's command buffer and barriers them against the passes that
+// read them, so a frame where nothing shared changed stages nothing and skips even the
+// barrier.
+func (r *Renderer) uploadSharedResources(cmd gpu.CommandBuffer) {
+	r.uploader.Begin(cmd)
+	r.GeometryStore.Sync(r.uploader)
+	r.MaterialStore.Sync(r.uploader)
+	r.uploader.End(cmd)
+}
+
+// encode records the frame's GPU work: everything from culling to the shaded image.
+func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture, cmd gpu.CommandBuffer) {
+	r.profiler.beginGPUFrame(cmd)
+
+	// 4a. Compute: skin, cull every view, simulate particles.
+	r.encodeCompute(st, views, cmd)
+
+	// 4b. Fill the shadow maps.
+	r.encodeShadowPasses(st, views.shadows, cmd)
+
+	// 4c. A debug view replaces shading entirely, so nothing after it runs.
+	if r.debugViewActive() {
+		r.encodeDebugView(st, views, target, cmd)
+		return
+	}
+
+	// 4d. Fill depth first, if enabled, so shading runs once per pixel.
+	depthFilled := r.encodeDepthPrepass(st, views.main, cmd)
+
+	// 4e. Shade.
+	r.encodeDrawingPass(st, views, target, depthFilled, cmd)
+}
+
+// encodeCompute runs everything the frame computes before it draws. Skinning writes
+// positions and the particle kernel writes particle records, both read by later vertex
+// stages; the cull reads only bounds the CPU supplied. So one barrier after all three
+// covers everything.
+func (r *Renderer) encodeCompute(st *renderState, views frameViews, cmd gpu.CommandBuffer) {
+	if len(st.layout.batches) == 0 && len(r.frame.Particles.Data) == 0 {
+		return
+	}
+
+	r.profiler.beginPass(GPUPassCull, cmd)
+	r.encodeSkinning(st, cmd)
+	r.encodeCulling(st, views, cmd)
+	r.encodeParticleSimulation(st, cmd)
+	cmd.Barrier(gpu.StageCompute, gpu.StageIndirect|gpu.StageVertex, 0)
+	r.profiler.endPass(GPUPassCull, cmd)
+}
+
+// encodeSkinning dispatches one compute-skinning job per skinned mesh, sized to its
+// vertex count (see scene_skin.comp). Every skinned mesh is skinned whether visible or
+// not — a v1 simplification that a scene with many off-screen characters pays for.
+func (r *Renderer) encodeSkinning(st *renderState, cmd gpu.CommandBuffer) {
+	jobs := r.skinCommands(&r.frame)
+	if len(jobs) == 0 {
+		return
+	}
+
+	cmd.SetPipeline(r.skinPipeline)
+	for _, job := range jobs {
+		root := skinRoot{
+			pos:         r.GeometryStore.PositionsAddr(),
+			attr:        r.GeometryStore.AttributesAddr(),
+			skin:        r.GeometryStore.SkinAddr(),
+			descs:       r.GeometryStore.DescriptorsAddr(),
+			joints:      st.jointBuf.Addr,
+			srcDesc:     job.srcDesc,
+			dstDesc:     job.dstDesc,
+			jointBase:   job.jointBase,
+			vertexCount: job.vertexCount,
+		}
+		cmd.Dispatch(utils.ToBytes(&root), (job.vertexCount+63)/64, 1, 1)
+	}
+}
+
+// skinCommands builds this frame's skinning jobs, one per skinned mesh, into a scratch
+// slice reused across frames.
+func (r *Renderer) skinCommands(p *scenes.FramePacket) []skinCmd {
+	r.skinScratch = r.skinScratch[:0]
+	for _, skin := range p.Skins.Data {
+		r.skinScratch = append(r.skinScratch, skinCmd{
+			srcDesc: skin.Source.Slot, dstDesc: skin.Output.Slot,
+			jointBase: skin.Joints.First, vertexCount: skin.VertexCount,
+		})
+	}
+	return r.skinScratch
+}
+
+// encodeCulling culls every view: the main camera and each shadow camera.
+func (r *Renderer) encodeCulling(st *renderState, views frameViews, cmd gpu.CommandBuffer) {
+	if len(st.layout.batches) == 0 {
+		return
+	}
+
+	r.encodeCull(views.main, views.eye, st, cmd)
+	for _, v := range views.shadows {
+		r.encodeCull(v, views.eye, st, cmd)
+	}
+}
+
+// encodeCull frustum-culls every drawable for one view: it resets the view's indirect
+// commands from the layout's template, then dispatches one thread per drawable, which
+// counts each survivor into its batch and appends it to the batch's visible region.
+//
+// eye is the main camera's, whichever view is culling: LOD is a main-camera decision.
+// No barrier — the caller puts every view behind one.
+func (r *Renderer) encodeCull(v view, eye glm.Vec3f, st *renderState, cmd gpu.CommandBuffer) {
+	r.ensureCullBuffers(v.cull, &st.layout)
+	v.cull.indirectBuf.Write(utils.ToBytesSlice(st.layout.template), 0)
+
+	var castersOnly uint32
+	if v.castersOnly {
+		castersOnly = 1
+	}
+	count := uint32(len(st.layout.drawables))
+	root := cullRoot{
+		drawables:   st.drawableBuf.Addr,
+		models:      st.worldBuf.Addr,
+		indirect:    v.cull.indirectBuf.Addr,
+		visible:     v.cull.visibleBuf.Addr,
+		lods:        st.lodTableBuf.Addr,
+		prevLevel:   st.prevLevelBuf.Addr,
+		eye:         glm.Vec4f{eye[0], eye[1], eye[2], 1},
+		count:       count,
+		castersOnly: castersOnly,
+		planes:      v.planes,
+	}
+	cmd.SetPipeline(r.cullPipeline)
+	cmd.Dispatch(utils.ToBytes(&root), (count+63)/64, 1, 1)
+}
+
+// encodeParticleSimulation steps every particle system. Each kernel compacts the
+// survivors — plus the newborns it consumes from its tail range — into the other half of
+// the system's ping-pong pair, counting them into the indirect command drawParticles
+// reads. See particle_update.comp for why it runs capacity+births threads.
+func (r *Renderer) encodeParticleSimulation(st *renderState, cmd gpu.CommandBuffer) {
+	for _, pp := range r.frame.Particles.Data {
+		births := pp.Newborns.Count
+		if pp.Capacity == 0 && births == 0 {
+			continue
+		}
+
+		ps := st.particles[pp.ID]
+		var pendingAddr uint64
+		if births > 0 {
+			pendingAddr = ps.pendingBuf.Addr
+		}
+		root := particleUpdateRoot{
+			src: ps.buffers[ps.current].Addr, dst: ps.buffers[1-ps.current].Addr,
+			pending: pendingAddr, indirect: ps.indirectBuf.Addr,
+			capacity: pp.Capacity, pendingCount: births, dt: pp.DT,
+			gravity: pp.Update.Gravity, drag: pp.Update.Drag,
+		}
+		if pp.Update.SizeOverLife.Enabled {
+			root.sizeEnabled, root.sizeStart, root.sizeEnd = 1, pp.Update.SizeOverLife.Start, pp.Update.SizeOverLife.End
+		}
+		if pp.Update.OpacityOverLife.Enabled {
+			root.opacityEnabled, root.opacityStart, root.opacityEnd = 1, pp.Update.OpacityOverLife.Start, pp.Update.OpacityOverLife.End
+		}
+
+		cmd.SetPipeline(r.particleUpdatePipeline)
+		cmd.Dispatch(utils.ToBytes(&root), (pp.Capacity+births+63)/64, 1, 1)
+		ps.current = 1 - ps.current
+	}
+}
+
+// encodeShadowPasses fills every shadow map, then hands each to the samplers.
+//
+// Views sharing a map arrive consecutively, each group starting with the view that
+// clears it (see collectShadowViews), so a group is the run from one clearing view up to
+// the next — and a group is drawn in a single render pass.
+func (r *Renderer) encodeShadowPasses(st *renderState, shadows []view, cmd gpu.CommandBuffer) {
+	if len(shadows) == 0 || len(st.layout.batches) == 0 {
+		return
+	}
+
+	r.profiler.beginPass(GPUPassShadow, cmd)
+	for start := 0; start < len(shadows); {
+		end := start + 1
+		for end < len(shadows) && !shadows[end].clearsMap {
+			end++
+		}
+		r.encodeShadowMap(shadows[start:end], st, cmd)
+		//FIXME: use VK_KHR_unified_image_layouts; that would remove PrepareSampled from
+		// the RHI entirely.
+		cmd.PrepareSampled(r.TextureStore.GPU(shadows[start].shadowMap), gpu.StageFragment)
+		start = end
+	}
+	r.profiler.endPass(GPUPassShadow, cmd)
+}
+
+// encodeShadowMap fills one shadow map from every view that shares it, in one render
+// pass: each confines itself to its own region with the viewport and scissor, and only
+// the first clears. A pass apiece would load and store the whole atlas per cascade for
+// nothing.
+func (r *Renderer) encodeShadowMap(group []view, st *renderState, cmd gpu.CommandBuffer) {
 	cmd.BeginRenderPass(gpu.RenderTargets{
-		Color: []gpu.ColorAttachment{{Texture: target, Load: colorLoad, Store: gpu.StoreKeep, Clear: r.clear}},
+		Depth: &gpu.DepthAttachment{
+			Texture: r.TextureStore.GPU(group[0].shadowMap),
+			Load:    gpu.LoadClear, Store: gpu.StoreKeep, Clear: 0.0,
+		},
+	})
+	cmd.SetPipeline(r.shadowPipeline)
+
+	for _, v := range group {
+		root := r.positionRoot(v, st)
+		cmd.SetViewport(float32(v.x), 0, float32(v.width), float32(v.height), 0, 1)
+		cmd.SetScissor(v.x, 0, int32(v.width), int32(v.height))
+		cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, v.cull.indirectBuf, 0, uint32(len(st.layout.batches)), indirectSize)
+	}
+
+	cmd.EndRenderPass()
+}
+
+// encodeDebugView draws every visible batch through the active view's pipeline, in one
+// multi-draw-indirect call, in place of shading.
+//
+// One call rather than one per raster span (the way drawBatches does it) because every
+// batch goes through the same pipeline here regardless of its material — which is also
+// why one root serves them all: the surface views read no material record, and the id
+// views read positions only.
+//
+// The overlay pass that follows draws the console on top, so it stays usable while a
+// view is up — which is the only way to turn one off again.
+func (r *Renderer) encodeDebugView(st *renderState, views frameViews, target gpu.Texture, cmd gpu.CommandBuffer) {
+	cmd.BeginRenderPass(gpu.RenderTargets{
+		Color: []gpu.ColorAttachment{{Texture: target, Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: debugClear(r.debugView, r.clear)}},
+		Depth: &gpu.DepthAttachment{Texture: r.depth, Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: 0.0},
+	})
+	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
+	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
+
+	if len(st.layout.batches) > 0 {
+		var root []byte
+		if r.debugSurfaceView() {
+			sceneRoot := r.sceneRoot(st, views)
+			root = utils.ToBytes(&sceneRoot)
+		} else {
+			positionRoot := r.positionRoot(views.main, st)
+			root = utils.ToBytes(&positionRoot)
+		}
+		cmd.SetPipeline(r.debugPipelineFor(r.debugView))
+		cmd.DrawIndexedIndirect(root, r.GeometryStore.IndexBuffer(), gpu.IndexUint32, views.main.cull.indirectBuf, 0, uint32(len(st.layout.batches)), indirectSize)
+	}
+
+	cmd.EndRenderPass()
+}
+
+// encodeDepthPrepass fills depth for the opaque geometry in a pass of its own, and
+// reports whether it did — in which case the drawing pass loads that depth rather than
+// clearing it.
+//
+// Its own pass, with no colour attachment, because that is what makes it depth-only. A
+// pipeline sharing the drawing pass would have to declare that pass's colour attachment,
+// and a fragment stage that writes nothing to a declared attachment does not skip the
+// work — it writes an undefined value, corrupting the target and paying full-rate
+// fragment cost over every opaque surface.
+//
+// Only opaque batches take part. A blended surface does not occlude what is behind it,
+// so writing its depth here would hide geometry that should show through.
+func (r *Renderer) encodeDepthPrepass(st *renderState, main view, cmd gpu.CommandBuffer) bool {
+	if !r.depthPrepass || len(st.layout.batches) == 0 {
+		return false
+	}
+
+	r.profiler.beginPass(GPUPassPrepass, cmd)
+	cmd.BeginRenderPass(gpu.RenderTargets{
+		Depth: &gpu.DepthAttachment{Texture: r.depth, Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: 0.0},
+	})
+	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
+	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
+
+	// One root serves every span: this pass reads positions and transforms, nothing that
+	// varies by material.
+	root := r.positionRoot(main, st)
+	drew := false
+	boundCull := materials.CullMode(255)
+	for first, count := range rasterSpans(st.layout.batches) {
+		b := &st.layout.batches[first]
+		if b.blend != materials.BlendOpaque {
+			continue
+		}
+		// A material with its own vertex program can put its vertices anywhere, and this
+		// pass runs the standard one — so its depth would not be that material's. Those
+		// spans shade as they always did, just without the prepass.
+		if b.pool.Shader().Vertex != nil {
+			continue
+		}
+		// Match the drawing pass's culling exactly, or this writes depth for faces it will
+		// discard. Spans arrive grouped by raster state, so this rebinds rarely.
+		if b.cull != boundCull {
+			boundCull = b.cull
+			cmd.SetPipeline(r.prepassPipelines[min(int(b.cull), len(r.prepassPipelines)-1)])
+		}
+		cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, main.cull.indirectBuf, uint64(first)*uint64(indirectSize), uint32(count), indirectSize)
+		drew = true
+	}
+
+	cmd.EndRenderPass()
+	r.profiler.endPass(GPUPassPrepass, cmd)
+	return drew
+}
+
+// encodeDrawingPass shades the scene: every batch, opaque and blended, then the
+// particles. It clears depth unless the prepass already filled it.
+func (r *Renderer) encodeDrawingPass(st *renderState, views frameViews, target gpu.Texture, depthFilled bool, cmd gpu.CommandBuffer) {
+	depthLoad := gpu.LoadClear
+	if depthFilled {
+		depthLoad = gpu.LoadKeep
+	}
+
+	r.profiler.beginPass(GPUPassForward, cmd)
+	cmd.BeginRenderPass(gpu.RenderTargets{
+		Color: []gpu.ColorAttachment{{Texture: target, Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: r.clear}},
 		Depth: &gpu.DepthAttachment{Texture: r.depth, Load: depthLoad, Store: gpu.StoreKeep, Clear: 0.0},
 	})
 	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
 	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
-	if drawForward {
-		r.issueDraws(cmd, dl, passForward)
-		if hasParticles {
-			r.drawParticles(cmd, st, &r.frame, drawVP, eye)
-		}
+
+	r.drawBatches(st, views, cmd)
+	r.drawParticles(st, views, cmd)
+
+	cmd.EndRenderPass()
+	r.profiler.endPass(GPUPassForward, cmd)
+}
+
+// drawBatches issues one multi-draw-indirect call per raster span: every per-geometry
+// command sharing a pipeline goes in a single DrawIndexedIndirect. Each command's
+// firstInstance is its region base, so gl_InstanceIndex indexes the compacted visible
+// buffer directly.
+func (r *Renderer) drawBatches(st *renderState, views frameViews, cmd gpu.CommandBuffer) {
+	root := r.sceneRoot(st, views)
+	for first, count := range rasterSpans(st.layout.batches) {
+		b := &st.layout.batches[first]
+		root.materials = b.pool.RecordsAddr()
+		cmd.SetPipeline(r.drawPipelines[r.pipelineForPool(b.pool, b.cull, b.blend)])
+		cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, views.main.cull.indirectBuf, uint64(first)*uint64(indirectSize), uint32(count), indirectSize)
 	}
-	if r.overlayActive() && r.overlay != nil {
-		// A capture is of the SCENE, not of the tools used to inspect it, so the copy
-		// goes in before the overlay. That means breaking the pass, since a copy cannot
-		// happen inside one — only on frames that actually capture, and only when there
-		// is an overlay to exclude.
-		if r.pendingShot != nil {
-			cmd.EndRenderPass()
-			r.recordScreenshot(cmd, target)
-			cmd.BeginRenderPass(gpu.RenderTargets{
-				Color: []gpu.ColorAttachment{{Texture: target, Load: gpu.LoadKeep, Store: gpu.StoreKeep}},
-				Depth: &gpu.DepthAttachment{Texture: r.depth, Load: gpu.LoadKeep, Store: gpu.StoreKeep},
-			})
-			cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
-			cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
+}
+
+// drawParticles issues one indirect draw per particle system, reading the instance count
+// its simulation kernel just compacted. Particle systems are never batched: each is one
+// geometry and one material already.
+func (r *Renderer) drawParticles(st *renderState, views frameViews, cmd gpu.CommandBuffer) {
+	for _, pp := range r.frame.Particles.Data {
+		ps, ok := st.particles[pp.ID]
+		if !ok || !ps.ready {
+			continue
 		}
+
+		pool := r.MaterialStore.PoolAt(pp.Material.PoolID)
+		root := particleDrawRoot{
+			viewProj:    views.main.viewProj,
+			pos:         r.GeometryStore.PositionsAddr(),
+			attr:        r.GeometryStore.AttributesAddr(),
+			descs:       r.GeometryStore.DescriptorsAddr(),
+			models:      st.worldBuf.Addr,
+			particles:   ps.buffers[ps.current].Addr,
+			materials:   pool.RecordsAddr(),
+			lights:      st.lights.Addr(),
+			eye:         glm.Vec4f{views.eye[0], views.eye[1], views.eye[2], 1},
+			geometryID:  pp.Geometry.Slot,
+			materialID:  pp.Material.Slot,
+			transformID: pp.Transform,
+			time:        r.frame.Time,
+		}
+		pipeline := r.pipelineForPool(pool, pool.CullAt(pp.Material.Slot), pool.BlendAt(pp.Material.Slot))
+		cmd.SetPipeline(r.drawPipelines[pipeline])
+		cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, ps.indirectBuf, 0, 1, indirectSize)
+	}
+}
+
+// recordScreenshot copies the frame's colour target into the readback buffer, with the
+// frame's command buffer still open and the scene already drawn into target.
+//
+// Render calls it between the scene and the overlay, which is what keeps the overlay out
+// of the image. Capturing what the scene looks like is the point — the console is the
+// instrument, not the subject — and it would otherwise cover a third of the frame in
+// exactly the cases where someone is capturing to inspect something.
+func (r *Renderer) recordScreenshot(target gpu.Texture, cmd gpu.CommandBuffer) {
+	if r.pendingShot == nil {
+		return
+	}
+	n := int(r.width * r.height * 4)
+	if !r.readback.IsValid() || len(r.pixels) < n {
+		if r.readback.IsValid() {
+			r.backend.Free(r.readback)
+		}
+		r.readback = r.backend.Alloc(uint64(n), gpu.MemoryHost, "readback")
+		r.pixels = make([]byte, n)
+	}
+	cmd.CopyTextureToBuffer(r.readback, target, 0, 0)
+}
+
+// ---------------------------------------------------------------------------------------
+// 6. Overlay
+// ---------------------------------------------------------------------------------------
+
+// encodeOverlay draws the HUD and the console over the finished frame, in a pass of its
+// own so a capture can be taken between the scene and the overlay.
+//
+// It is also where the frame's GPU profile closes, and the placement is load-bearing:
+// the two backends disagree about what is safe, and this is the only arrangement measured
+// to drop nothing on either. writeSkippedPasses goes in while the pass is open — it
+// stands in for passes the frame skipped, and a backend that resolves timestamps at
+// render-pass boundaries needs something to attach them to. The frame's closing
+// timestamp goes in after the pass ends: written as the last command inside it,
+// KosmicKrisp dropped it intermittently (24 of 40 frames), which froze the HUD.
+//
+// Profiling runs only while the HUD is showing, so the pass always runs when there is a
+// profile to close.
+func (r *Renderer) encodeOverlay(target gpu.Texture, cmd gpu.CommandBuffer) {
+	if !r.overlayActive() && !r.profiler.isGPUProfilingEnabled() {
+		return
+	}
+
+	cmd.BeginRenderPass(gpu.RenderTargets{
+		Color: []gpu.ColorAttachment{{Texture: target, Load: gpu.LoadKeep, Store: gpu.StoreKeep}},
+		Depth: &gpu.DepthAttachment{Texture: r.depth, Load: gpu.LoadKeep, Store: gpu.StoreKeep},
+	})
+	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
+	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
+	if r.overlay != nil {
 		r.overlay.draw(cmd, float32(r.width), float32(r.height))
 	}
+	r.profiler.writeSkippedPasses(cmd)
 	cmd.EndRenderPass()
-	if r.showFPS && r.gpuPool.IsValid() {
-		cmd.WriteTimestamp(r.gpuPool, 1, gpu.StageColorOutput)
+
+	r.profiler.endGPUFrame(cmd)
+}
+
+// ---------------------------------------------------------------------------------------
+// 7. Submit
+// ---------------------------------------------------------------------------------------
+
+// submit hands the frame to the GPU and blocks until it is done: presented, for a
+// window, or finished, for an offscreen target — whose Capture submits its own readback
+// on the same queue afterwards and so sees the result.
+func (r *Renderer) submit(cmd gpu.CommandBuffer) {
+	r.profiler.beginWait(WaitSubmit)
+	if r.hasTarget {
+		r.backend.Wait(r.backend.Submit(cmd))
+	} else {
+		r.backend.Present(r.swapchain, cmd)
+	}
+	r.profiler.endWait(WaitSubmit)
+}
+
+// finishFrame does what needs the frame to be complete. Both submit paths drain the
+// queue, so a screenshot's readback holds finished pixels and the GPU timestamps are
+// ready to read.
+func (r *Renderer) finishFrame() {
+	r.writeScreenshot()
+	r.profiler.readGPUTimestamps(r.backend)
+	r.profiler.endFrame()
+}
+
+// writeScreenshot encodes and writes the captured frame. Called after the frame has
+// been submitted and drained, so the readback buffer holds finished pixels.
+func (r *Renderer) writeScreenshot() {
+	shot := r.pendingShot
+	if shot == nil {
+		return
+	}
+	r.pendingShot = nil
+
+	err := r.encodePNG(shot.path)
+	if shot.done != nil {
+		shot.done(shot.path, err)
 	}
 }
 
-// hasGBufferRuns reports whether any of the draw list's current pipeline runs belong
-// to the G-buffer pass (i.e. some drawable's material is rendering deferred this frame).
-func (r *Renderer) hasGBufferRuns(dl *drawList) bool {
-	for i := range dl.runs {
-		if r.drawPipelineKeys[dl.runs[i].pipeline].pass == passGBuffer {
-			return true
+// encodePNG converts the readback buffer to an image and writes it.
+func (r *Renderer) encodePNG(path string) error {
+	n := int(r.width * r.height * 4)
+	if !r.readback.IsValid() || len(r.pixels) < n {
+		return fmt.Errorf("no frame was captured (the target may not allow readback)")
+	}
+	copy(r.pixels, unsafe.Slice((*byte)(r.readback.Ptr), n))
+
+	img := image.NewRGBA(image.Rect(0, 0, int(r.width), int(r.height)))
+	copy(img.Pix, r.pixels[:n])
+	// A swapchain is commonly BGRA while image.RGBA is, unsurprisingly, RGBA — without
+	// this the sky comes out orange.
+	if r.color == gpu.FormatBGRA8Unorm || r.color == gpu.FormatBGRA8Srgb {
+		for i := 0; i+3 < len(img.Pix); i += 4 {
+			img.Pix[i], img.Pix[i+2] = img.Pix[i+2], img.Pix[i]
 		}
 	}
-	return false
-}
-
-// shadowView is one depth-map render request: a camera, the map it renders into, and
-// its resolution. Directional and spot lights contribute one each; a point light
-// contributes six (its cube faces). The renderer treats them all uniformly — cull with
-// castersOnly, depth pass, hand to the samplers — so light types don't leak into the
-// GPU-driven path.
-type shadowView struct {
-	cam           Camera
-	m             textures.Texture
-	width, height uint32
-	// x is where this view's square starts along the map's width, which is how cascades
-	// share one texture (see collectShadowViews).
-	x int32
-	// clear reports whether this view is the one that clears the map. Views sharing a
-	// texture must agree that exactly one does, or each would wipe what the others drew.
-	clear bool
-}
-
-// collectShadowViews gathers every shadow-map render request the renderer has
-// resources for: one per casting directional/spot light and six per casting point
-// light. Empty when shadows are disabled or nothing casts.
-func (r *Renderer) collectShadowViews(st *renderState) []shadowView {
-	if !r.shadowsEnabled {
-		return nil
+	// The frame is opaque; whatever alpha the target ended up with is not meaningful
+	// here, and a stray 0 would make the PNG transparent.
+	for i := 3; i < len(img.Pix); i += 4 {
+		img.Pix[i] = 0xFF
 	}
-	var out []shadowView
-	for _, sh := range st.shadows {
-		switch {
-		case !sh.m.IsValid():
-		case len(sh.cascades) > 0:
-			// Every cascade renders into the same texture, so exactly one of them may
-			// clear it and the rest must load what the others wrote.
-			side := sh.size()
-			for i, c := range sh.cascades {
-				out = append(out, shadowView{
-					cam: c.cam, m: sh.m, x: int32(i) * int32(side),
-					width: side, height: side, clear: i == 0,
-				})
-			}
-		default:
-			out = append(out, shadowView{
-				cam: sh.cam, m: sh.m, width: sh.width, height: sh.height, clear: true,
-			})
-		}
-		for i := range sh.faces {
-			if f := sh.faces[i]; f.m.IsValid() {
-				out = append(out, shadowView{cam: f.cam, m: f.m, width: sh.width, height: sh.height, clear: true})
-			}
+
+	if dir := filepath.Dir(path); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
 		}
 	}
-	return out
-}
-
-// syncScene uploads the renderer's shared tables + the scene's per-scene GPU state.
-// It resolves each mesh's draw pipeline from its material (shaders + raster) every
-// frame and rebuilds the draw list when the mesh set OR any pipeline assignment
-// changed (so a material raster/blend change re-batches without an explicit dirty).
-func (r *Renderer) syncScene(scene scenes.Producer, cam Camera, cmd gpu.CommandBuffer) {
-	// Device-only resources (geometry streams + descriptors, material records) are
-	// staged through the shared uploader, which records the copies into the head of
-	// this frame's command buffer and barriers them against the passes that read
-	// them — no separate submit. The scene owns transforms, skinning, its draw list
-	// and lights, and writes those straight to MemoryHost buffers (see Scene.Sync),
-	// so a frame where only scene-owned state changed (a refit shadow camera, an
-	// animated pose) stages nothing at all and End skips even the barrier.
-	// The light table encodes each light's shadow map for the shader, so the scene
-	// needs the global toggle before it rebuilds that table — otherwise disabling
-	// shadows only stops refreshing the maps and the shader samples the last one.
-	st := r.stateFor(scene.ID())
-
-	// Scene.Sync settles world transforms, skinning and the clock; extraction publishes
-	// the result. Both happen exactly once per frame and before anything reads the
-	// packet — extracting twice would hand the second call a packet whose per-frame
-	// flags (TransformsDirty) the first had already consumed.
-	scene.Extract(&r.frame)
-
-	if r.shadowsEnabled {
-		r.prepareShadows(st, &r.frame, cam)
+	f, err := os.Create(path)
+	if err != nil {
+		return err
 	}
-	up := r.uploader
-	up.Begin(cmd)
-	r.GeometryStore.Sync(up)
-	r.MaterialStore.Sync(up)
-	up.End(cmd)
-
-	// The light table is the renderer's buffer, packed from the packet's light values
-	// and the shadow resources prepared above. The producer never sees a map index.
-	st.lights.rebuild(r.frame.Environment, r.frame.Lights.Data, st.shadows, r.shadowsEnabled, r.shadowFilter)
-	st.lights.Sync()
-
-	r.syncDrawList(scene)
+	defer f.Close()
+	return png.Encode(f, img)
 }
 
-// prepareFrom runs one frame's producer-side work — settle the scene, extract a
-// packet, refresh the draw list — without recording any GPU commands. Render does the
-// same steps as part of a frame; this is the seam tests use to inspect the derived
-// state, and it keeps them from having to know that extraction happens exactly once.
-func (r *Renderer) prepareFrom(scene scenes.Producer) {
-	scene.Extract(&r.frame)
-	r.syncDrawList(scene)
+// ---------------------------------------------------------------------------------------
+// Roots, resources and lookups the steps above share
+// ---------------------------------------------------------------------------------------
+
+// sceneRoot is the root every pass over the scene vertex stage pushes this frame, with
+// no material records: drawBatches fills those per span, and a debug fragment shader
+// never reads them.
+func (r *Renderer) sceneRoot(st *renderState, views frameViews) drawRoot {
+	return drawRoot{
+		viewProj:      views.main.viewProj,
+		pos:           r.GeometryStore.PositionsAddr(),
+		attr:          r.GeometryStore.AttributesAddr(),
+		descs:         r.GeometryStore.DescriptorsAddr(),
+		models:        st.worldBuf.Addr,
+		drawables:     st.drawableBuf.Addr,
+		visible:       views.main.cull.visibleBuf.Addr,
+		lights:        st.lights.Addr(),
+		eye:           glm.Vec4f{views.eye[0], views.eye[1], views.eye[2], 1},
+		shadowSampler: r.shadowSampler.Index,
+		time:          r.frame.Time,
+	}
 }
 
-// syncDrawList refreshes the scene's batches for this frame. The drawables and the
-// distinct set of materials they reference are collected only on a structural change
-// (drawableDirty); the pipeline ids are re-resolved every frame off that cached
-// material set, because a material can change pipeline — a blend-mode or cull change —
-// without the draw list structure moving at all.
+// positionRoot is the root of a position-only pass rendering one view: the shadow
+// passes, the depth prepass and the id debug views.
+func (r *Renderer) positionRoot(v view, st *renderState) positionRoot {
+	return positionRoot{
+		viewProj:  v.viewProj,
+		pos:       r.GeometryStore.PositionsAddr(),
+		descs:     r.GeometryStore.DescriptorsAddr(),
+		models:    st.worldBuf.Addr,
+		drawables: st.drawableBuf.Addr,
+		visible:   v.cull.visibleBuf.Addr,
+	}
+}
+
+// flipClipY negates clip-space Y (proj[1][1]*=-1) so images are right-side-up under
+// Vulkan's Y-down NDC. Only screen position is affected.
+func flipClipY(m glm.Mat4f) glm.Mat4f {
+	m[1], m[5], m[9], m[13] = -m[1], -m[5], -m[9], -m[13]
+	return m
+}
+
+// growBuffer makes sure buf holds at least size bytes. Grow-only: a buffer already large
+// enough is kept, so a steady frame allocates nothing, and one that must grow at least
+// doubles, so a scene growing a little every frame does not reallocate every frame.
+// Every writer bounds itself by the current count rather than the buffer's size, so the
+// slack is harmless.
+func (r *Renderer) growBuffer(buf *gpu.Buffer, size uint64, label string) {
+	size = max(size, 1)
+	if buf.IsValid() && buf.Size >= size {
+		return
+	}
+	if buf.IsValid() {
+		size = max(size, buf.Size*2)
+		r.backend.Free(*buf)
+	}
+	*buf = r.backend.Alloc(size, gpu.MemoryHost, label)
+}
+
+// ensureCullBuffers sizes one view's cull buffers for the current layout.
+func (r *Renderer) ensureCullBuffers(cull *cullBuffers, layout *drawLayout) {
+	r.growBuffer(&cull.indirectBuf, uint64(max(len(layout.batches), 1))*uint64(indirectSize), "indirect")
+	r.growBuffer(&cull.visibleBuf, uint64(layout.visibleCapacity)*4, "visible")
+}
+
+// ensureShadowSampler creates the PCF comparison sampler every lit shader samples shadow
+// maps with, on first use.
+func (r *Renderer) ensureShadowSampler() {
+	if r.shadowSampler.H != 0 {
+		return
+	}
+	r.shadowSampler = r.backend.CreateSampler(gpu.SamplerDescriptor{
+		MinLinear: true, MagLinear: true,
+		AddressU: gpu.AddressClamp, AddressV: gpu.AddressClamp,
+		Compare: gpu.CompareGreaterEqual, // reversed-Z: nearer is greater
+		Label:   "shadow-cmp",
+	})
+}
+
+// ensureParticleBuffers allocates a system's ping-pong buffers and indirect command on
+// first use — sized to its capacity, which is fixed at construction — and grows the
+// newborn buffer to fit this frame's births. A fresh or cleared system's buffers are
+// zeroed, so every slot starts dead (age 0 >= lifetime 0) rather than holding whatever
+// was in freshly allocated memory.
+func (r *Renderer) ensureParticleBuffers(ps *particleState, pp scenes.ParticlePacket, births uint32) {
+	if !ps.ready || ps.epoch != pp.Epoch {
+		size := uint64(pp.Capacity) * uint64(particleRecordSize)
+		for i := range ps.buffers {
+			r.growBuffer(&ps.buffers[i], size, "particles")
+			clear(unsafe.Slice((*byte)(ps.buffers[i].Ptr), ps.buffers[i].Size))
+		}
+		r.growBuffer(&ps.indirectBuf, uint64(indirectSize), "particles-indirect")
+		ps.current, ps.ready, ps.epoch = 0, true, pp.Epoch
+	}
+	if births > 0 {
+		r.growBuffer(&ps.pendingBuf, uint64(births)*uint64(particleRecordSize), "particles-pending")
+	}
+}
+
+// stateFor returns the GPU state for a source, creating it on first sight.
+func (r *Renderer) stateFor(id scenes.SourceID) *renderState {
+	if st, ok := r.sources[id]; ok {
+		return st
+	}
+	if r.sources == nil {
+		r.sources = make(map[scenes.SourceID]*renderState)
+	}
+	st := &renderState{lights: NewLights(r.backend)}
+	r.sources[id] = st
+	return st
+}
+
+// shadowResourceFor returns a light's shadow resources, creating them on first sight,
+// and marks them used this frame.
+func (r *Renderer) shadowResourceFor(light scenes.LightID, st *renderState) *shadowResource {
+	sh, ok := st.shadows[light]
+	if !ok {
+		if st.shadows == nil {
+			st.shadows = make(map[scenes.LightID]*shadowResource)
+		}
+		sh = &shadowResource{}
+		st.shadows[light] = sh
+	}
+	sh.seen = true
+	return sh
+}
+
+// retireUnusedShadows frees the resources of lights that stopped casting or went away.
+// Without it a scene toggling shadows on a long-lived light would hold every depth map
+// it ever allocated.
+func (r *Renderer) retireUnusedShadows(st *renderState) {
+	for id, sh := range st.shadows {
+		if sh.seen {
+			sh.seen = false
+			continue
+		}
+		sh.destroy()
+		delete(st.shadows, id)
+	}
+}
+
+// particleStateFor returns a particle system's simulation state, creating it on first
+// sight, and marks it used this frame.
+func (r *Renderer) particleStateFor(system scenes.ParticleID, st *renderState) *particleState {
+	ps, ok := st.particles[system]
+	if !ok {
+		if st.particles == nil {
+			st.particles = make(map[scenes.ParticleID]*particleState)
+		}
+		ps = &particleState{}
+		st.particles[system] = ps
+	}
+	ps.seen = true
+	return ps
+}
+
+// retireUnusedParticles frees the simulations of systems that left the packet — detached
+// or destroyed. Their particles go with them: the buffers are the simulation, and there
+// is nothing on the CPU to restore it from.
+func (r *Renderer) retireUnusedParticles(st *renderState) {
+	for id, ps := range st.particles {
+		if ps.seen {
+			ps.seen = false
+			continue
+		}
+		ps.destroy(r.backend)
+		delete(st.particles, id)
+	}
+}
+
+// --------------------------------------------------------------------------------------
+// Shadow fitting
 //
-// The work here is proportional to the number of distinct MATERIALS, not drawables.
-// A scene with ten thousand objects sharing six materials resolves six pipelines and
-// compares six ids; only when one of those six actually changes does anything touch
-// the per-drawable arrays. Resolving off the collected set is also what keeps pipeBuf
-// aligned with the drawables — both come from the one collectDrawables walk, so no
-// second traversal has to reproduce its ordering and its flagAttached filtering.
-func (r *Renderer) syncDrawList(scene scenes.Producer) {
-	dl := r.stateFor(scene.ID()).dl
-	p := &r.frame
+// Where each light's shadow cameras point and how far they reach. fitShadows calls these;
+// they depend on the view being rendered, which is why they are the renderer's.
+// --------------------------------------------------------------------------------------
 
-	// The transform buffer is the renderer's, so the renderer fills it. The producer
-	// only says whether the matrices moved; a frame where nothing did writes nothing.
+// shadowReach is how far the shadow fit should cover, in world units from the eye, or
+// zero to derive it from the view.
+//
+// Explicit cascade steps decide it: the outermost one is by definition where shadows
+// stop, so it has to set the range rather than be clipped by a separately chosen one.
+// Renderer.SetShadowDistance therefore has no effect while explicit steps are in use,
+// which keeps one setting in charge of the far end instead of two disagreeing.
+func (r *Renderer) shadowReach() float32 {
+	if c, ok := r.Shadows().(ShadowCascaded); ok {
+		if steps := c.steps(); len(steps) > 0 {
+			return steps[len(steps)-1]
+		}
+	}
+	return r.shadowDistance
+}
+
+// shadowFitFor caps the view frustum at the shadow distance and gathers everything the
+// fit algorithms share.
+//
+// The cap is what keeps a shadow map useful: fitted to the whole frustum, a far plane
+// kilometres out would spread every texel across the horizon. The default caps at the
+// last of the scene the camera can actually see — how far along the view direction the
+// scene bounds reach, never past the camera's own far plane — so the slice covers
+// everything that can receive a shadow and nothing beyond it. Override with
+// Renderer.SetShadowDistance.
+//
+// distance is how far the slice should reach, in world units from the eye; zero derives
+// it. A cascade split with explicit steps passes its last step, since that IS where its
+// shadows stop — left to derive, a shorter auto distance would quietly clamp every step
+// past it and collapse those cascades onto the same sliver of frustum.
+//
+// Covering exactly what is visible matters more than it sounds. fitUniform fits a
+// bounding SPHERE around this slice, and a sphere around a frustum wedge reaches well
+// past it, so a short cap there is invisible — the slop covers it. A cascade fits a much
+// shorter slice with far less slop, so the same short cap shows up as a hard band of
+// missing shadow at its far edge. A cap that is right to begin with avoids both.
+func (r *Renderer) shadowFitFor(cam Camera, sceneCenter glm.Vec3f, sceneRadius float32, distance float32) shadowFit {
+	corners := frustumCornersWorld(cam.ViewProjection())
+	eye := cam.Position()
+
+	nearCenter := avgCorners(corners, 0)
+	farCenter := avgCorners(corners, 4)
+	nearDist := nearCenter.Sub(eye).Length()
+	farDist := farCenter.Sub(eye).Length()
+
+	shadowDist := distance
+	if shadowDist <= 0 {
+		forward := farCenter.Sub(nearCenter).Normalize()
+		// How far along the view the scene still reaches. A small floor keeps the slice
+		// from collapsing when the camera sits on top of the scene, or has it behind.
+		reach := sceneCenter.Sub(eye).Dot(forward) + sceneRadius
+		shadowDist = min(max(reach, sceneRadius*0.15), farDist)
+	}
+
+	t := float32(1)
+	if farDist > nearDist {
+		t = glm.Clamp((shadowDist-nearDist)/(farDist-nearDist), 0, 1)
+	}
+
+	fit := shadowFit{
+		eye:         eye,
+		forward:     farCenter.Sub(nearCenter).Normalize(),
+		nearDist:    nearDist,
+		farDist:     nearDist + t*(farDist-nearDist),
+		sceneCenter: sceneCenter,
+		sceneRadius: sceneRadius,
+	}
+	for j := range 4 {
+		fit.corners[j] = corners[j]
+		fit.corners[j+4] = corners[j].Add(corners[j+4].Sub(corners[j]).Scale(t))
+	}
+	return fit
+}
+
+// fitDirectional points a directional light's shadow camera at the view, using the
+// renderer's selected algorithm.
+func (r *Renderer) fitDirectional(s *shadowResource, l scenes.LightPacket, fit shadowFit) {
+	if c, ok := r.Shadows().(ShadowCascaded); ok {
+		r.fitCascaded(s, l, c, fit)
+		return
+	}
+	s.cascades = s.cascades[:0] // a previous frame's slices are not this fit's
+	r.fitUniform(s, l, fit)
+}
+
+// fitUniform aims an orthographic camera to cover the capped view slice, sized to
+// enclose it. When that slice is as large as the whole scene (zoomed out) it falls back
+// to the scene sphere, so it is never worse than a whole-scene fit; zoomed in, it packs
+// resolution into the near view. The camera is pulled back along -dir across the scene
+// so occluders between the light and the slice are still captured, and the center is
+// snapped to the shadow texel grid so edges don't crawl as the camera moves.
+func (r *Renderer) fitUniform(s *shadowResource, l scenes.LightPacket, fit shadowFit) {
+	s.fit = r.fitOrtho(s.orthoCamera(), l, fit, s.width)
+	s.ndcBias = s.fit.bias
+}
+
+// fitOrtho is fitUniform's body, aimed at a camera the caller owns, returning the depth
+// bias its choice of box implies. Cascades need this: each slice is an ordinary uniform
+// fit, differing only in which camera it writes and how short a range it covers.
+//
+// size is the resolution of the map REGION this camera renders into, which for a cascade
+// is one square of the atlas rather than the whole texture — the texel grid the fit
+// snaps to has to be the one it will actually be sampled through.
+func (r *Renderer) fitOrtho(cam Camera, l scenes.LightPacket, fit shadowFit, size uint32) orthoFit {
+	f, ok := cam.(interface {
+		SetPosition(glm.Vec3f)
+		SetTarget(glm.Vec3f)
+		SetUp(glm.Vec3f)
+		SetFrustum(l, r, b, t float32)
+		SetClip(near, far float32)
+	})
+	if !ok {
+		return orthoFit{}
+	}
+	d := l.Direction.Normalize()
+
+	// Bounding sphere of the capped slice; fall back to the scene sphere when the fit
+	// isn't tighter (e.g. zoomed out), so we never do worse than whole-scene.
+	center, radius := boundingSphere(fit.corners)
+	if radius >= fit.sceneRadius {
+		center, radius = fit.sceneCenter, fit.sceneRadius
+	}
+
+	// Quantize the radius so the texel size only changes in discrete steps as the camera
+	// zooms. A continuously-resizing box would keep moving the texel grid under the
+	// geometry, which is what makes edges crawl — snapping the center only helps while
+	// the texel size holds still.
 	//
-	// A state seeing its first packet uploads regardless: the dirty flag reports change
-	// since the last EXTRACTION, which a cache created just now never saw. Without this
-	// a source released and then drawn again would render from an unwritten buffer,
-	// because the producer has no idea its consumer went away.
-	if p.TransformsDirty || !dl.worldBuf.IsValid() {
-		dl.sync(p.Transforms.Data, p.InstanceTransforms.Data)
+	// The step has to be RELATIVE to the radius, not an absolute fraction of the scene.
+	// An absolute step is a fixed number of world units, so it is invisible on a slice
+	// far larger than one step and ruinous on a slice smaller than one: in a scene a few
+	// hundred units across it rounded a three-unit near slice up to fourteen, throwing
+	// away four fifths of the resolution exactly where the fit was trying to concentrate
+	// it. Rounding up on a geometric grid costs the same proportion at every scale, which
+	// is what makes it safe to fit a small slice at all. Quarter-octave steps waste at
+	// most a fifth of the resolution, against the factor of two a whole-octave grid costs
+	// on a large one.
+	if radius > 0 {
+		const stepsPerOctave = 4
+		octave := math.Ceil(math.Log2(float64(radius))*stepsPerOctave) / stepsPerOctave
+		radius = float32(math.Exp2(octave))
+	}
+	right, up := lightBasis(d)
+
+	// Snap the center to the shadow texel grid in the light's right/up plane. This fit
+	// is always square, so either axis names the same texel.
+	texel := 2 * radius / float32(size)
+	if texel > 0 {
+		cx := snap(center.Dot(right), texel)
+		cy := snap(center.Dot(up), texel)
+		cz := center.Dot(d)
+		center = right.Scale(cx).Add(up.Scale(cy)).Add(d.Scale(cz))
 	}
 
-	// Resolve one pipeline per DISTINCT material, reading everything from the pool the
-	// material's identity names. This is the only place the packet's resource
-	// identities are turned back into renderer objects.
-	dl.matPipe = dl.matPipe[:0]
-	dl.matPool = dl.matPool[:0]
-	dl.matBlend = dl.matBlend[:0]
-	for _, id := range p.Materials.Data {
-		pool := r.MaterialStore.PoolAt(id.Pool)
-		blend := pool.Blend(id.Slot)
-		dl.matPool = append(dl.matPool, pool)
-		dl.matBlend = append(dl.matBlend, blend)
-		dl.matPipe = append(dl.matPipe, r.pipelineForPool(pool, pool.Cull(id.Slot), blend))
-	}
-	if dl.builtRevision == p.Meshes.Revision && slices.Equal(dl.matPipe, dl.batchedMatPipe) {
-		return
-	}
-	dl.expand(p)
-	dl.rebuild(r.GeometryStore)
-	dl.builtRevision = p.Meshes.Revision
-	dl.batchedMatPipe = append(dl.batchedMatPipe[:0], dl.matPipe...)
+	const near, farScale = float32(0.01), float32(4)
+	far := fit.sceneRadius * farScale
+	f.SetUp(up)
+	f.SetPosition(center.Sub(d.Scale(fit.sceneRadius * 2))) // back up across the scene
+	f.SetTarget(center)
+	f.SetFrustum(-radius, radius, -radius, radius)
+	f.SetClip(near, far) // depth spans the whole scene toward the light
+
+	// The renderer decides where the camera goes; the caller owns the derived bias.
+	return orthoBias(radius, far-near, size, l.ShadowBias)
 }
 
-// prepareShadows gives every casting light in the packet the resources it asked for —
-// a depth map, a camera aimed or fitted for this frame — and retires the resources of
-// lights that stopped casting. Runs before the light table is packed, so the table can
-// carry each light's map index and view-projection.
-//
-// The packet says only which lights cast and at what resolution. Everything here —
-// which projection, where it points, how it is fitted to the view, what the depth bias
-// works out to in normalized units — is the renderer's, because all of it depends on
-// the view being rendered and on caster bounds the producer does not track.
-func (r *Renderer) prepareShadows(st *renderState, p *scenes.FramePacket, cam Camera) {
-	if r.shadowSampler.H == 0 {
-		r.shadowSampler = r.backend.CreateSampler(gpu.SamplerDescriptor{
-			MinLinear: true, MagLinear: true,
-			AddressU: gpu.AddressClamp, AddressV: gpu.AddressClamp,
-			Compare: gpu.CompareGreaterEqual, // PCF comparison sampler (reversed-Z: nearer is greater)
-			Label:   "shadow-cmp",
+// fitCascaded fits one orthographic camera per slice of the view. Each slice is the
+// same frustum capped to a shorter range, so every cascade is an ordinary uniform fit —
+// texel snapping and all — over a range short enough for its texels to matter.
+func (r *Renderer) fitCascaded(s *shadowResource, l scenes.LightPacket, c ShadowCascaded, fit shadowFit) {
+	count := c.levels()
+	s.ensureCascades(count)
+
+	var splits [MaxShadowCascades]float32
+	if explicit := c.steps(); explicit != nil {
+		copy(splits[:count], explicit)
+	} else {
+		splitNear := r.shadowNear
+		if splitNear <= 0 {
+			splitNear = fit.farDist * defaultShadowNear
+		}
+		cascadeSplits(max(splitNear, fit.nearDist), fit.farDist, splits[:count])
+	}
+
+	// The first cascade is fitted from the camera's real near plane, whatever the split
+	// started from, so geometry in between is still covered.
+	near := fit.nearDist
+	for i := range count {
+		// Explicit steps are the caller's, so they are guarded rather than trusted: a
+		// step that does not advance would give a slice no depth to fit.
+		far := max(splits[i], near*(1+1e-3))
+		lvl := &s.cascades[i]
+		lvl.far = far
+		// The slice's own frustum: the same corner rays, cut at this cascade's near and
+		// far rather than the whole range's.
+		sub := fit
+		sub.nearDist, sub.farDist = near, far
+		sub.corners = sliceCorners(fit, near, far)
+		lvl.fit = r.fitOrtho(lvl.cam, l, sub, s.size())
+		near = far
+	}
+}
+
+// aimPointShadow allocates (once) and re-aims a point light's six cube-face shadow
+// cameras from the light's current position and range.
+func (r *Renderer) aimPointShadow(s *shadowResource, l scenes.LightPacket) {
+	s.ensureFaceMaps(r.TextureStore, requestedSize(l))
+	s.updateLocalBias(l.Range, l.ShadowBias)
+	for i := range s.faces {
+		f := &s.faces[i]
+		c, ok := f.cam.(interface {
+			SetPosition(glm.Vec3f)
+			SetTarget(glm.Vec3f)
+			SetUp(glm.Vec3f)
+			SetFar(float32)
 		})
-	}
-
-	// Point lights first: they are aimed from the light alone and need no scene bounds.
-	var needsFit bool
-	for _, l := range p.Lights.Data {
-		if !l.CastsShadow {
+		if !ok {
 			continue
 		}
-		if l.Kind != scenes.LightPoint {
-			needsFit = true
-			continue
-		}
-		sh := st.shadowFor(l.ID)
-		sh.seen = true
-		r.aimPointShadow(sh, l)
+		c.SetPosition(l.Position)
+		c.SetTarget(l.Position.Add(cubeFaceDirs[i]))
+		c.SetUp(cubeFaceUps[i])
+		c.SetFar(l.Range)
 	}
-	if !needsFit {
-		st.retireUnseenShadows()
-		return
-	}
-
-	center, radius := casterBounds(p)
-	fit := r.shadowFitFor(cam, center, radius, r.shadowReach())
-	for _, l := range p.Lights.Data {
-		if !l.CastsShadow || l.Kind == scenes.LightPoint {
-			continue
-		}
-		sh := st.shadowFor(l.ID)
-		sh.seen = true
-		switch l.Kind {
-		case scenes.LightDirectional:
-			// The map has to exist before the fit: every algorithm derives its depth
-			// bias from how much world space one of its texels covers. Its shape is the
-			// algorithm's to choose.
-			// One square per slice, laid out along the width: four 1024 cascades is a
-			// single 4096x1024 texture, each rendered through its own scissor. A single
-			// fit reports one level, so this is its natural size.
-			width, height := cascadeAtlas(requestedSize(l), uint32(r.Shadows().levels()))
-			sh.ensureMap(r.TextureStore, width, height)
-			r.fitDirectional(sh, l, fit)
-		case scenes.LightSpot:
-			sh.ensurePerspective(l.Angle, l.Range)
-			sh.ensureMap(r.TextureStore, requestedSize(l), requestedSize(l))
-			aimSpotShadow(sh, l)
-		}
-	}
-	st.retireUnseenShadows()
 }
 
 // casterBounds is the world-space sphere enclosing everything the packet draws, which
@@ -1326,29 +2004,6 @@ func transformAt(p *scenes.FramePacket, i uint32) glm.Mat4f {
 	return glm.Mat4Identity[float32]()
 }
 
-// aimPointShadow allocates (once) and re-aims a point light's six cube-face shadow
-// cameras from the light's current position and range.
-func (r *Renderer) aimPointShadow(s *shadowResource, l scenes.LightPacket) {
-	s.ensureFaceMaps(r.TextureStore, requestedSize(l))
-	s.updateLocalBias(l.Range, l.ShadowBias)
-	for i := range s.faces {
-		f := &s.faces[i]
-		c, ok := f.cam.(interface {
-			SetPosition(glm.Vec3f)
-			SetTarget(glm.Vec3f)
-			SetUp(glm.Vec3f)
-			SetFar(float32)
-		})
-		if !ok {
-			continue
-		}
-		c.SetPosition(l.Position)
-		c.SetTarget(l.Position.Add(cubeFaceDirs[i]))
-		c.SetUp(cubeFaceUps[i])
-		c.SetFar(l.Range)
-	}
-}
-
 // aimSpotShadow re-aims a spot light's perspective shadow camera from the light's
 // current position/direction/cone/range (all mutable each frame).
 func aimSpotShadow(s *shadowResource, l scenes.LightPacket) {
@@ -1395,376 +2050,447 @@ func frustumCornersWorld(viewProj glm.Mat4f) [8]glm.Vec3f {
 	return c
 }
 
-// cullInto dispatches the frustum-cull compute into one view's indirect + visible
-// buffers: it resets the indirect args from the shared template (zeroing each batch's
-// instanceCount), points a cull root at this view's buffers (the drawable/world/region
-// tables are shared), and dispatches one thread per instance. castersOnly=1 restricts
-// the view to shadow casters. eye is the camera's world position, used only by LOD
-// distance tests (see scene_cull.comp's selectLevel) — every view (main + shadow) uses
-// the same main-camera eye, not the shadow light's own position, since LOD is a
-// main-camera-relative decision regardless of which view is culling this frame. No
-// barrier — the caller batches all views behind one.
-func (r *Renderer) cullInto(cmd gpu.CommandBuffer, dl *drawList, indirect, visible gpu.Buffer, planes [6]glm.Vec4f, castersOnly uint32, eye glm.Vec3f) {
-	indirect.Write(utils.ToBytesSlice(dl.template), 0)
-	cr := cullRoot{
-		drawables: dl.drawableBuf.Addr, models: dl.worldBuf.Addr, indirect: indirect.Addr,
-		regions: dl.regionBuf.Addr, visible: visible.Addr,
-		lods: dl.lodTableBuf.Addr, prevLevel: dl.prevLevelBuf.Addr,
-		eye: glm.Vec4f{eye[0], eye[1], eye[2], 1}, count: dl.numInst,
-		castersOnly: castersOnly, planes: planes,
-	}
-	cmd.SetPipeline(r.cullPipeline)
-	cmd.Dispatch(utils.ToBytes(&cr), (dl.numInst+63)/64, 1, 1)
-}
-
-// skinCommands builds this frame's compute-skinning dispatch list, one entry per
-// SkinnedMesh, into a scratch slice reused across frames. The scene supplies the
-// state (which meshes are skinned, their source/output geometry, their skeleton's
-// joint range); deciding what GPU work that implies is the renderer's job, like
-// every other command list it builds here.
+// --------------------------------------------------------------------------------------
+// Pipelines
 //
-// Every skinned mesh is dispatched regardless of visibility — a v1 simplification;
-// a scene with many off-screen skinned meshes pays for all of them.
-func (r *Renderer) skinCommands(p *scenes.FramePacket) []skinCmd {
-	r.skinScratch = r.skinScratch[:0]
-	for _, sp := range p.Skins.Data {
-		r.skinScratch = append(r.skinScratch, skinCmd{
-			srcDesc: sp.Source.Slot, dstDesc: sp.Output.Slot,
-			jointBase: sp.Joints.First, vertexCount: sp.VertexCount,
+// The renderer owns every pipeline. Draw pipelines are built lazily per material raster
+// state, and all of them are rebuilt when the target format changes.
+// --------------------------------------------------------------------------------------
+
+// buildPipelines (re)creates the cull pipeline and every draw pipeline from the
+// registered material shaders (called on target/format change).
+func (r *Renderer) buildPipelines() {
+	if r.pipelinesReady {
+		r.backend.DestroyPipeline(r.cullPipeline)
+		r.backend.DestroyPipeline(r.skinPipeline)
+		r.backend.DestroyPipeline(r.particleUpdatePipeline)
+		r.backend.DestroyPipeline(r.shadowPipeline)
+		for _, p := range r.prepassPipelines {
+			r.backend.DestroyPipeline(p)
+		}
+		for _, p := range r.drawPipelines {
+			r.backend.DestroyPipeline(p)
+		}
+	}
+	r.cullPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.SceneCull), Entry: "main", Label: "scene-cull"})
+	r.skinPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.SceneSkin), Entry: "main", Label: "scene-skin"})
+	r.particleUpdatePipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleUpdate), Entry: "main", Label: "particle-update"})
+	// Depth-only passes: position-only vertex-pull, no colour attachment, writes depth.
+	//
+	// No fragment shader at all: a stage that outputs nothing is not free — it still
+	// runs per fragment — and leaving it out is what lets the driver take its
+	// depth-only path.
+	depthOnly := func(cull gpu.CullMode, label string) gpu.Pipeline {
+		return r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
+			VertexShader: shaders.ForBackend(r.backend, shaders.SceneShadowVert),
+			Topology:     gpu.TopologyTriangles, DepthFormat: gpu.FormatDepth32F,
+			DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareGreater,
+			CullMode: cull, FrontFaceCW: true, Label: label,
 		})
 	}
-	return r.skinScratch
-}
+	// Culling is off for the shadow pass: it only decides which of a surface's two
+	// faces writes the depth they share, and thin geometry must still occlude from the
+	// light's view.
+	r.shadowPipeline = depthOnly(gpu.CullNone, "scene-shadow")
 
-// dispatchSkinning fills one skinRoot per skinned mesh (position/attribute/skin/
-// descriptor streams and the scene's joint buffer are frame-global; only
-// srcDesc/dstDesc/jointBase/vertexCount vary per mesh) and issues one Dispatch per
-// mesh, sized to its vertex count. See scene_skin.comp.
-func (r *Renderer) dispatchSkinning(cmd gpu.CommandBuffer, dl *drawList, cmds []skinCmd, jointsAddr uint64) {
-	posAddr, attrAddr := r.GeometryStore.PositionsAddr(), r.GeometryStore.AttributesAddr()
-	skinAddr, descAddr := r.GeometryStore.SkinAddr(), r.GeometryStore.DescriptorsAddr()
-	cmd.SetPipeline(r.skinPipeline)
-	for _, c := range cmds {
-		sr := skinRoot{
-			pos: posAddr, attr: attrAddr, skin: skinAddr, descs: descAddr, joints: jointsAddr,
-			srcDesc: c.srcDesc, dstDesc: c.dstDesc, jointBase: c.jointBase, vertexCount: c.vertexCount,
-		}
-		cmd.Dispatch(utils.ToBytes(&sr), (c.vertexCount+63)/64, 1, 1)
+	// The depth prepass is the same pass pointed at the view camera, but one pipeline
+	// per cull mode: a prepass must cull exactly as the shading pass will. Sharing a
+	// single double-sided pipeline writes depth for faces the shading pass discards,
+	// and a surface the viewer was never meant to see then occludes everything behind
+	// it — a far wall hiding the room, terrain hiding what is under it.
+	for i := range r.prepassPipelines {
+		r.prepassPipelines[i] = depthOnly(gpu.CullMode(i), "scene-depth-prepass")
+	}
+
+	for i, k := range r.drawPipelineKeys {
+		r.drawPipelines[i] = r.buildDrawPipe(k)
+	}
+	r.pipelinesReady = true
+	if r.overlay != nil {
+		r.overlay.destroy()
+		r.overlay = newOverlay(r.backend, r.TextureStore, r.scale, r.color, gpu.FormatDepth32F)
 	}
 }
 
-// dispatchParticleUpdate runs every attached particle container's simulation kernel:
-// stages this frame's newborns into a host-visible scratch buffer, resets the
-// container's indirect-draw instance count to 0, and dispatches particle_update.comp
-// over capacity+pendingCount threads (see that shader for why). The kernel compacts
-// survivors — plus the newborns it consumes from its tail range — into the other half
-// of the container's ping-pong buffer pair, which drawParticles reads after the
-// compute/graphics barrier in encode.
+// materialPipeline is a material's full pipeline identity: shaders + raster state.
+type materialPipeline struct {
+	shaderHash       uint64 // cached (vertex,fragment) identity — the dedup key
+	vertex, fragment []byte // kept only to build the pipeline
+	cull             materials.CullMode
+	blend            materials.BlendMode
+}
+
+// buildDrawPipe creates a graphics pipeline for a material pipeline key against the
+// current color/depth formats. The vertex-pull stage is shared unless the material
+// supplies its own vertex program. Every key targets the main color target, with its
+// material's blend mode.
+func (r *Renderer) buildDrawPipe(k materialPipeline) gpu.Pipeline {
+	vert := k.vertex
+	if vert == nil {
+		vert = shaders.SceneDraw
+	}
+	var blend []gpu.BlendState
+	switch k.blend {
+	case materials.BlendAlpha:
+		blend = []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}}}
+	case materials.BlendAdditive:
+		blend = []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOne, Op: gpu.BlendAdd}}}
+	}
+	// Transparent (blended) materials test depth against opaque geometry but do NOT
+	// write depth, so they don't occlude each other and blend correctly.
+	depthWrite := k.blend == materials.BlendOpaque
+	return r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
+		VertexShader: shaders.ForBackend(r.backend, vert), FragmentShader: shaders.ForBackend(r.backend, k.fragment),
+		Topology: gpu.TopologyTriangles, ColorFormats: []gpu.Format{r.color},
+		// GreaterEqual, not Greater: with a depth prepass the shading draw meets depth it
+		// wrote itself, and Greater would reject every fragment. Without one the only
+		// difference is which of two exactly-coplanar surfaces wins, where nothing was
+		// well defined to begin with.
+		DepthFormat: gpu.FormatDepth32F, DepthTest: true, DepthWrite: depthWrite, DepthCompare: gpu.CompareGreaterEqual,
+		// The renderer flips clip-space Y (Vulkan NDC is Y-down), which reverses
+		// triangle winding, so front faces are clockwise on screen.
+		CullMode: gpu.CullMode(k.cull), FrontFaceCW: true, Blend: blend,
+	})
+}
+
+// pipelineFor resolves a material pipeline key to a draw-pipeline index, building and
+// caching a pipeline the first time a given key is seen (shaders deduped by SPIR-V
+// slice identity + cull/blend). Custom materials register here too.
+func (r *Renderer) pipelineFor(k materialPipeline) uint32 {
+	for i := range r.drawPipelineKeys {
+		if sameKey(r.drawPipelineKeys[i], k) {
+			return uint32(i)
+		}
+	}
+	id := uint32(len(r.drawPipelineKeys))
+	r.drawPipelineKeys = append(r.drawPipelineKeys, k)
+	r.drawPipelines = append(r.drawPipelines, r.buildDrawPipe(k))
+	return id
+}
+
+// pipelineUnresolved marks a cell of a pool's pipeline table that has not been built
+// yet. Zero is a perfectly good pipeline index, so it cannot double as "empty".
+const pipelineUnresolved uint32 = 0xFFFFFFFF
+
+// poolPipelines is every draw pipeline the instances of one material pool can select
+// between. A pool is keyed by a Shader that never changes for its lifetime, so the
+// only things that vary within it are the per-instance cull and blend modes. Three
+// values each, so the entire space is a fixed table indexed directly — no hashing, no
+// scan, no map — filled lazily because most pools use one or two of the cells.
+type poolPipelines struct {
+	table [3][3]uint32 // [cull][blend]
+}
+
+func newPoolPipelines() poolPipelines {
+	var pp poolPipelines
+	for c := range pp.table {
+		for b := range pp.table[c] {
+			pp.table[c][b] = pipelineUnresolved
+		}
+	}
+	return pp
+}
+
+// pipelineForPool resolves the draw pipeline for one material of a pool, given that
+// material's rasterization state.
 //
-// alive is advanced by the newborn count uploaded this call, never read back down as
-// particles die on the GPU: a deliberate, documented CPU-side over-estimate (see
-// particleData.alive) that trades some capacity headroom for needing no GPU readback.
-func (r *Renderer) dispatchParticleUpdate(cmd gpu.CommandBuffer, st *renderState, p *scenes.FramePacket) {
-	for _, pp := range p.Particles.Data {
-		births := pp.Newborns.Count
-		if pp.Capacity == 0 && births == 0 {
-			continue
-		}
-		ps := st.particleFor(pp.ID)
-		ps.seen = true
-		r.ensureParticleBuffers(ps, pp, births)
-
-		if births > 0 {
-			ps.pendingBuf.Write(utils.ToBytesSlice(p.Newborns.Data[pp.Newborns.First:][:births]), 0)
-		}
-		data := utils.ToBytes(&indirectCmd{
-			indexCount: r.GeometryStore.IndexCount(pp.Geometry.Slot),
-			firstIndex: r.GeometryStore.IndexBase(pp.Geometry.Slot),
-		})
-		ps.indirectBuf.Write(data, 0)
-
-		var pendingAddr uint64
-		if births > 0 {
-			pendingAddr = ps.pendingBuf.Addr
-		}
-		ur := particleUpdateRoot{
-			src: ps.buffers[ps.current].Addr, dst: ps.buffers[1-ps.current].Addr,
-			pending: pendingAddr, indirect: ps.indirectBuf.Addr,
-			capacity: pp.Capacity, pendingCount: births, dt: pp.DT,
-			gravity: pp.Update.Gravity, drag: pp.Update.Drag,
-		}
-		if pp.Update.SizeOverLife.Enabled {
-			ur.sizeEnabled, ur.sizeStart, ur.sizeEnd = 1, pp.Update.SizeOverLife.Start, pp.Update.SizeOverLife.End
-		}
-		if pp.Update.OpacityOverLife.Enabled {
-			ur.opacityEnabled, ur.opacityStart, ur.opacityEnd = 1, pp.Update.OpacityOverLife.Start, pp.Update.OpacityOverLife.End
-		}
-		threads := pp.Capacity + births
-		cmd.SetPipeline(r.particleUpdatePipeline)
-		cmd.Dispatch(utils.ToBytes(&ur), (threads+63)/64, 1, 1)
-
-		ps.current = 1 - ps.current
+// The shaders come from the pool rather than the material because the pool is keyed by
+// those very shaders — a material cannot disagree with it, and so cannot ask for a
+// pipeline built out of SPIR-V its pool does not have.
+func (r *Renderer) pipelineForPool(p *materials.Pool, cull materials.CullMode, blend materials.BlendMode) uint32 {
+	for uint32(len(r.pools)) <= p.Index() {
+		r.pools = append(r.pools, newPoolPipelines())
 	}
-	st.retireUnseenParticles(r.backend)
+	pp := &r.pools[p.Index()]
+
+	if id := pp.table[cull][blend]; id != pipelineUnresolved {
+		return id
+	}
+	sh := p.Shader()
+	id := r.pipelineFor(materialPipeline{
+		shaderHash: p.Hash(), vertex: sh.Vertex, fragment: sh.Fragment,
+		cull: cull, blend: blend,
+	})
+	pp.table[cull][blend] = id
+	return id
 }
 
-// ensureParticleBuffers allocates a system's ping-pong particle buffers and
-// indirect-draw args on first use (sized to capacity, fixed at construction), and grows
-// the newborn scratch buffer to fit this frame's births. A fresh or cleared system's
-// particle buffers are zeroed so every slot starts dead (age 0 >= lifetime 0) rather
-// than reading whatever was in freshly allocated memory — see particle_update.comp.glsl.
-func (r *Renderer) ensureParticleBuffers(ps *particleState, pp scenes.ParticlePacket, births uint32) {
-	if !ps.ready || ps.epoch != pp.Epoch {
-		size := max(uint64(pp.Capacity)*uint64(particleRecordSize), 1)
-		for i := range ps.buffers {
-			if !ps.buffers[i].IsValid() || ps.buffers[i].Size < size {
-				if ps.buffers[i].IsValid() {
-					r.backend.Free(ps.buffers[i])
+// sameKey compares two pipeline keys.
+func sameKey(a, b materialPipeline) bool {
+	return a.shaderHash == b.shaderHash && a.cull == b.cull && a.blend == b.blend
+}
+
+// debugViewActive reports whether this frame draws a debug view instead of shading.
+func (r *Renderer) debugViewActive() bool {
+	return r.debugView != DebugOff && int(r.debugView) < len(debugViewNames)
+}
+
+// debugSurfaceView reports whether the active view runs over the ordinary scene vertex
+// stage (reading its varyings) rather than the id pass's own one.
+func (r *Renderer) debugSurfaceView() bool {
+	return r.debugView == DebugNormal || r.debugView == DebugDepth || r.debugView == DebugPosition
+}
+
+// debugPipelineFor builds (once per view) the pipeline that draws it.
+//
+// CullNone, not CullBack: a drawable's own material may be double-sided or
+// front-culled, and one shared pipeline has no per-drawable way to know which —
+// hardcoding CullBack drops every backface of any double-sided object (foliage,
+// glass), which shows as missing geometry. Nothing here depends on winding.
+func (r *Renderer) debugPipelineFor(v DebugView) gpu.Pipeline {
+	if p := r.debugPipelines[v]; p.H != 0 {
+		return p
+	}
+	vert := shaders.SceneDebugIDVert
+	if r.debugSurfaceView() {
+		vert = shaders.SceneDraw
+	}
+	p := r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
+		VertexShader:   shaders.ForBackend(r.backend, vert),
+		FragmentShader: shaders.ForBackend(r.backend, debugFragment(v)),
+		Topology:       gpu.TopologyTriangles, ColorFormats: []gpu.Format{r.color},
+		DepthFormat: gpu.FormatDepth32F, DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareGreater,
+		CullMode: gpu.CullNone, FrontFaceCW: true, Label: "debug-" + v.String(),
+	})
+	r.debugPipelines[v] = p
+	return p
+}
+
+// --------------------------------------------------------------------------------------
+// Overlay and console
+// --------------------------------------------------------------------------------------
+
+// ensureOverlay creates the shared debug overlay if a consumer (the FPS HUD or the
+// console) needs it and the pipelines it depends on exist yet. It is deferred rather
+// than created up front because a renderer that never shows either should not pay for
+// the pipeline.
+func (r *Renderer) ensureOverlay() {
+	if r.overlay == nil && r.pipelinesReady {
+		r.overlay = newOverlay(r.backend, r.TextureStore, r.scale, r.color, gpu.FormatDepth32F)
+	}
+}
+
+// overlayActive reports whether anything wants the overlay drawn this frame.
+func (r *Renderer) overlayActive() bool {
+	return r.showFPS || r.IsConsoleOpen()
+}
+
+// registerBuiltins exposes the renderer's own switches on a freshly created console,
+// so a console is useful the moment it is enabled rather than only after the
+// application has bound things by hand. Every one of these was previously reachable
+// only by editing code and rebuilding.
+//
+// Names are dotted and grouped by subject (shadow.*, stats.*) so `list shadow.` filters
+// usefully and tab completion narrows in the same way.
+func (r *Renderer) registerBuiltins(c *console.Console) {
+	console.BindFunc(c, "shadows", r.ShadowsEnabled,
+		func(v bool) error { r.EnableShadows(v); return nil },
+		"render shadow maps")
+
+	console.BindFunc(c, "shadow.distance", r.ShadowDistance,
+		func(v float32) error { r.SetShadowDistance(v); return nil },
+		"directional shadow fit distance, world units (0 = auto)")
+
+	c.Register("shadow.filter",
+		"kernel directional shadow lookups use: "+strings.Join(ShadowFilterNames(), "/"),
+		func() string { return r.ShadowFilter().String() },
+		func(v string) error {
+			filter, ok := ParseShadowFilter(v)
+			if !ok {
+				return fmt.Errorf("unknown filter %q; want one of %s", v, strings.Join(ShadowFilterNames(), ", "))
+			}
+			r.SetShadowFilter(filter)
+			return nil
+		})
+
+	console.BindFunc(c, "shadow.near", r.ShadowNear,
+		func(v float32) error { r.SetShadowNear(v); return nil },
+		"cascaded: distance the split starts from, world units (0 = auto)")
+
+	console.BindFunc(c, "shadow.cascades", func() uint32 { return uint32(cascadeSettings(r).Levels) },
+		func(v uint32) error {
+			if v == 0 || v > MaxShadowCascades {
+				return fmt.Errorf("cascades must be 1..%d", MaxShadowCascades)
+			}
+			cs := cascadeSettings(r)
+			cs.Levels = int(v)
+			r.SetShadows(cs)
+			return nil
+		},
+		"cascaded: how many slices the view is split into")
+
+	// The boundaries as a comma list, which is what tuning a scene actually comes down
+	// to: "shadow.steps 8,25,80" is the whole of it. Empty derives them.
+	c.Register("shadow.steps",
+		"cascaded: boundary distances, comma separated, innermost first, or \"auto\"",
+		func() string {
+			cs := cascadeSettings(r)
+			if cs.AutoSteps || len(cs.Steps) == 0 {
+				return "auto"
+			}
+			parts := make([]string, len(cs.Steps))
+			for i, v := range cs.Steps {
+				parts[i] = strconv.FormatFloat(float64(v), 'g', -1, 32)
+			}
+			return strings.Join(parts, ",")
+		},
+		func(v string) error {
+			cs := cascadeSettings(r)
+			v = strings.TrimSpace(v)
+			if v == "" || v == "auto" {
+				cs.Steps, cs.AutoSteps = nil, true
+				r.SetShadows(cs)
+				return nil
+			}
+			fields := strings.Split(v, ",")
+			if len(fields) > MaxShadowCascades {
+				return fmt.Errorf("at most %d steps", MaxShadowCascades)
+			}
+			steps := make([]float32, 0, len(fields))
+			prev := float32(0)
+			for _, f := range fields {
+				d, err := strconv.ParseFloat(strings.TrimSpace(f), 32)
+				if err != nil {
+					return fmt.Errorf("step %q is not a distance", f)
 				}
-				ps.buffers[i] = r.backend.Alloc(size, gpu.MemoryHost, "particles")
+				if float32(d) <= prev {
+					return fmt.Errorf("steps must increase; %g does not follow %g", d, prev)
+				}
+				prev = float32(d)
+				steps = append(steps, float32(d))
 			}
-			clear(unsafe.Slice((*byte)(ps.buffers[i].Ptr), ps.buffers[i].Size))
-		}
-		if !ps.indirectBuf.IsValid() {
-			ps.indirectBuf = r.backend.Alloc(uint64(indirectSize), gpu.MemoryHost, "particles-indirect")
-		}
-		ps.current, ps.ready, ps.epoch = 0, true, pp.Epoch
-	}
-	if births > 0 {
-		if size := uint64(births) * uint64(particleRecordSize); !ps.pendingBuf.IsValid() || ps.pendingBuf.Size < size {
-			if ps.pendingBuf.IsValid() {
-				r.backend.Free(ps.pendingBuf)
-			}
-			ps.pendingBuf = r.backend.Alloc(size, gpu.MemoryHost, "particles-pending")
-		}
-	}
-}
-
-// drawParticles issues one indirect draw per attached particle container, reading the
-// instance count dispatchParticleUpdate's kernel just compacted. Each container's
-// pipeline is resolved via the regular pipelineForMaterial path (its Material is a
-// *materials.BasicParticleMaterial, whose Vertex/Forward already are the particle
-// shaders — see basic_particle.go) and draws directly — unlike meshes, containers
-// are never batched into drawList's multi-draw-indirect runs (one geometry/material
-// per container already, so there is nothing to batch).
-func (r *Renderer) drawParticles(cmd gpu.CommandBuffer, st *renderState, p *scenes.FramePacket, viewProj glm.Mat4f, eye glm.Vec3f) {
-	idx := r.GeometryStore.IndexBuffer()
-	for _, pp := range p.Particles.Data {
-		ps, ok := st.particles[pp.ID]
-		if !ok || !ps.ready {
-			continue
-		}
-		id := p.Materials.Data[pp.Material]
-		pool := r.MaterialStore.PoolAt(id.Pool)
-		dr := particleDrawRoot{
-			viewProj: viewProj,
-			pos:      r.GeometryStore.PositionsAddr(), attr: r.GeometryStore.AttributesAddr(), descs: r.GeometryStore.DescriptorsAddr(),
-			models: st.dl.worldBuf.Addr, particles: ps.buffers[ps.current].Addr,
-			materials: pool.RecordsAddr(), lights: st.lights.Addr(),
-			eye:        glm.Vec4f{eye[0], eye[1], eye[2], 1},
-			geometryID: pp.Geometry.Slot, materialID: id.Slot, transformID: pp.Transform,
-			time: p.Time,
-		}
-		cmd.SetPipeline(r.drawPipelines[r.pipelineForPool(pool, pool.Cull(id.Slot), pool.Blend(id.Slot))])
-		cmd.DrawIndexedIndirect(utils.ToBytes(&dr), idx, gpu.IndexUint32, ps.indirectBuf, 0, 1, indirectSize)
-	}
-}
-
-// recordShadowDepth renders the caster geometry into a light's depth map from its
-// camera. It uses the view's own compacted-visible buffer (culled with castersOnly)
-// and a single position-only MDI over every batch — material/pipeline don't matter
-// for depth, so all batches draw with the one shadow pipeline.
-func (r *Renderer) recordShadowDepth(cmd gpu.CommandBuffer, dl *drawList, v *drawView, sv shadowView) {
-	width, height := sv.width, sv.height
-	sr := shadowRoot{
-		viewProj:  sv.cam.ViewProjection(),
-		pos:       r.GeometryStore.PositionsAddr(),
-		descs:     r.GeometryStore.DescriptorsAddr(),
-		models:    dl.worldBuf.Addr,
-		drawables: dl.drawableBuf.Addr,
-		visible:   v.visibleBuf.Addr,
-	}
-	// Cascades share a texture, so only the first view clears it; the rest load what the
-	// earlier ones drew and confine themselves to their own square with the scissor.
-	load := gpu.LoadKeep
-	if sv.clear {
-		load = gpu.LoadClear
-	}
-	cmd.BeginRenderPass(gpu.RenderTargets{
-		Depth: &gpu.DepthAttachment{Texture: r.TextureStore.GPU(sv.m), Load: load, Store: gpu.StoreKeep, Clear: 0.0},
-	})
-	cmd.SetViewport(float32(sv.x), 0, float32(width), float32(height), 0, 1)
-	cmd.SetScissor(sv.x, 0, int32(width), int32(height))
-
-	cmd.SetPipeline(r.shadowPipeline)
-	cmd.DrawIndexedIndirect(utils.ToBytes(&sr), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, v.indirectBuf, 0, uint32(dl.batchCount()), indirectSize)
-	cmd.EndRenderPass()
-}
-
-// fillDrawRoots writes each pipeline run's drawRoot (the same layout serves both the
-// forward and the G-buffer pass — a gbuffer fragment shader just doesn't read
-// lights/eye/shadowSampler). Filling every run regardless of pass keeps this call
-// independent of which passes actually run this frame; issueDraws filters by pass.
-func (r *Renderer) fillDrawRoots(dl *drawList, viewProj glm.Mat4f, eye glm.Vec3f, lightsAddr uint64, elapsed float32) {
-	if len(dl.runs) == 0 {
-		return
-	}
-	// Roots now travel inline with each draw, so they live in a plain slice the draw
-	// list reuses rather than in a GPU buffer.
-	if cap(dl.roots) < len(dl.runs) {
-		dl.roots = make([]drawRoot, len(dl.runs))
-	}
-	roots := dl.roots[:len(dl.runs)]
-	for ri := range dl.runs {
-		run := &dl.runs[ri]
-		roots[ri] = drawRoot{
-			viewProj:      viewProj,
-			pos:           r.GeometryStore.PositionsAddr(),
-			attr:          r.GeometryStore.AttributesAddr(),
-			descs:         r.GeometryStore.DescriptorsAddr(),
-			models:        dl.worldBuf.Addr,
-			drawables:     dl.drawableBuf.Addr,
-			visible:       dl.visibleBuf.Addr,
-			materials:     run.pool.RecordsAddr(),
-			lights:        lightsAddr,
-			eye:           glm.Vec4f{eye[0], eye[1], eye[2], 1},
-			shadowSampler: r.shadowSampler.Index,
-			time:          elapsed,
-		}
-	}
-}
-
-// issueDraws records one multi-draw-indirect call per pipeline run belonging to
-// pass: all of a material type's per-geometry commands go in a single
-// DrawIndexedIndirect. Each command's
-// firstInstance is its region base, so gl_InstanceIndex indexes the compacted visible
-// buffer directly — no per-command push constant.
-func (r *Renderer) issueDraws(cmd gpu.CommandBuffer, dl *drawList, p pass) {
-	if len(dl.runs) == 0 {
-		return
-	}
-	idx := r.GeometryStore.IndexBuffer()
-	for ri := range dl.runs {
-		run := &dl.runs[ri]
-		key := r.drawPipelineKeys[run.pipeline]
-		if key.pass != p {
-			continue
-		}
-		cmd.SetPipeline(r.drawPipelines[run.pipeline])
-		cmd.DrawIndexedIndirect(utils.ToBytes(&dl.roots[ri]), idx, gpu.IndexUint32, dl.indirectBuf, uint64(run.firstBatch)*uint64(indirectSize), run.count, indirectSize)
-	}
-}
-
-// ensureGBufferSampler creates the sampler both fullscreen passes read the G-buffer
-// with, on first use.
-//
-// Plain (non-comparison), unlike shadowSampler, which is compare-mode-only and would
-// return comparison results instead of raw values if reused here.
-//
-// Point filtering, deliberately: these passes read texel-for-texel, and the data is
-// not filterable — interpolating an octahedral normal, a packed model id or a depth
-// value between texels is meaningless. Linear filtering on a D32_SFLOAT image is also
-// not guaranteed to be supported.
-func (r *Renderer) ensureGBufferSampler() {
-	if r.gbufferSampler.H != 0 {
-		return
-	}
-	r.gbufferSampler = r.backend.CreateSampler(gpu.SamplerDescriptor{
-		AddressU: gpu.AddressClamp, AddressV: gpu.AddressClamp,
-		Label: "gbuffer-read",
-	})
-}
-
-// recordLighting shades the G-buffer: one fullscreen pass per unique shading model
-// referenced by this frame's active gbuffer runs, each additively blending its
-// contribution onto target (which already holds the G-buffer pass's emissive write).
-//
-// NOTE: with more than one active model this shades every non-background pixel in
-// every pass (no per-model masking yet — fine while PBR is the only built-in deferred
-// model; a real fix, e.g. a model-id compare or a stencil mask written during the
-// G-buffer pass, is needed before a second one ships).
-func (r *Renderer) recordLighting(cmd gpu.CommandBuffer, dl *drawList, target gpu.Texture, viewProj glm.Mat4f, eye glm.Vec3f, lightsAddr uint64) {
-	r.ensureGBufferSampler()
-	invViewProj := viewProj.Inv()
-	lr := lightingRoot{
-		invViewProj:     invViewProj,
-		eye:             glm.Vec4f{eye[0], eye[1], eye[2], 1},
-		lights:          lightsAddr,
-		shadowSampler:   r.shadowSampler.Index,
-		gbufferSampler:  r.gbufferSampler.Index,
-		diffuseTexture:  r.diffuseTexture.Index,
-		normalTexture:   r.normalTexture.Index,
-		materialTexture: r.materialTexture.Index,
-		emissiveTexture: r.emissiveTexture.Index,
-		depthTexture:    r.depth.Index,
-		screen:          [2]float32{float32(r.width), float32(r.height)},
-	}
-	// One pass per distinct shading model referenced this frame (scratch is reused, so
-	// no per-frame allocation once it has grown to the model count).
-	r.lightingScratch = r.lightingScratch[:0]
-	for i := range dl.runs {
-		k := r.drawPipelineKeys[dl.runs[i].pipeline]
-		if k.pass != passGBuffer || slices.Contains(r.lightingScratch, k.lightingIdx) {
-			continue
-		}
-		r.lightingScratch = append(r.lightingScratch, k.lightingIdx)
-		cmd.BeginRenderPass(gpu.RenderTargets{
-			Color: []gpu.ColorAttachment{{Texture: target, Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: r.clear}},
-			Depth: &gpu.DepthAttachment{Texture: r.depth, Load: gpu.LoadKeep, Store: gpu.StoreKeep, ReadOnly: true},
+			cs.Steps, cs.AutoSteps = steps, false
+			r.SetShadows(cs)
+			return nil
 		})
-		cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
-		cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
-		cmd.SetPipeline(r.lightingPipelines[k.lightingIdx])
-		cmd.Draw(utils.ToBytes(&lr), 3, 1, 0, 0)
-		cmd.EndRenderPass()
-	}
+
+	// The fit is a choice between two named shapes rather than a number, so it goes
+	// through Register — "set shadow.algorithm cascaded" reads better than a magic value,
+	// and the error lists what is valid. Switching keeps whatever cascade settings were
+	// already there, so flipping back and forth does not discard a tuned split.
+	c.Register("shadow.algorithm",
+		"how directional shadow cameras are fitted: uniform/cascaded",
+		func() string {
+			if _, ok := r.Shadows().(ShadowCascaded); ok {
+				return "cascaded"
+			}
+			return "uniform"
+		},
+		func(v string) error {
+			switch v {
+			case "uniform":
+				r.SetShadows(ShadowUniform{})
+			case "cascaded":
+				r.SetShadows(cascadeSettings(r))
+			default:
+				return fmt.Errorf("unknown algorithm %q; want one of uniform, cascaded", v)
+			}
+			return nil
+		})
+
+	console.BindFunc(c, "depthprepass", r.DepthPrepassEnabled,
+		func(v bool) error { r.EnableDepthPrepass(v); return nil },
+		"fill depth before the forward pass so shading runs once per pixel")
+
+	console.BindFunc(c, "stats", r.StatsVisible,
+		func(v bool) error { r.ShowFPS(v); return nil },
+		"show the FPS / CPU / GPU HUD")
+
+	bindColor(c, "stats.color", r.FontColor, r.SetFontColor,
+		"HUD text colour, \"r g b a\" in [0,1]")
+
+	bindColor(c, "clear.color", r.ClearColor, r.SetClearColor,
+		"background colour, \"r g b a\" in [0,1]")
+
+	// The debug view is an enum, so it goes through Register with its own names
+	// rather than Bind — "set debug normal" reads better than a magic number, and
+	// the error lists what is valid. Every view is a geometry pass over the scene, so
+	// none of them depends on any other setting being on.
+	c.Register("debug", "show one debug view instead of the shaded frame: "+
+		strings.Join(DebugViewNames(), "/"),
+		func() string { return r.DebugView().String() },
+		func(v string) error {
+			view, ok := ParseDebugView(v)
+			if !ok {
+				return fmt.Errorf("unknown view %q; want one of %s", v, strings.Join(DebugViewNames(), ", "))
+			}
+			r.SetDebugView(view)
+			return nil
+		})
+
+	// Read-only: no setter, so the console reports them rather than pretending they
+	// can be assigned. Resizing is driven by the window, not by a variable.
+	c.Register("size", "framebuffer size in pixels",
+		func() string { w, h := r.Size(); return fmt.Sprintf("%dx%d", w, h) }, nil)
+	c.Register("aspect", "framebuffer aspect ratio",
+		func() string { return fmt.Sprintf("%.4f", r.Aspect()) }, nil)
 }
 
-// buildOverlay composes this frame's overlay from everything that draws into it: the
-// FPS HUD and the console, in that order (the console panel covers the HUD when open).
-func (r *Renderer) buildOverlay() {
-	r.ensureOverlay()
-	if r.overlay == nil {
+// registerCommands adds the console commands that act on the renderer. Unlike a
+// variable, these do something once rather than holding a value.
+func (r *Renderer) registerCommands(c *console.Console) {
+	c.Command("screenshot", "save a PNG of this frame; defaults to a timestamped name",
+		func(args []string) error {
+			path := ""
+			if len(args) > 0 {
+				path = strings.Join(args, " ")
+			}
+			// The capture happens at the end of this very frame, so the result is
+			// reported from the callback rather than returned.
+			r.Screenshot(path, func(p string, err error) {
+				if err != nil {
+					c.Printf("screenshot failed: %v", err)
+					return
+				}
+				c.Printf("wrote %s", p)
+			})
+			return nil
+		})
+}
+
+// --------------------------------------------------------------------------------------
+// Teardown
+// --------------------------------------------------------------------------------------
+
+// ReleaseSource drops the GPU state cached for a producer. Call it when a Scene is
+// destroyed, passing Scene.ID: scene teardown does not reach into a renderer to do
+// this, so nothing else will.
+//
+// Releasing a source that is drawn again is safe, but not free, and not lossless: the
+// caches rebuild from the next packet, while each particle system restarts empty — its
+// simulation lived only in the released buffers — and LOD hysteresis starts over.
+//
+// Renderer.Destroy releases every remaining source, so a program that tears the renderer
+// down at exit need not track this.
+func (r *Renderer) ReleaseSource(id scenes.SourceID) {
+	st, ok := r.sources[id]
+	if !ok {
 		return
 	}
-	r.overlay.reset()
-	if r.showFPS {
-		// Logical points, scaled and snapped by the overlay (which rounds down to a
-		// whole multiple of the font's cell, so this is an upper bound, not exact).
-		const pt, gap, inset = 12, 15, 8
-		size := r.scale * pt
-		ms := func(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
-		x, y := r.scale*inset, r.scale*inset
-		step := r.scale * gap
-		r.overlay.text(fmt.Sprintf("FPS %.0f", r.stats.FPS()), x, y, size, r.fontColor)
-		r.overlay.text(fmt.Sprintf("CPU %.2f ms", ms(r.stats.AvgCPUTime())), x, y+step, size, r.fontColor)
-		if r.gpuValid {
-			r.overlay.text(fmt.Sprintf("GPU %.2f ms", ms(r.stats.AvgGPUTime())), x, y+2*step, size, r.fontColor)
+	r.releaseState(st)
+	delete(r.sources, id)
+}
+
+// releaseState frees everything one source's state holds.
+func (r *Renderer) releaseState(st *renderState) {
+	buffers := []gpu.Buffer{st.worldBuf, st.drawableBuf, st.lodTableBuf, st.jointBuf, st.prevLevelBuf,
+		st.mainCull.indirectBuf, st.mainCull.visibleBuf}
+	for _, cull := range st.shadowCulls {
+		buffers = append(buffers, cull.indirectBuf, cull.visibleBuf)
+	}
+	for _, buf := range buffers {
+		if buf.IsValid() {
+			r.backend.Free(buf)
 		}
 	}
-	if r.console != nil {
-		r.console.Draw(consolePainter{r.overlay}, float32(r.width), float32(r.height))
-	}
-}
 
-func (r *Renderer) readGPU() {
-	if !r.showFPS {
-		return
+	st.lights.Destroy()
+	for _, sh := range st.shadows {
+		sh.destroy()
 	}
-	ts := r.backend.ReadTimestamps(r.gpuPool, 2)
-	if ts == nil || ts[1] <= ts[0] {
-		return
+	for _, ps := range st.particles {
+		ps.destroy(r.backend)
 	}
-	ns := float64(ts[1]-ts[0]) * r.backend.TimestampPeriod()
-	r.stats.AddGPUTime(ns / 1e9)
-	r.gpuValid = true
-}
-
-// flipClipY negates clip-space Y (proj[1][1]*=-1) so images are right-side-up under
-// Vulkan's Y-down NDC. Only screen position is affected.
-func flipClipY(m glm.Mat4f) glm.Mat4f {
-	m[1], m[5], m[9], m[13] = -m[1], -m[5], -m[9], -m[13]
-	return m
 }
 
 // Destroy releases the renderer's GPU resources and the backend it owns.
@@ -1775,27 +2501,26 @@ func (r *Renderer) Destroy() {
 	if r.overlay != nil {
 		r.overlay.destroy()
 	}
-	if r.gpuPool.IsValid() {
-		r.backend.DestroyTimestampPool(r.gpuPool)
-	}
+	r.profiler.disableGPUProfiling(r.backend)
 	if r.pipelinesReady {
 		r.backend.DestroyPipeline(r.cullPipeline)
 		r.backend.DestroyPipeline(r.skinPipeline)
 		r.backend.DestroyPipeline(r.particleUpdatePipeline)
 		r.backend.DestroyPipeline(r.shadowPipeline)
+		for _, p := range r.prepassPipelines {
+			r.backend.DestroyPipeline(p)
+		}
 		for _, p := range r.drawPipelines {
 			r.backend.DestroyPipeline(p)
 		}
-		for _, p := range r.lightingPipelines {
+	}
+	for _, p := range r.debugPipelines {
+		if p.H != 0 {
 			r.backend.DestroyPipeline(p)
 		}
 	}
 	if r.depth.IsValid() {
 		r.backend.DestroyTexture(r.depth)
-	}
-	r.destroyGBuffer()
-	if r.gbufferSampler.H != 0 {
-		r.backend.DestroySampler(r.gbufferSampler)
 	}
 	if r.shadowSampler.H != 0 {
 		r.backend.DestroySampler(r.shadowSampler)
@@ -1812,5 +2537,3 @@ func (r *Renderer) Destroy() {
 	r.uploader.Destroy()
 	r.backend.Destroy()
 }
-
-//TODO: Add a resize method that would adjust the SwapChain size

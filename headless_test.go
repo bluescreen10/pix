@@ -7,7 +7,6 @@ import (
 	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/materials"
 	"github.com/bluescreen10/pix/scenes"
 )
 
@@ -112,12 +111,11 @@ func TestHandAuthoredPacketNeedsNoScene(t *testing.T) {
 	p := scenes.FramePacket{Source: scenes.NewSourceID(), Frame: 1}
 	// Slot 0 stands in for a root nothing draws at; the mesh below is drawn at 1..3.
 	p.Transforms.Data = []glm.Mat4f{glm.Mat4Identity[float32](), at(-6), at(0), at(6)}
-	p.Materials.Data = []materials.ID{mat.ID()}
 	p.Meshes.Data = []scenes.MeshPacket{{
 		ID:         scenes.ObjectID{Index: 1, Gen: 1},
 		Transforms: scenes.IndexRange{First: 1, Count: 3}, // drawn at three transforms
 		Geometry:   geo.ID(),
-		Material:   0,
+		Material:   mat.ID(),
 		Bounds:     geo.BoundingSphere(),
 	}}
 	p.Meshes.Revision = 1

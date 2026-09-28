@@ -11,7 +11,6 @@ import (
 
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/materials"
 	"github.com/bluescreen10/pix/mem"
 )
 
@@ -83,9 +82,6 @@ type Scene struct {
 
 	// freeHead is the first reusable node slot, or invalidIndex when none are free.
 	freeHead uint32
-
-	// local caches each node's local transform matrix.
-	local []glm.Mat4f
 
 	// world caches each node's world-space transform matrix.
 	world []glm.Mat4f
@@ -163,10 +159,6 @@ type Scene struct {
 
 	// nextLightID is the last stable light identity issued by the scene.
 	nextLightID LightID
-
-	// matSlot maps material identities to packet.Materials slots while rebuilding the
-	// packet and is retained to avoid repeated allocation.
-	matSlot map[materials.ID]uint32
 
 	// packet caches the frame description and owns the reusable backing slices that
 	// Extract lends to callers. Scene graph storage such as world remains separate and
@@ -303,7 +295,6 @@ func (s *Scene) allocNode(kind nodeKind) NodeID {
 		s.lastChildren = append(s.lastChildren, NodeID{})
 		s.nextSiblings = append(s.nextSiblings, NodeID{})
 		s.prevSiblings = append(s.prevSiblings, NodeID{})
-		s.local = append(s.local, glm.Mat4fIdentity)
 		s.world = append(s.world, glm.Mat4fIdentity)
 		s.transforms = append(s.transforms, defaultTransform)
 		s.flags = append(s.flags, flagAlive|flagLocalVisible|flagCastShadow|flagReceiveShadow|flagTransformDirty|flagVisibleDirty)
@@ -329,7 +320,6 @@ func (s *Scene) resetSlot(idx uint32, kind nodeKind) {
 	s.lastChildren[idx] = NodeID{}
 	s.nextSiblings[idx] = NodeID{}
 	s.prevSiblings[idx] = NodeID{}
-	s.local[idx] = glm.Mat4fIdentity
 	s.world[idx] = glm.Mat4fIdentity
 	s.transforms[idx] = defaultTransform
 	s.flags[idx] = flagAlive | flagLocalVisible | flagCastShadow | flagReceiveShadow | flagTransformDirty | flagVisibleDirty
@@ -559,7 +549,7 @@ func (s *Scene) updateTopology() {
 	s.topologyDirty = false
 }
 
-// updateTransforms recomputes local + world matrices for dirty nodes in topological
+// updateTransforms recomputes world matrices for dirty nodes in topological
 // (parent-before-child) order. Returns true if anything changed. Called only from
 // Sync, which flushes topology once up front — this assumes topologyOrder/flagAttached
 // are already current and does not flush them itself.
@@ -578,15 +568,15 @@ func (s *Scene) updateTransforms() {
 
 		anyDirty = true
 
-		// update local transform
-		s.local[i] = s.transforms[i].Matrix()
-
-		// update world transform
+		// A node's local matrix is needed only here, on the way to its world matrix, so
+		// it is not kept. If a caller ever needs it cached, the cache belongs inside
+		// Transform, beside the components it is derived from.
+		local := s.transforms[i].Matrix()
 		parent := s.parents[i]
 		if !parent.isValid() {
-			s.world[i] = s.local[i]
+			s.world[i] = local
 		} else {
-			s.world[i] = s.world[parent.index].Mul4x4(s.local[i])
+			s.world[i] = s.world[parent.index].Mul4x4(local)
 		}
 
 		// mark self as non-dirty
@@ -657,7 +647,7 @@ func (s *Scene) FrameSphere(percentile float32) (center glm.Vec3f, radius float3
 	worldRadius := func(m glm.Mat4f, r float32) float32 {
 		return r * maxColumnLength(m)
 	}
-	// Scratch is retained on the Scene: this runs every frame (prepareShadows fits
+	// Scratch is retained on the Scene: this runs every frame (Renderer.fitShadows fits
 	// the directional shadow camera from it), so it must not allocate per call.
 	centers := s.frameCenters[:0]
 	reach := s.frameReach[:0]

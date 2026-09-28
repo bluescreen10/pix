@@ -1,7 +1,5 @@
 package scenes
 
-import "github.com/bluescreen10/pix/materials"
-
 // Extract publishes this scene's current rendering description into p. It is the whole
 // of what a renderer is told; nothing downstream of it touches a Node, a payload table,
 // or the Scene itself.
@@ -22,7 +20,6 @@ func (s *Scene) Extract(p *FramePacket) {
 		revision := s.packet.Meshes.Revision + 1
 		s.packet.Meshes.Revision = revision
 		s.packet.LODs.Revision = revision
-		s.packet.Materials.Revision = revision
 		s.packetDirty = false
 	}
 
@@ -60,13 +57,8 @@ func (s *Scene) Extract(p *FramePacket) {
 // every transform set on it. Omitting it makes the mistake obvious — the mesh is simply
 // missing until it is added.
 func (s *Scene) rebuildPacketTables() {
-	if s.matSlot == nil {
-		s.matSlot = make(map[materials.ID]uint32)
-	}
-	clear(s.matSlot)
 	s.packet.Meshes.Data = s.packet.Meshes.Data[:0]
 	s.packet.LODs.Data = s.packet.LODs.Data[:0]
-	s.packet.Materials.Data = s.packet.Materials.Data[:0]
 
 	for i := range s.meshes {
 		md := &s.meshes[i]
@@ -93,7 +85,7 @@ func (s *Scene) rebuildPacketTables() {
 			ID:         s.objectID(sm.ownerNode),
 			Transforms: IndexRange{First: root, Count: 1},
 			Geometry:   sm.outputGeo.ID(),
-			Material:   s.materialSlot(sm.material),
+			Material:   sm.material.ID(),
 			Bounds:     sm.bounds,
 			Flags:      s.renderFlags(sm.ownerNode),
 		})
@@ -124,34 +116,17 @@ func (s *Scene) rebuildPacketTables() {
 // else, so only the part above varies.
 func (s *Scene) addMesh(mp MeshPacket, lods []lodLevel) {
 	mp.Geometry = lods[0].geometry.ID()
-	mp.Material = s.materialSlot(lods[0].material)
+	mp.Material = lods[0].material.ID()
 	mp.LODRange = IndexRange{First: uint32(len(s.packet.LODs.Data))}
 	for _, l := range lods[1:] {
 		s.packet.LODs.Data = append(s.packet.LODs.Data, LODLevel{
 			Geometry:    l.geometry.ID(),
-			Material:    s.materialSlot(l.material),
+			Material:    l.material.ID(),
 			MinDistance: l.minDistance,
 		})
 		mp.LODRange.Count++
 	}
 	s.packet.Meshes.Data = append(s.packet.Meshes.Data, mp)
-}
-
-// materialSlot returns m's slot in the distinct material table, appending it the first
-// time this rebuild sees it. The dedup map is scratch, cleared per rebuild and reused so
-// the walk does not allocate one every time.
-//
-// The indirection is what keeps the material set small: a thousand-instance field with
-// four LOD levels contributes a thousand draws and at most four material entries.
-func (s *Scene) materialSlot(m materials.Material) uint32 {
-	id := m.ID()
-	slot, seen := s.matSlot[id]
-	if !seen {
-		slot = uint32(len(s.packet.Materials.Data))
-		s.packet.Materials.Data = append(s.packet.Materials.Data, id)
-		s.matSlot[id] = slot
-	}
-	return slot
 }
 
 // objectID is a node's identity as a packet object: stable while the node lives, and
@@ -272,7 +247,7 @@ func (s *Scene) extractParticles() {
 			ID:        d.id,
 			Transform: d.ownerNode,
 			Geometry:  d.geometry.ID(),
-			Material:  s.materialSlot(d.material),
+			Material:  d.material.ID(),
 			Capacity:  d.capacity,
 			Update:    d.update,
 			DT:        d.dt,

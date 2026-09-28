@@ -6,6 +6,7 @@ import (
 	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/materials"
 	"github.com/bluescreen10/pix/scenes"
 )
 
@@ -67,9 +68,17 @@ func TestExtractDescribesObjectsNotDrawRecords(t *testing.T) {
 	if len(p.LODs.Data) != 2 {
 		t.Errorf("packet has %d coarser LOD levels, want 2", len(p.LODs.Data))
 	}
-	// Red and blue, each referenced several times across meshes and levels.
-	if len(p.Materials.Data) != 2 {
-		t.Errorf("packet has %d distinct materials, want 2", len(p.Materials.Data))
+	// Red and blue, each referenced several times across meshes and levels — and each
+	// carried inline on the entry that uses it rather than through a shared table.
+	seen := map[materials.ID]bool{}
+	for _, m := range p.Meshes.Data {
+		seen[m.Material] = true
+	}
+	for _, l := range p.LODs.Data {
+		seen[l.Material] = true
+	}
+	if len(seen) != 2 {
+		t.Errorf("packet references %d distinct materials, want 2", len(seen))
 	}
 	if p.Source != scene.ID() {
 		t.Errorf("packet source %d, want the scene's %d", p.Source, scene.ID())

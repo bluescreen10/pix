@@ -104,9 +104,11 @@ func (n Node) WorldTransform() glm.Mat4f {
 	return n.scene.world[n.slot()]
 }
 
-// Transform returns the local transform matrix.
+// Transform returns the node's local transform matrix, computed from its current
+// position, rotation and scale. Unlike WorldTransform, which is cached as of the last
+// Sync, it reflects edits made since.
 func (n Node) Transform() glm.Mat4f {
-	return n.scene.local[n.slot()]
+	return n.scene.transforms[n.slot()].Matrix()
 }
 
 // Flags

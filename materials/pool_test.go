@@ -14,7 +14,7 @@ import (
 func TestRegisterRejectsWrongRecordSize(t *testing.T) {
 	store, _ := testStore(t)
 
-	st := store.Pool(materials.Shader{Forward: shaders.BasicForward}, "probe")
+	st := store.Pool(materials.Shader{Fragment: shaders.BasicFragment}, "probe")
 	st.Create(&materials.BasicMaterial{}) // sets the store's stride to the Basic record size
 
 	defer func() {

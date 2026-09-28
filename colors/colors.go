@@ -41,8 +41,8 @@ func (c RGB[T]) B() T {
 }
 
 // RGBA returns the colour with an opaque alpha added.
-func (c RGB[T]) RGBA() RGBA[T] {
-	return RGBA[T]{c[0], c[1], c[2], 1}
+func (c RGB[T]) RGBA(a T) RGBA[T] {
+	return RGBA[T]{c[0], c[1], c[2], a}
 }
 
 // RGB aliases. Names follow the per-channel convention described on the package.

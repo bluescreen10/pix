@@ -8,7 +8,7 @@ import (
 )
 
 // TestDebugViewNamesRoundTrip: the console addresses views by name, so parse and String
-// must agree for every one of them — a mismatch means `set gbuffer normal` reports back
+// must agree for every one of them — a mismatch means `set debug normal` reports back
 // something else.
 func TestDebugViewNamesRoundTrip(t *testing.T) {
 	for _, name := range pix.DebugViewNames() {
@@ -29,77 +29,72 @@ func TestDebugViewNamesRoundTrip(t *testing.T) {
 	}
 }
 
-// TestDebugViewNeedsDeferred: the views show the deferred path's intermediate targets,
-// which the forward path never fills — so the setting must lie dormant rather than
-// producing a black or garbage frame. Checked by rendering, not by the internal
-// activity flag: with deferred off, setting a view must not change the frame at all;
-// with deferred on, it must.
-func TestDebugViewNeedsDeferred(t *testing.T) {
+// TestEveryDebugViewChangesTheFrame: a view is a geometry pass with its own fragment
+// shader, so every one of them must visibly replace the shaded frame — for any
+// material, with nothing else switched on first.
+//
+// They used to be re-reads of the G-buffer and so lay dormant unless deferred rendering
+// was enabled, which is exactly the coupling this removes.
+func TestEveryDebugViewChangesTheFrame(t *testing.T) {
 	r, scene, cam := shotScene(t, 32, 32)
 
-	r.EnableDeferredRendering(false)
 	r.SetDebugView(pix.DebugOff)
 	r.Render(scene, cam)
-	off := append([]byte(nil), r.Pixels()...)
+	shaded := append([]byte(nil), r.Pixels()...)
 
-	r.SetDebugView(pix.DebugNormal)
-	r.Render(scene, cam)
-	dormant := r.Pixels()
-	if !bytes.Equal(off, dormant) {
-		t.Error("a debug view changed the frame with deferred rendering off — it should lie dormant")
-	}
-
-	r.EnableDeferredRendering(true)
-	r.Render(scene, cam)
-	active := r.Pixels()
-	if bytes.Equal(off, active) {
-		t.Error("a debug view made no difference with deferred rendering on")
+	for _, name := range pix.DebugViewNames() {
+		v, _ := pix.ParseDebugView(name)
+		if v == pix.DebugOff {
+			continue
+		}
+		r.SetDebugView(v)
+		r.Render(scene, cam)
+		if bytes.Equal(shaded, r.Pixels()) {
+			t.Errorf("%v produced the shaded frame unchanged", v)
+		}
 	}
 }
 
-// TestDebugViewsRenderDistinctFrames drives every view through a real deferred frame.
-// Each shows different data, so each must produce a different image — and none may be
-// blank, which is what a broken target index or an unbound sampler would look like.
+// TestDebugViewsRenderDistinctFrames drives every view through a real frame. Each shows
+// different data, so each must produce a different image — and none may be blank, which
+// is what a wrong shader or an unfilled root would look like.
 func TestDebugViewsRenderDistinctFrames(t *testing.T) {
 	r, scene, cam := shotScene(t, 96, 96)
-	r.EnableDeferredRendering(true)
 
-	frame := func(v pix.DebugView) (sum int64, nonBlank bool) {
+	// The frames are compared as pixels, not as a summed luma. A sum is a lossy hash,
+	// and two of these views genuinely collided on one while rendering different
+	// images — the test reported a bug that wasn't there.
+	frame := func(v pix.DebugView) (px []byte, nonBlank bool) {
 		r.SetDebugView(v)
 		r.Render(scene, cam)
-		px := r.Pixels()
-		var lit int
+		px = append([]byte(nil), r.Pixels()...)
 		for i := 0; i+3 < len(px); i += 4 {
-			sum += int64(px[i]) + int64(px[i+1]) + int64(px[i+2])
 			if px[i] > 8 || px[i+1] > 8 || px[i+2] > 8 {
-				lit++
+				return px, true
 			}
 		}
-		return sum, lit > 0
+		return px, false
 	}
 
 	shaded, _ := frame(pix.DebugOff)
-	seen := map[int64]pix.DebugView{shaded: pix.DebugOff}
+	seen := map[pix.DebugView][]byte{pix.DebugOff: shaded}
 
-	// DebugEmissive is left out on purpose: nothing in this scene emits, so its target
-	// is legitimately black and the not-blank check below would fail on correct output.
-	for _, v := range []pix.DebugView{pix.DebugAlbedo, pix.DebugNormal, pix.DebugMaterial, pix.DebugDepth, pix.DebugPosition} {
-		sum, nonBlank := frame(v)
+	for _, v := range []pix.DebugView{pix.DebugNormal, pix.DebugDepth, pix.DebugPosition, pix.DebugObjectID, pix.DebugTriangleID} {
+		px, nonBlank := frame(v)
 		if !nonBlank {
 			t.Errorf("%v rendered a blank frame", v)
 		}
-		if prev, dup := seen[sum]; dup {
-			t.Errorf("%v produced the same image as %v — it is probably showing the wrong target", v, prev)
+		for prev, prevPx := range seen {
+			if bytes.Equal(px, prevPx) {
+				t.Errorf("%v produced the same image as %v — it is probably running the wrong shader", v, prev)
+			}
 		}
-		seen[sum] = v
-		t.Logf("%-9s luma sum %d", v, sum)
+		seen[v] = px
 	}
 
 	// Turning it off must restore the shaded frame exactly.
-	r.SetDebugView(pix.DebugOff)
-	r.Render(scene, cam)
-	if again, _ := frame(pix.DebugOff); again != shaded {
-		t.Errorf("returning to DebugOff did not reproduce the shaded frame: %d vs %d", again, shaded)
+	if again, _ := frame(pix.DebugOff); !bytes.Equal(again, shaded) {
+		t.Error("returning to DebugOff did not reproduce the shaded frame")
 	}
 }
 
@@ -112,10 +107,9 @@ func TestDebugViewsRenderDistinctFrames(t *testing.T) {
 // regresses the test hangs rather than failing, and `go test` kills it on timeout.
 func TestDebugViewWithStatsCompletesFrames(t *testing.T) {
 	r, scene, cam := shotScene(t, 64, 64)
-	r.EnableDeferredRendering(true)
 	r.ShowFPS(true) // arms the GPU timestamp queries
 
-	for _, v := range []pix.DebugView{pix.DebugOff, pix.DebugNormal, pix.DebugAlbedo, pix.DebugDepth, pix.DebugOff} {
+	for _, v := range []pix.DebugView{pix.DebugOff, pix.DebugNormal, pix.DebugObjectID, pix.DebugDepth, pix.DebugOff} {
 		r.SetDebugView(v)
 		for range 3 { // several frames: the read happens at the end of each
 			r.Render(scene, cam)
@@ -130,7 +124,6 @@ func TestDebugViewWithStatsCompletesFrames(t *testing.T) {
 // skipped, toggling the HUD would make no visible difference.
 func TestDebugViewKeepsTheOverlay(t *testing.T) {
 	r, scene, cam := shotScene(t, 64, 64)
-	r.EnableDeferredRendering(true)
 	r.SetDebugView(pix.DebugNormal)
 
 	r.ShowFPS(false)

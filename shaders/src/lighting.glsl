@@ -62,23 +62,47 @@ layout(buffer_reference, scalar) readonly buffer LightBuf {
 #define SHADOW_FILTER_HARD 0u
 #define SHADOW_FILTER_SOFT 1u
 
+// shadowSlot is the transform from a shadow camera's own [0,1] into the texture it
+// shares with the other cascades: x scaled into this cascade's column, and the bounds a
+// wide kernel has to stay inside so it cannot read its neighbour's texels.
+//
+// Cascades lay their squares out along the width, so a cascade's coordinates are its
+// column's coordinates once scaled and offset. A light with a map to itself passes
+// slots = 1, which makes the scale the identity and the clamp the full map.
+struct ShadowSlot {
+    float scale;  // 1 / slots
+    float offset; // slot / slots
+    vec2 lo, hi;  // the column's usable range, half a texel in from its edges
+};
+
+ShadowSlot shadowSlot(uint slot, uint slots, uint mapSide) {
+    float inv = 1.0 / float(slots);
+    ShadowSlot s;
+    s.scale = inv;
+    s.offset = float(slot) * inv;
+    // A light with the map to itself has no neighbour to bleed into, and shadowFactor
+    // has already rejected anything off the map, so the clamp is the full range. It
+    // stays in the expression rather than behind a branch because it costs nothing and
+    // those lights do not publish a map resolution to inset by.
+    s.lo = vec2(0.0);
+    s.hi = vec2(1.0);
+    if (slots > 1u) {
+        float half_ = 0.5 / float(mapSide);
+        s.lo = vec2(half_);
+        s.hi = vec2(1.0 - half_);
+    }
+    return s;
+}
+
 // shadowTap is one hardware PCF fetch: the comparison and the bilinear blend of its four
 // texels both happen in the texture unit, so a single tap already spans 2x2.
 //
-// uv is in the SHADOW CAMERA's own [0,1], not the texture's. Cascades share one texture
-// laid out as `slots` squares along its width, so the remap here is what puts a cascade's
-// own coordinates into its own column, and the clamp is what stops a wide kernel reading
-// out of that column into its neighbour.
-//
-// A light with a map to itself passes slots = 1: the remap is then the identity and the
-// clamp is skipped, because there is no neighbour to bleed into and shadowFactor has
-// already rejected anything outside the map.
-float shadowTap(uint shadowMap, uint shadowSamp, vec2 uv, float ref, uint slot, uint slots, uint mapSide) {
-    if (slots > 1u) {
-        float half_ = 0.5 / float(mapSide);
-        uv = clamp(uv, vec2(half_), vec2(1.0 - half_));
-        uv.x = (uv.x + float(slot)) / float(slots);
-    }
+// uv is in the SHADOW CAMERA's own [0,1], not the texture's; the slot maps it the rest
+// of the way. Taking that as a precomputed value rather than deriving it per tap matters
+// when nine of these run per light per fragment.
+float shadowTap(uint shadowMap, uint shadowSamp, vec2 uv, float ref, ShadowSlot s) {
+    uv = clamp(uv, s.lo, s.hi);
+    uv.x = uv.x * s.scale + s.offset;
     return texture(sampler2DShadow(gShadowTextures[nonuniformEXT(shadowMap)], gSamplers[nonuniformEXT(shadowSamp)]), vec3(uv, ref));
 }
 
@@ -93,34 +117,34 @@ float shadowTap(uint shadowMap, uint shadowSamp, vec2 uv, float ref, uint slot, 
 //
 // The weights below are the separable kernel {1,3,4,3,1}, whose products give the 144 the
 // sum is normalized by.
-float shadowSoft(uint shadowMap, uint shadowSamp, vec2 uv, float ref, uint slot, uint slots, uint mapSide) {
-    float side = float(mapSide);
+float shadowSoft(uint shadowMap, uint shadowSamp, vec2 uv, float ref, ShadowSlot slot, float side) {
     vec2 texels = uv * side;
     vec2 base = floor(texels + 0.5);
     float s = texels.x + 0.5 - base.x;
     float t = texels.y + 0.5 - base.y;
     vec2 baseUV = (base - 0.5) / side;
+    float inv = 1.0 / side;
 
     float uw0 = 4.0 - 3.0 * s, uw1 = 7.0, uw2 = 1.0 + 3.0 * s;
-    float u0 = (3.0 - 2.0 * s) / uw0 - 2.0;
-    float u1 = (3.0 + s) / uw1;
-    float u2 = s / uw2 + 2.0;
+    float u0 = ((3.0 - 2.0 * s) / uw0 - 2.0) * inv;
+    float u1 = ((3.0 + s) / uw1) * inv;
+    float u2 = (s / uw2 + 2.0) * inv;
 
     float vw0 = 4.0 - 3.0 * t, vw1 = 7.0, vw2 = 1.0 + 3.0 * t;
-    float v0 = (3.0 - 2.0 * t) / vw0 - 2.0;
-    float v1 = (3.0 + t) / vw1;
-    float v2 = t / vw2 + 2.0;
+    float v0 = ((3.0 - 2.0 * t) / vw0 - 2.0) * inv;
+    float v1 = ((3.0 + t) / vw1) * inv;
+    float v2 = (t / vw2 + 2.0) * inv;
 
     float sum = 0.0;
-    sum += uw0 * vw0 * shadowTap(shadowMap, shadowSamp, baseUV + vec2(u0, v0) / side, ref, slot, slots, mapSide);
-    sum += uw1 * vw0 * shadowTap(shadowMap, shadowSamp, baseUV + vec2(u1, v0) / side, ref, slot, slots, mapSide);
-    sum += uw2 * vw0 * shadowTap(shadowMap, shadowSamp, baseUV + vec2(u2, v0) / side, ref, slot, slots, mapSide);
-    sum += uw0 * vw1 * shadowTap(shadowMap, shadowSamp, baseUV + vec2(u0, v1) / side, ref, slot, slots, mapSide);
-    sum += uw1 * vw1 * shadowTap(shadowMap, shadowSamp, baseUV + vec2(u1, v1) / side, ref, slot, slots, mapSide);
-    sum += uw2 * vw1 * shadowTap(shadowMap, shadowSamp, baseUV + vec2(u2, v1) / side, ref, slot, slots, mapSide);
-    sum += uw0 * vw2 * shadowTap(shadowMap, shadowSamp, baseUV + vec2(u0, v2) / side, ref, slot, slots, mapSide);
-    sum += uw1 * vw2 * shadowTap(shadowMap, shadowSamp, baseUV + vec2(u1, v2) / side, ref, slot, slots, mapSide);
-    sum += uw2 * vw2 * shadowTap(shadowMap, shadowSamp, baseUV + vec2(u2, v2) / side, ref, slot, slots, mapSide);
+    sum += uw0 * vw0 * shadowTap(shadowMap, shadowSamp, baseUV + vec2(u0, v0), ref, slot);
+    sum += uw1 * vw0 * shadowTap(shadowMap, shadowSamp, baseUV + vec2(u1, v0), ref, slot);
+    sum += uw2 * vw0 * shadowTap(shadowMap, shadowSamp, baseUV + vec2(u2, v0), ref, slot);
+    sum += uw0 * vw1 * shadowTap(shadowMap, shadowSamp, baseUV + vec2(u0, v1), ref, slot);
+    sum += uw1 * vw1 * shadowTap(shadowMap, shadowSamp, baseUV + vec2(u1, v1), ref, slot);
+    sum += uw2 * vw1 * shadowTap(shadowMap, shadowSamp, baseUV + vec2(u2, v1), ref, slot);
+    sum += uw0 * vw2 * shadowTap(shadowMap, shadowSamp, baseUV + vec2(u0, v2), ref, slot);
+    sum += uw1 * vw2 * shadowTap(shadowMap, shadowSamp, baseUV + vec2(u1, v2), ref, slot);
+    sum += uw2 * vw2 * shadowTap(shadowMap, shadowSamp, baseUV + vec2(u2, v2), ref, slot);
     return sum * (1.0 / 144.0);
 }
 
@@ -153,10 +177,11 @@ float shadowFactor(mat4 shadowVP, uint shadowMap, vec3 worldPos, uint shadowSamp
     // conventional depth buffer would subtract. The comparison sampler is
     // GreaterEqual to match (see Renderer.prepareShadows).
     float ref = ndc.z + bias;
+    ShadowSlot s = shadowSlot(slot, slots, mapSide);
     if (filterMode == SHADOW_FILTER_SOFT) {
-        return shadowSoft(shadowMap, shadowSamp, uv, ref, slot, slots, mapSide);
+        return shadowSoft(shadowMap, shadowSamp, uv, ref, s, float(mapSide));
     }
-    return shadowTap(shadowMap, shadowSamp, uv, ref, slot, slots, mapSide);
+    return shadowTap(shadowMap, shadowSamp, uv, ref, s);
 }
 
 // shadowOffsets returns how far to push a shadow lookup away from the surface, in
@@ -193,16 +218,18 @@ vec2 shadowOffsets(vec3 N, vec3 L) {
 const float shadowNormalTexels = 0.75;
 const float shadowSlopeTexels = 2.0;
 
-// sampleCascade applies cascade i's angle-dependent offsets and samples it.
-float sampleCascade(DirLight dl, uint i, uint n, vec3 worldPos, vec3 N, uint shadowSamp) {
-    float texel = dl.shadowTexel[i];
-    vec2 off = shadowOffsets(N, -dl.dir.xyz);
+// sampleCascade applies cascade i's angle-dependent offsets and samples it. off is
+// shadowOffsets for this fragment, passed in because it depends only on the surface and
+// the light — recomputing its square root per cascade would pay twice for the same
+// answer on every fragment inside a blend band.
+float sampleCascade(LightBuf L, uint li, uint i, uint n, vec3 worldPos, vec3 N, vec2 off, uint shadowSamp) {
+    float texel = L.dirs[li].shadowTexel[i];
     // Moving the lookup along the normal is what actually clears the surface; the slope
     // term covers the depth the texel still spans after that.
     vec3 p = worldPos + N * (texel * shadowNormalTexels * off.x);
-    float bias = dl.shadowBias[i] + texel * shadowSlopeTexels * off.y * dl.shadowDepthScale[i];
-    return shadowFactor(dl.shadowVP[i], dl.shadowMap, p, shadowSamp, bias,
-                        i, n, dl.shadowMapSide, dl.shadowFilter);
+    float bias = L.dirs[li].shadowBias[i] + texel * shadowSlopeTexels * off.y * L.dirs[li].shadowDepthScale[i];
+    return shadowFactor(L.dirs[li].shadowVP[i], L.dirs[li].shadowMap, p, shadowSamp, bias,
+                        i, n, L.dirs[li].shadowMapSide, L.dirs[li].shadowFilter);
 }
 
 // shadowCascadeBlend is how much of a cascade's depth range, at its far end, is shared
@@ -210,7 +237,12 @@ float sampleCascade(DirLight dl, uint i, uint n, vec3 worldPos, vec3 N, uint sha
 const float shadowCascadeBlend = 0.1;
 
 // dirShadowFactor picks which of a directional light's cascades covers this fragment and
-// samples it. viewDist is how far the fragment is from the eye, which is what the split
+// samples it. It takes the light's INDEX rather than the light, and so do the helpers it
+// calls: a DirLight carries a matrix per cascade and runs to a few hundred bytes, so
+// copying one into a local — which is what naming it as a parameter or assigning it to a
+// variable does — costs more register traffic than the lookup it is there to perform.
+// Reading the two or three fields actually wanted straight out of the buffer is free by
+// comparison. The buffer itself is passed as a reference, which is a 64-bit handle. viewDist is how far the fragment is from the eye, which is what the split
 // distances are measured in, and N is the surface normal, which sizes the offsets that
 // keep the surface from shadowing itself.
 //
@@ -226,26 +258,27 @@ const float shadowCascadeBlend = 0.1;
 // place either side of the line. Fading over the last tenth of the range spreads that
 // step over enough pixels to disappear, at the cost of a second lookup for the fragments
 // inside the band.
-float dirShadowFactor(DirLight dl, vec3 worldPos, vec3 N, float viewDist, uint shadowSamp) {
-    if (dl.shadowMap == NO_SHADOW) return 1.0;
-    uint n = max(dl.cascades, 1u);
+float dirShadowFactor(LightBuf L, uint li, vec3 worldPos, vec3 N, float viewDist, uint shadowSamp) {
+    if (L.dirs[li].shadowMap == NO_SHADOW) return 1.0;
+    uint n = max(L.dirs[li].cascades, 1u);
     uint i = n - 1u;
     for (uint c = 0u; c < n; c++) {
-        if (viewDist <= dl.shadowSplit[c]) { i = c; break; }
+        if (viewDist <= L.dirs[li].shadowSplit[c]) { i = c; break; }
     }
 
-    float sh = sampleCascade(dl, i, n, worldPos, N, shadowSamp);
+    vec2 off = shadowOffsets(N, -L.dirs[li].dir.xyz);
+    float sh = sampleCascade(L, li, i, n, worldPos, N, off, shadowSamp);
     if (i + 1u >= n) return sh; // the outermost cascade has nothing to fade into
 
     // How far into this cascade's fade band the fragment sits. The band is measured back
     // from the split, over a fraction of the range this cascade spans.
-    float near = (i == 0u) ? 0.0 : dl.shadowSplit[i - 1u];
-    float band = (dl.shadowSplit[i] - near) * shadowCascadeBlend;
+    float near = (i == 0u) ? 0.0 : L.dirs[li].shadowSplit[i - 1u];
+    float band = (L.dirs[li].shadowSplit[i] - near) * shadowCascadeBlend;
     if (band <= 0.0) return sh;
-    float t = clamp((viewDist - (dl.shadowSplit[i] - band)) / band, 0.0, 1.0);
+    float t = clamp((viewDist - (L.dirs[li].shadowSplit[i] - band)) / band, 0.0, 1.0);
     if (t <= 0.0) return sh;
 
-    return mix(sh, sampleCascade(dl, i + 1u, n, worldPos, N, shadowSamp), t);
+    return mix(sh, sampleCascade(L, li, i + 1u, n, worldPos, N, off, shadowSamp), t);
 }
 
 // pointShadowFactor picks the cube face for the light→fragment direction (dominant

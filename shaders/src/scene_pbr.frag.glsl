@@ -1,15 +1,9 @@
-// pbr_frag.glsl — PBRMaterial's fragment shader for all three render paths, compiled
-// three times from this one source (see shaders.go):
+// scene_pbr.frag.glsl — PBRMaterial's fragment shader: surface + lighting in one pass.
 //
-//   -DPIX_PASS_FORWARD   -> scene_pbr.frag.spv           surface + lighting, one pass
-//   -DPIX_PASS_DEFERRED  -> scene_gbuffer_pbr.frag.spv   surface -> G-buffer
-//   -DPIX_PASS_LIGHTING  -> scene_lighting_pbr.frag.spv  G-buffer -> lit color
-//
-// The passes overlap in exactly two places, which is why they share a file: forward and
-// deferred both derive a Surface from the material record (materialSurface), and
-// forward and lighting both shade a Surface against the light table (shadeSurface).
-// Deferred writes the Surface out; lighting reads one back; forward does both inline
-// and never touches the G-buffer.
+// It resolves a Surface from the material record (materialSurface), then shades that
+// Surface against the light table (shadeSurface). The split is not structural any more
+// — both halves run here, back to back — but it keeps the per-material-type half
+// separate from the half every shading model shares.
 #version 460
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference2 : require
@@ -18,16 +12,10 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_GOOGLE_include_directive : require
 
-#if defined(PIX_PASS_FORWARD) || defined(PIX_PASS_DEFERRED)
 // Geometry passes: bindless heap + light table + the DrawRoot push constant and the
 // vertex-pull varyings.
 #include "material_common.glsl"
-#else
-// The lighting pass is fullscreen: no varyings, no per-drawable record, and its own
-// push constant below — so it takes the light table without DrawRoot.
-#include "lighting.glsl"
-#endif
-#include "gbuffer.glsl"
+#include "surface.glsl"
 
 // This model's id and its interpretation of Surface.material (the model-defined
 // G-buffer slot). Every pass goes through these two helpers, so the packing is stated
@@ -44,41 +32,12 @@ float pbrRoughness(Surface s) { return s.material.g; }
 // ---------------------------------------------------------------------------
 // Outputs
 // ---------------------------------------------------------------------------
-#ifdef PIX_PASS_DEFERRED
-layout(location = 0) out vec4 outDiffuse;
-layout(location = 1) out vec2 outNormal;
-layout(location = 2) out vec4 outMaterial;
-layout(location = 3) out vec4 outEmissive;
-#else
 layout(location = 0) out vec4 outColor;
-#endif
 
-#ifdef PIX_PASS_LIGHTING
-// LightingRoot mirrors pix.lightingRoot.
-// Pushed inline rather than behind a device address: it fits in push constants on
-// every backend, so the shader reads its parameters directly instead of chasing a
-// pointer to reach them. Fields that are themselves addresses stay addresses — those
-// point at unbounded arrays, so that indirection is inherent.
-layout(push_constant, scalar) uniform PC {
-    mat4 invViewProj;
-    vec4 eye;
-    LightBuf lights;
-    uint shadowSampler;
-    uint gbufferSampler;
-    uint diffuseTexture;
-    uint normalTexture;
-    uint materialTexture;
-    uint emissiveTexture;
-    uint depthTexture;
-    vec2 screen;
-    uint debugView; // unused here; the G-buffer debug pass shares this layout
-} pc;
-#endif
 
 // ---------------------------------------------------------------------------
 // Surface from the material record (forward + deferred)
 // ---------------------------------------------------------------------------
-#ifndef PIX_PASS_LIGHTING
 
 const uint MAT_NORMAL_MAP = 2u;
 const uint MAT_METAL_MAP = 4u;
@@ -160,12 +119,10 @@ Surface materialSurface(Material m, out float baseAlpha) {
     }
     return s;
 }
-#endif // !PIX_PASS_LIGHTING
 
 // ---------------------------------------------------------------------------
 // Shading a Surface (forward + lighting)
 // ---------------------------------------------------------------------------
-#ifndef PIX_PASS_DEFERRED
 
 const float PI = 3.14159265359;
 
@@ -214,10 +171,19 @@ vec3 cookTorrance(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float meta
 vec3 shadeSurface(Surface s, vec3 worldPos, vec3 V, uint shadowSamp, float diffuseScale, bool receives) {
     LightBuf L = pc.lights;
     vec3 lo = vec3(0.0);
+    // Every directional light selects its cascade on this, and it does not vary between
+    // them.
+    float viewDist = length(pc.eye.xyz - worldPos);
     for (uint i = 0u; i < L.numDir; i++) {
-        DirLight dl = L.dirs[i];
-        float sh = receives ? dirShadowFactor(dl, worldPos, s.normal, length(pc.eye.xyz - worldPos), shadowSamp) : 1.0;
-        lo += sh * cookTorrance(s.normal, V, normalize(-dl.dir.xyz), dl.color.rgb * dl.color.w,
+        vec3 Ldir = normalize(-L.dirs[i].dir.xyz);
+        // A surface turned away from a light receives nothing from it: cookTorrance
+        // multiplies by max(dot(N,L),0) and returns exactly zero here, so skipping is
+        // not an approximation. It is worth doing because the shadow lookup is not free
+        // — up to nine texture fetches for a result about to be multiplied by zero — and
+        // roughly half the fragments in a closed scene face away from any given light.
+        if (dot(s.normal, Ldir) <= 0.0) continue;
+        float sh = receives ? dirShadowFactor(L, i, worldPos, s.normal, viewDist, shadowSamp) : 1.0;
+        lo += sh * cookTorrance(s.normal, V, Ldir, L.dirs[i].color.rgb * L.dirs[i].color.w,
                                 s.albedo, pbrMetallic(s), pbrRoughness(s), diffuseScale);
     }
     for (uint i = 0u; i < L.numPoint; i++) {
@@ -227,8 +193,10 @@ vec3 shadeSurface(Surface s, vec3 worldPos, vec3 V, uint shadowSamp, float diffu
         float range = max(pl.pos.w, 0.0001);
         float atten = clamp(1.0 - dist / range, 0.0, 1.0);
         atten *= atten;
+        vec3 Ldir = d / max(dist, 0.0001);
+        if (dot(s.normal, Ldir) <= 0.0) continue;
         float sh = receives ? pointShadowFactor(pl, worldPos, shadowSamp) : 1.0;
-        lo += sh * cookTorrance(s.normal, V, d / max(dist, 0.0001), pl.color.rgb * pl.color.w * atten,
+        lo += sh * cookTorrance(s.normal, V, Ldir, pl.color.rgb * pl.color.w * atten,
                                 s.albedo, pbrMetallic(s), pbrRoughness(s), diffuseScale);
     }
     for (uint i = 0u; i < L.numSpot; i++) {
@@ -237,31 +205,16 @@ vec3 shadeSurface(Surface s, vec3 worldPos, vec3 V, uint shadowSamp, float diffu
         float dist = length(d);
         vec3 Ldir = d / max(dist, 1e-4);
         float atten = spotAttenuation(sl, worldPos, Ldir, dist);
-        if (atten <= 0.0) continue;
+        if (atten <= 0.0 || dot(s.normal, Ldir) <= 0.0) continue;
         float sh = receives ? shadowFactor(sl.shadowVP, sl.shadowMap, worldPos, shadowSamp, sl.shadowBias, 0u, 1u, 1u, SHADOW_FILTER_HARD) : 1.0;
         lo += sh * cookTorrance(s.normal, V, Ldir, sl.color.rgb * sl.color.w * atten,
                                 s.albedo, pbrMetallic(s), pbrRoughness(s), diffuseScale);
     }
     return L.ambient.rgb * s.albedo * diffuseScale + lo + s.emissive;
 }
-#endif // !PIX_PASS_DEFERRED
 
 // ---------------------------------------------------------------------------
 void main() {
-#if defined(PIX_PASS_DEFERRED)
-    // Surface -> G-buffer. No lighting here, and no transmission: a transmissive
-    // instance is Transparent and renders forward, never reaching this pass.
-    Material m = MatBuf(pc.materials).v[vMat];
-    float baseAlpha;
-    Surface s = materialSurface(m, baseAlpha);
-
-    GBufferOut g = packSurface(s);
-    outDiffuse = g.diffuse;
-    outNormal = g.normal;
-    outMaterial = g.material;
-    outEmissive = g.emissive;
-
-#elif defined(PIX_PASS_FORWARD)
     Material m = MatBuf(pc.materials).v[vMat];
     float baseAlpha;
     Surface s = materialSurface(m, baseAlpha);
@@ -307,29 +260,4 @@ void main() {
     }
     outColor = vec4(linearToSrgb(lit), alpha);
 
-#else // PIX_PASS_LIGHTING
-    // Background pixels were already rejected by the pipeline's read-only depth test
-    // (CompareGreater vs the far-plane triangle), so everything reaching this shader
-    // has real geometry behind it. Depth is still sampled — position reconstruction
-    // needs the value, not just the pass/fail.
-    uint samp = pc.gbufferSampler;
-    vec2 uv = gl_FragCoord.xy / pc.screen;
-    float depth = texture(sampler2D(gTextures[nonuniformEXT(pc.depthTexture)], gSamplers[nonuniformEXT(samp)]), uv).r;
-
-    vec4 diffuse = texture(sampler2D(gTextures[nonuniformEXT(pc.diffuseTexture)], gSamplers[nonuniformEXT(samp)]), uv);
-    vec2 normal = texture(sampler2D(gTextures[nonuniformEXT(pc.normalTexture)], gSamplers[nonuniformEXT(samp)]), uv).rg;
-    vec4 material = texture(sampler2D(gTextures[nonuniformEXT(pc.materialTexture)], gSamplers[nonuniformEXT(samp)]), uv);
-    vec4 emissive = texture(sampler2D(gTextures[nonuniformEXT(pc.emissiveTexture)], gSamplers[nonuniformEXT(samp)]), uv);
-    Surface s = unpackGBuffer(diffuse, normal, material, emissive);
-
-    vec3 worldPos = worldFromDepth(gl_FragCoord.xy, pc.screen, depth, pc.invViewProj);
-    vec3 V = normalize(pc.eye.xyz - worldPos);
-
-    // diffuseScale 1.0 (transmission is forward-only) and receives=true: the
-    // receive-shadow flag isn't carried through the G-buffer, so deferred surfaces
-    // always receive. Emissive is summed in LINEAR space and encoded once.
-    vec3 lit = shadeSurface(s, worldPos, V, pc.shadowSampler, 1.0, true);
-    lit = applyFog(lit, worldPos, pc.eye.xyz, pc.lights.fogColor, pc.lights.fogParams);
-    outColor = vec4(linearToSrgb(lit), 1.0);
-#endif
 }

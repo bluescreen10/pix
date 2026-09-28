@@ -69,6 +69,16 @@ const uint FLAG_NORMAL = 1u;
 const uint FLAG_UV = 2u;
 const uint FLAG_COLOR = 4u;
 
+// A depth prepass compares this shader's depth against one written by a DIFFERENT
+// shader, so the two have to agree bit for bit. Nothing otherwise guarantees that: the
+// same expression compiled into two programs may fuse a multiply-add in one and not the
+// other, and a result a fraction of an ULP behind the prepass fails a GreaterEqual test
+// and drops the fragment. That shows up as geometry flickering or missing across the
+// whole frame rather than anywhere in particular.
+//
+// invariant is the guarantee, and it has to be on BOTH shaders to mean anything.
+invariant gl_Position;
+
 void main() {
     // Each indirect command sets firstInstance = its region base, so gl_InstanceIndex
     // already includes it and indexes the compacted visible buffer directly.

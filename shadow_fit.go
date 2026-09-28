@@ -15,7 +15,6 @@ import (
 	"math"
 
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/scenes"
 	"github.com/chewxy/math32"
 )
 
@@ -97,30 +96,9 @@ func (c ShadowCascaded) steps() []float32 {
 	return c.Steps[:min(len(c.Steps), MaxShadowCascades)]
 }
 
-// Shadows reports how directional shadow cameras are fitted, and that fit's settings.
-func (r *Renderer) Shadows() ShadowSettings {
-	if r.shadows == nil {
-		return ShadowUniform{}
-	}
-	return r.shadows
-}
-
-// SetShadows selects how directional shadow cameras are fitted — see ShadowSettings.
-// It takes effect on the next Render: the fit is recomputed every frame, and a shadow
-// map is reallocated only if the number of slices changed.
-//
-// This is not Renderer.EnableShadows, which turns shadow rendering on and off; this
-// chooses how it is done when it is on.
-func (r *Renderer) SetShadows(s ShadowSettings) {
-	if s == nil {
-		s = ShadowUniform{}
-	}
-	r.shadows = s
-}
-
 // shadowFit is what every directional fit needs to know about this frame: the view it
 // is covering and the scene the casters live in. Gathered once per frame by
-// prepareShadows, since every casting light shares it.
+// fitShadows, since every casting light shares it.
 //
 // corners is the view frustum already CAPPED at the shadow distance (see
 // Renderer.shadowFitFor): near corners 0..3, then the far corners pulled back along
@@ -136,156 +114,6 @@ type shadowFit struct {
 
 	sceneCenter glm.Vec3f
 	sceneRadius float32
-}
-
-// shadowFitFor caps the view frustum at the shadow distance and gathers everything the
-// fit algorithms share.
-//
-// The cap is what keeps a shadow map useful: fitted to the whole frustum, a far plane
-// kilometres out would spread every texel across the horizon. The default caps at the
-// last of the scene the camera can actually see — how far along the view direction the
-// scene bounds reach, never past the camera's own far plane — so the slice covers
-// everything that can receive a shadow and nothing beyond it. Override with
-// Renderer.SetShadowDistance.
-//
-// distance is how far the slice should reach, in world units from the eye; zero derives
-// it. A cascade split with explicit steps passes its last step, since that IS where its
-// shadows stop — left to derive, a shorter auto distance would quietly clamp every step
-// past it and collapse those cascades onto the same sliver of frustum.
-//
-// Covering exactly what is visible matters more than it sounds. fitUniform fits a
-// bounding SPHERE around this slice, and a sphere around a frustum wedge reaches well
-// past it, so a short cap there is invisible — the slop covers it. A cascade fits a much
-// shorter slice with far less slop, so the same short cap shows up as a hard band of
-// missing shadow at its far edge. A cap that is right to begin with avoids both.
-func (r *Renderer) shadowFitFor(cam Camera, sceneCenter glm.Vec3f, sceneRadius float32, distance float32) shadowFit {
-	corners := frustumCornersWorld(cam.ViewProjection())
-	eye := cam.Position()
-
-	nearCenter := avgCorners(corners, 0)
-	farCenter := avgCorners(corners, 4)
-	nearDist := nearCenter.Sub(eye).Length()
-	farDist := farCenter.Sub(eye).Length()
-
-	shadowDist := distance
-	if shadowDist <= 0 {
-		forward := farCenter.Sub(nearCenter).Normalize()
-		// How far along the view the scene still reaches. A small floor keeps the slice
-		// from collapsing when the camera sits on top of the scene, or has it behind.
-		reach := sceneCenter.Sub(eye).Dot(forward) + sceneRadius
-		shadowDist = min(max(reach, sceneRadius*0.15), farDist)
-	}
-
-	t := float32(1)
-	if farDist > nearDist {
-		t = glm.Clamp((shadowDist-nearDist)/(farDist-nearDist), 0, 1)
-	}
-
-	fit := shadowFit{
-		eye:         eye,
-		forward:     farCenter.Sub(nearCenter).Normalize(),
-		nearDist:    nearDist,
-		farDist:     nearDist + t*(farDist-nearDist),
-		sceneCenter: sceneCenter,
-		sceneRadius: sceneRadius,
-	}
-	for j := range 4 {
-		fit.corners[j] = corners[j]
-		fit.corners[j+4] = corners[j].Add(corners[j+4].Sub(corners[j]).Scale(t))
-	}
-	return fit
-}
-
-// fitDirectional points a directional light's shadow camera at the view, using the
-// renderer's selected algorithm.
-func (r *Renderer) fitDirectional(s *shadowResource, l scenes.LightPacket, fit shadowFit) {
-	if c, ok := r.Shadows().(ShadowCascaded); ok {
-		r.fitCascaded(s, l, c, fit)
-		return
-	}
-	s.cascades = s.cascades[:0] // a previous frame's slices are not this fit's
-	r.fitUniform(s, l, fit)
-}
-
-// fitUniform aims an orthographic camera to cover the capped view slice, sized to
-// enclose it. When that slice is as large as the whole scene (zoomed out) it falls back
-// to the scene sphere, so it is never worse than a whole-scene fit; zoomed in, it packs
-// resolution into the near view. The camera is pulled back along -dir across the scene
-// so occluders between the light and the slice are still captured, and the center is
-// snapped to the shadow texel grid so edges don't crawl as the camera moves.
-func (r *Renderer) fitUniform(s *shadowResource, l scenes.LightPacket, fit shadowFit) {
-	s.fit = r.fitOrtho(s.orthoCamera(), l, fit, s.width)
-	s.ndcBias = s.fit.bias
-}
-
-// fitOrtho is fitUniform's body, aimed at a camera the caller owns, returning the depth
-// bias its choice of box implies. Cascades need this: each slice is an ordinary uniform
-// fit, differing only in which camera it writes and how short a range it covers.
-//
-// size is the resolution of the map REGION this camera renders into, which for a cascade
-// is one square of the atlas rather than the whole texture — the texel grid the fit
-// snaps to has to be the one it will actually be sampled through.
-func (r *Renderer) fitOrtho(cam Camera, l scenes.LightPacket, fit shadowFit, size uint32) orthoFit {
-	f, ok := cam.(interface {
-		SetPosition(glm.Vec3f)
-		SetTarget(glm.Vec3f)
-		SetUp(glm.Vec3f)
-		SetFrustum(l, r, b, t float32)
-		SetClip(near, far float32)
-	})
-	if !ok {
-		return orthoFit{}
-	}
-	d := l.Direction.Normalize()
-
-	// Bounding sphere of the capped slice; fall back to the scene sphere when the fit
-	// isn't tighter (e.g. zoomed out), so we never do worse than whole-scene.
-	center, radius := boundingSphere(fit.corners)
-	if radius >= fit.sceneRadius {
-		center, radius = fit.sceneCenter, fit.sceneRadius
-	}
-
-	// Quantize the radius so the texel size only changes in discrete steps as the camera
-	// zooms. A continuously-resizing box would keep moving the texel grid under the
-	// geometry, which is what makes edges crawl — snapping the center only helps while
-	// the texel size holds still.
-	//
-	// The step has to be RELATIVE to the radius, not an absolute fraction of the scene.
-	// An absolute step is a fixed number of world units, so it is invisible on a slice
-	// far larger than one step and ruinous on a slice smaller than one: in a scene a few
-	// hundred units across it rounded a three-unit near slice up to fourteen, throwing
-	// away four fifths of the resolution exactly where the fit was trying to concentrate
-	// it. Rounding up on a geometric grid costs the same proportion at every scale, which
-	// is what makes it safe to fit a small slice at all. Quarter-octave steps waste at
-	// most a fifth of the resolution, against the factor of two a whole-octave grid costs
-	// on a large one.
-	if radius > 0 {
-		const stepsPerOctave = 4
-		octave := math.Ceil(math.Log2(float64(radius))*stepsPerOctave) / stepsPerOctave
-		radius = float32(math.Exp2(octave))
-	}
-	right, up := lightBasis(d)
-
-	// Snap the center to the shadow texel grid in the light's right/up plane. This fit
-	// is always square, so either axis names the same texel.
-	texel := 2 * radius / float32(size)
-	if texel > 0 {
-		cx := snap(center.Dot(right), texel)
-		cy := snap(center.Dot(up), texel)
-		cz := center.Dot(d)
-		center = right.Scale(cx).Add(up.Scale(cy)).Add(d.Scale(cz))
-	}
-
-	const near, farScale = float32(0.01), float32(4)
-	far := fit.sceneRadius * farScale
-	f.SetUp(up)
-	f.SetPosition(center.Sub(d.Scale(fit.sceneRadius * 2))) // back up across the scene
-	f.SetTarget(center)
-	f.SetFrustum(-radius, radius, -radius, radius)
-	f.SetClip(near, far) // depth spans the whole scene toward the light
-
-	// The renderer decides where the camera goes; the caller owns the derived bias.
-	return orthoBias(radius, far-near, size, l.ShadowBias)
 }
 
 // lightBasis builds a stable right/up pair perpendicular to the light direction,
@@ -375,15 +203,4 @@ func ParseShadowFilter(s string) (ShadowFilter, bool) {
 // ShadowFilterNames lists every accepted name, for help text and completion.
 func ShadowFilterNames() []string {
 	return shadowFilterNames[:]
-}
-
-// ShadowFilter reports which kernel directional shadow lookups use.
-func (r *Renderer) ShadowFilter() ShadowFilter {
-	return r.shadowFilter
-}
-
-// SetShadowFilter selects the kernel directional shadow lookups use — see ShadowFilter.
-// It takes effect on the next Render; nothing needs reallocating.
-func (r *Renderer) SetShadowFilter(filter ShadowFilter) {
-	r.shadowFilter = filter
 }

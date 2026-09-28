@@ -7,7 +7,7 @@ import (
 )
 
 // maxLODLevels is the most levels a single LOD group (Mesh, InstancedMesh, or later
-// SkinnedMesh) can have — bounded by gpuLODEntry's fixed-size boundaries array.
+// SkinnedMesh) can have — bounded by gpuLOD's fixed-size boundaries array.
 const maxLODLevels = 4
 
 // lodLevel is one entry in a LOD chain: geometry/material shown once the camera is
@@ -28,7 +28,7 @@ type Mesh struct{ Node }
 // meshData is the per-mesh payload stored in Scene.meshes. lods[0] is always the mesh
 // created by NewMesh; AddLOD appends coarser levels. bounds is shared by every level
 // (see AddLOD's doc comment). lodGroupID is 0 until AddLOD is first called — it then
-// indexes Scene.lodEntries, shared by every one of this mesh's level records.
+// indexes Scene.lods, shared by every one of this mesh's level records.
 type meshData struct {
 	lods       []lodLevel
 	hysteresis float32

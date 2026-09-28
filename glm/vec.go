@@ -151,8 +151,8 @@ func (v Vec3[T]) Unorm10x3() Unorm10x3 {
 }
 
 // Vec4 returns v extended with a zero w component.
-func (v Vec3[T]) Vec4() Vec4[T] {
-	return Vec4[T]{v[0], v[1], v[2]}
+func (v Vec3[T]) Vec4(z T) Vec4[T] {
+	return Vec4[T]{v[0], v[1], v[2], z}
 }
 
 // Vec4 is a four-component vector.

@@ -101,7 +101,7 @@ func (g Geometry) SkinOutput() Geometry {
 	return Geometry{
 		ref:            ref.New(id, gen, g.store.dispose, g.store.validate),
 		store:          g.store,
-		boundingSphere: g.store.BoundingSphere(id),
+		boundingSphere: g.store.BoundingSphereAt(id),
 	}
 }
 

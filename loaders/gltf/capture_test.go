@@ -29,7 +29,6 @@ func TestCaptureAnimatedFrames(t *testing.T) {
 	}
 	defer r.Destroy()
 	r.EnableShadows(true)
-	r.EnableDeferredRendering(true)
 
 	scene := scenes.New()
 	defer scene.Destroy()

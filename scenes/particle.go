@@ -181,7 +181,7 @@ type particleData struct {
 
 	// pending holds particle records this step's Spawn calls produced; drained and
 	// uploaded, alongside dt, by the renderer during the next Render (see
-	// dispatchParticleUpdate in renderer.go). emitting is false after StopEmission.
+	// Renderer.encodeParticleSimulation in renderer.go). emitting is false after StopEmission.
 	pending  []ParticleRecord
 	dt       float32
 	dtStaged bool
@@ -286,7 +286,7 @@ func (c ParticleContainer) Material() materials.Material {
 // Update stages this step's dt and runs emission and spawning. It does not itself
 // dispatch GPU work or wait for GPU completion: like culling and skinning, the
 // update kernel is recorded by the renderer during Render's encode phase, from the
-// state staged here (see dispatchParticleUpdate in renderer.go). Calling Update more
+// state staged here (see Renderer.encodeParticleSimulation in renderer.go). Calling Update more
 // than once before the next Render stages the latest call's dt and accumulates
 // emission from every call; it does not run the GPU kernel more than once.
 //
@@ -355,7 +355,7 @@ func (s *Scene) swapRemoveParticles(payloadIdx uint32) {
 	d.geometry.Release()
 	d.material.Release()
 	// The simulation buffers are the renderer's; it retires them when this system stops
-	// appearing in the packet (see renderState.retireUnseenParticles).
+	// appearing in the packet (see Renderer.retireUnusedParticles).
 	last := uint32(len(s.particleContainers) - 1)
 	if payloadIdx != last {
 		s.particleContainers[payloadIdx] = s.particleContainers[last]

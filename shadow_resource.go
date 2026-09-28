@@ -233,33 +233,6 @@ func (s *shadowResource) destroy() {
 	s.faces = nil
 }
 
-// shadowFor returns the cached resource for a light, creating it on first sight.
-func (st *renderState) shadowFor(id scenes.LightID) *shadowResource {
-	if s, ok := st.shadows[id]; ok {
-		return s
-	}
-	if st.shadows == nil {
-		st.shadows = make(map[scenes.LightID]*shadowResource)
-	}
-	s := &shadowResource{}
-	st.shadows[id] = s
-	return s
-}
-
-// retireUnseenShadows frees the resources of lights that stopped casting, or went away
-// entirely. Without it a scene that toggles shadows on a long-lived light would hold
-// every depth map it ever allocated.
-func (st *renderState) retireUnseenShadows() {
-	for id, s := range st.shadows {
-		if s.seen {
-			s.seen = false
-			continue
-		}
-		s.destroy()
-		delete(st.shadows, id)
-	}
-}
-
 // ShadowView is a light's renderer-owned shadow resources, exposed for inspection.
 // Camera is the view the depth pass rendered with and Map the depth texture the lit
 // shaders sample; for a point light these are the first cube face, and Faces holds all
@@ -276,36 +249,6 @@ type ShadowView struct {
 	// Splits[i] is the view distance Cascades[i] covers out to, which is where the lit
 	// shader stops using it. Same length as Cascades.
 	Splits []float32
-}
-
-// ShadowView returns the shadow resources the renderer holds for one light of one
-// source, or nil if it has none — the light does not cast, shadows are disabled, or
-// nothing has been rendered yet.
-//
-// This is the resource half of what LightShadow used to be. The settings half stayed on
-// the light (see LightShadow); what could not stay is anything whose value depends on
-// the view being rendered, which is all of this.
-func (r *Renderer) ShadowView(source scenes.SourceID, light scenes.LightID) *ShadowView {
-	st, ok := r.sources[source]
-	if !ok {
-		return nil
-	}
-	s, ok := st.shadows[light]
-	if !ok {
-		return nil
-	}
-	v := &ShadowView{Camera: s.cam, Map: s.m, Faces: s.faces}
-	for _, c := range s.cascades {
-		v.Cascades = append(v.Cascades, c.cam)
-		v.Splits = append(v.Splits, c.far)
-	}
-	switch {
-	case len(s.faces) > 0:
-		v.Camera, v.Map = s.faces[0].cam, s.faces[0].m
-	case len(v.Cascades) > 0:
-		v.Camera = v.Cascades[0]
-	}
-	return v
 }
 
 // Camera and Map of one cube face, for inspecting a point light's shadow.
@@ -336,32 +279,6 @@ type particleState struct {
 	// must start empty again.
 	epoch uint64
 	seen  bool
-}
-
-func (st *renderState) particleFor(id scenes.ParticleID) *particleState {
-	if ps, ok := st.particles[id]; ok {
-		return ps
-	}
-	if st.particles == nil {
-		st.particles = make(map[scenes.ParticleID]*particleState)
-	}
-	ps := &particleState{}
-	st.particles[id] = ps
-	return ps
-}
-
-// retireUnseenParticles frees the buffers of systems that left the packet — detached,
-// or destroyed. Their simulation state goes with them, which is the documented
-// consequence of detaching: there is nothing on the CPU to restore it from.
-func (st *renderState) retireUnseenParticles(backend gpu.Backend) {
-	for id, ps := range st.particles {
-		if ps.seen {
-			ps.seen = false
-			continue
-		}
-		ps.destroy(backend)
-		delete(st.particles, id)
-	}
 }
 
 func (ps *particleState) destroy(backend gpu.Backend) {

@@ -13,7 +13,6 @@ package pix
 
 import (
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/scenes"
 	"github.com/chewxy/math32"
 )
 
@@ -37,25 +36,6 @@ const DefaultShadowCascades = 4
 // it, and on any scene being tuned for quality it should.
 const defaultShadowNear float32 = 1.0 / 500
 
-// ShadowNear reports the distance ShadowCascaded starts its split from, or 0 when it is
-// derived from the view.
-func (r *Renderer) ShadowNear() float32 {
-	return r.shadowNear
-}
-
-// SetShadowNear sets the distance, in world units from the eye, that ShadowCascaded
-// starts its cascade split from. Zero (the default) derives it from the covered range.
-//
-// Geometry nearer than this is still shadowed — the first cascade is fitted from the
-// camera's real near plane, and only the BOUNDARIES are computed from this. What it
-// controls is the ratio between consecutive cascades, and that ratio is the whole story
-// for quality: each boundary drops texel density by exactly that factor, so a split
-// starting far too close forces large ratios and a visible cliff at every boundary. Set
-// it to roughly where the nearest geometry the camera can see begins.
-func (r *Renderer) SetShadowNear(distance float32) {
-	r.shadowNear = distance
-}
-
 // cascadeLevel is one fitted slice: the camera it renders with, the depth bias that fit
 // implies, and the view distance it covers out to, which is what the lit shaders select
 // on.
@@ -63,22 +43,6 @@ type cascadeLevel struct {
 	cam Camera
 	fit orthoFit
 	far float32
-}
-
-// shadowReach is how far the shadow fit should cover, in world units from the eye, or
-// zero to derive it from the view.
-//
-// Explicit cascade steps decide it: the outermost one is by definition where shadows
-// stop, so it has to set the range rather than be clipped by a separately chosen one.
-// Renderer.SetShadowDistance therefore has no effect while explicit steps are in use,
-// which keeps one setting in charge of the far end instead of two disagreeing.
-func (r *Renderer) shadowReach() float32 {
-	if c, ok := r.Shadows().(ShadowCascaded); ok {
-		if steps := c.steps(); len(steps) > 0 {
-			return steps[len(steps)-1]
-		}
-	}
-	return r.shadowDistance
 }
 
 // cascadeSplits fills out[i] with the view distance cascade i covers out to, the last
@@ -102,43 +66,6 @@ func cascadeSplits(near, far float32, out []float32) {
 		out[i] = near * math32.Pow(far/near, float32(i+1)/float32(n))
 	}
 	out[n-1] = far // exactly, so nothing falls past the last cascade
-}
-
-// fitCascaded fits one orthographic camera per slice of the view. Each slice is the
-// same frustum capped to a shorter range, so every cascade is an ordinary uniform fit —
-// texel snapping and all — over a range short enough for its texels to matter.
-func (r *Renderer) fitCascaded(s *shadowResource, l scenes.LightPacket, c ShadowCascaded, fit shadowFit) {
-	count := c.levels()
-	s.ensureCascades(count)
-
-	var splits [MaxShadowCascades]float32
-	if explicit := c.steps(); explicit != nil {
-		copy(splits[:count], explicit)
-	} else {
-		splitNear := r.shadowNear
-		if splitNear <= 0 {
-			splitNear = fit.farDist * defaultShadowNear
-		}
-		cascadeSplits(max(splitNear, fit.nearDist), fit.farDist, splits[:count])
-	}
-
-	// The first cascade is fitted from the camera's real near plane, whatever the split
-	// started from, so geometry in between is still covered.
-	near := fit.nearDist
-	for i := range count {
-		// Explicit steps are the caller's, so they are guarded rather than trusted: a
-		// step that does not advance would give a slice no depth to fit.
-		far := max(splits[i], near*(1+1e-3))
-		lvl := &s.cascades[i]
-		lvl.far = far
-		// The slice's own frustum: the same corner rays, cut at this cascade's near and
-		// far rather than the whole range's.
-		sub := fit
-		sub.nearDist, sub.farDist = near, far
-		sub.corners = sliceCorners(fit, near, far)
-		lvl.fit = r.fitOrtho(lvl.cam, l, sub, s.size())
-		near = far
-	}
 }
 
 // sliceCorners re-cuts a fit's frustum corners to the range [near, far], measured along

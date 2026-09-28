@@ -38,35 +38,32 @@ var metalSceneDraw []byte
 //go:embed build/scene_shadow.vert.metalbin
 var metalSceneShadowVert []byte
 
-//go:embed build/scene_shadow.frag.metalbin
-var metalSceneShadowFrag []byte
-
-//go:embed build/fullscreen.vert.metalbin
-var metalFullscreenVert []byte
-
-//go:embed build/gbuffer_debug.frag.metalbin
-var metalGBufferDebug []byte
-
 //go:embed build/scene_debug_id.vert.metalbin
 var metalSceneDebugIDVert []byte
 
-//go:embed build/scene_debug_id.frag.metalbin
-var metalSceneDebugIDFrag []byte
+//go:embed build/scene_debug_normal.frag.metalbin
+var metalSceneDebugNormal []byte
+
+//go:embed build/scene_debug_depth.frag.metalbin
+var metalSceneDebugDepth []byte
+
+//go:embed build/scene_debug_position.frag.metalbin
+var metalSceneDebugPosition []byte
+
+//go:embed build/scene_debug_object.frag.metalbin
+var metalSceneDebugObject []byte
+
+//go:embed build/scene_debug_triangle.frag.metalbin
+var metalSceneDebugTriangle []byte
 
 //go:embed build/scene_basic.frag.metalbin
-var metalBasicForward []byte
+var metalBasicFragment []byte
 
 //go:embed build/scene_lit.frag.metalbin
-var metalBlinnPhongForward []byte
+var metalBlinnPhongFragment []byte
 
-//go:embed build/scene_forward_pbr.frag.metalbin
-var metalPBRForward []byte
-
-//go:embed build/scene_deferred_pbr.frag.metalbin
-var metalPBRDeferred []byte
-
-//go:embed build/scene_lighting_pbr.frag.metalbin
-var metalPBRLighting []byte
+//go:embed build/scene_pbr.frag.metalbin
+var metalPBRFragment []byte
 
 //go:embed build/overlay.vert.metalbin
 var metalOverlayVert []byte
@@ -81,26 +78,25 @@ var metalParticleUpdate []byte
 var metalParticleDraw []byte
 
 //go:embed build/particle_basic.frag.metalbin
-var metalParticleBasicForward []byte
+var metalParticleBasicFragment []byte
 
 var metalVariants = []struct{ spirv, metal []byte }{
 	{SceneCull, metalSceneCull},
 	{SceneSkin, metalSceneSkin},
 	{SceneDraw, metalSceneDraw},
 	{SceneShadowVert, metalSceneShadowVert},
-	{SceneShadowFrag, metalSceneShadowFrag},
-	{FullscreenVert, metalFullscreenVert},
-	{GBufferDebug, metalGBufferDebug},
 	{SceneDebugIDVert, metalSceneDebugIDVert},
-	{SceneDebugIDFrag, metalSceneDebugIDFrag},
-	{BasicForward, metalBasicForward},
-	{BlinnPhongForward, metalBlinnPhongForward},
-	{PBRForward, metalPBRForward},
-	{PBRDeferred, metalPBRDeferred},
-	{PBRLighting, metalPBRLighting},
+	{SceneDebugNormal, metalSceneDebugNormal},
+	{SceneDebugDepth, metalSceneDebugDepth},
+	{SceneDebugPosition, metalSceneDebugPosition},
+	{SceneDebugObject, metalSceneDebugObject},
+	{SceneDebugTriangle, metalSceneDebugTriangle},
+	{BasicFragment, metalBasicFragment},
+	{BlinnPhongFragment, metalBlinnPhongFragment},
+	{PBRFragment, metalPBRFragment},
 	{OverlayVert, metalOverlayVert},
 	{OverlayFrag, metalOverlayFrag},
 	{ParticleUpdate, metalParticleUpdate},
 	{ParticleDraw, metalParticleDraw},
-	{ParticleBasicForward, metalParticleBasicForward},
+	{ParticleBasicFragment, metalParticleBasicFragment},
 }

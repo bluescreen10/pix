@@ -95,7 +95,7 @@ func TestVectorComponentsAndConversions(t *testing.T) {
 	if vec3.X() != 1 || vec3.Y() != 2 || vec3.Z() != 3 {
 		t.Errorf("Vec3 components = (%v, %v, %v), want (1, 2, 3)", vec3.X(), vec3.Y(), vec3.Z())
 	}
-	if got, want := vec3.Vec4(), (glm.Vec4i{1, 2, 3, 0}); got != want {
+	if got, want := vec3.Vec4(4), (glm.Vec4i{1, 2, 3, 4}); got != want {
 		t.Errorf("Vec4() = %v, want %v", got, want)
 	}
 

@@ -31,9 +31,7 @@ type BasicMaterial struct {
 
 // NewBasicMaterial creates an unlit material with an unbound color map.
 func NewBasicMaterial(store *Store) *BasicMaterial {
-	// Forward-only: unlit shading has no surface to hand a deferred lighting pass, so
-	// it supplies neither Deferred nor Lighting and always renders through Forward().
-	st := store.Pool(Shader{Forward: shaders.BasicForward}, "Basic Material")
+	st := store.Pool(Shader{Fragment: shaders.BasicFragment}, "Basic Material")
 	m := &BasicMaterial{color: colors.RGBA32F{1, 1, 1, 1}}
 	m.pool = st
 	m.ref = st.Create(m)
@@ -121,8 +119,6 @@ func (m *BasicMaterial) SetColorMapSampler(sampler uint32) {
 
 // --- Material ---
 //
-// BasicMaterial is unlit, so Deferred and Lighting are nil and it always
-// renders through Forward.
 // Every method below is a plain store lookup. They are spelled out here, rather than
 // inherited from a shared base, so that this file is the whole of BasicMaterial.
 
@@ -147,12 +143,12 @@ func (m *BasicMaterial) IsValid() bool {
 
 // Cull reports which triangle faces are discarded.
 func (m *BasicMaterial) Cull() CullMode {
-	return m.pool.Cull(m.ref.ID())
+	return m.pool.CullAt(m.ref.ID())
 }
 
 // SetCull sets which faces are culled (CullNone = double-sided).
 func (m *BasicMaterial) SetCull(mode CullMode) {
-	m.pool.SetCull(m.ref.ID(), mode)
+	m.pool.SetCullAt(m.ref.ID(), mode)
 }
 
 // SetDoubleSided is a convenience for SetCull(CullNone) / SetCull(CullBack).
@@ -168,12 +164,12 @@ func (m *BasicMaterial) SetDoubleSided(enabled bool) {
 // material to the forward path — the G-buffer holds one surface per pixel, so it
 // cannot represent a fragment that composites over what is behind it.
 func (m *BasicMaterial) Blend() BlendMode {
-	return m.pool.Blend(m.ref.ID())
+	return m.pool.BlendAt(m.ref.ID())
 }
 
 // SetBlend sets the material's blend mode (Opaque/Alpha/Additive).
 func (m *BasicMaterial) SetBlend(mode BlendMode) {
-	m.pool.SetBlend(m.ref.ID(), mode)
+	m.pool.SetBlendAt(m.ref.ID(), mode)
 }
 
 // Pool returns the pool this material's records live in — its shader, pipeline

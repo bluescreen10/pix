@@ -26,8 +26,8 @@ func distinctColors(px []byte) map[[3]byte]int {
 }
 
 // TestDebugObjectIDView confirms DebugObjectID works in plain forward rendering (no
-// EnableDeferredRendering call at all — unlike the G-buffer-based views, this one
-// must not depend on deferred mode, see DebugView's doc comment) and that two
+// extra setup at all — every view is a geometry pass over the scene, see DebugView's
+// doc comment) and that two
 // different objects get two different flat colors.
 func TestDebugObjectIDView(t *testing.T) {
 	const size = 128

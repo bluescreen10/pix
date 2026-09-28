@@ -27,7 +27,11 @@ func TestShowFPS(t *testing.T) {
 	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 1000)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
 
-	for i := 0; i < 6; i++ {
+	// Comfortably more frames than the stats' GPU warm-up discards (see profileWarmup), with
+	// room on top: the first frames of a fresh backend carry pipeline compilation and
+	// need not produce a usable timestamp at all, so a count that only just clears the
+	// warm-up passes on one backend and fails on another.
+	for i := 0; i < 12; i++ {
 		r.Render(scene, cam)
 	}
 
@@ -42,11 +46,11 @@ func TestShowFPS(t *testing.T) {
 	if lit < 50 {
 		t.Fatalf("overlay text not visible (%d font px)", lit)
 	}
-	if r.Stats().AvgGPUTime() <= 0 {
+	if r.Profiler().GPUTime() <= 0 {
 		t.Fatalf("no GPU time recorded via timestamps")
 	}
 	t.Logf("overlay lit=%d px | FPS=%.0f CPU=%.3fms GPU=%.3fms",
-		lit, r.Stats().FPS(),
-		float64(r.Stats().AvgCPUTime().Microseconds())/1000,
-		float64(r.Stats().AvgGPUTime().Microseconds())/1000)
+		lit, r.Profiler().FPS(),
+		float64(r.Profiler().CPUTime().Microseconds())/1000,
+		float64(r.Profiler().GPUTime().Microseconds())/1000)
 }

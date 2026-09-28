@@ -48,26 +48,26 @@ type gpuDirLight struct {
 	// mapSide is one cascade square's resolution in texels, which a wide kernel needs in
 	// order to step by texels; filter is the renderer's ShadowFilter.
 	mapSide uint32
-	filter  uint32
+	filter  ShadowFilter
 }
 
 type gpuPointLight struct {
-	pos        [4]float32   // xyz world; w = range
-	color      [4]float32   // rgb; w = intensity
-	shadowVP   [6]glm.Mat4f // per cube face: world → face clip
-	shadowMap  [6]uint32    // per cube face: depth map heap index, or noShadowMap
-	shadowBias float32      // depth-compare bias, in the face cameras' normalized depth units
+	pos        glm.Vec4f      // xyz world; w = range
+	color      colors.RGBA32F // rgb; w = intensity
+	shadowVP   [6]glm.Mat4f   // per cube face: world → face clip
+	shadowMap  [6]uint32      // per cube face: depth map heap index, or noShadowMap
+	shadowBias float32        // depth-compare bias, in the face cameras' normalized depth units
 	pad0       uint32
 }
 
 type gpuSpotLight struct {
-	pos        [4]float32 // xyz world; w = range
-	dir        [4]float32 // xyz cone axis (travel); w = cosOuter (outer cutoff)
-	color      [4]float32 // rgb; w = intensity
-	shadowVP   glm.Mat4f  // world → light clip (same matrix the depth pass rendered with)
-	cosInner   float32    // inner cutoff cos (smooth edge between inner and outer)
-	shadowMap  uint32     // bindless heap index of the depth map, or noShadowMap
-	shadowBias float32    // depth-compare bias, in this camera's normalized depth units
+	pos        glm.Vec4f      // xyz world; w = range
+	dir        glm.Vec4f      // xyz cone axis (travel); w = cosOuter (outer cutoff)
+	color      colors.RGBA32F // rgb; w = intensity
+	shadowVP   glm.Mat4f      // world → light clip (same matrix the depth pass rendered with)
+	cosInner   float32        // inner cutoff cos (smooth edge between inner and outer)
+	shadowMap  uint32         // bindless heap index of the depth map, or noShadowMap
+	shadowBias float32        // depth-compare bias, in this camera's normalized depth units
 	pad0       uint32
 }
 
@@ -79,7 +79,7 @@ type gpuLights struct {
 	// and the deferred lighting passes already carry the table, and neither push
 	// constant has to grow.
 	fogColor  colors.RGBA32F
-	fogParams colors.RGBA32F
+	fogParams glm.Vec4f
 	numDir    uint32
 	numPoint  uint32
 	numSpot   uint32
@@ -104,7 +104,7 @@ type Lights struct {
 // unlit-looking scene still shows geometry; call SetAmbient to change it.
 //
 // MemoryHost (not Device): a shadow-casting light's shadowVP is refit from the
-// current scene bounds every frame (see Renderer.prepareShadows), so any moving
+// current scene bounds every frame (see Renderer.fitShadows), so any moving
 // or animated geometry — a SkinnedMesh, say — makes the table "dirty" essentially
 // every frame, not just on user edits. Staging that through the shared uploader
 // would force a real GPU submit+wait every frame just for a few KB of light data;
@@ -132,11 +132,13 @@ func NewLights(b gpu.Backend) *Lights {
 // the shadow stays on screen after it was turned off.
 func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPacket, res map[scenes.LightID]*shadowResource, shadows bool, filter ShadowFilter) {
 	var next gpuLights
-	next.ambient = env.Ambient.RGBA()
+	next.ambient = env.Ambient.RGBA(1)
 	fs := env.Fog
-	next.fogColor = [4]float32{fs.Color[0], fs.Color[1], fs.Color[2], float32(fs.Mode)}
-	next.fogParams = [4]float32{fs.Near, fs.Far, fs.Density, 0}
+	next.fogColor = fs.Color.RGBA(float32(fs.Mode))
+	next.fogParams = glm.Vec4f{fs.Near, fs.Far, fs.Density, 0}
 
+	//FIXME: remove enclosure, use a helper method
+	//
 	// shadowOf is the light's resource, but only when shadows may be advertised at all.
 	shadowOf := func(lp scenes.LightPacket) *shadowResource {
 		if !shadows || !lp.CastsShadow {
@@ -153,8 +155,8 @@ func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPack
 			}
 			dir := lp.Direction.Normalize()
 			gl := gpuDirLight{
-				dir:       [4]float32{dir[0], dir[1], dir[2], 0},
-				color:     [4]float32{lp.Color[0], lp.Color[1], lp.Color[2], lp.Intensity},
+				dir:       dir.Vec4(0),
+				color:     lp.Color.RGBA(lp.Intensity),
 				shadowMap: noShadowMap,
 			}
 			// A casting light with an allocated map contributes its view-projection (the
@@ -162,7 +164,7 @@ func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPack
 			if s := shadowOf(lp); s != nil && s.m.IsValid() {
 				gl.shadowMap = s.m.Index()
 				gl.mapSide = max(s.size(), 1)
-				gl.filter = uint32(filter)
+				gl.filter = filter
 				if n := len(s.cascades); n > 0 {
 					gl.cascades = uint32(n)
 					for i, c := range s.cascades {
@@ -188,8 +190,8 @@ func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPack
 				continue
 			}
 			gp := gpuPointLight{
-				pos:   [4]float32{lp.Position[0], lp.Position[1], lp.Position[2], lp.Range},
-				color: [4]float32{lp.Color[0], lp.Color[1], lp.Color[2], lp.Intensity},
+				pos:   lp.Position.Vec4(lp.Range),
+				color: lp.Color.RGBA(lp.Intensity),
 			}
 			for f := range gp.shadowMap {
 				gp.shadowMap[f] = noShadowMap
@@ -212,9 +214,9 @@ func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPack
 			}
 			dir := lp.Direction.Normalize()
 			gs := gpuSpotLight{
-				pos:       [4]float32{lp.Position[0], lp.Position[1], lp.Position[2], lp.Range},
-				dir:       [4]float32{dir[0], dir[1], dir[2], math32.Cos(lp.Angle)},
-				color:     [4]float32{lp.Color[0], lp.Color[1], lp.Color[2], lp.Intensity},
+				pos:       glm.Vec4f{lp.Position[0], lp.Position[1], lp.Position[2], lp.Range},
+				dir:       glm.Vec4f{dir[0], dir[1], dir[2], math32.Cos(lp.Angle)},
+				color:     colors.RGBA32F{lp.Color[0], lp.Color[1], lp.Color[2], lp.Intensity},
 				cosInner:  math32.Cos(lp.Angle * (1 - glm.Clamp(lp.Penumbra, 0, 1))),
 				shadowMap: noShadowMap,
 			}
