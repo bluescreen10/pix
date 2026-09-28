@@ -1,7 +1,3 @@
-github.com/bluescreen10/gamekit v0.2.1 h1:Cs9sdnSDD8OJiclh3AIBIQvU7RrbVKKnPPrxdH7dBC4=
-github.com/bluescreen10/gamekit v0.2.1/go.mod h1:YmJogtOjGF9hoTVSUYGQ3G1QHAh9LIWxj7f0sIlF0oA=
-github.com/bluescreen10/gamekit v0.3.0 h1:2/BtZrQgwvPAKNghzwn9vqbScAxFkpvoxyEXZeFO/Gg=
-github.com/bluescreen10/gamekit v0.3.0/go.mod h1:YmJogtOjGF9hoTVSUYGQ3G1QHAh9LIWxj7f0sIlF0oA=
 github.com/chewxy/math32 v1.11.2 h1:IufN08Zwr1NKuWfY+4Tz55BcwKmyKKNdOP7KtumehnM=
 github.com/chewxy/math32 v1.11.2/go.mod h1:dOB2rcuFrCn6UHrze36WSLVPKtzPMRAQvBvUwkSsLqs=
 golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba h1:Ck8QetSgk912qxWLMCKxd0in+aiyBQyDSMae6e/xmpU=

@@ -80,7 +80,27 @@ var metalParticleDraw []byte
 //go:embed build/particle_basic.frag.metalbin
 var metalParticleBasicFragment []byte
 
+//go:embed build/fullscreen.vert.metalbin
+var metalFullscreenVert []byte
+
+//go:embed build/bloom_downsample.frag.metalbin
+var metalBloomDownsample []byte
+
+//go:embed build/bloom_upsample.frag.metalbin
+var metalBloomUpsample []byte
+
+//go:embed build/bloom_composite.frag.metalbin
+var metalBloomComposite []byte
+
+//go:embed build/tonemap.frag.metalbin
+var metalToneMap []byte
+
 var metalVariants = []struct{ spirv, metal []byte }{
+	{FullscreenVert, metalFullscreenVert},
+	{BloomDownsample, metalBloomDownsample},
+	{BloomUpsample, metalBloomUpsample},
+	{BloomComposite, metalBloomComposite},
+	{ToneMap, metalToneMap},
 	{SceneCull, metalSceneCull},
 	{SceneSkin, metalSceneSkin},
 	{SceneDraw, metalSceneDraw},

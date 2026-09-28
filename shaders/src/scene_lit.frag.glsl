@@ -82,5 +82,5 @@ void main() {
     }
 
     lit = applyFog(lit + m.emissive.rgb, vWorldPos, pc.eye.xyz, L.fogColor, L.fogParams);
-    outColor = vec4(linearToSrgb(lit), base.a);
+    outColor = vec4(lit, base.a); // linear: the target encodes it for display
 }

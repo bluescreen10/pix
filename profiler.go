@@ -21,18 +21,18 @@ const (
 	// GPUPassPrepass is the depth-only pass that precedes forward shading, and does not
 	// run unless Renderer.EnableDepthPrepass turned it on.
 	GPUPassPrepass
-	// GPUPassForward is the forward pass: all shaded geometry, opaque and blended,
-	// particles — and the overlay, which shares its render pass. A backend can only
-	// resolve a timestamp at an encoder boundary, so the console's cost cannot be
-	// separated from the geometry drawn beside it without splitting the pass and
-	// changing the thing being measured.
+	// GPUPassForward is the forward pass: all shaded geometry, opaque and blended, and
+	// particles.
 	GPUPassForward
+	// GPUPassPostProcessing is an HDR frame's post-processing chain and the tone-map
+	// pass that follows it. Without HDR it does not run.
+	GPUPassPostProcessing
 
 	gpuPassCount
 )
 
 // gpuPassNames is each pass's label, in enum order.
-var gpuPassNames = [gpuPassCount]string{"cull", "shadow", "prepass", "forward"}
+var gpuPassNames = [gpuPassCount]string{"cull", "shadow", "prepass", "forward", "post"}
 
 // String returns the pass's label.
 func (p GPUPass) String() string {

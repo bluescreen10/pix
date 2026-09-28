@@ -46,15 +46,18 @@ func TestPassRecordedSeparatesUnrunFromUnmeasured(t *testing.T) {
 		r.Render(scene, cam)
 	}
 
-	// Rendering forward with shadows on: these three happen every frame.
+	// Rendering forward with shadows on: these happen every frame.
 	for _, p := range []pix.GPUPass{pix.GPUPassCull, pix.GPUPassShadow, pix.GPUPassForward} {
 		if !r.Profiler().IsPassRecorded(p) {
 			t.Errorf("%s did not report as recorded, but a forward frame with shadows runs it", p)
 		}
 	}
-	// The prepass does not, and must not merely read as zero.
-	if r.Profiler().IsPassRecorded(pix.GPUPassPrepass) {
-		t.Error("prepass reported as recorded with EnableDepthPrepass off")
+	// These do not — the prepass is off, and without HDR there is no post pass — and
+	// must not merely read as zero.
+	for _, p := range []pix.GPUPass{pix.GPUPassPrepass, pix.GPUPassPostProcessing} {
+		if r.Profiler().IsPassRecorded(p) {
+			t.Errorf("%s reported as recorded, but this frame does not run it", p)
+		}
 	}
 }
 

@@ -19,7 +19,7 @@ func TestShowFPS(t *testing.T) {
 	}
 	defer r.Destroy()
 	r.SetClearColor([4]float32{0, 0, 0, 1})
-	r.SetFontColor(colors.RGBA32F{1, 0.9, 0.35, 1})
+	r.SetFontColor(colors.RGBA32F{1, 0.787, 0.1, 1}) // linear; the sRGB target stores (255,229,89)
 	r.ShowFPS(true)
 
 	scene := scenes.New()

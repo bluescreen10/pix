@@ -9,7 +9,7 @@
 #ifndef MATERIAL_COMMON_GLSL
 #define MATERIAL_COMMON_GLSL
 
-// Bindless heap, light table, shadow sampling and linearToSrgb.
+// Bindless heap, light table, shadow sampling and fog.
 #include "lighting.glsl"
 
 const uint MAT_COLOR_MAP = 1u;

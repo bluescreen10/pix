@@ -1,20 +1,9 @@
-// lighting.glsl — the light table + shadow sampling, standalone for the deferred
-// Lighting() passes (a fullscreen shader, no vertex varyings, no per-drawable material
-// record — unlike material_common.glsl's forward shape). Deliberately a copy of
-// material_common.glsl's light-table declarations rather than a shared include: the
-// forward path is load-bearing and already tested, and duplicating ~60 lines here
-// keeps this change from touching it at all. A future cleanup can fold both into one
-// header once both paths are proven out.
+// lighting.glsl — the light table, shadow sampling and fog, shared by every lit shader.
+// Everything here works in linear light; the render target encodes for display.
 #ifndef PIX_LIGHTING_GLSL
 #define PIX_LIGHTING_GLSL
 
-// Bindless heap (set 0): sampled images at binding 0, samplers at binding 2.
-layout(set = 0, binding = 0) uniform texture2D gTextures[];
-// Alias the same heap with a distinct shader variable for comparison sampling.
-// SPIRV-Cross otherwise promotes every gTextures sample to depth2d's scalar
-// return type, losing the G-buffer/base-color green and blue channels on Metal.
-layout(set = 0, binding = 0) uniform texture2D gShadowTextures[];
-layout(set = 0, binding = 2) uniform sampler gSamplers[];
+#include "bindless.glsl"
 
 const uint MAX_DIR = 4u;
 const uint MAX_POINT = 16u;
@@ -308,16 +297,9 @@ float spotAttenuation(SpotLight sl, vec3 worldPos, vec3 Ldir, float dist) {
     return atten;
 }
 
-// linearToSrgb encodes a linear color to sRGB for display.
-vec3 linearToSrgb(vec3 c) {
-    c = clamp(c, 0.0, 1.0);
-    return mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, c * 12.92, lessThanEqual(c, vec3(0.0031308)));
-}
-
 // applyFog blends a LINEAR-space shaded colour toward the scene's fog colour by
-// distance from the eye. Call it before the sRGB encode: fog is a physical blend
-// between the surface and the medium in front of it, and doing it after the encode
-// washes the result out.
+// distance from the eye. Fog is a physical blend between the surface and the medium
+// in front of it, so it belongs in linear light, before anything encodes for display.
 //
 // The returned value is the fogged colour; a scene with no fog returns lit unchanged
 // (one compare, and the branch is uniform across the draw).

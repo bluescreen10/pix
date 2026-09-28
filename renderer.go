@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -94,6 +95,19 @@ type Renderer struct {
 	debugView      DebugView
 	debugPipelines [debugViewCount]gpu.Pipeline
 
+	// HDR. With it on, the scene is shaded into sceneColor, linear and unclamped; the
+	// post-processing chain ping-pongs between it and postColor; the tone-map pass maps
+	// the result into the target. With it off none of these exist, and the scene draws
+	// straight into the target. Each step owns whatever else it draws with.
+	hdr            bool
+	toneMapping    ToneMapOperator
+	exposureStops  float32
+	postProcessing []PostProcessingStep
+	sceneColor     gpu.Texture
+	postColor      gpu.Texture // only while the chain has steps
+	linearSampler  gpu.Sampler
+	toneMapPass    *FullscreenPass
+
 	// Shadows: global toggle + the shared PCF comparison sampler (created lazily) +
 	// the position-only depth-pass pipeline (rebuilt with the others on format change).
 	// shadowDistance caps how far down the view frustum directional shadows are fit
@@ -163,8 +177,8 @@ func NewRenderer(cfg *RendererConfig) (*Renderer, error) {
 	r := &Renderer{
 		backend:   backend,
 		scale:     scale,
-		clear:     colors.RGBA32F{0, 0, 0, 1},      //TODO: extract as constant
-		fontColor: colors.RGBA32F{1, 0.9, 0.35, 1}, //TODO: extract as constant
+		clear:     colors.RGBA32F{0, 0, 0, 1},       //TODO: extract as constant
+		fontColor: colors.RGBA32F{1, 0.787, 0.1, 1}, //TODO: extract as constant
 		// One uploader for the process, not one per frame: its staging arena only
 		// pays off by keeping its memory across frames (see uploader).
 		uploader:      newUploader(backend),
@@ -199,7 +213,14 @@ func (r *Renderer) attachWindow(w *gamekit.Window, width, height uint32) error {
 	if err != nil {
 		return err
 	}
-	r.swapchain = r.backend.CreateSwapchain(surface, width, height)
+	format, err := sRGBSwapchainFormat(r.backend.SwapchainFormats(surface))
+	if err != nil {
+		return err
+	}
+	r.swapchain, err = r.backend.CreateSwapchain(surface, gpu.SwapchainDescriptor{Width: width, Height: height, Format: format})
+	if err != nil {
+		return err
+	}
 	sizer, ok := r.backend.(swapchainSizer)
 	if !ok {
 		return fmt.Errorf("backend does not expose swapchain size")
@@ -211,17 +232,34 @@ func (r *Renderer) attachWindow(w *gamekit.Window, width, height uint32) error {
 	return nil
 }
 
-// attachTexture configures an internally-owned RGBA8 render target of w×h.
+// sRGBSwapchainFormat picks the backbuffer format for a window: an 8-bit sRGB one, in
+// whichever channel order the surface offers. Every shader writes linear light, and the
+// hardware encodes it for display as it stores — and decodes it to blend, so blending
+// is linear too.
+func sRGBSwapchainFormat(available []gpu.Format) (gpu.Format, error) {
+	for _, format := range []gpu.Format{gpu.FormatBGRA8Srgb, gpu.FormatRGBA8Srgb} {
+		if slices.Contains(available, format) {
+			return format, nil
+		}
+	}
+	return gpu.FormatUndefined, fmt.Errorf("the window presents no 8-bit sRGB format (it offers %v)", available)
+}
+
+// attachTexture configures an internally-owned sRGB RGBA8 render target of w×h.
 func (r *Renderer) attachTexture(w, h uint32) {
 	tex := r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: w, Height: h,
-		Format: gpu.FormatRGBA8Unorm, Usage: gpu.TextureRenderTarget | gpu.TextureTransfer})
+		Format: gpu.FormatRGBA8Srgb, Usage: gpu.TextureRenderTarget | gpu.TextureTransfer})
 	r.ownsTarget = true
-	r.SetRenderTarget(tex, w, h, gpu.FormatRGBA8Unorm)
+	r.SetRenderTarget(tex, w, h, gpu.FormatRGBA8Srgb)
 }
 
 // SetRenderTarget renders into tex (headless). The renderer (re)creates its depth
 // buffer and pipelines to match. tex must have render-target usage (plus transfer
 // usage if you intend to Capture it).
+//
+// The format should be an sRGB one (FormatRGBA8Srgb, FormatBGRA8Srgb): every shader
+// writes linear light and relies on the target to encode it for display. A unorm target
+// stores the linear values as they are, and the image comes out too dark.
 func (r *Renderer) SetRenderTarget(tex gpu.Texture, w, h uint32, format gpu.Format) {
 	r.target = tex
 	r.hasTarget = true
@@ -240,7 +278,47 @@ func (r *Renderer) configure(w, h uint32, format gpu.Format) {
 	// Sampled too, so a pass can read depth back rather than only test against it.
 	r.depth = r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: w, Height: h,
 		Format: gpu.FormatDepth32F, Usage: gpu.TextureDepth | gpu.TextureSampled, Label: "depth"})
+
+	// With HDR on the scene renders into an image of the target's size, not the target
+	// itself. The chain's second image is created when a step first needs it, and steps
+	// with images of their own resize them on their next Encode.
+	r.releaseHDRImages()
+	if r.hdr {
+		r.sceneColor = r.createHDRImage(w, h, "scene-color")
+	}
+
 	r.buildPipelines()
+}
+
+// hdrColorFormat is what the scene is shaded into and the post-processing chain works
+// in: half floats, so light above 1.0 survives until it is tone-mapped or clipped.
+const hdrColorFormat = gpu.FormatRGBA16F
+
+// sceneFormat is what the scene is shaded into: the HDR scene image, or the target.
+func (r *Renderer) sceneFormat() gpu.Format {
+	if r.hdr {
+		return hdrColorFormat
+	}
+	return r.color
+}
+
+// createHDRImage creates one image the scene or the post-processing chain renders into
+// and then samples.
+func (r *Renderer) createHDRImage(width, height uint32, label string) gpu.Texture {
+	return r.backend.CreateTexture(gpu.TextureDescriptor{
+		Kind: gpu.Texture2D, Width: width, Height: height, Format: hdrColorFormat,
+		Usage: gpu.TextureRenderTarget | gpu.TextureSampled, Label: label,
+	})
+}
+
+// releaseHDRImages frees the scene image and the chain's second image, if they exist.
+func (r *Renderer) releaseHDRImages() {
+	for _, image := range []*gpu.Texture{&r.sceneColor, &r.postColor} {
+		if image.IsValid() {
+			r.backend.DestroyTexture(*image)
+		}
+		*image = gpu.Texture{}
+	}
 }
 
 // --------------------------------------------------------------------------------------
@@ -288,7 +366,8 @@ func (r *Renderer) ClearColor() colors.RGBA32F {
 	return r.clear
 }
 
-// SetClearColor sets the color the framebuffer is cleared to each frame.
+// SetClearColor sets the colour the frame is cleared to, in linear light like every
+// other colour the renderer is given.
 func (r *Renderer) SetClearColor(rgba colors.RGBA32F) {
 	r.clear = rgba
 }
@@ -444,8 +523,12 @@ func (r *Renderer) DepthPrepassEnabled() bool {
 // EnableDepthPrepass turns on a depth-only pass over opaque geometry before the forward
 // pass, so shading runs once per visible pixel instead of once per fragment drawn.
 //
-// Worth it when the frame is fragment-bound and overdrawn; a cost when it is not, since
-// the geometry is submitted twice.
+// Worth it on GPUs that shade in submission order — desktop NVIDIA and AMD — when the
+// frame is fragment-bound and overdrawn. On Apple GPUs it is a pure cost: their
+// hidden-surface removal already shades each opaque pixel once, so the prepass saves the
+// forward pass nothing and adds a second submission of the geometry. Measured on the
+// beach scene at 2560x1440 (median of 12 runs each): the forward pass took the same time
+// either way, and the frame 0.2-1.0 ms longer with the prepass.
 func (r *Renderer) EnableDepthPrepass(on bool) {
 	r.depthPrepass = on
 }
@@ -459,6 +542,84 @@ func (r *Renderer) DebugView() DebugView {
 // materials'. DebugOff restores normal shading. Takes effect on the next Render.
 func (r *Renderer) SetDebugView(v DebugView) {
 	r.debugView = v
+}
+
+// HDREnabled reports whether frames are rendered in high dynamic range (see EnableHDR).
+func (r *Renderer) HDREnabled() bool {
+	return r.hdr
+}
+
+// EnableHDR renders frames in high dynamic range: the scene is shaded into an offscreen
+// image in linear, unclamped light, the post-processing chain runs over it, and a
+// tone-map pass maps the result into the target (see SetToneMapping and SetExposure).
+//
+// Off — the default — the scene draws straight into the target: no offscreen image, no
+// extra pass, and no post-processing. Light brighter than white clips.
+func (r *Renderer) EnableHDR(on bool) {
+	if on == r.hdr {
+		return
+	}
+	r.hdr = on
+	// Without a target yet, configuring one later builds for the new setting.
+	if r.width == 0 {
+		return
+	}
+	r.configure(r.width, r.height, r.color)
+}
+
+// ToneMapping is the curve an HDR frame is mapped through (see SetToneMapping).
+func (r *Renderer) ToneMapping() ToneMapOperator {
+	return r.toneMapping
+}
+
+// SetToneMapping sets the curve an HDR frame's light is mapped through into the range a
+// display can show. The default is ToneMapNeutral. It has no effect without HDR.
+func (r *Renderer) SetToneMapping(operator ToneMapOperator) {
+	r.toneMapping = operator
+}
+
+// Exposure is the scale applied to an HDR frame's light before tone mapping, in stops.
+func (r *Renderer) Exposure() float32 {
+	return r.exposureStops
+}
+
+// SetExposure scales an HDR frame's light before tone mapping, in stops: +1 doubles it,
+// -1 halves it, and 0 — the default — leaves it unchanged. It has no effect without HDR.
+func (r *Renderer) SetExposure(stops float32) {
+	r.exposureStops = stops
+}
+
+// PostProcessing returns the effects the renderer runs over the shaded scene, in order.
+func (r *Renderer) PostProcessing() []PostProcessingStep {
+	return r.postProcessing
+}
+
+// SetPostProcessing replaces the chain of effects run over the shaded scene, in the
+// order given. Each step reads the image the one before it produced; the last one's
+// result is tone-mapped into the target.
+//
+// The chain runs only while HDR is on (see EnableHDR): its effects work on the
+// unclamped light that tone mapping then compresses. The default is an empty chain.
+//
+// Steps are held by pointer, so changing one's fields changes the next frame. A step
+// that leaves the chain is released; it can be added back later.
+func (r *Renderer) SetPostProcessing(steps []PostProcessingStep) {
+	for _, step := range r.postProcessing {
+		if !slices.Contains(steps, step) {
+			step.Release()
+		}
+	}
+	r.postProcessing = slices.Clone(steps)
+	// An empty chain needs no second image.
+	if len(steps) == 0 && r.postColor.IsValid() {
+		r.backend.DestroyTexture(r.postColor)
+		r.postColor = gpu.Texture{}
+	}
+}
+
+// AddPostProcessingStep appends one effect to the end of the chain.
+func (r *Renderer) AddPostProcessingStep(step PostProcessingStep) {
+	r.postProcessing = append(r.postProcessing, step)
 }
 
 // EnableConsole turns on the developer console, reading from in, and returns it so
@@ -997,7 +1158,7 @@ func (r *Renderer) buildOverlay() {
 			// The per-pass breakdown is the half of this worth reading: a total says
 			// the budget is gone, the split says which pass spent it.
 			row := 3
-			for _, p := range []GPUPass{GPUPassCull, GPUPassShadow, GPUPassPrepass, GPUPassForward} {
+			for _, p := range []GPUPass{GPUPassCull, GPUPassShadow, GPUPassPrepass, GPUPassForward, GPUPassPostProcessing} {
 				if !r.profiler.IsPassRecorded(p) {
 					continue
 				}
@@ -1048,7 +1209,8 @@ func (r *Renderer) uploadSharedResources(cmd gpu.CommandBuffer) {
 	r.uploader.End(cmd)
 }
 
-// encode records the frame's GPU work: everything from culling to the shaded image.
+// encode records the frame's GPU work: everything from culling to the finished image in
+// the target.
 func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture, cmd gpu.CommandBuffer) {
 	r.profiler.beginGPUFrame(cmd)
 
@@ -1058,7 +1220,9 @@ func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture,
 	// 4b. Fill the shadow maps.
 	r.encodeShadowPasses(st, views.shadows, cmd)
 
-	// 4c. A debug view replaces shading entirely, so nothing after it runs.
+	// 4c. A debug view replaces shading entirely, so nothing after it runs. It draws
+	// straight into the target: its values are data, not light, and neither the
+	// post-processing chain nor tone mapping should touch them.
 	if r.debugViewActive() {
 		r.encodeDebugView(st, views, target, cmd)
 		return
@@ -1067,8 +1231,20 @@ func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture,
 	// 4d. Fill depth first, if enabled, so shading runs once per pixel.
 	depthFilled := r.encodeDepthPrepass(st, views.main, cmd)
 
-	// 4e. Shade.
-	r.encodeDrawingPass(st, views, target, depthFilled, cmd)
+	// 4e. Shade. Without HDR that is the finished image, drawn straight into the target.
+	if !r.hdr {
+		r.encodeDrawingPass(st, views, depthFilled, target, cmd)
+		return
+	}
+	r.encodeDrawingPass(st, views, depthFilled, r.sceneColor, cmd)
+	cmd.PrepareSampled(r.sceneColor, gpu.StageFragment)
+
+	// 4f. Run the post-processing chain over the scene image, then tone-map the result
+	// into the target.
+	r.profiler.beginPass(GPUPassPostProcessing, cmd)
+	image := r.encodePostProcessing(cmd)
+	r.encodeToneMapping(image, target, cmd)
+	r.profiler.endPass(GPUPassPostProcessing, cmd)
 }
 
 // encodeCompute runs everything the frame computes before it draws. Skinning writes
@@ -1342,9 +1518,10 @@ func (r *Renderer) encodeDepthPrepass(st *renderState, main view, cmd gpu.Comman
 	return drew
 }
 
-// encodeDrawingPass shades the scene: every batch, opaque and blended, then the
-// particles. It clears depth unless the prepass already filled it.
-func (r *Renderer) encodeDrawingPass(st *renderState, views frameViews, target gpu.Texture, depthFilled bool, cmd gpu.CommandBuffer) {
+// encodeDrawingPass shades the scene into image — the HDR scene image, or the target
+// itself — every batch, opaque and blended, then the particles. It clears depth unless
+// the prepass already filled it.
+func (r *Renderer) encodeDrawingPass(st *renderState, views frameViews, depthFilled bool, image gpu.Texture, cmd gpu.CommandBuffer) {
 	depthLoad := gpu.LoadClear
 	if depthFilled {
 		depthLoad = gpu.LoadKeep
@@ -1352,7 +1529,7 @@ func (r *Renderer) encodeDrawingPass(st *renderState, views frameViews, target g
 
 	r.profiler.beginPass(GPUPassForward, cmd)
 	cmd.BeginRenderPass(gpu.RenderTargets{
-		Color: []gpu.ColorAttachment{{Texture: target, Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: r.clear}},
+		Color: []gpu.ColorAttachment{{Texture: image, Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: [4]float32(r.clear)}},
 		Depth: &gpu.DepthAttachment{Texture: r.depth, Load: depthLoad, Store: gpu.StoreKeep, Clear: 0.0},
 	})
 	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
@@ -1408,6 +1585,60 @@ func (r *Renderer) drawParticles(st *renderState, views frameViews, cmd gpu.Comm
 		pipeline := r.pipelineForPool(pool, pool.CullAt(pp.Material.Slot), pool.BlendAt(pp.Material.Slot))
 		cmd.SetPipeline(r.drawPipelines[pipeline])
 		cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, ps.indirectBuf, 0, 1, indirectSize)
+	}
+}
+
+// encodePostProcessing runs every step of the chain, in order, over the shaded scene,
+// and returns the image the last one wrote. With an empty chain that is the scene image
+// itself.
+//
+// The steps ping-pong between the scene image and a second image of the same size: each
+// reads the one the step before it wrote, and writes the other.
+func (r *Renderer) encodePostProcessing(cmd gpu.CommandBuffer) gpu.Texture {
+	if len(r.postProcessing) > 0 && !r.postColor.IsValid() {
+		r.postColor = r.createHDRImage(r.width, r.height, "post-color")
+	}
+
+	image := r.sceneColor
+	for _, step := range r.postProcessing {
+		next := r.postColor
+		if image == r.postColor {
+			next = r.sceneColor
+		}
+		frame := PostProcessingFrame{
+			Source: image,
+			Target: next,
+			Width:  r.width,
+			Height: r.height,
+			Time:   r.frame.Time,
+
+			renderer: r,
+		}
+		step.Encode(&frame, cmd)
+		cmd.PrepareSampled(next, gpu.StageFragment)
+		image = next
+	}
+	return image
+}
+
+// encodeToneMapping maps the finished HDR image into the target: exposed, and through
+// the tone-map curve. The target encodes it for display.
+func (r *Renderer) encodeToneMapping(image, target gpu.Texture, cmd gpu.CommandBuffer) {
+	root := toneMapRoot{
+		PostProcessingRoot: r.postProcessingRoot(image, r.width, r.height),
+		operator:           r.toneMapping,
+		exposure:           r.exposureStops,
+	}
+	r.toneMapPass.Draw(target, r.width, r.height, gpu.LoadClear, utils.ToBytes(&root), cmd)
+}
+
+// postProcessingRoot is what a post-processing pass reading image is told about it.
+func (r *Renderer) postProcessingRoot(image gpu.Texture, width, height uint32) PostProcessingRoot {
+	return PostProcessingRoot{
+		Source:        image.Index,
+		LinearSampler: r.ensureLinearSampler().Index,
+		TexelSize:     glm.Vec2f{1 / float32(width), 1 / float32(height)},
+		Time:          r.frame.Time,
 	}
 }
 
@@ -1625,6 +1856,19 @@ func (r *Renderer) ensureShadowSampler() {
 		Compare: gpu.CompareGreaterEqual, // reversed-Z: nearer is greater
 		Label:   "shadow-cmp",
 	})
+}
+
+// ensureLinearSampler creates the linear, clamp-to-edge sampler every post-processing
+// pass reads through, on first use.
+func (r *Renderer) ensureLinearSampler() gpu.Sampler {
+	if r.linearSampler.H == 0 {
+		r.linearSampler = r.backend.CreateSampler(gpu.SamplerDescriptor{
+			MinLinear: true, MagLinear: true,
+			AddressU: gpu.AddressClamp, AddressV: gpu.AddressClamp,
+			Label: "post-linear",
+		})
+	}
+	return r.linearSampler
 }
 
 // ensureParticleBuffers allocates a system's ping-pong buffers and indirect command on
@@ -2105,6 +2349,7 @@ func (r *Renderer) buildPipelines() {
 	for i, k := range r.drawPipelineKeys {
 		r.drawPipelines[i] = r.buildDrawPipe(k)
 	}
+	r.buildToneMapPass()
 	r.pipelinesReady = true
 	if r.overlay != nil {
 		r.overlay.destroy()
@@ -2122,8 +2367,9 @@ type materialPipeline struct {
 
 // buildDrawPipe creates a graphics pipeline for a material pipeline key against the
 // current color/depth formats. The vertex-pull stage is shared unless the material
-// supplies its own vertex program. Every key targets the main color target, with its
-// material's blend mode.
+// supplies its own vertex program. Every key targets the HDR scene image, with its
+// material's blend mode: materials output linear, unclamped light, and blending happens
+// in linear light where it is physically meaningful.
 func (r *Renderer) buildDrawPipe(k materialPipeline) gpu.Pipeline {
 	vert := k.vertex
 	if vert == nil {
@@ -2141,7 +2387,7 @@ func (r *Renderer) buildDrawPipe(k materialPipeline) gpu.Pipeline {
 	depthWrite := k.blend == materials.BlendOpaque
 	return r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
 		VertexShader: shaders.ForBackend(r.backend, vert), FragmentShader: shaders.ForBackend(r.backend, k.fragment),
-		Topology: gpu.TopologyTriangles, ColorFormats: []gpu.Format{r.color},
+		Topology: gpu.TopologyTriangles, ColorFormats: []gpu.Format{r.sceneFormat()},
 		// GreaterEqual, not Greater: with a depth prepass the shading draw meets depth it
 		// wrote itself, and Greater would reject every fragment. Without one the only
 		// difference is which of two exactly-coplanar surfaces wins, where nothing was
@@ -2151,6 +2397,18 @@ func (r *Renderer) buildDrawPipe(k materialPipeline) gpu.Pipeline {
 		// triangle winding, so front faces are clockwise on screen.
 		CullMode: gpu.CullMode(k.cull), FrontFaceCW: true, Blend: blend,
 	})
+}
+
+// buildToneMapPass (re)creates the pass that maps the HDR frame into the target, which
+// depends on the target's format. Without HDR there is none.
+func (r *Renderer) buildToneMapPass() {
+	if r.toneMapPass != nil {
+		r.toneMapPass.Release()
+		r.toneMapPass = nil
+	}
+	if r.hdr {
+		r.toneMapPass = newFullscreenPass(r.backend, shaders.ToneMap, r.color, nil, "tone-map")
+	}
 }
 
 // pipelineFor resolves a material pipeline key to a draw-pipeline index, building and
@@ -2390,7 +2648,21 @@ func (r *Renderer) registerBuiltins(c *console.Console) {
 
 	console.BindFunc(c, "depthprepass", r.DepthPrepassEnabled,
 		func(v bool) error { r.EnableDepthPrepass(v); return nil },
-		"fill depth before the forward pass so shading runs once per pixel")
+		"fill depth before shading; helps desktop GPUs, costs Apple GPUs (they already shade each pixel once)")
+
+	console.BindFunc(c, "hdr", r.HDREnabled,
+		func(v bool) error {
+			r.EnableHDR(v)
+			return nil
+		},
+		"render in HDR: offscreen scene image, post-processing, tone mapping")
+
+	console.BindFunc(c, "exposure", r.Exposure,
+		func(v float32) error {
+			r.SetExposure(v)
+			return nil
+		},
+		"HDR light scale before tone mapping, in stops")
 
 	console.BindFunc(c, "stats", r.StatsVisible,
 		func(v bool) error { r.ShowFPS(v); return nil },
@@ -2514,16 +2786,28 @@ func (r *Renderer) Destroy() {
 			r.backend.DestroyPipeline(p)
 		}
 	}
+	if r.toneMapPass != nil {
+		r.toneMapPass.Release()
+		r.toneMapPass = nil
+	}
 	for _, p := range r.debugPipelines {
 		if p.H != 0 {
 			r.backend.DestroyPipeline(p)
 		}
 	}
-	if r.depth.IsValid() {
-		r.backend.DestroyTexture(r.depth)
+	for _, step := range r.postProcessing {
+		step.Release()
 	}
-	if r.shadowSampler.H != 0 {
-		r.backend.DestroySampler(r.shadowSampler)
+	r.postProcessing = nil
+	for _, t := range []gpu.Texture{r.depth, r.sceneColor, r.postColor} {
+		if t.IsValid() {
+			r.backend.DestroyTexture(t)
+		}
+	}
+	for _, sampler := range []gpu.Sampler{r.shadowSampler, r.linearSampler} {
+		if sampler.H != 0 {
+			r.backend.DestroySampler(sampler)
+		}
 	}
 	if r.ownsTarget && r.target.IsValid() {
 		r.backend.DestroyTexture(r.target)

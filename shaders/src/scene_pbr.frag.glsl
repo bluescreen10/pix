@@ -258,6 +258,6 @@ void main() {
         float refl = max(fres * fres, dot(lit, vec3(0.2126, 0.7152, 0.0722)));
         alpha = clamp(baseAlpha * mix(1.0, refl, transmission), 0.04, 1.0);
     }
-    outColor = vec4(linearToSrgb(lit), alpha);
+    outColor = vec4(lit, alpha); // linear: the target encodes it for display
 
 }

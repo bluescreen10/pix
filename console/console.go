@@ -97,11 +97,12 @@ func New(in Input) *Console {
 		ToggleKey:  DefaultToggleKey,
 		Height:     0.5,
 		Padding:    8,
-		Background: colors.RGBA32F{0.05, 0.06, 0.09, 0.88},
-		Border:     colors.RGBA32F{0.35, 0.62, 0.95, 0.9},
-		Foreground: colors.RGBA32F{0.85, 0.88, 0.93, 1},
-		PromptFG:   colors.RGBA32F{0.98, 0.82, 0.35, 1},
-		CursorFG:   colors.RGBA32F{0.98, 0.82, 0.35, 0.55},
+		// Linear light, like every colour the renderer draws.
+		Background: colors.RGBA32F{0.004, 0.005, 0.009, 0.88},
+		Border:     colors.RGBA32F{0.1, 0.342, 0.89, 0.9},
+		Foreground: colors.RGBA32F{0.692, 0.748, 0.848, 1},
+		PromptFG:   colors.RGBA32F{0.955, 0.638, 0.1, 1},
+		CursorFG:   colors.RGBA32F{0.955, 0.638, 0.1, 0.55},
 	}
 	c.SetFontSize(DefaultFontSize)
 	c.Printf("pix console — `list` for variables, `help` for commands")

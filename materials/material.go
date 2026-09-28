@@ -47,9 +47,14 @@ const (
 // alongside these two — so that a material could opt into deferred shading. The
 // renderer is forward-only now, which removes not just the two blobs but the question
 // a material type had to answer about which combination it supplied.
+//
+// The fragment shader outputs linear, unclamped light — never display-encoded. Without
+// HDR it lands in the sRGB target, which encodes it as it stores; with HDR it lands in
+// the scene image, which the renderer tone-maps into that target at the end of the
+// frame. A shader that encodes its own output is encoded twice and comes out washed out.
 type Shader struct {
 	Vertex   []byte // Backend-native bytes; nil => the default scene vertex-pull shader
-	Fragment []byte // Backend-native bytes; required — surface + lighting in one pass, outputs color
+	Fragment []byte // Backend-native bytes; required — surface + lighting in one pass, outputs linear light
 }
 
 // Built-ins identify shaders from the shaders package. Store.Pool selects the
