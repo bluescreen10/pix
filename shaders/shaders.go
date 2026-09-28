@@ -58,6 +58,7 @@ import _ "embed"
 //go:generate go run ../cmd/shadercompile -i src/bloom_upsample.frag.glsl -o spv:build/bloom_upsample.frag.spv -o metallib:build/bloom_upsample.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/bloom_composite.frag.glsl -o spv:build/bloom_composite.frag.spv -o metallib:build/bloom_composite.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/tonemap.frag.glsl -o spv:build/tonemap.frag.spv -o metallib:build/tonemap.frag.metalbin
+//go:generate go run ../cmd/shadercompile -i src/halftone.frag.glsl -o spv:build/halftone.frag.spv -o metallib:build/halftone.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/particle_update.comp.glsl -o spv:build/particle_update.comp.spv -o metallib:build/particle_update.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/particle_draw.vert.glsl -o spv:build/particle_draw.vert.spv -o metallib:build/particle_draw.vert.metalbin
 //go:generate go run ../cmd/shadercompile -i src/particle_basic.frag.glsl -o spv:build/particle_basic.frag.spv -o metallib:build/particle_basic.frag.metalbin
@@ -130,6 +131,9 @@ var BloomComposite []byte
 
 //go:embed build/tonemap.frag.spv
 var ToneMap []byte
+
+//go:embed build/halftone.frag.spv
+var Halftone []byte
 
 // --- overlay (debug HUD) ---
 

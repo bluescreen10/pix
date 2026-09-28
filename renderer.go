@@ -2,6 +2,7 @@ package pix
 
 import (
 	"fmt"
+	"github.com/bluescreen10/pix/postprocess"
 	"image"
 	"image/png"
 	"math"
@@ -102,11 +103,11 @@ type Renderer struct {
 	hdr            bool
 	toneMapping    ToneMapOperator
 	exposureStops  float32
-	postProcessing []PostProcessingStep
+	postProcessing []postprocess.Step
 	sceneColor     gpu.Texture
 	postColor      gpu.Texture // only while the chain has steps
 	linearSampler  gpu.Sampler
-	toneMapPass    *FullscreenPass
+	toneMapPass    *postprocess.FullscreenPass
 
 	// Shadows: global toggle + the shared PCF comparison sampler (created lazily) +
 	// the position-only depth-pass pipeline (rebuilt with the others on format change).
@@ -284,31 +285,18 @@ func (r *Renderer) configure(w, h uint32, format gpu.Format) {
 	// with images of their own resize them on their next Encode.
 	r.releaseHDRImages()
 	if r.hdr {
-		r.sceneColor = r.createHDRImage(w, h, "scene-color")
+		r.sceneColor = postprocess.CreateImage(r.backend, w, h, "scene-color")
 	}
 
 	r.buildPipelines()
 }
 
-// hdrColorFormat is what the scene is shaded into and the post-processing chain works
-// in: half floats, so light above 1.0 survives until it is tone-mapped or clipped.
-const hdrColorFormat = gpu.FormatRGBA16F
-
 // sceneFormat is what the scene is shaded into: the HDR scene image, or the target.
 func (r *Renderer) sceneFormat() gpu.Format {
 	if r.hdr {
-		return hdrColorFormat
+		return postprocess.ImageFormat
 	}
 	return r.color
-}
-
-// createHDRImage creates one image the scene or the post-processing chain renders into
-// and then samples.
-func (r *Renderer) createHDRImage(width, height uint32, label string) gpu.Texture {
-	return r.backend.CreateTexture(gpu.TextureDescriptor{
-		Kind: gpu.Texture2D, Width: width, Height: height, Format: hdrColorFormat,
-		Usage: gpu.TextureRenderTarget | gpu.TextureSampled, Label: label,
-	})
 }
 
 // releaseHDRImages frees the scene image and the chain's second image, if they exist.
@@ -590,7 +578,7 @@ func (r *Renderer) SetExposure(stops float32) {
 }
 
 // PostProcessing returns the effects the renderer runs over the shaded scene, in order.
-func (r *Renderer) PostProcessing() []PostProcessingStep {
+func (r *Renderer) PostProcessing() []postprocess.Step {
 	return r.postProcessing
 }
 
@@ -603,7 +591,7 @@ func (r *Renderer) PostProcessing() []PostProcessingStep {
 //
 // Steps are held by pointer, so changing one's fields changes the next frame. A step
 // that leaves the chain is released; it can be added back later.
-func (r *Renderer) SetPostProcessing(steps []PostProcessingStep) {
+func (r *Renderer) SetPostProcessing(steps []postprocess.Step) {
 	for _, step := range r.postProcessing {
 		if !slices.Contains(steps, step) {
 			step.Release()
@@ -618,7 +606,7 @@ func (r *Renderer) SetPostProcessing(steps []PostProcessingStep) {
 }
 
 // AddPostProcessingStep appends one effect to the end of the chain.
-func (r *Renderer) AddPostProcessingStep(step PostProcessingStep) {
+func (r *Renderer) AddPostProcessingStep(step postprocess.Step) {
 	r.postProcessing = append(r.postProcessing, step)
 }
 
@@ -1596,7 +1584,7 @@ func (r *Renderer) drawParticles(st *renderState, views frameViews, cmd gpu.Comm
 // reads the one the step before it wrote, and writes the other.
 func (r *Renderer) encodePostProcessing(cmd gpu.CommandBuffer) gpu.Texture {
 	if len(r.postProcessing) > 0 && !r.postColor.IsValid() {
-		r.postColor = r.createHDRImage(r.width, r.height, "post-color")
+		r.postColor = postprocess.CreateImage(r.backend, r.width, r.height, "post-color")
 	}
 
 	image := r.sceneColor
@@ -1605,15 +1593,7 @@ func (r *Renderer) encodePostProcessing(cmd gpu.CommandBuffer) gpu.Texture {
 		if image == r.postColor {
 			next = r.sceneColor
 		}
-		frame := PostProcessingFrame{
-			Source: image,
-			Target: next,
-			Width:  r.width,
-			Height: r.height,
-			Time:   r.frame.Time,
-
-			renderer: r,
-		}
+		frame := r.postProcessingFrame(image, next)
 		step.Encode(&frame, cmd)
 		cmd.PrepareSampled(next, gpu.StageFragment)
 		image = next
@@ -1624,21 +1604,26 @@ func (r *Renderer) encodePostProcessing(cmd gpu.CommandBuffer) gpu.Texture {
 // encodeToneMapping maps the finished HDR image into the target: exposed, and through
 // the tone-map curve. The target encodes it for display.
 func (r *Renderer) encodeToneMapping(image, target gpu.Texture, cmd gpu.CommandBuffer) {
+	frame := r.postProcessingFrame(image, target)
 	root := toneMapRoot{
-		PostProcessingRoot: r.postProcessingRoot(image, r.width, r.height),
-		operator:           r.toneMapping,
-		exposure:           r.exposureStops,
+		Root:     frame.Root(image, r.width, r.height),
+		operator: r.toneMapping,
+		exposure: r.exposureStops,
 	}
 	r.toneMapPass.Draw(target, r.width, r.height, gpu.LoadClear, utils.ToBytes(&root), cmd)
 }
 
-// postProcessingRoot is what a post-processing pass reading image is told about it.
-func (r *Renderer) postProcessingRoot(image gpu.Texture, width, height uint32) PostProcessingRoot {
-	return PostProcessingRoot{
-		Source:        image.Index,
-		LinearSampler: r.ensureLinearSampler().Index,
-		TexelSize:     glm.Vec2f{1 / float32(width), 1 / float32(height)},
+// postProcessingFrame is what a post-processing pass reading source and writing target
+// is given.
+func (r *Renderer) postProcessingFrame(source, target gpu.Texture) postprocess.Frame {
+	return postprocess.Frame{
+		Source:        source,
+		Target:        target,
+		Width:         r.width,
+		Height:        r.height,
 		Time:          r.frame.Time,
+		Backend:       r.backend,
+		LinearSampler: r.ensureLinearSampler(),
 	}
 }
 
@@ -2407,7 +2392,11 @@ func (r *Renderer) buildToneMapPass() {
 		r.toneMapPass = nil
 	}
 	if r.hdr {
-		r.toneMapPass = newFullscreenPass(r.backend, shaders.ToneMap, r.color, nil, "tone-map")
+		r.toneMapPass = postprocess.NewFullscreenPass(r.backend, postprocess.FullscreenPassDescriptor{
+			Fragment: shaders.ToneMap,
+			Format:   r.color,
+			Label:    "tone-map",
+		})
 	}
 }
 

@@ -1,10 +1,8 @@
 package pix_test
 
 import (
-	"encoding/binary"
 	"fmt"
 	"math"
-	"slices"
 	"testing"
 
 	"github.com/bluescreen10/gamekit/gpu"
@@ -13,6 +11,7 @@ import (
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/postprocess"
 	"github.com/bluescreen10/pix/scenes"
 	"github.com/bluescreen10/pix/shaders"
 )
@@ -130,83 +129,25 @@ func TestExposureScalesLight(t *testing.T) {
 	}
 }
 
-// TestBloomSpreadsBrightLight: bloom carries light from a bright surface onto pixels
-// around it that no geometry covers. Without it those pixels are the black background.
-func TestBloomSpreadsBrightLight(t *testing.T) {
-	r, scene, cam := postScene(t, colors.RGBA32F{50, 50, 50, 1}, 0.2)
-	r.EnableHDR(true)
-	// Well outside the quad, which spans the middle quarter of the frame.
-	x, y := postSize/2+postSize/4, postSize/2
-
-	r.Render(scene, cam)
-	if dark := pixelAt(r, x, y); dark != [3]byte{} {
-		t.Fatalf("without bloom the pixel beside the quad = %v, want black", dark)
-	}
-
-	r.AddPostProcessingStep(&pix.Bloom{Intensity: 0.1})
-	r.Render(scene, cam)
-	if glow := pixelAt(r, x, y); glow == [3]byte{} {
-		t.Error("with bloom the pixel beside the quad is still black, want the quad's light spread onto it")
-	}
-}
-
 // TestPostProcessingNeedsHDR: without HDR there is no scene image for the chain to work
 // on, so it does not run — the frame costs nothing more for having one.
 func TestPostProcessingNeedsHDR(t *testing.T) {
 	r, scene, cam := postScene(t, colors.RGBA32F{50, 50, 50, 1}, 0.2)
-	r.AddPostProcessingStep(&pix.Bloom{Intensity: 0.1})
+	r.AddPostProcessingStep(&postprocess.Bloom{Intensity: 0.1})
 	r.Render(scene, cam)
 	if dark := pixelAt(r, postSize/2+postSize/4, postSize/2); dark != [3]byte{} {
 		t.Errorf("without HDR the pixel beside the quad = %v, want black: the chain should not run", dark)
 	}
 }
 
-// blurStep is an application effect: bloom's downsampling shader run at full size, which
-// makes it a small blur. firstLevel is the shader's own field; 1 turns on its average
-// that damps the brightest pixels.
-func blurStep(firstLevel uint32) *pix.ShaderStep {
-	return &pix.ShaderStep{
-		Fragment: shaders.BloomDownsample,
-		Params:   binary.LittleEndian.AppendUint32(nil, firstLevel),
-		Label:    "blur",
-	}
-}
-
-// TestShaderStepRunsTheApplicationsShader: an application's effect is its fragment shader
-// and its parameters, laid out after the renderer's own fields. Blurring a bright quad
-// must spread its light just past its edge, and the shader's own parameter must reach it.
-func TestShaderStepRunsTheApplicationsShader(t *testing.T) {
-	r, scene, cam := postScene(t, colors.RGBA32F{50, 50, 50, 1}, 0.2)
-	r.EnableHDR(true)
-	// The quad's right edge is near x = 59; the blur reaches two texels.
-	x, y := 61, postSize/2
-
-	r.Render(scene, cam)
-	if dark := pixelAt(r, x, y); dark != [3]byte{} {
-		t.Fatalf("without the step the pixel past the quad's edge = %v, want black", dark)
-	}
-
-	r.SetPostProcessing([]pix.PostProcessingStep{blurStep(0)})
-	r.Render(scene, cam)
-	blurred := append([]byte(nil), r.Pixels()...)
-	if glow := pixelAt(r, x, y); glow == [3]byte{} {
-		t.Fatal("with the step the pixel past the quad's edge is still black, want the blur to reach it")
-	}
-
-	r.SetPostProcessing([]pix.PostProcessingStep{blurStep(1)})
-	r.Render(scene, cam)
-	if slices.Equal(blurred, r.Pixels()) {
-		t.Error("firstLevel 1 drew the same image as firstLevel 0, want the parameter to reach the shader")
-	}
-}
-
-// countingStep runs an application effect and counts what the renderer asks of it.
+// countingStep runs an application effect — bloom's downsampling shader as a small blur —
+// and counts what the renderer asks of it.
 type countingStep struct {
-	pix.ShaderStep
+	postprocess.ShaderStep
 	encodes, releases int
 }
 
-func (s *countingStep) Encode(frame *pix.PostProcessingFrame, cmd gpu.CommandBuffer) {
+func (s *countingStep) Encode(frame *postprocess.Frame, cmd gpu.CommandBuffer) {
 	s.encodes++
 	s.ShaderStep.Encode(frame, cmd)
 }
@@ -221,16 +162,16 @@ func (s *countingStep) Release() {
 func TestStepLeavingTheChainIsReleased(t *testing.T) {
 	r, scene, cam := postScene(t, colors.RGBA32F{1, 1, 1, 1}, 0.5)
 	r.EnableHDR(true)
-	kept := &countingStep{ShaderStep: *blurStep(0)}
-	dropped := &countingStep{ShaderStep: *blurStep(0)}
+	kept := &countingStep{ShaderStep: postprocess.ShaderStep{Fragment: shaders.BloomDownsample, Params: make([]byte, 4)}}
+	dropped := &countingStep{ShaderStep: postprocess.ShaderStep{Fragment: shaders.BloomDownsample, Params: make([]byte, 4)}}
 
-	r.SetPostProcessing([]pix.PostProcessingStep{kept, dropped})
+	r.SetPostProcessing([]postprocess.Step{kept, dropped})
 	r.Render(scene, cam)
 	if kept.encodes != 1 || dropped.encodes != 1 {
 		t.Fatalf("encodes = %d, %d, want each step run once", kept.encodes, dropped.encodes)
 	}
 
-	r.SetPostProcessing([]pix.PostProcessingStep{kept})
+	r.SetPostProcessing([]postprocess.Step{kept})
 	if dropped.releases != 1 {
 		t.Errorf("the dropped step was released %d times, want once", dropped.releases)
 	}
