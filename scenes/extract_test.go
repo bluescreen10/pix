@@ -26,16 +26,6 @@ func TestExtractFrameBelongsToScene(t *testing.T) {
 	}
 }
 
-func TestExtractPreservesViews(t *testing.T) {
-	scene := scenes.New()
-	packet := scenes.FramePacket{Views: make([]scenes.ViewPacket, 2)}
-
-	scene.Extract(&packet)
-	if len(packet.Views) != 2 {
-		t.Fatalf("Extract retained %d views, want 2", len(packet.Views))
-	}
-}
-
 func TestTransformDirtinessSurvivesSyncUntilExtract(t *testing.T) {
 	scene := scenes.New()
 	group := scene.NewGroup()

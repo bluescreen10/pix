@@ -36,10 +36,10 @@ func TestDebugViewNamesRoundTrip(t *testing.T) {
 // They used to be re-reads of the G-buffer and so lay dormant unless deferred rendering
 // was enabled, which is exactly the coupling this removes.
 func TestEveryDebugViewChangesTheFrame(t *testing.T) {
-	r, scene, cam := shotScene(t, 32, 32)
+	r, scene := shotScene(t, 32, 32)
 
 	r.SetDebugView(pix.DebugOff)
-	r.Render(scene, cam)
+	r.Render(scene)
 	shaded := append([]byte(nil), r.Pixels()...)
 
 	for _, name := range pix.DebugViewNames() {
@@ -48,7 +48,7 @@ func TestEveryDebugViewChangesTheFrame(t *testing.T) {
 			continue
 		}
 		r.SetDebugView(v)
-		r.Render(scene, cam)
+		r.Render(scene)
 		if bytes.Equal(shaded, r.Pixels()) {
 			t.Errorf("%v produced the shaded frame unchanged", v)
 		}
@@ -59,14 +59,14 @@ func TestEveryDebugViewChangesTheFrame(t *testing.T) {
 // different data, so each must produce a different image — and none may be blank, which
 // is what a wrong shader or an unfilled root would look like.
 func TestDebugViewsRenderDistinctFrames(t *testing.T) {
-	r, scene, cam := shotScene(t, 96, 96)
+	r, scene := shotScene(t, 96, 96)
 
 	// The frames are compared as pixels, not as a summed luma. A sum is a lossy hash,
 	// and two of these views genuinely collided on one while rendering different
 	// images — the test reported a bug that wasn't there.
 	frame := func(v pix.DebugView) (px []byte, nonBlank bool) {
 		r.SetDebugView(v)
-		r.Render(scene, cam)
+		r.Render(scene)
 		px = append([]byte(nil), r.Pixels()...)
 		for i := 0; i+3 < len(px); i += 4 {
 			if px[i] > 8 || px[i+1] > 8 || px[i+2] > 8 {
@@ -106,13 +106,13 @@ func TestDebugViewsRenderDistinctFrames(t *testing.T) {
 // ShowFPS is what arms the timestamps, so it is essential to the reproduction. If this
 // regresses the test hangs rather than failing, and `go test` kills it on timeout.
 func TestDebugViewWithStatsCompletesFrames(t *testing.T) {
-	r, scene, cam := shotScene(t, 64, 64)
+	r, scene := shotScene(t, 64, 64)
 	r.ShowFPS(true) // arms the GPU timestamp queries
 
 	for _, v := range []pix.DebugView{pix.DebugOff, pix.DebugNormal, pix.DebugObjectID, pix.DebugDepth, pix.DebugOff} {
 		r.SetDebugView(v)
 		for range 3 { // several frames: the read happens at the end of each
-			r.Render(scene, cam)
+			r.Render(scene)
 		}
 	}
 }
@@ -123,15 +123,15 @@ func TestDebugViewWithStatsCompletesFrames(t *testing.T) {
 // a frame with the stats HUD on against one with it off: if the overlay pass were being
 // skipped, toggling the HUD would make no visible difference.
 func TestDebugViewKeepsTheOverlay(t *testing.T) {
-	r, scene, cam := shotScene(t, 64, 64)
+	r, scene := shotScene(t, 64, 64)
 	r.SetDebugView(pix.DebugNormal)
 
 	r.ShowFPS(false)
-	r.Render(scene, cam)
+	r.Render(scene)
 	withoutHUD := append([]byte(nil), r.Pixels()...)
 
 	r.ShowFPS(true)
-	r.Render(scene, cam)
+	r.Render(scene)
 	withHUD := r.Pixels()
 
 	if bytes.Equal(withoutHUD, withHUD) {

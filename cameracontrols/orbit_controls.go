@@ -1,4 +1,4 @@
-package controls
+package cameracontrols
 
 import (
 	"time"
@@ -11,8 +11,8 @@ import (
 type camera interface {
 	Position() glm.Vec3f
 	SetPosition(glm.Vec3f)
-	Fwd() glm.Vec3f
-	SetFwd(glm.Vec3f)
+	Forward() glm.Vec3f
+	SetForward(glm.Vec3f)
 	Up() glm.Vec3f
 	SetUp(glm.Vec3f)
 }
@@ -132,8 +132,8 @@ func (c *OrbitControls) Update() {
 			c.isPanning = true
 		} else {
 			deltaMouse := newPos.Sub(c.mousePos)
-			right := c.camera.Fwd().Cross(glm.Vec3f{0, 1, 0}).Normalize()
-			up := right.Cross(c.camera.Fwd()).Normalize()
+			right := c.camera.Forward().Cross(glm.Vec3f{0, 1, 0}).Normalize()
+			up := right.Cross(c.camera.Forward()).Normalize()
 			panX := right.Scale(-deltaMouse[0] * c.panSpeed * radius * 0.1)
 			panY := up.Scale(deltaMouse[1] * c.panSpeed * radius * 0.1)
 			c.desiredTarget = c.desiredTarget.Add(panX).Add(panY)
@@ -183,6 +183,6 @@ func (c *OrbitControls) Update() {
 
 	// update camera position and orientation
 	c.camera.SetPosition(pos)
-	c.camera.SetFwd(forward)
+	c.camera.SetForward(forward)
 	c.camera.SetUp(up)
 }

@@ -1,15 +1,13 @@
 package pix
 
 import (
-	"math"
-	"testing"
-
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
 	"github.com/bluescreen10/pix/scenes"
+	"math"
+	"testing"
 )
 
 // decalTestScene builds a renderer + scene with one unit-ish box at the origin,
@@ -184,10 +182,11 @@ func TestDecalGeometryRenders(t *testing.T) {
 	decal.SetCastShadow(false)
 	box.Add(decal)
 
-	cam := cameras.NewOrthographicCamera(-1, 1, -1, 1, 0.1, 100)
+	cam := scene.NewOrthographicCamera(-1, 1, -1, 1, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 10})
-	cam.SetTarget(glm.Vec3f{0, 0, 0})
-	r.Render(scene, cam)
+	cam.LookAt(glm.Vec3f{0, 0, 0})
+	r.Render(scene)
 
 	px := r.Pixels()
 	// Center is inside the decal's footprint (half-extent 0.5 of a 2-unit face).

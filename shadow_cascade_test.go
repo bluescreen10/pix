@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
@@ -15,7 +14,7 @@ import (
 // with props from under the viewer's feet out to the horizon, and a camera whose near
 // plane sits a thousandth of the scene radius away, as examples/beach_lod sets it. The
 // caller owns the scene.
-func bigScene(t *testing.T, r *pix.Renderer, mapSize uint32) (*scenes.Scene, pix.Camera, scenes.LightID) {
+func bigScene(t *testing.T, r *pix.Renderer, mapSize uint32) (*scenes.Scene, scenes.Camera, scenes.LightID) {
 	t.Helper()
 	const radius = 300
 
@@ -41,9 +40,10 @@ func bigScene(t *testing.T, r *pix.Renderer, mapSize uint32) (*scenes.Scene, pix
 		scene.Add(p)
 	}
 
-	cam := cameras.NewPerspectiveCamera(45, 1, radius*0.001, radius*12)
+	cam := scene.NewPerspectiveCamera(45, 1, radius*0.001, radius*12)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 1.7, 8})
-	cam.SetTarget(glm.Vec3f{0, 1.2, -20})
+	cam.LookAt(glm.Vec3f{0, 1.2, -20})
 	return scene, cam, light.ID()
 }
 
@@ -72,7 +72,7 @@ func TestCascadesResolveTheNearFieldInALargeScene(t *testing.T) {
 
 		scene, cam, lightID := bigScene(t, r, mapSize)
 		defer scene.Destroy()
-		r.Render(scene, cam)
+		r.Render(scene)
 
 		view := r.ShadowView(scene.ID(), lightID)
 		if view == nil {
@@ -143,14 +143,14 @@ func TestCascadesMatchOneMapInASmallScene(t *testing.T) {
 		r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 		r.SetShadows(algo)
 
-		scene, cam, _ := occluderScene(t, r, glm.Vec3f{})
+		scene, _ := occluderScene(t, r, glm.Vec3f{})
 		defer scene.Destroy()
 
 		r.EnableShadows(false)
-		r.Render(scene, cam)
+		r.Render(scene)
 		lit := append([]byte(nil), r.Pixels()...)
 		r.EnableShadows(true)
-		r.Render(scene, cam)
+		r.Render(scene)
 		shadowed := r.Pixels()
 
 		n := 0
@@ -207,13 +207,13 @@ func TestCascadesRenderEverySlice(t *testing.T) {
 		r.SetShadows(pix.ShadowCascaded{})
 		r.SetShadows(pix.ShadowCascaded{Levels: int(count)})
 
-		scene, cam, lightID := occluderScene(t, r, glm.Vec3f{})
+		scene, lightID := occluderScene(t, r, glm.Vec3f{})
 
 		r.EnableShadows(false)
-		r.Render(scene, cam)
+		r.Render(scene)
 		lit := append([]byte(nil), r.Pixels()...)
 		r.EnableShadows(true)
-		r.Render(scene, cam)
+		r.Render(scene)
 		shadowed := r.Pixels()
 
 		n := 0
@@ -288,15 +288,16 @@ func TestShadowBiasHoldsAsTheLightGrazes(t *testing.T) {
 		box.SetCastShadow(true)
 		scene.Add(box)
 
-		cam := cameras.NewPerspectiveCamera(55, 1, 0.3, 200)
+		cam := scene.NewPerspectiveCamera(55, 1, 0.3, 200)
+		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{2, 5, 12})
-		cam.SetTarget(glm.Vec3f{0, 1, -2})
+		cam.LookAt(glm.Vec3f{0, 1, -2})
 
 		r.EnableShadows(false)
-		r.Render(scene, cam)
+		r.Render(scene)
 		lit := append([]byte(nil), r.Pixels()...)
 		r.EnableShadows(true)
-		r.Render(scene, cam)
+		r.Render(scene)
 		shadowed := r.Pixels()
 
 		dark := make([]bool, size*size)
@@ -366,9 +367,9 @@ func TestShadowNearControlsTheCascadeRatio(t *testing.T) {
 		r.SetShadowDistance(distance)
 		r.EnableShadows(true)
 
-		scene, cam, lightID := bigScene(t, r, 1024)
+		scene, _, lightID := bigScene(t, r, 1024)
 		defer scene.Destroy()
-		r.Render(scene, cam)
+		r.Render(scene)
 
 		view := r.ShadowView(scene.ID(), lightID)
 		if view == nil || len(view.Splits) < 2 {
@@ -408,14 +409,14 @@ func TestShadowNearDoesNotDropNearGeometry(t *testing.T) {
 		r.SetShadows(pix.ShadowCascaded{})
 		r.SetShadowNear(near)
 
-		scene, cam, _ := occluderScene(t, r, glm.Vec3f{})
+		scene, _ := occluderScene(t, r, glm.Vec3f{})
 		defer scene.Destroy()
 
 		r.EnableShadows(false)
-		r.Render(scene, cam)
+		r.Render(scene)
 		lit := append([]byte(nil), r.Pixels()...)
 		r.EnableShadows(true)
-		r.Render(scene, cam)
+		r.Render(scene)
 		shadowed := r.Pixels()
 
 		n := 0
@@ -470,9 +471,9 @@ func TestExplicitStepsAreHonoured(t *testing.T) {
 		r.SetShadows(set)
 		r.EnableShadows(true)
 
-		scene, cam, id := bigScene(t, r, 1024)
+		scene, _, id := bigScene(t, r, 1024)
 		defer scene.Destroy()
-		r.Render(scene, cam)
+		r.Render(scene)
 
 		view := r.ShadowView(scene.ID(), id)
 		if view == nil || len(view.Cascades) == 0 {
@@ -526,9 +527,9 @@ func TestExplicitStepsSetTheShadowRange(t *testing.T) {
 	r.SetShadows(pix.ShadowCascaded{Steps: steps})
 	r.EnableShadows(true)
 
-	scene, cam, id := bigScene(t, r, 1024)
+	scene, _, id := bigScene(t, r, 1024)
 	defer scene.Destroy()
-	r.Render(scene, cam)
+	r.Render(scene)
 
 	view := r.ShadowView(scene.ID(), id)
 	if view == nil || len(view.Splits) != len(steps) {
@@ -582,10 +583,10 @@ func TestCascadeAtlasStaysWithinTextureLimits(t *testing.T) {
 
 			// bigScene asks the light for the resolution, which is what the atlas
 			// multiplies by the slice count.
-			scene, cam, id := bigScene(t, r, size)
+			scene, _, id := bigScene(t, r, size)
 			// Rendering at all is most of the test: an atlas over the limit aborts the
 			// process rather than returning an error.
-			r.Render(scene, cam)
+			r.Render(scene)
 
 			if view := r.ShadowView(scene.ID(), id); view == nil {
 				t.Errorf("%d texels x %d levels: no shadow view", size, levels)

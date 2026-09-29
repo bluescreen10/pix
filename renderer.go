@@ -30,7 +30,7 @@ import (
 // Renderer is the single entry point. It obtains a gpu backend from the registry
 // (so it never imports a concrete backend), owns the shared resources (geometry /
 // materials / textures as ref-counted handles) and the GPU-driven pipelines, and
-// renders a Scene from a Camera. It renders either to a window swapchain (see the
+// renders a Scene from the cameras in it. It renders either to a window swapchain (see the
 // platform-specific SetSurface) or, for headless use, to a render target texture
 // (SetRenderTarget). There is a single Renderer type for both.
 type Renderer struct {
@@ -798,9 +798,13 @@ func (r *Renderer) NewDecalGeometry(geometry geometries.Geometry, position glm.V
 // follows in the order it calls them, so this section reads top to bottom as a frame.
 // --------------------------------------------------------------------------------------
 
-// Render draws one frame of the scene, seen from cam, into the renderer's target — a
-// window's swapchain or an offscreen texture. The camera is not retained.
-func (r *Renderer) Render(scene scenes.Producer, cam Camera) {
+// Render draws one frame of the scene into the renderer's target — a window's swapchain
+// or an offscreen texture — seen from the first view the scene describes: for a Scene,
+// its first attached, visible camera. Further views are not drawn yet.
+//
+// A scene with no view still produces a frame: the target is cleared, and the overlay
+// and particle simulation run as usual.
+func (r *Renderer) Render(scene scenes.Producer) {
 
 	if !r.hasTarget && !r.swapchain.IsValid() {
 		panic("renderer has no target")
@@ -814,7 +818,7 @@ func (r *Renderer) Render(scene scenes.Producer, cam Camera) {
 
 	// 2. Extract: compare the scene's packet against this source's GPU state, and
 	// re-sync whatever has gone stale.
-	st, views := r.extract(scene, cam)
+	st, views := r.extract(scene)
 
 	// 3. Build the overlay — the HUD and the console — on the CPU.
 	r.buildOverlay()
@@ -852,7 +856,7 @@ func (r *Renderer) Render(scene scenes.Producer, cam Camera) {
 //
 // Everything a packet says becomes renderer-owned state here, and nowhere else. Once it
 // returns, nothing downstream reads the scene.
-func (r *Renderer) extract(scene scenes.Producer, cam Camera) (*renderState, frameViews) {
+func (r *Renderer) extract(scene scenes.Producer) (*renderState, frameViews) {
 	// 2a. Look up the source's state, and take the scene's packet. Extraction settles
 	// the scene first — transforms, skinning, the clock — and must happen exactly once
 	// a frame: a second call would get a packet whose per-frame flags, such as
@@ -863,7 +867,7 @@ func (r *Renderer) extract(scene scenes.Producer, cam Camera) (*renderState, fra
 
 	// 2b–2f. Re-sync each part of the state that the packet describes.
 	r.extractTransforms(p, st)
-	views := r.extractViews(cam, p, st)
+	views := r.extractViews(p, st)
 	r.extractLights(p, st)
 	r.collectDrawables(p, st)
 	r.extractParticles(p, st)
@@ -912,17 +916,26 @@ const matrixSize = 64
 
 // extractViews works out every camera the frame renders from: the main camera, and —
 // when shadows are on — a camera for every shadow map region, fitted to this frame.
-func (r *Renderer) extractViews(cam Camera, p *scenes.FramePacket, st *renderState) frameViews {
-	vp := cam.ViewProjection()
+//
+// The main camera is the packet's first view. The others are not rendered yet: each
+// would need its own viewport, cull, and shadow fit.
+func (r *Renderer) extractViews(p *scenes.FramePacket, st *renderState) frameViews {
+	if len(p.Views) == 0 {
+		return frameViews{}
+	}
+
+	mainView := p.Views[0]
+	vp := mainView.ViewProjection()
 	views := frameViews{
-		main: view{viewProj: flipClipY(vp), planes: glm.FrustumPlanes(vp), cull: &st.mainCull},
-		eye:  cam.Position(),
+		main:        view{viewProj: flipClipY(vp), planes: glm.FrustumPlanes(vp), cull: &st.mainCull},
+		hasMainView: true,
+		eye:         mainView.Position,
 	}
 	if !r.shadowsEnabled {
 		return views
 	}
 
-	r.fitShadows(cam, p, st)
+	r.fitShadows(mainView, p, st)
 	views.shadows = r.collectShadowViews(p, st)
 	return views
 }
@@ -938,7 +951,7 @@ func (r *Renderer) extractViews(cam Camera, p *scenes.FramePacket, st *renderSta
 // Depth maps are ensured here rather than when they are drawn into, for two reasons: the
 // fit derives its depth bias from how much world one texel covers, and the light table
 // built next carries each map's bindless index.
-func (r *Renderer) fitShadows(cam Camera, p *scenes.FramePacket, st *renderState) {
+func (r *Renderer) fitShadows(mainView scenes.ViewPacket, p *scenes.FramePacket, st *renderState) {
 	r.ensureShadowSampler()
 
 	// Point lights first: they are aimed from the light alone and need no scene bounds.
@@ -956,7 +969,7 @@ func (r *Renderer) fitShadows(cam Camera, p *scenes.FramePacket, st *renderState
 
 	if needsFit {
 		center, radius := casterBounds(p)
-		fit := r.shadowFitFor(cam, center, radius, r.shadowReach())
+		fit := r.shadowFitFor(mainView, center, radius, r.shadowReach())
 		for _, light := range p.Lights.Data {
 			if !light.CastsShadow || light.Kind == scenes.LightPoint {
 				continue
@@ -1208,7 +1221,14 @@ func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture,
 	// 4b. Fill the shadow maps.
 	r.encodeShadowPasses(st, views.shadows, cmd)
 
-	// 4c. A debug view replaces shading entirely, so nothing after it runs. It draws
+	// 4c. Without a view there is no scene to draw. The target is still cleared, so the
+	// overlay has a defined frame to go on.
+	if !views.hasMainView {
+		r.encodeTargetClear(target, cmd)
+		return
+	}
+
+	// 4d. A debug view replaces shading entirely, so nothing after it runs. It draws
 	// straight into the target: its values are data, not light, and neither the
 	// post-processing chain nor tone mapping should touch them.
 	if r.debugViewActive() {
@@ -1216,10 +1236,10 @@ func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture,
 		return
 	}
 
-	// 4d. Fill depth first, if enabled, so shading runs once per pixel.
+	// 4e. Fill depth first, if enabled, so shading runs once per pixel.
 	depthFilled := r.encodeDepthPrepass(st, views.main, cmd)
 
-	// 4e. Shade. Without HDR that is the finished image, drawn straight into the target.
+	// 4f. Shade. Without HDR that is the finished image, drawn straight into the target.
 	if !r.hdr {
 		r.encodeDrawingPass(st, views, depthFilled, target, cmd)
 		return
@@ -1227,7 +1247,7 @@ func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture,
 	r.encodeDrawingPass(st, views, depthFilled, r.sceneColor, cmd)
 	cmd.PrepareSampled(r.sceneColor, gpu.StageFragment)
 
-	// 4f. Run the post-processing chain over the scene image, then tone-map the result
+	// 4g. Run the post-processing chain over the scene image, then tone-map the result
 	// into the target.
 	r.profiler.beginPass(GPUPassPostProcessing, cmd)
 	image := r.encodePostProcessing(cmd)
@@ -1293,7 +1313,7 @@ func (r *Renderer) skinCommands(p *scenes.FramePacket) []skinCmd {
 
 // encodeCulling culls every view: the main camera and each shadow camera.
 func (r *Renderer) encodeCulling(st *renderState, views frameViews, cmd gpu.CommandBuffer) {
-	if len(st.layout.batches) == 0 {
+	if len(st.layout.batches) == 0 || !views.hasMainView {
 		return
 	}
 
@@ -1414,6 +1434,15 @@ func (r *Renderer) encodeShadowMap(group []view, st *renderState, cmd gpu.Comman
 		cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, v.cull.indirectBuf, 0, uint32(len(st.layout.batches)), indirectSize)
 	}
 
+	cmd.EndRenderPass()
+}
+
+// encodeTargetClear clears the target to the clear colour, for a frame with no view to
+// draw.
+func (r *Renderer) encodeTargetClear(target gpu.Texture, cmd gpu.CommandBuffer) {
+	cmd.BeginRenderPass(gpu.RenderTargets{
+		Color: []gpu.ColorAttachment{{Texture: target, Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: [4]float32(r.clear)}},
+	})
 	cmd.EndRenderPass()
 }
 
@@ -1990,9 +2019,9 @@ func (r *Renderer) shadowReach() float32 {
 // past it, so a short cap there is invisible — the slop covers it. A cascade fits a much
 // shorter slice with far less slop, so the same short cap shows up as a hard band of
 // missing shadow at its far edge. A cap that is right to begin with avoids both.
-func (r *Renderer) shadowFitFor(cam Camera, sceneCenter glm.Vec3f, sceneRadius float32, distance float32) shadowFit {
-	corners := frustumCornersWorld(cam.ViewProjection())
-	eye := cam.Position()
+func (r *Renderer) shadowFitFor(mainView scenes.ViewPacket, sceneCenter glm.Vec3f, sceneRadius float32, distance float32) shadowFit {
+	corners := frustumCornersWorld(mainView.ViewProjection())
+	eye := mainView.Position
 
 	nearCenter := avgCorners(corners, 0)
 	farCenter := avgCorners(corners, 4)

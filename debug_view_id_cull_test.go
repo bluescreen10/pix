@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
@@ -35,12 +34,13 @@ func TestDebugIDShowsDoubleSidedBackfaces(t *testing.T) {
 	box := scene.NewMesh(geo, mat)
 	scene.Add(box)
 
-	cam := cameras.NewPerspectiveCamera(90, 1, 0.05, 100)
+	cam := scene.NewPerspectiveCamera(90, 1, 0.05, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 0}) // inside the box
 	cam.LookAt(glm.Vec3f{0, 0, -1})
 
 	r.SetDebugView(pix.DebugObjectID)
-	r.Render(scene, cam)
+	r.Render(scene)
 	px := r.Pixels()
 	lit := 0
 	for i := 0; i+3 < len(px); i += 4 {

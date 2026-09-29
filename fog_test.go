@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
@@ -44,9 +43,10 @@ func TestFogBlendsTowardFogColorWithDistance(t *testing.T) {
 		mat.SetColor(colors.RGBA32F{1, 0, 0, 1})
 		scene.Add(scene.NewMesh(geo, mat))
 
-		cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 1000)
+		cam := scene.NewPerspectiveCamera(45, 1, 0.1, 1000)
+		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 0, 10}) // looks down -Z at the origin by default, past the quad
-		ren.Render(scene, cam)
+		ren.Render(scene)
 
 		px := ren.Pixels()
 		i := (size/2*size + size/2) * 4

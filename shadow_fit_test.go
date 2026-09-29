@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
@@ -21,7 +20,7 @@ import (
 // The caller owns the scene and must defer its Destroy, so that it runs before the
 // renderer's: the scene holds geometry and material references into the renderer's
 // stores, and releasing them after those stores are gone panics.
-func occluderScene(t *testing.T, r *pix.Renderer, origin glm.Vec3f) (*scenes.Scene, pix.Camera, scenes.LightID) {
+func occluderScene(t *testing.T, r *pix.Renderer, origin glm.Vec3f) (*scenes.Scene, scenes.LightID) {
 	t.Helper()
 	scene := scenes.New()
 	scene.SetAmbient(colors.RGB32F{0.05, 0.05, 0.05})
@@ -42,10 +41,11 @@ func occluderScene(t *testing.T, r *pix.Renderer, origin glm.Vec3f) (*scenes.Sce
 	occluder.SetCastShadow(true)
 	scene.Add(occluder)
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 5, 6}.Add(origin))
-	cam.SetTarget(origin)
-	return scene, cam, light.ID()
+	cam.LookAt(origin)
+	return scene, light.ID()
 }
 
 // TestShadowSettingsLevels: the number of shadow cameras a fit needs is what decides
@@ -83,9 +83,9 @@ func TestShadowSettingsLevels(t *testing.T) {
 func fitCascades(t *testing.T, r *pix.Renderer) []float32 {
 	t.Helper()
 	r.EnableShadows(true)
-	scene, cam, id := occluderScene(t, r, glm.Vec3f{})
+	scene, id := occluderScene(t, r, glm.Vec3f{})
 	defer scene.Destroy()
-	r.Render(scene, cam)
+	r.Render(scene)
 	return r.ShadowView(scene.ID(), id).Splits
 }
 
@@ -124,11 +124,11 @@ func TestShadowAlgorithmSwitchesAtRuntime(t *testing.T) {
 	r.EnableShadows(true)
 	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
-	scene, cam, id := occluderScene(t, r, glm.Vec3f{})
+	scene, id := occluderScene(t, r, glm.Vec3f{})
 	defer scene.Destroy()
 
 	luma := func() int64 {
-		r.Render(scene, cam)
+		r.Render(scene)
 		px := r.Pixels()
 		var sum int64
 		for i := 0; i+3 < len(px); i += 4 {
@@ -230,14 +230,14 @@ func TestSoftFilterWidensTheShadowEdge(t *testing.T) {
 		r.SetShadows(pix.ShadowCascaded{})
 		r.SetShadowFilter(filter)
 
-		scene, cam, _ := occluderScene(t, r, glm.Vec3f{})
+		scene, _ := occluderScene(t, r, glm.Vec3f{})
 		defer scene.Destroy()
 
 		r.EnableShadows(false)
-		r.Render(scene, cam)
+		r.Render(scene)
 		lit := append([]byte(nil), r.Pixels()...)
 		r.EnableShadows(true)
-		r.Render(scene, cam)
+		r.Render(scene)
 		shadowed := r.Pixels()
 
 		for i := 0; i < len(lit); i += 4 {

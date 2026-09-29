@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/loaders/gltf"
@@ -146,9 +145,10 @@ func TestLoadTriangle(t *testing.T) {
 	// loading/material/transform, not lighting — and there's no default ambient).
 	scene.SetAmbient(colors.RGB32F{1, 1, 1})
 
-	cam := cameras.NewPerspectiveCamera(50, 1, 0.1, 100)
+	cam := scene.NewPerspectiveCamera(50, 1, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2.5})
-	r.Render(scene, cam)
+	r.Render(scene)
 
 	px := r.Pixels()
 	var lit, green, leftLit, rightLit int

@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
@@ -16,7 +15,7 @@ const postSize = 96
 // postScene renders one unlit quad of the given colour, covering the middle of the frame
 // by the given fraction, over a black background. Unlit means the colour reaches the
 // scene image as-is, so a colour above 1.0 is light above white.
-func postScene(t *testing.T, color colors.RGBA32F, coverage float32) (*pix.Renderer, *scenes.Scene, pix.Camera) {
+func postScene(t *testing.T, color colors.RGBA32F, coverage float32) (*pix.Renderer, *scenes.Scene) {
 	t.Helper()
 	r, err := pix.NewOffscreenRenderer(postSize, postSize)
 	if err != nil {
@@ -40,9 +39,10 @@ func postScene(t *testing.T, color colors.RGBA32F, coverage float32) (*pix.Rende
 
 	// From 2 units away a 45-degree camera sees about ±0.83 of the plane z = 0, so a
 	// coverage of 0.8 fills nearly the frame and 0.2 the middle quarter of it.
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2})
-	return r, scene, cam
+	return r, scene
 }
 
 func pixelAt(r *pix.Renderer, x, y int) [3]byte {

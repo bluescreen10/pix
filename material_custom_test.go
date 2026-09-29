@@ -5,7 +5,6 @@ import (
 	"unsafe"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
@@ -105,7 +104,8 @@ func TestCustomMaterialFromOutsideThePackage(t *testing.T) {
 	mat := newCustomMaterial(r.MaterialStore)
 	scene.Add(scene.NewMesh(cube, mat))
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2})
 
 	red, green, blue := renderCube(t, r, scene, cam)

@@ -1,4 +1,4 @@
-package controls
+package cameracontrols
 
 import (
 	"time"
@@ -57,7 +57,7 @@ type FirstPersonControls struct {
 // snap on the first Update).
 func NewFirstPerson(camera camera, in fpsInput) *FirstPersonControls {
 	x, y := in.Pos()
-	fwd := camera.Fwd()
+	fwd := camera.Forward()
 
 	return &FirstPersonControls{
 		camera: camera,
@@ -151,6 +151,6 @@ func (c *FirstPersonControls) Update() {
 	}
 
 	c.camera.SetPosition(pos)
-	c.camera.SetFwd(forward)
+	c.camera.SetForward(forward)
 	c.camera.SetUp(up)
 }

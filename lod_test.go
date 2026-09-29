@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
@@ -55,10 +54,11 @@ func TestMeshLODSelection(t *testing.T) {
 	mesh.AddLOD(far, blueMat, 10)
 	scene.Add(mesh)
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.05, 1000)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.05, 1000)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 5}) // within level 0's [0, 10) range
 	cam.LookAt(glm.Vec3f{0, 0, 0})
-	r.Render(scene, cam)
+	r.Render(scene)
 	rr, gg, bb, lit := avgColor(r.Pixels(), size)
 	t.Logf("near: avg=(%.0f,%.0f,%.0f) lit=%d", rr, gg, bb, lit)
 	if lit < 100 || rr < 150 || bb > 50 {
@@ -67,7 +67,7 @@ func TestMeshLODSelection(t *testing.T) {
 
 	cam.SetPosition(glm.Vec3f{0, 0, 20}) // past the threshold
 	cam.LookAt(glm.Vec3f{0, 0, 0})
-	r.Render(scene, cam)
+	r.Render(scene)
 	rr, gg, bb, lit = avgColor(r.Pixels(), size)
 	t.Logf("far: avg=(%.0f,%.0f,%.0f) lit=%d", rr, gg, bb, lit)
 	if lit < 20 || bb < 150 || rr > 50 {
@@ -106,10 +106,11 @@ func TestInstancedMeshLODSelection(t *testing.T) {
 	scene.Add(field)
 
 	// Camera far enough that BOTH instances are past the threshold: both should be blue.
-	cam := cameras.NewPerspectiveCamera(60, 1, 0.05, 1000)
+	cam := scene.NewPerspectiveCamera(60, 1, 0.05, 1000)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 20})
 	cam.LookAt(glm.Vec3f{0, 0, 0})
-	r.Render(scene, cam)
+	r.Render(scene)
 	rr, _, bb, lit := avgColor(r.Pixels(), size)
 	t.Logf("both far: avg=(%.0f,_,%.0f) lit=%d", rr, bb, lit)
 	if lit < 20 || bb < 150 || rr > 50 {
@@ -118,7 +119,7 @@ func TestInstancedMeshLODSelection(t *testing.T) {
 
 	// Camera close enough that both are within the near threshold: both should be red.
 	cam.SetPosition(glm.Vec3f{0, 0, 4})
-	r.Render(scene, cam)
+	r.Render(scene)
 	rr, _, bb, lit = avgColor(r.Pixels(), size)
 	t.Logf("both near: avg=(%.0f,_,%.0f) lit=%d", rr, bb, lit)
 	if lit < 20 || rr < 150 || bb > 50 {
@@ -153,12 +154,12 @@ func TestMeshLODHysteresis(t *testing.T) {
 	mesh.SetLODHysteresis(5) // widened band: level 0 sticky up to 15, level 1 down to 5
 	scene.Add(mesh)
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.05, 1000)
-	cam.LookAt(glm.Vec3f{0, 0, 0})
+	cam := scene.NewPerspectiveCamera(45, 1, 0.05, 1000)
+	scene.Add(cam) // looks down -Z, at the origin from every position below
 
 	// First frame at distance 5: no prior selection, so it picks level 0 normally.
 	cam.SetPosition(glm.Vec3f{0, 0, 5})
-	r.Render(scene, cam)
+	r.Render(scene)
 	_, _, bb, _ := avgColor(r.Pixels(), size)
 	if bb > 50 {
 		t.Fatalf("expected level 0 (red) at distance 5, got blue avg=%.0f", bb)
@@ -167,7 +168,7 @@ func TestMeshLODHysteresis(t *testing.T) {
 	// Move just past the raw boundary (distance 12) but still inside the widened
 	// sticky band (up to 15): should still show level 0.
 	cam.SetPosition(glm.Vec3f{0, 0, 12})
-	r.Render(scene, cam)
+	r.Render(scene)
 	rr, _, bb, lit := avgColor(r.Pixels(), size)
 	t.Logf("distance 12 (inside widened band): avg=(%.0f,_,%.0f) lit=%d", rr, bb, lit)
 	if rr < 150 || bb > 50 {
@@ -176,7 +177,7 @@ func TestMeshLODHysteresis(t *testing.T) {
 
 	// Move well past the widened band: should now switch to level 1.
 	cam.SetPosition(glm.Vec3f{0, 0, 20})
-	r.Render(scene, cam)
+	r.Render(scene)
 	rr, _, bb, lit = avgColor(r.Pixels(), size)
 	t.Logf("distance 20 (past widened band): avg=(%.0f,_,%.0f) lit=%d", rr, bb, lit)
 	if bb < 150 || rr > 50 {
@@ -193,7 +194,7 @@ func TestMeshLODHysteresis(t *testing.T) {
 	// band first, before the plain ascending scan (see scene_cull.comp's
 	// selectLevel). Should still show level 1 (blue) here, not snap back to level 0.
 	cam.SetPosition(glm.Vec3f{0, 0, 7})
-	r.Render(scene, cam)
+	r.Render(scene)
 	rr, _, bb, lit = avgColor(r.Pixels(), size)
 	t.Logf("distance 7, approaching from far (inside level 1's widened near edge): avg=(%.0f,_,%.0f) lit=%d", rr, bb, lit)
 	if bb < 150 || rr > 50 {
@@ -203,7 +204,7 @@ func TestMeshLODHysteresis(t *testing.T) {
 	// Move well inside level 0's territory, past even the widened band: should
 	// finally drop back to level 0.
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
-	r.Render(scene, cam)
+	r.Render(scene)
 	rr, _, bb, lit = avgColor(r.Pixels(), size)
 	t.Logf("distance 3 (past level 1's widened band): avg=(%.0f,_,%.0f) lit=%d", rr, bb, lit)
 	if rr < 150 || bb > 50 {

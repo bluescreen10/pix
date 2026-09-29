@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
@@ -45,9 +44,10 @@ func TestMaterialTableDedupsAcrossInstances(t *testing.T) {
 	im := scene.NewInstancedMesh(geo, mat, xforms)
 	scene.Add(im)
 
-	cam := cameras.NewPerspectiveCamera(70, 8, 0.1, 200)
+	cam := scene.NewPerspectiveCamera(70, 8, 0.1, 200)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 20})
-	r.Render(scene, cam)
+	r.Render(scene)
 
 	const w, h = 256, 32
 	px := r.Pixels()
@@ -107,9 +107,10 @@ func TestMaterialTableKeepsDistinctMaterialsApart(t *testing.T) {
 	place(red, 0)
 	place(blue, 6)
 
-	cam := cameras.NewPerspectiveCamera(35, 3, 0.1, 100)
+	cam := scene.NewPerspectiveCamera(35, 3, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 10})
-	r.Render(scene, cam)
+	r.Render(scene)
 
 	const w, h = 240, 80
 	px := r.Pixels()

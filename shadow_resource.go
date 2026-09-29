@@ -6,7 +6,6 @@ package pix
 
 import (
 	"github.com/bluescreen10/gamekit/gpu"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
 	"github.com/bluescreen10/pix/textures"
@@ -134,7 +133,7 @@ func (s *shadowResource) ensureCascades(count int) {
 	}
 	for len(s.cascades) < count {
 		s.cascades = append(s.cascades, cascadeLevel{
-			cam: cameras.NewOrthographicCamera(-10, 10, -10, 10, 0.1, 100),
+			cam: newOrthographicCamera(-10, 10, -10, 10, 0.1, 100),
 		})
 	}
 }
@@ -172,8 +171,8 @@ func cascadeAtlas(size, count uint32) (width, height uint32) {
 // renderer chooses the projection, not the light: which one a shadow needs follows from
 // how the renderer intends to render it, and the fit is recomputed every frame anyway.
 func (s *shadowResource) orthoCamera() Camera {
-	if _, ok := s.cam.(*cameras.OrthographicCamera); !ok {
-		s.cam = cameras.NewOrthographicCamera(-10, 10, -10, 10, 0.1, 100)
+	if _, ok := s.cam.(*orthographicCamera); !ok {
+		s.cam = newOrthographicCamera(-10, 10, -10, 10, 0.1, 100)
 	}
 	return s.cam
 }
@@ -181,7 +180,7 @@ func (s *shadowResource) orthoCamera() Camera {
 // ensurePerspective gives a spot light its camera, matching the cone.
 func (s *shadowResource) ensurePerspective(angle, rng float32) {
 	if s.cam == nil {
-		s.cam = cameras.NewPerspectiveCamera(glm.ToDegrees(2*angle), 1, 0.05, rng)
+		s.cam = newPerspectiveCamera(glm.ToDegrees(2*angle), 1, 0.05, rng)
 	}
 }
 
@@ -205,7 +204,7 @@ func (s *shadowResource) ensureFaceMaps(store *textures.Store, size uint32) {
 	}
 	for i := range s.faces {
 		if s.faces[i].cam == nil {
-			s.faces[i].cam = cameras.NewPerspectiveCamera(90, 1, 0.05, 1)
+			s.faces[i].cam = newPerspectiveCamera(90, 1, 0.05, 1)
 		}
 	}
 	if s.faces[0].m.IsValid() && s.width == size && s.height == size {

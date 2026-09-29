@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
@@ -43,17 +42,18 @@ func TestDepthDebugPolarity(t *testing.T) {
 	farBox.SetPosition(glm.Vec3f{15, 0, -20000})
 	scene.Add(farBox)
 
-	cam := cameras.NewPerspectiveCamera(60, 1, 30, 360000)
+	cam := scene.NewPerspectiveCamera(60, 1, 30, 360000)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 0})
 	cam.LookAt(glm.Vec3f{0, 0, -1})
 
 	// Find each box's actual screen position from a normal render (rather than
 	// guessing projected coordinates by hand), then sample the depth-debug frame at
 	// those same pixels, plus a corner known to be neither box.
-	r.Render(scene, cam)
+	r.Render(scene)
 	normalPx := append([]byte(nil), r.Pixels()...)
 	r.SetDebugView(pix.DebugDepth)
-	r.Render(scene, cam)
+	r.Render(scene)
 	depthPx := r.Pixels()
 
 	firstLit := func(fromLeft bool) (int, int) {

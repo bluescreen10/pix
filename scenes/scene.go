@@ -27,6 +27,7 @@ const (
 	kindSkeleton
 	kindSkinnedMesh
 	kindParticleContainer
+	kindCamera
 )
 
 // nodeFlags is the per-node flag bitset.
@@ -159,6 +160,13 @@ type Scene struct {
 
 	// nextLightID is the last stable light identity issued by the scene.
 	nextLightID LightID
+
+	// cameras stores the payload for every camera node, in creation order: that order
+	// is the order of the frame's views.
+	cameras []cameraData
+
+	// nextViewID is the last stable view identity issued by the scene.
+	nextViewID ViewID
 
 	// packet caches the frame description and owns the reusable backing slices that
 	// Extract lends to callers. Scene graph storage such as world remains separate and
@@ -297,7 +305,7 @@ func (s *Scene) allocNode(kind nodeKind) NodeID {
 		s.prevSiblings = append(s.prevSiblings, NodeID{})
 		s.world = append(s.world, glm.Mat4fIdentity)
 		s.transforms = append(s.transforms, defaultTransform)
-		s.flags = append(s.flags, flagAlive|flagLocalVisible|flagCastShadow|flagReceiveShadow|flagTransformDirty|flagVisibleDirty)
+		s.flags = append(s.flags, flagAlive|flagLocalVisible|flagVisible|flagCastShadow|flagReceiveShadow|flagTransformDirty|flagVisibleDirty)
 		s.generation = append(s.generation, 1)
 		s.kind = append(s.kind, kind)
 		s.payload = append(s.payload, 0)
@@ -322,7 +330,7 @@ func (s *Scene) resetSlot(idx uint32, kind nodeKind) {
 	s.prevSiblings[idx] = NodeID{}
 	s.world[idx] = glm.Mat4fIdentity
 	s.transforms[idx] = defaultTransform
-	s.flags[idx] = flagAlive | flagLocalVisible | flagCastShadow | flagReceiveShadow | flagTransformDirty | flagVisibleDirty
+	s.flags[idx] = flagAlive | flagLocalVisible | flagVisible | flagCastShadow | flagReceiveShadow | flagTransformDirty | flagVisibleDirty
 	s.kind[idx] = kind
 	s.payload[idx] = 0
 	s.names[idx] = ""
@@ -487,6 +495,8 @@ func (s *Scene) destroyNode(id NodeID) {
 		s.swapRemoveParticles(s.payload[idx])
 	case kindInstancedMesh:
 		s.swapRemoveInstancedMesh(s.payload[idx])
+	case kindCamera:
+		s.removeCamera(s.payload[idx])
 	}
 	s.flags[idx] &^= flagAlive
 	s.generation[idx]++

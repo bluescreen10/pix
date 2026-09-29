@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
@@ -49,10 +48,11 @@ func TestSurfacesFacingAwayAreUnlit(t *testing.T) {
 		slab.SetScale(glm.Vec3f{4, 4, 0.2})
 		scene.Add(slab)
 
-		cam := cameras.NewPerspectiveCamera(50, 1, 0.1, 50)
+		cam := scene.NewPerspectiveCamera(50, 1, 0.1, 50)
+		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 0, 6})
-		cam.SetTarget(glm.Vec3f{0, 0, 0})
-		r.Render(scene, cam)
+		cam.LookAt(glm.Vec3f{0, 0, 0})
+		r.Render(scene)
 
 		px := r.Pixels()
 		var sum int64
@@ -111,12 +111,13 @@ func BenchmarkFrame(b *testing.B) {
 		scene.Add(p)
 	}
 
-	cam := cameras.NewPerspectiveCamera(55, 1, 0.3, 2000)
+	cam := scene.NewPerspectiveCamera(55, 1, 0.3, 2000)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 6, 40})
-	cam.SetTarget(glm.Vec3f{0, 3, -40})
+	cam.LookAt(glm.Vec3f{0, 3, -40})
 
 	for b.Loop() {
-		r.Render(scene, cam)
+		r.Render(scene)
 	}
 	b.StopTimer()
 	for _, p := range []pix.GPUPass{pix.GPUPassCull, pix.GPUPassShadow, pix.GPUPassPrepass, pix.GPUPassForward, pix.GPUPassPostProcessing} {
@@ -171,10 +172,11 @@ func TestDepthPrepassDoesNotChangeTheImage(t *testing.T) {
 			scene.Add(b)
 		}
 
-		cam := cameras.NewPerspectiveCamera(55, 1, 0.3, 300)
+		cam := scene.NewPerspectiveCamera(55, 1, 0.3, 300)
+		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 8, 22})
-		cam.SetTarget(glm.Vec3f{0, 2, -20})
-		r.Render(scene, cam)
+		cam.LookAt(glm.Vec3f{0, 2, -20})
+		r.Render(scene)
 		return append([]byte(nil), r.Pixels()...)
 	}
 
@@ -251,10 +253,11 @@ func TestDepthPrepassRespectsCulling(t *testing.T) {
 		wall.SetRotation(glm.Vec3f{1.5707963, 0, 0}) // facing away from the camera
 		scene.Add(wall)
 
-		cam := cameras.NewPerspectiveCamera(50, 1, 0.5, 200)
+		cam := scene.NewPerspectiveCamera(50, 1, 0.5, 200)
+		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 0, 10})
-		cam.SetTarget(glm.Vec3f{0, 0, -20})
-		r.Render(scene, cam)
+		cam.LookAt(glm.Vec3f{0, 0, -20})
+		r.Render(scene)
 
 		px := r.Pixels()
 		n := 0
@@ -327,10 +330,11 @@ func TestDepthDebugViewIsMaterialIndependent(t *testing.T) {
 			scene.Add(m)
 		}
 
-		cam := cameras.NewPerspectiveCamera(50, 1, 0.5, 120)
+		cam := scene.NewPerspectiveCamera(50, 1, 0.5, 120)
+		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 2, 18})
-		cam.SetTarget(glm.Vec3f{0, 0, 0})
-		r.Render(scene, cam)
+		cam.LookAt(glm.Vec3f{0, 0, 0})
+		r.Render(scene)
 		return append([]byte(nil), r.Pixels()...)
 	}
 

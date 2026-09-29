@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
@@ -14,7 +13,7 @@ import (
 // renderCube draws one unlit cube filling the view and returns the centre pixel.
 func renderCube(t *testing.T, r *pix.Renderer, scene *scenes.Scene, cam pix.Camera) (byte, byte, byte) {
 	t.Helper()
-	r.Render(scene, cam)
+	r.Render(scene)
 	px := r.Pixels()
 	w, _ := r.Size()
 	i := (int(w)/2*int(w) + int(w)/2) * 4
@@ -39,7 +38,8 @@ func TestMaterialEditBetweenFramesReachesGPU(t *testing.T) {
 	mat.SetColor(colors.RGBA32F{1, 0, 0, 1})
 	scene.Add(scene.NewMesh(cube, mat))
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2})
 
 	red, _, _ := renderCube(t, r, scene, cam)
@@ -73,7 +73,8 @@ func TestMaterialStoreGrowReuploadsEveryRecord(t *testing.T) {
 	first.SetColor(colors.RGBA32F{1, 0, 0, 1})
 	scene.Add(scene.NewMesh(cube, first))
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2})
 	if red, _, _ := renderCube(t, r, scene, cam); red < 200 {
 		t.Fatalf("first frame: want red, got r=%d", red)

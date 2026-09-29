@@ -1,5 +1,7 @@
 package scenes
 
+import "github.com/bluescreen10/pix/glm"
+
 // Extract publishes this scene's current rendering description into p. It is the whole
 // of what a renderer is told; nothing downstream of it touches a Node, a payload table,
 // or the Scene itself.
@@ -31,16 +33,13 @@ func (s *Scene) Extract(p *FramePacket) {
 	// One revision covers all three object tables. They are rebuilt by the same walk
 	// and cannot disagree, so splitting them would mean three counters that always move
 	// together — the revisions worth separating are the ones with different causes.
+	s.extractViews()
 	s.extractLights()
 	s.extractSkins()
 	s.extractParticles()
 
 	s.packet.Frame++
-	views := p.Views
 	*p = s.packet
-	// Views are supplied by the caller rather than the scene. Preserve them when the
-	// rest of the destination is replaced by the prepared packet.
-	p.Views = views
 	// Transform dirtiness is edge-triggered: this packet carries it, and later Sync
 	// calls accumulate changes until the next extraction.
 	s.packet.TransformsDirty = false
@@ -147,6 +146,30 @@ func (s *Scene) renderFlags(node uint32) RenderFlags {
 		f |= RenderReceivesShadow
 	}
 	return f
+}
+
+// extractViews refills the published view table with every attached, visible camera,
+// in creation order. Cameras are polled like lights: there are a handful of them, and a
+// camera is the one node expected to move every frame.
+//
+// A camera's view comes from its node's world matrix, so a camera parented under
+// something moves with it.
+func (s *Scene) extractViews() {
+	out := s.packet.Views[:0]
+	for i := range s.cameras {
+		c := &s.cameras[i]
+		if s.flags[c.ownerNode]&flagAttached == 0 || s.flags[c.ownerNode]&flagVisible == 0 {
+			continue
+		}
+		world := s.world[c.ownerNode]
+		out = append(out, ViewPacket{
+			ID:         c.id,
+			View:       world.Inv(),
+			Projection: c.projection(),
+			Position:   glm.Vec3f{world[12], world[13], world[14]},
+		})
+	}
+	s.packet.Views = out
 }
 
 // newLightID mints the next stable light identity. Never reused: a renderer keys shadow

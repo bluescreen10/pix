@@ -2,10 +2,9 @@ package pix
 
 import "github.com/bluescreen10/pix/glm"
 
-// Camera is a view of the scene: a world→clip transform plus the eye position (for
-// specular). Concrete cameras live in the cameras package (PerspectiveCamera for the
-// main view / spot & point shadows, OrthographicCamera for directional shadows); a
-// frame can be rendered from any camera, and a shadow view holds one internally.
+// Camera is a viewpoint the renderer computes for itself — the shadow cameras a fit
+// aims each frame, exposed through ShadowView. The views a frame is rendered from are
+// not Cameras: they come from the packet (see scenes.Camera and FramePacket.Views).
 type Camera interface {
 	ViewProjection() glm.Mat4f
 	Position() glm.Vec3f

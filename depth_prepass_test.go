@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
@@ -42,7 +41,8 @@ func TestDepthPrepassMatchesShadingExactly(t *testing.T) {
 	ground.SetPosition(glm.Vec3f{0, -60, -400})
 	scene.Add(ground)
 
-	cam := cameras.NewPerspectiveCamera(60, 1, 1, 5000)
+	cam := scene.NewPerspectiveCamera(60, 1, 1, 5000)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 0})
 	cam.LookAt(glm.Vec3f{0, 0, -1})
 
@@ -53,11 +53,11 @@ func TestDepthPrepassMatchesShadingExactly(t *testing.T) {
 		// The same frame twice, with nothing advanced in between, so the prepass is the
 		// only difference between the two images.
 		r.EnableDepthPrepass(false)
-		r.Render(scene, cam)
+		r.Render(scene)
 		shaded := append([]byte(nil), r.Pixels()...)
 
 		r.EnableDepthPrepass(true)
-		r.Render(scene, cam)
+		r.Render(scene)
 		prepassed := r.Pixels()
 
 		differing := 0

@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
@@ -16,7 +15,7 @@ import (
 
 // shotScene builds a renderer showing one lit cube, so a capture has something in it
 // that is neither uniform nor the clear colour.
-func shotScene(t *testing.T, w, h uint32) (*pix.Renderer, *scenes.Scene, pix.Camera) {
+func shotScene(t *testing.T, w, h uint32) (*pix.Renderer, *scenes.Scene) {
 	t.Helper()
 	r, err := pix.NewOffscreenRenderer(w, h)
 	if err != nil {
@@ -36,16 +35,17 @@ func shotScene(t *testing.T, w, h uint32) (*pix.Renderer, *scenes.Scene, pix.Cam
 	mat.SetColor(colors.RGBA32F{0.9, 0.2, 0.2, 1})
 	scene.Add(scene.NewMesh(cube, mat))
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
-	return r, scene, cam
+	return r, scene
 }
 
 // TestScreenshotWritesTheRenderedFrame is the whole feature: the file must appear, be a
 // readable PNG of the right size, and contain the frame rather than a blank image.
 func TestScreenshotWritesTheRenderedFrame(t *testing.T) {
 	const w, h = 96, 96
-	r, scene, cam := shotScene(t, w, h)
+	r, scene := shotScene(t, w, h)
 	path := filepath.Join(t.TempDir(), "shot.png")
 
 	var gotPath string
@@ -55,7 +55,7 @@ func TestScreenshotWritesTheRenderedFrame(t *testing.T) {
 		gotPath, gotErr, called = p, err, true
 	})
 
-	r.Render(scene, cam) // the capture rides this frame
+	r.Render(scene) // the capture rides this frame
 
 	if !called {
 		t.Fatal("the callback never fired — the capture did not run during Render")
@@ -102,7 +102,7 @@ func TestScreenshotWritesTheRenderedFrame(t *testing.T) {
 // TestScreenshotDefaultsToATimestampedName: `screenshot` with no argument has to go
 // somewhere predictable rather than failing.
 func TestScreenshotDefaultsToATimestampedName(t *testing.T) {
-	r, scene, cam := shotScene(t, 32, 32)
+	r, scene := shotScene(t, 32, 32)
 
 	dir := t.TempDir()
 	wd, err := os.Getwd()
@@ -121,7 +121,7 @@ func TestScreenshotDefaultsToATimestampedName(t *testing.T) {
 		}
 		gotPath = p
 	})
-	r.Render(scene, cam)
+	r.Render(scene)
 
 	if !strings.HasPrefix(gotPath, "screenshot-") || !strings.HasSuffix(gotPath, ".png") {
 		t.Fatalf("default name = %q, want a screenshot-*.png", gotPath)
@@ -134,12 +134,12 @@ func TestScreenshotDefaultsToATimestampedName(t *testing.T) {
 // TestScreenshotCreatesMissingDirectories: a path into a folder that does not exist yet
 // should just work, rather than making the user mkdir first.
 func TestScreenshotCreatesMissingDirectories(t *testing.T) {
-	r, scene, cam := shotScene(t, 32, 32)
+	r, scene := shotScene(t, 32, 32)
 	path := filepath.Join(t.TempDir(), "shots", "nested", "a.png")
 
 	var gotErr error
 	r.Screenshot(path, func(_ string, err error) { gotErr = err })
-	r.Render(scene, cam)
+	r.Render(scene)
 
 	if gotErr != nil {
 		t.Fatalf("screenshot into a new directory failed: %v", gotErr)
@@ -152,14 +152,14 @@ func TestScreenshotCreatesMissingDirectories(t *testing.T) {
 // TestScreenshotIsOneShot: a queued capture must not repeat on later frames, which
 // would rewrite the file every frame forever.
 func TestScreenshotIsOneShot(t *testing.T) {
-	r, scene, cam := shotScene(t, 32, 32)
+	r, scene := shotScene(t, 32, 32)
 	path := filepath.Join(t.TempDir(), "once.png")
 
 	calls := 0
 	r.Screenshot(path, func(string, error) { calls++ })
-	r.Render(scene, cam)
-	r.Render(scene, cam)
-	r.Render(scene, cam)
+	r.Render(scene)
+	r.Render(scene)
+	r.Render(scene)
 
 	if calls != 1 {
 		t.Fatalf("callback fired %d times, want exactly 1", calls)

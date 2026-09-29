@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
@@ -50,12 +49,13 @@ func TestDebugObjectIDView(t *testing.T) {
 	b.SetPosition(glm.Vec3f{1, 0, 0})
 	scene.Add(b)
 
-	cam := cameras.NewPerspectiveCamera(60, 1, 0.05, 100)
+	cam := scene.NewPerspectiveCamera(60, 1, 0.05, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 4})
 	cam.LookAt(glm.Vec3f{0, 0, 0})
 
 	r.SetDebugView(pix.DebugObjectID)
-	r.Render(scene, cam)
+	r.Render(scene)
 	colors := distinctColors(r.Pixels())
 	t.Logf("distinct object-id colors: %d", len(colors))
 	if len(colors) < 2 {
@@ -82,12 +82,13 @@ func TestDebugTriangleIDView(t *testing.T) {
 	m.SetRotationQuat(glm.NewQuat(0.6, glm.Vec3f{1, 1, 0}))
 	scene.Add(m)
 
-	cam := cameras.NewPerspectiveCamera(60, 1, 0.05, 100)
+	cam := scene.NewPerspectiveCamera(60, 1, 0.05, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2.5})
 	cam.LookAt(glm.Vec3f{0, 0, 0})
 
 	r.SetDebugView(pix.DebugTriangleID)
-	r.Render(scene, cam)
+	r.Render(scene)
 	colors := distinctColors(r.Pixels())
 	t.Logf("distinct triangle-id colors: %d", len(colors))
 	if len(colors) < 3 {

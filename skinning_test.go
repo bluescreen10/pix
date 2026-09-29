@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
@@ -94,10 +93,12 @@ func TestSkinnedMeshBindPose(t *testing.T) {
 	sm := scene.NewSkinnedMesh(geo, mat, skel)
 	scene.Add(sm)
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 1, 6})
+	cam.LookAt(glm.Vec3f{})
 
-	r.Render(scene, cam)
+	r.Render(scene)
 	pixels := r.Capture()
 	if pixels == nil {
 		t.Fatal("Capture returned nil")
@@ -131,16 +132,18 @@ func TestSkinnedMeshDeforms(t *testing.T) {
 	sm := scene.NewSkinnedMesh(geo, mat, skel)
 	scene.Add(sm)
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 1, 6})
+	cam.LookAt(glm.Vec3f{})
 
-	r.Render(scene, cam)
+	r.Render(scene)
 	bindPixels := append([]byte(nil), r.Capture()...)
 
 	// Bend the tip 90 degrees about Z: its vertices swing sideways out of the
 	// silhouette the bind pose occupied.
 	skel.Bone(1).RotateZ(glm.ToRadians(float32(90)))
-	r.Render(scene, cam)
+	r.Render(scene)
 	bentPixels := r.Capture()
 
 	diff := 0

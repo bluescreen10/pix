@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
@@ -44,9 +43,10 @@ func TestPipelineAlignmentDetachedMesh(t *testing.T) {
 		added := scene.NewMesh(geo, phong)
 		scene.Add(added)
 
-		cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+		cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 0, 3})
-		r.Render(scene, cam)
+		r.Render(scene)
 		return append([]byte(nil), r.Pixels()...)
 	}
 
@@ -88,16 +88,17 @@ func TestDrawableFlagsFollowShadowToggle(t *testing.T) {
 	occluder.SetScale(glm.Vec3f{0.8, 0.8, 0.8})
 	scene.Add(occluder)
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 5, 6})
-	cam.SetTarget(glm.Vec3f{0, 0, 0})
+	cam.LookAt(glm.Vec3f{0, 0, 0})
 
 	occluder.SetCastShadow(false)
-	r.Render(scene, cam)
+	r.Render(scene)
 	notCasting := sceneLuma(r.Pixels())
 
 	occluder.SetCastShadow(true)
-	r.Render(scene, cam)
+	r.Render(scene)
 	casting := sceneLuma(r.Pixels())
 
 	if casting >= notCasting {
@@ -127,9 +128,10 @@ func TestPipelineFollowsMaterialSwap(t *testing.T) {
 	mesh := scene.NewMesh(r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1)), red)
 	scene.Add(mesh)
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
-	r.Render(scene, cam)
+	r.Render(scene)
 	px := r.Pixels()
 	i := (32*64 + 32) * 4
 	if px[i] < 200 || px[i+2] > 40 {
@@ -137,7 +139,7 @@ func TestPipelineFollowsMaterialSwap(t *testing.T) {
 	}
 
 	mesh.SetMaterial(blue)
-	r.Render(scene, cam)
+	r.Render(scene)
 	px = r.Pixels()
 	if px[i+2] < 200 || px[i] > 40 {
 		t.Fatalf("after swap to blue Blinn-Phong: center pixel = (%d,%d,%d), want blue", px[i], px[i+1], px[i+2])
@@ -170,17 +172,18 @@ func TestMaterialSwapWithinOnePool(t *testing.T) {
 	mesh := scene.NewMesh(r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1)), red)
 	scene.Add(mesh)
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
 	i := (32*64 + 32) * 4
 
-	r.Render(scene, cam)
+	r.Render(scene)
 	if px := r.Pixels(); px[i] < 200 || px[i+1] > 40 {
 		t.Fatalf("before swap: center pixel = (%d,%d,%d), want red", px[i], px[i+1], px[i+2])
 	}
 
 	mesh.SetMaterial(green)
-	r.Render(scene, cam)
+	r.Render(scene)
 	if px := r.Pixels(); px[i+1] < 200 || px[i] > 40 {
 		t.Fatalf("after swap to a second Basic material: center pixel = (%d,%d,%d), want green", px[i], px[i+1], px[i+2])
 	}

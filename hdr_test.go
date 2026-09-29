@@ -7,7 +7,6 @@ import (
 
 	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
@@ -21,7 +20,7 @@ const postSize = 96
 // postScene renders one unlit quad of the given colour, covering the middle of the frame
 // by the given fraction, over a black background. Unlit means the colour reaches the
 // scene image as-is, so a colour above 1.0 is light above white.
-func postScene(t *testing.T, color colors.RGBA32F, coverage float32) (*pix.Renderer, *scenes.Scene, pix.Camera) {
+func postScene(t *testing.T, color colors.RGBA32F, coverage float32) (*pix.Renderer, *scenes.Scene) {
 	t.Helper()
 	r, err := pix.NewOffscreenRenderer(postSize, postSize)
 	if err != nil {
@@ -45,9 +44,10 @@ func postScene(t *testing.T, color colors.RGBA32F, coverage float32) (*pix.Rende
 
 	// From 2 units away a 45-degree camera sees about ±0.83 of the plane z = 0, so a
 	// coverage of 0.8 fills nearly the frame and 0.2 the middle quarter of it.
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2})
-	return r, scene, cam
+	return r, scene
 }
 
 func pixelAt(r *pix.Renderer, x, y int) [3]byte {
@@ -74,11 +74,11 @@ func TestClearColourIsLinearLight(t *testing.T) {
 	clear := colors.RGBA32F{0.2, 0.5, 0.8, 1}
 	for _, hdr := range []bool{false, true} {
 		t.Run(fmt.Sprintf("HDR %v", hdr), func(t *testing.T) {
-			r, scene, cam := postScene(t, colors.RGBA32F{0, 0, 0, 0}, 0)
+			r, scene := postScene(t, colors.RGBA32F{0, 0, 0, 0}, 0)
 			r.EnableHDR(hdr)
 			r.SetToneMapping(pix.ToneMapNone) // so HDR changes nothing about light below white
 			r.SetClearColor(clear)
-			r.Render(scene, cam)
+			r.Render(scene)
 
 			got := pixelAt(r, 2, 2)
 			for i, v := range []float32{clear[0], clear[1], clear[2]} {
@@ -96,15 +96,15 @@ func TestClearColourIsLinearLight(t *testing.T) {
 func TestHDRKeepsLightAboveWhite(t *testing.T) {
 	orange := colors.RGBA32F{4, 1.5, 0.3, 1}
 
-	r, scene, cam := postScene(t, orange, 0.8)
-	r.Render(scene, cam)
+	r, scene := postScene(t, orange, 0.8)
+	r.Render(scene)
 	clipped := pixelAt(r, postSize/2, postSize/2)
 	if clipped[0] != 255 || clipped[1] != 255 {
 		t.Fatalf("without HDR the centre = %v, want red and green clipped to 255", clipped)
 	}
 
 	r.EnableHDR(true)
-	r.Render(scene, cam)
+	r.Render(scene)
 	mapped := pixelAt(r, postSize/2, postSize/2)
 	if mapped[0] == 255 || mapped[1] == 255 {
 		t.Errorf("with HDR the centre = %v, want the highlight compressed below 255", mapped)
@@ -117,11 +117,11 @@ func TestHDRKeepsLightAboveWhite(t *testing.T) {
 // TestExposureScalesLight: each stop of exposure doubles the light before tone mapping,
 // so a surface of 0.25 at +1 stop draws exactly as one of 0.5 at none.
 func TestExposureScalesLight(t *testing.T) {
-	r, scene, cam := postScene(t, colors.RGBA32F{0.25, 0.25, 0.25, 1}, 0.8)
+	r, scene := postScene(t, colors.RGBA32F{0.25, 0.25, 0.25, 1}, 0.8)
 	r.EnableHDR(true)
 	r.SetToneMapping(pix.ToneMapNone)
 	r.SetExposure(1)
-	r.Render(scene, cam)
+	r.Render(scene)
 
 	got := pixelAt(r, postSize/2, postSize/2)
 	if d := int(got[0]) - srgbByte(0.5); d < -1 || d > 1 {
@@ -132,9 +132,9 @@ func TestExposureScalesLight(t *testing.T) {
 // TestPostProcessingNeedsHDR: without HDR there is no scene image for the chain to work
 // on, so it does not run — the frame costs nothing more for having one.
 func TestPostProcessingNeedsHDR(t *testing.T) {
-	r, scene, cam := postScene(t, colors.RGBA32F{50, 50, 50, 1}, 0.2)
+	r, scene := postScene(t, colors.RGBA32F{50, 50, 50, 1}, 0.2)
 	r.AddPostProcessingStep(&postprocess.Bloom{Intensity: 0.1})
-	r.Render(scene, cam)
+	r.Render(scene)
 	if dark := pixelAt(r, postSize/2+postSize/4, postSize/2); dark != [3]byte{} {
 		t.Errorf("without HDR the pixel beside the quad = %v, want black: the chain should not run", dark)
 	}
@@ -160,13 +160,13 @@ func (s *countingStep) Release() {
 // TestStepLeavingTheChainIsReleased: a step owns what it draws with, so the renderer must
 // tell it when it is no longer run — and only then, not while it stays in the chain.
 func TestStepLeavingTheChainIsReleased(t *testing.T) {
-	r, scene, cam := postScene(t, colors.RGBA32F{1, 1, 1, 1}, 0.5)
+	r, scene := postScene(t, colors.RGBA32F{1, 1, 1, 1}, 0.5)
 	r.EnableHDR(true)
 	kept := &countingStep{ShaderStep: postprocess.ShaderStep{Fragment: shaders.BloomDownsample, Params: make([]byte, 4)}}
 	dropped := &countingStep{ShaderStep: postprocess.ShaderStep{Fragment: shaders.BloomDownsample, Params: make([]byte, 4)}}
 
 	r.SetPostProcessing([]postprocess.Step{kept, dropped})
-	r.Render(scene, cam)
+	r.Render(scene)
 	if kept.encodes != 1 || dropped.encodes != 1 {
 		t.Fatalf("encodes = %d, %d, want each step run once", kept.encodes, dropped.encodes)
 	}
@@ -178,7 +178,7 @@ func TestStepLeavingTheChainIsReleased(t *testing.T) {
 	if kept.releases != 0 {
 		t.Errorf("the kept step was released %d times, want none while it stays in the chain", kept.releases)
 	}
-	r.Render(scene, cam)
+	r.Render(scene)
 	if kept.encodes != 2 || dropped.encodes != 1 {
 		t.Errorf("encodes = %d, %d, want only the kept step run again", kept.encodes, dropped.encodes)
 	}

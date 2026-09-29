@@ -12,11 +12,11 @@ import (
 // with no tone curve to grey the paper, and returns the middle of the frame's pixels.
 func printed(t *testing.T, color colors.RGBA32F, halftone *postprocess.Halftone) [][3]byte {
 	t.Helper()
-	r, scene, cam := postScene(t, color, 1)
+	r, scene := postScene(t, color, 1)
 	r.EnableHDR(true)
 	r.SetToneMapping(pix.ToneMapNone)
 	r.SetPostProcessing([]postprocess.Step{halftone})
-	r.Render(scene, cam)
+	r.Render(scene)
 
 	var pixels [][3]byte
 	for y := postSize / 4; y < postSize*3/4; y++ {

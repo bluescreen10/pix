@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
@@ -24,7 +23,8 @@ func TestShowFPS(t *testing.T) {
 
 	scene := scenes.New()
 	defer scene.Destroy()
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 1000)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 1000)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
 
 	// Comfortably more frames than the stats' GPU warm-up discards (see profileWarmup), with
@@ -32,7 +32,7 @@ func TestShowFPS(t *testing.T) {
 	// need not produce a usable timestamp at all, so a count that only just clears the
 	// warm-up passes on one backend and fails on another.
 	for i := 0; i < 12; i++ {
-		r.Render(scene, cam)
+		r.Render(scene)
 	}
 
 	// Font pixels are the solid font color (255,229,89); count them.

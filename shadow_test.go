@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
@@ -31,9 +30,10 @@ func TestDirectionalShadowMapAllocated(t *testing.T) {
 	defer cube.Release()
 	scene.Add(scene.NewMesh(cube, r.NewPBRMaterial()))
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
-	r.Render(scene, cam)
+	r.Render(scene)
 
 	// Settings stay on the light; the resources they asked for belong to the renderer.
 	if light.Shadow() == nil {
@@ -79,12 +79,13 @@ func TestDirectionalShadowDepthPass(t *testing.T) {
 	mesh.SetCastShadow(true) // so the shadow view's castersOnly cull keeps it
 	scene.Add(mesh)
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
 
 	// Two frames: frame 2 transitions the shadow map back from sampled to depth.
-	r.Render(scene, cam)
-	r.Render(scene, cam)
+	r.Render(scene)
+	r.Render(scene)
 
 	// The main pass must still have drawn the lit cube — assert some pixel is non-black.
 	px := r.Pixels()
@@ -119,9 +120,10 @@ func TestShadowsEmptyScene(t *testing.T) {
 	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 1)
 	light.SetCastShadow(true)
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
-	r.Render(scene, cam) // must not panic on the empty draw list
+	r.Render(scene) // must not panic on the empty draw list
 }
 
 // TestSpotShadowDarkensReceiver is the spot-light analogue of the directional test: a
@@ -161,11 +163,12 @@ func TestSpotShadowDarkensReceiver(t *testing.T) {
 		occluder.SetCastShadow(true)
 		scene.Add(occluder)
 
-		cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+		cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 5, 6})
-		cam.SetTarget(glm.Vec3f{0, 0, 0})
+		cam.LookAt(glm.Vec3f{0, 0, 0})
 
-		r.Render(scene, cam)
+		r.Render(scene)
 		out := make([]byte, len(r.Pixels()))
 		copy(out, r.Pixels())
 		return out
@@ -215,11 +218,12 @@ func TestPointShadowDarkensReceiver(t *testing.T) {
 		occluder.SetCastShadow(true)
 		scene.Add(occluder)
 
-		cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+		cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 5, 6})
-		cam.SetTarget(glm.Vec3f{0, 0, 0})
+		cam.LookAt(glm.Vec3f{0, 0, 0})
 
-		r.Render(scene, cam)
+		r.Render(scene)
 		out := make([]byte, len(r.Pixels()))
 		copy(out, r.Pixels())
 		return out
@@ -279,11 +283,12 @@ func TestDirectionalShadowDarkensReceiver(t *testing.T) {
 		occluder.SetCastShadow(true)
 		scene.Add(occluder)
 
-		cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+		cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 5, 6})
-		cam.SetTarget(glm.Vec3f{0, 0, 0})
+		cam.LookAt(glm.Vec3f{0, 0, 0})
 
-		r.Render(scene, cam)
+		r.Render(scene)
 		out := make([]byte, len(r.Pixels()))
 		copy(out, r.Pixels())
 		return out
@@ -320,9 +325,10 @@ func TestShadowSetSizeReallocatesMap(t *testing.T) {
 	defer cube.Release()
 	scene.Add(scene.NewMesh(cube, r.NewPBRMaterial()))
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
-	r.Render(scene, cam)
+	r.Render(scene)
 
 	s := light.Shadow()
 	// mapOf re-reads the renderer's resource each time: a reallocation replaces the
@@ -336,7 +342,7 @@ func TestShadowSetSizeReallocatesMap(t *testing.T) {
 
 	// Same size: the map must be left alone.
 	s.SetSize(scenes.DefaultShadowSize)
-	r.Render(scene, cam)
+	r.Render(scene)
 	if r.TextureStore.GPU(mapOf()).H != first {
 		t.Error("map reallocated even though the size did not change")
 	}
@@ -349,7 +355,7 @@ func TestShadowSetSizeReallocatesMap(t *testing.T) {
 
 	// A new size must take effect.
 	s.SetSize(512)
-	r.Render(scene, cam)
+	r.Render(scene)
 	if s.Size() != 512 {
 		t.Fatalf("size = %d after SetSize(512)", s.Size())
 	}
@@ -396,12 +402,13 @@ func TestEnableShadowsTogglesAtRuntime(t *testing.T) {
 	occluder.SetCastShadow(true)
 	scene.Add(occluder)
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 5, 6})
-	cam.SetTarget(glm.Vec3f{0, 0, 0})
+	cam.LookAt(glm.Vec3f{0, 0, 0})
 
 	frame := func() int64 {
-		r.Render(scene, cam)
+		r.Render(scene)
 		return sceneLuma(r.Pixels())
 	}
 

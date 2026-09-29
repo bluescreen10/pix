@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
@@ -39,11 +38,12 @@ func TestPassRecordedSeparatesUnrunFromUnmeasured(t *testing.T) {
 	box.SetPosition(glm.Vec3f{0, 0, -120})
 	scene.Add(box)
 
-	cam := cameras.NewPerspectiveCamera(60, 1, 1, 5000)
+	cam := scene.NewPerspectiveCamera(60, 1, 1, 5000)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 0})
 	cam.LookAt(glm.Vec3f{0, 0, -1})
 	for range 4 {
-		r.Render(scene, cam)
+		r.Render(scene)
 	}
 
 	// Rendering forward with shadows on: these happen every frame.
@@ -78,10 +78,11 @@ func TestWaitsAreSeparatedFromCPUTime(t *testing.T) {
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.3, 0.3, 0.3})
 	scene.Add(scene.NewMesh(r.GeometryStore.Create(pix.BoxGeometry(40, 40, 40)), r.NewPBRMaterial()))
-	cam := cameras.NewPerspectiveCamera(60, 1, 1, 5000)
+	cam := scene.NewPerspectiveCamera(60, 1, 1, 5000)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 120})
 	for range 8 {
-		r.Render(scene, cam)
+		r.Render(scene)
 	}
 
 	p := r.Profiler()

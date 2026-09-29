@@ -5,7 +5,6 @@ import (
 
 	_ "github.com/bluescreen10/gamekit/gpu/vulkan"
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/loaders/gltf"
 	"github.com/bluescreen10/pix/scenes"
 )
@@ -58,8 +57,9 @@ func TestLoadSkinnedAnimatedAsset(t *testing.T) {
 	// Render once so the skeleton's Sync-computed bind-pose bounds exist, then
 	// frame it — an all-SkinnedMesh scene must still be frameable (FrameSphere
 	// has to see skinnedMeshes, not just meshes).
-	cam := cameras.NewPerspectiveCamera(45, 1, 1, 1000)
-	r.Render(scene, cam)
+	cam := scene.NewPerspectiveCamera(45, 1, 1, 1000)
+	scene.Add(cam)
+	r.Render(scene)
 	center, radius := scene.FrameSphere(0.9)
 	if radius <= 0 {
 		t.Fatalf("FrameSphere radius = %v, want > 0 (scene should not look empty)", radius)

@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
@@ -46,9 +45,10 @@ func TestTransparency(t *testing.T) {
 	scene.Add(scene.NewMesh(quad(0), blue))   // front, transparent, added first
 	scene.Add(scene.NewMesh(quad(-0.5), red)) // behind, opaque, added last
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 1000)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 1000)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2})
-	r.Render(scene, cam)
+	r.Render(scene)
 
 	px := r.Pixels()
 	i := (size/2*size + size/2) * 4 // center (overlap)
@@ -95,18 +95,19 @@ func TestBlendChangeRebatches(t *testing.T) {
 	scene.Add(scene.NewMesh(quad(-0.5), red))
 	scene.Add(scene.NewMesh(quad(0), blue))
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 1000)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 1000)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2})
 	i := (size/2*size + size/2) * 4
 
 	// Opaque to begin with: the blue quad in front hides the red one entirely.
-	r.Render(scene, cam)
+	r.Render(scene)
 	if px := r.Pixels(); px[i] > 40 || px[i+2] < 200 {
 		t.Fatalf("before the change: center = (%d,%d,%d), want opaque blue", px[i], px[i+1], px[i+2])
 	}
 
 	blue.SetBlend(materials.BlendAlpha)
-	r.Render(scene, cam)
+	r.Render(scene)
 	px := r.Pixels()
 	if px[i] < 40 || px[i+2] < 40 {
 		t.Fatalf("after SetBlend: center = (%d,%d,%d), want red showing through blue — "+

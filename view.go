@@ -8,8 +8,11 @@ import (
 // frameViews is every camera a frame renders from: the main camera, and one per shadow
 // map region.
 type frameViews struct {
-	main    view
-	shadows []view
+	main view
+	// hasMainView says the packet had a view to render main from. Without one the frame
+	// draws no scene, and has no shadow views either: they are fitted to the main one.
+	hasMainView bool
+	shadows     []view
 	// eye is the main camera's position. Every view's cull uses it for LOD selection —
 	// LOD is a main-camera decision whichever view is culling — and shading uses it for
 	// specular.

@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/loaders/gltf"
@@ -53,8 +52,8 @@ func TestMSFTLod(t *testing.T) {
 		t.Fatalf("expected exactly 1 Mesh (the alternates must not become their own scene nodes), got %d", got)
 	}
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.01, 1000)
-	cam.LookAt(glm.Vec3f{0, 0, 0})
+	cam := scene.NewPerspectiveCamera(45, 1, 0.01, 1000)
+	scene.Add(cam) // looks down -Z, at the origin from every position below
 
 	// Cube radius is ~0.866 (half-diagonal of a unit cube). Coverage 0.5 -> distance
 	// ~1.22, coverage 0.2 -> ~1.94 (see applyMSFTLod's radius/sqrt(coverage)
@@ -72,7 +71,7 @@ func TestMSFTLod(t *testing.T) {
 	}
 	for _, c := range cases {
 		cam.SetPosition(glm.Vec3f{0, 0, c.dist})
-		r.Render(scene, cam)
+		r.Render(scene)
 		rr, gg, bb, lit := avgColor(r.Pixels())
 		t.Logf("distance %.2f: avg=(%.0f,%.0f,%.0f) lit=%d", c.dist, rr, gg, bb, lit)
 		if lit < 20 {

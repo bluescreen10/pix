@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
@@ -119,12 +118,16 @@ func TestHandAuthoredPacketNeedsNoScene(t *testing.T) {
 		Bounds:     geo.BoundingSphere(),
 	}}
 	p.Meshes.Revision = 1
+	eye := glm.Vec3f{0, 0, 6}
+	p.Views = []scenes.ViewPacket{{
+		ID:         1,
+		View:       glm.LookAtRH(eye, glm.Vec3f{}, glm.Vec3f{0, 1, 0}),
+		Projection: glm.PerspectiveRevZRH(glm.ToRadians(float32(60)), 4, 0.1, 100),
+		Position:   eye,
+	}}
 
 	producer := &fakeProducer{id: p.Source, packet: p}
-
-	cam := cameras.NewPerspectiveCamera(60, 4, 0.1, 100)
-	cam.SetPosition(glm.Vec3f{0, 0, 6})
-	r.Render(producer, cam)
+	r.Render(producer)
 
 	px := r.Pixels()
 	const w, h = 160, 40

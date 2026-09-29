@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
@@ -46,10 +45,12 @@ func TestMaterialClasses(t *testing.T) {
 	scene.SetAmbient(colors.RGB32F{0.15, 0.15, 0.15})
 	scene.AddDirectionalLight(glm.Vec3f{-1, -0.3, -0.6}, colors.RGB32F{1, 1, 1}, 1.0)
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 1000)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 1000)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0.5, 5})
+	cam.LookAt(glm.Vec3f{})
 
-	r.Render(scene, cam)
+	r.Render(scene)
 
 	// Split the frame into thirds (basic | phong | pbr) and measure, for each, the
 	// spread between the brightest and darkest lit pixel. Unlit is flat (small

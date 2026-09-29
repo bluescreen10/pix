@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/loaders/gltf"
@@ -44,8 +43,9 @@ func TestCaptureAnimatedFrames(t *testing.T) {
 	action := mixer.Action(res.Clips[0])
 	action.SetLoop(scenes.LoopRepeat).Play()
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.01, 100)
-	r.Render(scene, cam)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.01, 100)
+	scene.Add(cam)
+	r.Render(scene)
 	center, radius := scene.FrameSphere(0.9)
 	cam.SetPosition(center.Add(glm.Vec3f{0, 0, radius * 2.6}))
 	cam.LookAt(center)
@@ -55,7 +55,7 @@ func TestCaptureAnimatedFrames(t *testing.T) {
 	for i, t0 := range []float32{0, 1.2, 2.4} {
 		action.SetTime(t0)
 		mixer.Update(0) // apply the jumped time without advancing further
-		r.Render(scene, cam)
+		r.Render(scene)
 		pixels := r.Capture()
 		savePNG(t, pixels, 480, 480, "/tmp/skinning_frame_"+string(rune('0'+i))+".png")
 	}

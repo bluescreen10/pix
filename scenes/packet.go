@@ -33,9 +33,10 @@ type FramePacket struct {
 	Frame uint64
 	Time  float32
 
-	// Views are the images to render from these tables, composed in order. A packet
-	// describes one source and may be seen from several viewpoints; simulation and
-	// table uploads happen once, not once per view.
+	// Views are the images to render from these tables, composed in order — for a
+	// Scene, one per attached, visible camera. A packet describes one source and may be
+	// seen from several viewpoints; simulation and table uploads happen once, not once
+	// per view.
 	Views []ViewPacket
 
 	// Transforms holds one world matrix per producer node. InstanceTransforms holds the
@@ -323,4 +324,9 @@ type ViewPacket struct {
 	View       glm.Mat4f
 	Projection glm.Mat4f
 	Position   glm.Vec3f
+}
+
+// ViewProjection returns the view's world-to-clip matrix.
+func (v ViewPacket) ViewProjection() glm.Mat4f {
+	return v.Projection.Mul4x4(v.View)
 }

@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
-	"github.com/bluescreen10/pix/cameras"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
@@ -14,7 +13,7 @@ import (
 // These tests pin the consequences: two scenes do not share state, and a released
 // source rebuilds correctly rather than rendering from buffers nobody filled.
 
-func greenCubeScene(t *testing.T, r *pix.Renderer) (*scenes.Scene, pix.Camera) {
+func greenCubeScene(t *testing.T, r *pix.Renderer) *scenes.Scene {
 	t.Helper()
 	scene := scenes.New()
 	scene.SetAmbient(colors.RGB32F{1, 1, 1})
@@ -24,9 +23,10 @@ func greenCubeScene(t *testing.T, r *pix.Renderer) (*scenes.Scene, pix.Camera) {
 	scene.Add(scene.NewMesh(geo, mat))
 	geo.Release()
 
-	cam := cameras.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
-	return scene, cam
+	return scene
 }
 
 func greenPixels(px []byte) int {
@@ -50,27 +50,27 @@ func TestSourceCacheIsPerScene(t *testing.T) {
 	}
 	defer r.Destroy()
 
-	a, camA := greenCubeScene(t, r)
+	a := greenCubeScene(t, r)
 	defer a.Destroy()
-	b, camB := greenCubeScene(t, r)
+	b := greenCubeScene(t, r)
 	defer b.Destroy()
 
 	if a.ID() == b.ID() {
 		t.Fatal("two scenes minted the same source id")
 	}
 
-	r.Render(a, camA)
+	r.Render(a)
 	want := greenPixels(r.Pixels())
 	if want == 0 {
 		t.Fatal("scene a did not render at all")
 	}
 
-	r.Render(b, camB)
+	r.Render(b)
 	if got := greenPixels(r.Pixels()); got == 0 {
 		t.Fatal("scene b did not render at all")
 	}
 
-	r.Render(a, camA)
+	r.Render(a)
 	if got := greenPixels(r.Pixels()); got != want {
 		t.Errorf("re-rendering a after b produced %d green pixels, want %d — rendering b corrupted a's cached draw state", got, want)
 	}
@@ -88,10 +88,10 @@ func TestReleasedSourceRendersAgain(t *testing.T) {
 	defer r.Destroy()
 	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 
-	scene, cam := greenCubeScene(t, r)
+	scene := greenCubeScene(t, r)
 	defer scene.Destroy()
 
-	r.Render(scene, cam)
+	r.Render(scene)
 	before := greenPixels(r.Pixels())
 	if before == 0 {
 		t.Fatal("cube did not render at all")
@@ -101,7 +101,7 @@ func TestReleasedSourceRendersAgain(t *testing.T) {
 
 	// Nothing about the scene changed, so the packet reports no transform movement and
 	// the same mesh revision. The renderer must still rebuild from the complete tables.
-	r.Render(scene, cam)
+	r.Render(scene)
 	if after := greenPixels(r.Pixels()); after != before {
 		t.Errorf("after release and re-render: %d green pixels, want %d — the rebuilt "+
 			"cache did not reproduce the frame", after, before)
@@ -118,9 +118,9 @@ func TestReleaseSourceIsIdempotent(t *testing.T) {
 	}
 	defer r.Destroy()
 
-	scene, cam := greenCubeScene(t, r)
+	scene := greenCubeScene(t, r)
 	defer scene.Destroy()
-	r.Render(scene, cam)
+	r.Render(scene)
 
 	r.ReleaseSource(scene.ID())
 	r.ReleaseSource(scene.ID())
@@ -128,7 +128,7 @@ func TestReleaseSourceIsIdempotent(t *testing.T) {
 
 	// The renderer must still work normally after releasing everything (including an
 	// id it never saw).
-	r.Render(scene, cam)
+	r.Render(scene)
 	if greenPixels(r.Pixels()) == 0 {
 		t.Error("renderer failed to render after a sequence of idempotent releases")
 	}
