@@ -43,6 +43,10 @@ type renderState struct {
 	// particles is each particle system's simulation, keyed by its stable id.
 	particles map[scenes.ParticleID]*particleState
 
+	// backToFront is the blended batches in this frame's draw order, farthest first:
+	// scratch, kept so sorting them every frame allocates nothing.
+	backToFront []batchDistance
+
 	// previousTime is the source's clock when it last rendered, and hasRendered whether
 	// it has: what a frame step's DeltaTime is measured from.
 	previousTime float32

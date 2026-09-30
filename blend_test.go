@@ -159,3 +159,61 @@ func TestTransparentBehindOpaqueIsHidden(t *testing.T) {
 		t.Fatalf("center = (%d,%d,%d), want opaque red with no blue blended over it", px[i], px[i+1], px[i+2])
 	}
 }
+
+// TestBlendedMeshesDrawBackToFront renders a 50%-alpha red quad and a 50%-alpha blue
+// one, overlapping over black, from in front and then from behind. Blending composites
+// each surface over what is already drawn, so the nearer quad has to be drawn last: the
+// overlap is half the nearer colour plus a quarter of the farther, (0.5, 0.25) linear,
+// which the display target encodes as 188 and 137.
+//
+// Both quads share a geometry and a material pool, which is what used to make them one
+// batch drawn in whatever order the cull kept them; and moving the camera changes no
+// layout, so only a sort redone every frame gets both views right.
+func TestBlendedMeshesDrawBackToFront(t *testing.T) {
+	const size = 96
+	r, err := pix.NewOffscreenRenderer(size, size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	r.SetClearColor([4]float32{0, 0, 0, 1})
+	scene := scenes.New()
+	defer scene.Destroy()
+
+	quad := r.GeometryStore.Create(geometries.GeometryConfig{
+		Attributes: []geometries.Attribute{
+			geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, []glm.Vec3f{{-0.8, -0.8, 0}, {0.8, -0.8, 0}, {0.8, 0.8, 0}, {-0.8, 0.8, 0}}),
+		},
+		Indices: []uint32{0, 1, 2, 0, 2, 3},
+	})
+	pane := func(color colors.RGBA32F, z float32) {
+		material := r.NewBasicMaterial()
+		material.SetColor(color)
+		material.SetBlend(materials.BlendAlpha)
+		material.SetDoubleSided(true)
+		mesh := scene.NewMesh(quad, material)
+		mesh.SetPosition(glm.Vec3f{0, 0, z})
+		scene.Add(mesh)
+	}
+	pane(colors.RGBA32F{1, 0, 0, 0.5}, 0)
+	pane(colors.RGBA32F{0, 0, 1, 0.5}, -0.5)
+
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
+	for _, view := range []struct {
+		z    float32
+		want [3]byte
+		name string
+	}{
+		{2, [3]byte{188, 0, 137}, "from in front, red is nearer"},
+		{-2.5, [3]byte{137, 0, 188}, "from behind, blue is nearer"},
+	} {
+		cam.SetPosition(glm.Vec3f{0, 0, view.z})
+		cam.LookAt(glm.Vec3f{0, 0, -0.25})
+		r.Render(scene)
+
+		if got := pixelAt(r, size/2, size/2); got != view.want {
+			t.Errorf("%s: center = %v, want %v", view.name, got, view.want)
+		}
+	}
+}

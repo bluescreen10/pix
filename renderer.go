@@ -1704,8 +1704,8 @@ func (r *Renderer) encodeOpaquePass(batches batchRange, st *renderState, views f
 	cmd.EndRenderPass()
 }
 
-// encodeTransparentPass draws the blended batches, then the particles, over the opaque
-// scene in image, testing against the depth it left. A frame with neither skips the
+// encodeTransparentPass draws the blended batches, back to front, then the particles,
+// over the opaque scene in image, testing against the depth it left. A frame with neither skips the
 // pass: ending one render pass and starting another stores both attachments and loads
 // them back, which is a cost for nothing when nothing is drawn.
 func (r *Renderer) encodeTransparentPass(batches batchRange, st *renderState, views frameViews, image gpu.Texture, cmd gpu.CommandBuffer) {
@@ -1722,7 +1722,7 @@ func (r *Renderer) encodeTransparentPass(batches batchRange, st *renderState, vi
 	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
 	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
 
-	r.drawBatches(batches, st, views, cmd)
+	r.drawBackToFront(batches, st, views, cmd)
 	r.drawParticles(st, views, cmd)
 
 	cmd.EndRenderPass()
@@ -1740,6 +1740,30 @@ func (r *Renderer) drawBatches(batches batchRange, st *renderState, views frameV
 		root.materials = b.pool.RecordsAddr()
 		cmd.SetPipeline(r.drawPipelines[r.pipelineForPool(b.pool, b.cull, b.blend)])
 		cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, views.main.cull.indirectBuf, uint64(first)*uint64(indirectSize), uint32(count), indirectSize)
+	}
+}
+
+// drawBackToFront issues the blended batches in batches farthest first, one indirect
+// draw each: a blended mesh is a batch of its own, and the batches are sorted every
+// frame, since the order changes whenever the camera or a mesh moves. The layout is
+// built once and never reordered; only the order the draws are issued in changes.
+//
+// TODO: a double-sided blended mesh overlaps itself — a jar's back wall is behind its
+// front wall, in the same draw — and which is drawn first is up to triangle order. Draw
+// such a batch twice, back faces first (cull front), then front faces (cull back).
+func (r *Renderer) drawBackToFront(batches batchRange, st *renderState, views frameViews, cmd gpu.CommandBuffer) {
+	st.backToFront = sortBackToFront(batches, &st.layout, &r.frame, views.eye, st.backToFront)
+
+	root := r.sceneRoot(st, views)
+	boundPipeline := ^uint32(0)
+	for _, entry := range st.backToFront {
+		b := &st.layout.batches[entry.batch]
+		if pipeline := r.pipelineForPool(b.pool, b.cull, b.blend); pipeline != boundPipeline {
+			cmd.SetPipeline(r.drawPipelines[pipeline])
+			boundPipeline = pipeline
+		}
+		root.materials = b.pool.RecordsAddr()
+		cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, views.main.cull.indirectBuf, uint64(entry.batch)*uint64(indirectSize), 1, indirectSize)
 	}
 }
 

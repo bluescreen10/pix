@@ -1,11 +1,13 @@
 package pix
 
 import (
+	"cmp"
 	"iter"
 	"slices"
 	"sort"
 
 	"github.com/bluescreen10/pix/geometries"
+	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
 	"github.com/bluescreen10/pix/scenes"
 )
@@ -51,6 +53,10 @@ type batch struct {
 	cull       materials.CullMode
 	blend      materials.BlendMode
 	geometryID uint32
+	// mesh is, for a blended batch, the index in the packet's mesh table of the one mesh
+	// it draws: each blended mesh gets batches of its own, so it can take its place in
+	// the back-to-front order (see sortBackToFront). Opaque batches leave it 0.
+	mesh uint32
 
 	// instanceCount sizes the batch's region in the visible buffer.
 	instanceCount uint32
@@ -110,6 +116,41 @@ func splitByBlend(batches []batch) (opaque, transparent batchRange) {
 	return batchRange{first: 0, end: split}, batchRange{first: split, end: len(batches)}
 }
 
+// batchDistance is a blended batch, and how far its mesh is from the camera, squared.
+type batchDistance struct {
+	batch           int
+	distanceSquared float32
+}
+
+// sortBackToFront returns the blended batches in batches ordered farthest first, by the
+// distance from eye to their mesh's bounding-sphere center, reusing order's storage.
+// Blending composites a surface over what is already drawn, so what is behind it has
+// to be drawn first. Batches at equal distances keep their layout order, so they do not
+// trade places from one frame to the next.
+func sortBackToFront(batches batchRange, layout *drawLayout, p *scenes.FramePacket, eye glm.Vec3f, order []batchDistance) []batchDistance {
+	order = order[:0]
+	for i := batches.first; i < batches.end; i++ {
+		toCenter := meshCenter(p.Meshes.Data[layout.batches[i].mesh], p).Sub(eye)
+		order = append(order, batchDistance{batch: i, distanceSquared: toCenter.Dot(toCenter)})
+	}
+	slices.SortStableFunc(order, func(a, b batchDistance) int {
+		return cmp.Compare(b.distanceSquared, a.distanceSquared)
+	})
+	return order
+}
+
+// meshCenter is the world-space center of a mesh's bounding sphere. An instanced mesh
+// is sorted as one object, at the mean of its instances' centers; among themselves,
+// its instances draw in whatever order the cull kept them.
+func meshCenter(mesh scenes.MeshPacket, p *scenes.FramePacket) glm.Vec3f {
+	var sum glm.Vec3f
+	for i := range mesh.Transforms.Count {
+		center := transformAt(p, mesh.Transforms.First+i).Mul4x1(mesh.Bounds.Center.Vec4(1))
+		sum = sum.Add(glm.Vec3f{center[0], center[1], center[2]})
+	}
+	return sum.Scale(1 / float32(mesh.Transforms.Count))
+}
+
 // isLayoutStale reports whether a layout still describes the scene the packet holds.
 //
 // Two things can invalidate it. The mesh table may have changed — objects added or
@@ -158,10 +199,11 @@ func buildDrawables(p *scenes.FramePacket, layout *drawLayout, materialStore *ma
 		cull     materials.CullMode
 		blend    materials.BlendMode
 		geometry uint32
+		mesh     uint32
 	}
 	batchOf := make(map[key]uint32)
 
-	for _, mesh := range p.Meshes.Entries() {
+	for meshIndex, mesh := range p.Meshes.Entries() {
 		lodID := uint32(0)
 		if mesh.LODRange.Count > 0 {
 			lodID = uint32(len(layout.lods))
@@ -191,6 +233,11 @@ func buildDrawables(p *scenes.FramePacket, layout *drawLayout, materialStore *ma
 					blend:    pool.BlendAt(material.Slot),
 					geometry: geometry.Slot,
 				}
+				// A blended mesh is drawn on its own, so that it can be drawn in its
+				// place back to front; opaque meshes share batches freely.
+				if k.blend != materials.BlendOpaque {
+					k.mesh = uint32(meshIndex)
+				}
 				batchID, seen := batchOf[k]
 				if !seen {
 					batchID = uint32(len(layout.batches))
@@ -200,6 +247,7 @@ func buildDrawables(p *scenes.FramePacket, layout *drawLayout, materialStore *ma
 						cull:         k.cull,
 						blend:        k.blend,
 						geometryID:   k.geometry,
+						mesh:         k.mesh,
 						poolRevision: pool.RasterRevision(),
 					})
 				}
