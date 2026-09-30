@@ -110,6 +110,11 @@ type Renderer struct {
 	linearSampler  gpu.Sampler
 	toneMapPass    *postprocess.FullscreenPass
 
+	// frameSteps is the work added at each stage of the frame, in the order it runs; and
+	// stepFrame what the steps are told, rebuilt every frame (see frame_step.go).
+	frameSteps [frameStageCount][]FrameStep
+	stepFrame  Frame
+
 	// Shadows: global toggle + the shared PCF comparison sampler (created lazily) +
 	// the position-only depth-pass pipeline (rebuilt with the others on format change).
 	// shadowDistance caps how far down the view frustum directional shadows are fit
@@ -607,8 +612,63 @@ func (r *Renderer) SetPostProcessing(steps []postprocess.Step) {
 }
 
 // AddPostProcessingStep appends one effect to the end of the chain.
+//
+// A step can be in the chain once: its images are sized for one place in it, and
+// RemovePostProcessingStep would not know which to remove. Adding it again panics.
 func (r *Renderer) AddPostProcessingStep(step postprocess.Step) {
-	r.postProcessing = append(r.postProcessing, step)
+	if slices.Contains(r.postProcessing, step) {
+		panic("pix: AddPostProcessingStep: step is already in the chain")
+	}
+	r.SetPostProcessing(append(slices.Clone(r.postProcessing), step))
+}
+
+// RemovePostProcessingStep takes one effect out of the chain and releases it. Removing
+// a step that is not in the chain does nothing.
+func (r *Renderer) RemovePostProcessingStep(step postprocess.Step) {
+	i := slices.Index(r.postProcessing, step)
+	if i < 0 {
+		return
+	}
+	r.SetPostProcessing(slices.Delete(slices.Clone(r.postProcessing), i, i+1))
+}
+
+// AddFrameStep adds step to the frame at stage, after the steps already there. Steps
+// are held by pointer, so changing one's fields changes the next frame.
+//
+// A step can be added once: its resources are sized for one place in the frame, and
+// RemoveFrameStep would not know which to remove. Adding it again panics.
+func (r *Renderer) AddFrameStep(stage FrameStage, step FrameStep) {
+	if r.hasFrameStep(step) {
+		panic("pix: AddFrameStep: step is already added")
+	}
+	r.frameSteps[stage] = append(r.frameSteps[stage], step)
+}
+
+// RemoveFrameStep takes step out of the frame and releases it. Removing a step that
+// was never added, or is already removed, does nothing.
+func (r *Renderer) RemoveFrameStep(step FrameStep) {
+	for stage, steps := range r.frameSteps {
+		if i := slices.Index(steps, step); i >= 0 {
+			r.frameSteps[stage] = slices.Delete(steps, i, i+1)
+			step.Release()
+			return
+		}
+	}
+}
+
+// hasFrameStep reports whether step is added at any stage.
+func (r *Renderer) hasFrameStep(step FrameStep) bool {
+	for _, steps := range r.frameSteps {
+		if slices.Contains(steps, step) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasFrameStepsAt reports whether any step is added at stage.
+func (r *Renderer) hasFrameStepsAt(stage FrameStage) bool {
+	return len(r.frameSteps[stage]) > 0
 }
 
 // EnableConsole turns on the developer console, reading from in, and returns it so
@@ -1216,20 +1276,30 @@ func (r *Renderer) uploadSharedResources(cmd gpu.CommandBuffer) {
 func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture, cmd gpu.CommandBuffer) {
 	r.profiler.beginGPUFrame(cmd)
 
-	// 4a. Compute: skin, cull every view, simulate particles.
+	// 4a. The scene is shaded into the HDR scene image, or without HDR straight into the
+	// target. Tell the frame steps so, then run the ones that go before everything else.
+	sceneImage := target
+	if r.hdr {
+		sceneImage = r.sceneColor
+	}
+	r.prepareStepFrame(st, views, sceneImage)
+	r.encodeFrameSteps(FrameStageStart, cmd)
+
+	// 4b. Compute: skin, cull every view, simulate particles.
 	r.encodeCompute(st, views, cmd)
 
-	// 4b. Fill the shadow maps.
+	// 4c. Fill the shadow maps.
 	r.encodeShadowPasses(st, views.shadows, cmd)
+	r.encodeFrameSteps(FrameStageAfterShadows, cmd)
 
-	// 4c. Without a view there is no scene to draw. The target is still cleared, so the
+	// 4d. Without a view there is no scene to draw. The target is still cleared, so the
 	// overlay has a defined frame to go on.
 	if !views.hasMainView {
 		r.encodeTargetClear(target, cmd)
 		return
 	}
 
-	// 4d. A debug view replaces shading entirely, so nothing after it runs. It draws
+	// 4e. A debug view replaces shading entirely, so nothing after it runs. It draws
 	// straight into the target: its values are data, not light, and neither the
 	// post-processing chain nor tone mapping should touch them.
 	if r.debugViewActive() {
@@ -1237,23 +1307,77 @@ func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture,
 		return
 	}
 
-	// 4e. Fill depth first, if enabled, so shading runs once per pixel.
+	// 4f. Fill depth first, if enabled, so shading runs once per pixel.
 	depthFilled := r.encodeDepthPrepass(st, views.main, cmd)
+	r.encodeFrameSteps(FrameStageAfterDepth, cmd)
 
-	// 4f. Shade. Without HDR that is the finished image, drawn straight into the target.
+	// 4g. Shade. Without HDR that is the finished image.
+	r.encodeDrawingPass(st, views, depthFilled, sceneImage, cmd)
 	if !r.hdr {
-		r.encodeDrawingPass(st, views, depthFilled, target, cmd)
 		return
 	}
-	r.encodeDrawingPass(st, views, depthFilled, r.sceneColor, cmd)
 	cmd.PrepareSampled(r.sceneColor, gpu.StageFragment)
 
-	// 4g. Run the post-processing chain over the scene image, then tone-map the result
+	// 4h. Run the post-processing chain over the scene image, then tone-map the result
 	// into the target.
 	r.profiler.beginPass(GPUPassPostProcessing, cmd)
 	image := r.encodePostProcessing(cmd)
 	r.encodeToneMapping(image, target, cmd)
 	r.profiler.endPass(GPUPassPostProcessing, cmd)
+}
+
+// prepareStepFrame fills in what every stage of this frame tells its steps. image is
+// what the scene is shaded into: the HDR scene image, or the target itself.
+func (r *Renderer) prepareStepFrame(st *renderState, views frameViews, image gpu.Texture) {
+	deltaTime := float32(0)
+	if st.hasRendered {
+		deltaTime = r.frame.Time - st.previousTime
+	}
+	st.previousTime, st.hasRendered = r.frame.Time, true
+
+	r.stepFrame = Frame{
+		Number:           r.frame.Frame,
+		Time:             r.frame.Time,
+		DeltaTime:        deltaTime,
+		Width:            r.width,
+		Height:           r.height,
+		SceneDepth:       r.depth,
+		SceneColor:       image,
+		SceneColorFormat: r.sceneFormat(),
+		Backend:          r.backend,
+		LinearSampler:    r.ensureLinearSampler(),
+	}
+	if views.hasMainView {
+		r.stepFrame.ViewProj = views.main.viewProj
+		r.stepFrame.InverseViewProj = views.main.viewProj.Inv()
+		r.stepFrame.Eye = views.eye
+	}
+}
+
+// encodeFrameSteps runs the steps added at stage, in the order they were added, each
+// told only what the stage has filled. Then it orders everything they wrote before the
+// rest of the frame: a barrier covers what compute wrote to buffers, and the images
+// they drew into are ordered by the next pass that uses them.
+func (r *Renderer) encodeFrameSteps(stage FrameStage, cmd gpu.CommandBuffer) {
+	if !r.hasFrameStepsAt(stage) {
+		return
+	}
+
+	frame := r.stepFrame
+	if stage < FrameStageAfterDepth {
+		frame.SceneDepth = gpu.Texture{}
+	} else {
+		cmd.PrepareSampled(frame.SceneDepth, gpu.StageCompute|gpu.StageFragment)
+	}
+	if stage < FrameStageAfterOpaque {
+		frame.SceneColor = gpu.Texture{}
+		frame.SceneColorFormat = gpu.FormatUndefined
+	}
+
+	for _, step := range r.frameSteps[stage] {
+		step.Encode(&frame, cmd)
+	}
+	cmd.Barrier(gpu.StageCompute, gpu.StageIndirect|gpu.StageVertex|gpu.StageFragment|gpu.StageCompute, 0)
 }
 
 // encodeCompute runs everything the frame computes before it draws. Skinning writes
@@ -1493,8 +1617,12 @@ func (r *Renderer) encodeDebugView(st *renderState, views frameViews, target gpu
 //
 // Only opaque batches take part. A blended surface does not occlude what is behind it,
 // so writing its depth here would hide geometry that should show through.
+//
+// Frame steps at FrameStageAfterDepth read the depth this pass fills, so adding one
+// turns the pass on. It then runs even with nothing to draw: its clear is what keeps
+// those steps from reading the previous frame's depth.
 func (r *Renderer) encodeDepthPrepass(st *renderState, main view, cmd gpu.CommandBuffer) bool {
-	if !r.depthPrepass || len(st.layout.batches) == 0 {
+	if !r.hasFrameStepsAt(FrameStageAfterDepth) && (!r.depthPrepass || len(st.layout.batches) == 0) {
 		return false
 	}
 
@@ -1538,14 +1666,17 @@ func (r *Renderer) encodeDepthPrepass(st *renderState, main view, cmd gpu.Comman
 
 // encodeDrawingPass shades the scene into image — the HDR scene image, or the target
 // itself — in two render passes: the opaque batches, then the blended batches and the
-// particles over them. Two rather than one so that work needing the finished opaque
-// scene — a sky drawn behind it, a copy of it for refraction — can run in between.
+// particles over them. Two rather than one so that the frame steps needing the
+// finished opaque scene — a sky drawn behind it, a copy of it for refraction — run in
+// between.
 func (r *Renderer) encodeDrawingPass(st *renderState, views frameViews, depthFilled bool, image gpu.Texture, cmd gpu.CommandBuffer) {
 	opaque, transparent := splitByBlend(st.layout.batches)
 
 	r.profiler.beginPass(GPUPassForward, cmd)
 	r.encodeOpaquePass(opaque, st, views, depthFilled, image, cmd)
+	r.encodeFrameSteps(FrameStageAfterOpaque, cmd)
 	r.encodeTransparentPass(transparent, st, views, image, cmd)
+	r.encodeFrameSteps(FrameStageAfterTransparent, cmd)
 	r.profiler.endPass(GPUPassForward, cmd)
 }
 
@@ -2850,6 +2981,12 @@ func (r *Renderer) Destroy() {
 		step.Release()
 	}
 	r.postProcessing = nil
+	for stage, steps := range r.frameSteps {
+		for _, step := range steps {
+			step.Release()
+		}
+		r.frameSteps[stage] = nil
+	}
 	for _, t := range []gpu.Texture{r.depth, r.sceneColor, r.postColor} {
 		if t.IsValid() {
 			r.backend.DestroyTexture(t)

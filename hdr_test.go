@@ -183,3 +183,46 @@ func TestStepLeavingTheChainIsReleased(t *testing.T) {
 		t.Errorf("encodes = %d, %d, want only the kept step run again", kept.encodes, dropped.encodes)
 	}
 }
+
+// TestRemovedPostProcessingStepIsReleased: removing a step takes it out of the chain and
+// releases it, and leaves the rest of the chain running.
+func TestRemovedPostProcessingStepIsReleased(t *testing.T) {
+	r, scene := postScene(t, colors.RGBA32F{1, 1, 1, 1}, 0.5)
+	r.EnableHDR(true)
+	kept := &countingStep{ShaderStep: postprocess.ShaderStep{Fragment: shaders.BloomDownsample, Params: make([]byte, 4)}}
+	removed := &countingStep{ShaderStep: postprocess.ShaderStep{Fragment: shaders.BloomDownsample, Params: make([]byte, 4)}}
+	r.AddPostProcessingStep(kept)
+	r.AddPostProcessingStep(removed)
+	r.Render(scene)
+
+	r.RemovePostProcessingStep(removed)
+	if removed.releases != 1 {
+		t.Errorf("the removed step was released %d times, want once", removed.releases)
+	}
+	if kept.releases != 0 {
+		t.Errorf("the kept step was released %d times, want none while it stays in the chain", kept.releases)
+	}
+	r.Render(scene)
+	if kept.encodes != 2 || removed.encodes != 1 {
+		t.Errorf("encodes = %d, %d, want only the kept step run again", kept.encodes, removed.encodes)
+	}
+
+	r.RemovePostProcessingStep(removed)
+	if removed.releases != 1 {
+		t.Errorf("removing the step again released it %d times in all, want once", removed.releases)
+	}
+}
+
+// TestPostProcessingStepAddedTwicePanics: a step can be in the chain once.
+func TestPostProcessingStepAddedTwicePanics(t *testing.T) {
+	r, _ := postScene(t, colors.RGBA32F{1, 1, 1, 1}, 0.5)
+	step := &countingStep{ShaderStep: postprocess.ShaderStep{Fragment: shaders.BloomDownsample, Params: make([]byte, 4)}}
+	r.AddPostProcessingStep(step)
+
+	defer func() {
+		if recover() == nil {
+			t.Error("AddPostProcessingStep did not panic on a step already in the chain")
+		}
+	}()
+	r.AddPostProcessingStep(step)
+}

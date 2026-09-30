@@ -42,6 +42,11 @@ type renderState struct {
 
 	// particles is each particle system's simulation, keyed by its stable id.
 	particles map[scenes.ParticleID]*particleState
+
+	// previousTime is the source's clock when it last rendered, and hasRendered whether
+	// it has: what a frame step's DeltaTime is measured from.
+	previousTime float32
+	hasRendered  bool
 }
 
 // cullBuffers is what one view's cull writes: each batch's indirect arguments, with the
