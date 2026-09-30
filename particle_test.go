@@ -4,7 +4,10 @@ import (
 	"testing"
 
 	"github.com/bluescreen10/pix"
+	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/materials"
 	"github.com/bluescreen10/pix/scenes"
 )
 
@@ -95,17 +98,6 @@ func TestParticleFaceCameraPanics(t *testing.T) {
 	defer func() {
 		if recover() == nil {
 			t.Fatal("expected panic for scenes.ParticleFaceCamera")
-		}
-	}()
-	scene.NewParticleContainer(config, 10)
-}
-
-func TestParticleSortBackToFrontPanics(t *testing.T) {
-	_, scene, config := newParticleTestScene(t)
-	config.Sort = scenes.ParticleSortBackToFront
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected panic for scenes.ParticleSortBackToFront")
 		}
 	}()
 	scene.NewParticleContainer(config, 10)
@@ -342,5 +334,149 @@ func TestParticleFreshEmitterInstancesIsolateTiming(t *testing.T) {
 	}
 	if got := len(c2.Pending()); got != 0 {
 		t.Fatalf("c2 pending = %d, want 0 (c1's scenes.Update must not affect c2)", got)
+	}
+}
+
+// TestParticlesDrawBackToFront renders two 50%-alpha particles of one container,
+// overlapping over black — a blue one spawned first, farther along -z, and a red one —
+// from in front and then from behind. A back-to-front container draws the nearer one
+// last, from either side: the overlap is half the nearer colour plus a quarter of the
+// farther, which the display target encodes as 188 and 137. The container's own order,
+// the order they were spawned in, can only be right from one side.
+func TestParticlesDrawBackToFront(t *testing.T) {
+	r, err := pix.NewOffscreenRenderer(postSize, postSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
+	scene := scenes.New()
+	defer scene.Destroy()
+
+	quad := r.GeometryStore.Create(geometries.GeometryConfig{
+		Attributes: []geometries.Attribute{
+			geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, []glm.Vec3f{{-0.8, -0.8, 0}, {0.8, -0.8, 0}, {0.8, 0.8, 0}, {-0.8, 0.8, 0}}),
+		},
+		Indices: []uint32{0, 1, 2, 0, 2, 3},
+	})
+	material := r.NewBasicParticleMaterial()
+	material.SetBlend(materials.BlendAlpha)
+	material.SetDoubleSided(true)
+	spawned := 0
+	container := scene.NewParticleContainer(scenes.ParticleConfig{
+		Geometry: quad,
+		Material: material,
+		Sort:     scenes.ParticleSortBackToFront,
+		Emitters: []scenes.ParticleEmitter{&countEmitter{n: 2}},
+		Spawn: SpawnFuncFor(func(p *scenes.Particle) {
+			p.Lifetime = 100
+			if spawned == 0 {
+				p.Position, p.Color = glm.Vec3f{0, 0, -0.5}, colors.RGBA32F{0, 0, 1, 0.5}
+			} else {
+				p.Position, p.Color = glm.Vec3f{0, 0, 0}, colors.RGBA32F{1, 0, 0, 0.5}
+			}
+			spawned++
+		}),
+	}, 2)
+	scene.Add(container)
+	container.Update(1.0 / 60)
+
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
+	for _, view := range []struct {
+		z    float32
+		want [3]byte
+		name string
+	}{
+		{2, [3]byte{188, 0, 137}, "from in front, red is nearer"},
+		{-2.5, [3]byte{137, 0, 188}, "from behind, blue is nearer"},
+	} {
+		cam.SetPosition(glm.Vec3f{0, 0, view.z})
+		cam.LookAt(glm.Vec3f{0, 0, -0.25})
+		r.Render(scene)
+
+		if got := pixelAt(r, postSize/2, postSize/2); got != view.want {
+			t.Errorf("%s: center = %v, want %v", view.name, got, view.want)
+		}
+	}
+}
+
+// TestParticleSortOrdersEveryPair lays 40 particles of one back-to-front container in a
+// row, each overlapping only its neighbours, at depths shuffled against the order they
+// were spawned in, and in alternating colours: red, blue, red. They are opaque, so in
+// each overlap the one drawn last is the one that shows, and back to front that is
+// the nearer. Every adjacent pair is checked, so a sort that misplaces any particle
+// shows it; and the container has room for 100, so the sort also has to move the 60
+// empty slots out of the way.
+func TestParticleSortOrdersEveryPair(t *testing.T) {
+	const count, width, height = 40, 400, 20
+	const pixelsPerUnit = width / count
+	r, err := pix.NewOffscreenRenderer(width, height)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
+	scene := scenes.New()
+	defer scene.Destroy()
+
+	// Each particle spans 1.5 units and its neighbours sit 1 unit away, so the half
+	// unit between two centres is covered by those two and no other.
+	quad := r.GeometryStore.Create(geometries.GeometryConfig{
+		Attributes: []geometries.Attribute{
+			geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, []glm.Vec3f{{-0.75, -0.9, 0}, {0.75, -0.9, 0}, {0.75, 0.9, 0}, {-0.75, 0.9, 0}}),
+		},
+		Indices: []uint32{0, 1, 2, 0, 2, 3},
+	})
+	material := r.NewBasicParticleMaterial()
+	material.SetBlend(materials.BlendAlpha)
+	red, blue := colors.RGBA32F{1, 0, 0, 1}, colors.RGBA32F{0, 0, 1, 1}
+	// depth is particle i's z: a fixed shuffle of 40 distinct depths (17 is coprime
+	// with 40), so nearness has nothing to do with spawn order.
+	depth := func(i int) float32 {
+		return -float32(i*17%count) / count
+	}
+	spawned := 0
+	container := scene.NewParticleContainer(scenes.ParticleConfig{
+		Geometry: quad,
+		Material: material,
+		Sort:     scenes.ParticleSortBackToFront,
+		Emitters: []scenes.ParticleEmitter{&countEmitter{n: count}},
+		Spawn: SpawnFuncFor(func(p *scenes.Particle) {
+			p.Lifetime = 100
+			p.Position = glm.Vec3f{float32(spawned) - (count-1)/2.0, 0, depth(spawned)}
+			p.Color = red
+			if spawned%2 == 1 {
+				p.Color = blue
+			}
+			spawned++
+		}),
+	}, 100)
+	scene.Add(container)
+	container.Update(1.0 / 60)
+
+	cam := scene.NewOrthographicCamera(-count/2, count/2, -1, 1, 0.1, 100)
+	scene.Add(cam)
+	cam.SetPosition(glm.Vec3f{0, 0, 5})
+	cam.LookAt(glm.Vec3f{0, 0, 0})
+	r.Render(scene)
+
+	px := r.Pixels()
+	for i := range count - 1 {
+		// Halfway between particle i's centre and particle i+1's.
+		x := (i + 1) * pixelsPerUnit
+		o := (height/2*width + x) * 4
+		got := [3]byte{px[o], px[o+1], px[o+2]}
+		nearer := i
+		if depth(i+1) > depth(i) {
+			nearer = i + 1
+		}
+		want := [3]byte{255, 0, 0}
+		if nearer%2 == 1 {
+			want = [3]byte{0, 0, 255}
+		}
+		if got != want {
+			t.Errorf("overlap of particles %d and %d = %v, want %v, particle %d's colour, the nearer", i, i+1, got, want, nearer)
+		}
 	}
 }

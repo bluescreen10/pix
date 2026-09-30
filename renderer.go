@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/png"
 	"math"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"slices"
@@ -64,6 +65,11 @@ type Renderer struct {
 	cullPipeline           gpu.Pipeline
 	skinPipeline           gpu.Pipeline // compute pre-skinning (scene_skin.comp) — see encodeSkinning
 	particleUpdatePipeline gpu.Pipeline // compute particle simulation (particle_update.comp) — see encodeParticleSimulation
+	// particleSortKeysPipeline and particleSortStepPipeline sort a container's particles
+	// back to front (particle_sort_keys.comp, particle_sort_step.comp) — see
+	// encodeParticleSorting.
+	particleSortKeysPipeline gpu.Pipeline
+	particleSortStepPipeline gpu.Pipeline
 	// skinScratch and shadowViews collect the frame's skinning jobs and shadow views
 	// (see skinCommands, collectShadowViews); reused every frame rather than
 	// reallocated.
@@ -1384,9 +1390,10 @@ func (r *Renderer) encodeFrameSteps(stage FrameStage, cmd gpu.CommandBuffer) {
 }
 
 // encodeCompute runs everything the frame computes before it draws. Skinning writes
-// positions and the particle kernel writes particle records, both read by later vertex
-// stages; the cull reads only bounds the CPU supplied. So one barrier after all three
-// covers everything.
+// positions, the particle kernel particle records and the particle sort their draw
+// order, all read by later vertex stages; the cull reads only bounds the CPU supplied.
+// So one barrier after them all covers everything — the sort orders itself after the
+// simulation it reads.
 func (r *Renderer) encodeCompute(st *renderState, views frameViews, cmd gpu.CommandBuffer) {
 	if len(st.layout.batches) == 0 && len(r.frame.Particles.Data) == 0 {
 		return
@@ -1396,6 +1403,7 @@ func (r *Renderer) encodeCompute(st *renderState, views frameViews, cmd gpu.Comm
 	r.encodeSkinning(st, cmd)
 	r.encodeCulling(st, views, cmd)
 	r.encodeParticleSimulation(st, cmd)
+	r.encodeParticleSorting(st, views, cmd)
 	cmd.Barrier(gpu.StageCompute, gpu.StageIndirect|gpu.StageVertex, 0)
 	r.profiler.endPass(GPUPassCull, cmd)
 }
@@ -1515,6 +1523,62 @@ func (r *Renderer) encodeParticleSimulation(st *renderState, cmd gpu.CommandBuff
 		cmd.Dispatch(utils.ToBytes(&root), (pp.Capacity+births+63)/64, 1, 1)
 		ps.current = 1 - ps.current
 	}
+}
+
+// encodeParticleSorting sorts each back-to-front container's particles for the main
+// camera, farthest first by depth along its view direction, into the container's order
+// buffer, which the draw then reads instead of taking the particles in compaction
+// order.
+//
+// It is a bitonic sort: one pass writes a key per entry, then log2(n)·(log2(n)+1)/2
+// compare-and-swap steps order them — 55 for a thousand particles — each a dispatch of
+// its own, ordered by a barrier.
+//
+// TODO: sort each workgroup's share in shared memory first; every step with a partner
+// inside the workgroup could then run in one dispatch, which would cut the step count
+// to a handful.
+func (r *Renderer) encodeParticleSorting(st *renderState, views frameViews, cmd gpu.CommandBuffer) {
+	if !views.hasMainView {
+		return
+	}
+	depthPlane := viewDepthPlane(r.frame.Views[0].View)
+	for _, pp := range r.frame.Particles.Data {
+		ps, ok := st.particles[pp.ID]
+		if pp.Sort != scenes.ParticleSortBackToFront || !ok || !ps.ready || pp.Capacity == 0 {
+			continue
+		}
+
+		// The keys read the positions and the living count the simulation just wrote.
+		cmd.Barrier(gpu.StageCompute, gpu.StageCompute, 0)
+		count := sortEntryCount(pp.Capacity)
+		keys := particleSortKeysRoot{
+			particles:   ps.buffers[ps.current].Addr,
+			indirect:    ps.indirectBuf.Addr,
+			models:      st.worldBuf.Addr,
+			order:       ps.orderBuf.Addr,
+			depthPlane:  depthPlane,
+			transformID: pp.Transform,
+			count:       count,
+		}
+		cmd.SetPipeline(r.particleSortKeysPipeline)
+		cmd.Dispatch(utils.ToBytes(&keys), (count+63)/64, 1, 1)
+
+		cmd.SetPipeline(r.particleSortStepPipeline)
+		for blockSize := uint32(2); blockSize <= count; blockSize *= 2 {
+			for partnerDistance := blockSize / 2; partnerDistance > 0; partnerDistance /= 2 {
+				cmd.Barrier(gpu.StageCompute, gpu.StageCompute, 0)
+				step := particleSortStepRoot{order: ps.orderBuf.Addr, count: count, blockSize: blockSize, partnerDistance: partnerDistance}
+				cmd.Dispatch(utils.ToBytes(&step), (count+63)/64, 1, 1)
+			}
+		}
+	}
+}
+
+// viewDepthPlane returns the plane whose signed distance is a point's depth along the
+// view direction: the view matrix's third row, negated, since a camera looks down its
+// view space's -z.
+func viewDepthPlane(view glm.Mat4f) glm.Vec4f {
+	return view.Row(2).Scale(-1)
 }
 
 // encodeShadowPasses fills every shadow map, then hands each to the samplers.
@@ -1792,6 +1856,9 @@ func (r *Renderer) drawParticles(st *renderState, views frameViews, cmd gpu.Comm
 			materialID:  pp.Material.Slot,
 			transformID: pp.Transform,
 			time:        r.frame.Time,
+		}
+		if pp.Sort == scenes.ParticleSortBackToFront {
+			root.order = ps.orderBuf.Addr
 		}
 		pipeline := r.pipelineForPool(pool, pool.CullAt(pp.Material.Slot), pool.BlendAt(pp.Material.Slot))
 		cmd.SetPipeline(r.drawPipelines[pipeline])
@@ -2111,6 +2178,15 @@ func (r *Renderer) ensureParticleBuffers(ps *particleState, pp scenes.ParticlePa
 	if births > 0 {
 		r.growBuffer(&ps.pendingBuf, uint64(births)*uint64(particleRecordSize), "particles-pending")
 	}
+	if pp.Sort == scenes.ParticleSortBackToFront {
+		r.growBuffer(&ps.orderBuf, uint64(sortEntryCount(pp.Capacity))*sortEntrySize, "particles-order")
+	}
+}
+
+// sortEntryCount is how many entries a container's order holds: its capacity rounded
+// up to a power of two, which is what a bitonic sort works on.
+func sortEntryCount(capacity uint32) uint32 {
+	return 1 << bits.Len32(max(capacity, 1)-1)
 }
 
 // stateFor returns the GPU state for a source, creating it on first sight.
@@ -2530,6 +2606,8 @@ func (r *Renderer) buildPipelines() {
 		r.backend.DestroyPipeline(r.cullPipeline)
 		r.backend.DestroyPipeline(r.skinPipeline)
 		r.backend.DestroyPipeline(r.particleUpdatePipeline)
+		r.backend.DestroyPipeline(r.particleSortKeysPipeline)
+		r.backend.DestroyPipeline(r.particleSortStepPipeline)
 		r.backend.DestroyPipeline(r.shadowPipeline)
 		for _, p := range r.prepassPipelines {
 			r.backend.DestroyPipeline(p)
@@ -2541,6 +2619,8 @@ func (r *Renderer) buildPipelines() {
 	r.cullPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.SceneCull), Entry: "main", Label: "scene-cull"})
 	r.skinPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.SceneSkin), Entry: "main", Label: "scene-skin"})
 	r.particleUpdatePipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleUpdate), Entry: "main", Label: "particle-update"})
+	r.particleSortKeysPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleSortKeys), Entry: "main", Label: "particle-sort-keys"})
+	r.particleSortStepPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleSortStep), Entry: "main", Label: "particle-sort-step"})
 	// Depth-only passes: position-only vertex-pull, no colour attachment, writes depth.
 	//
 	// No fragment shader at all: a stage that outputs nothing is not free — it still
@@ -3004,6 +3084,8 @@ func (r *Renderer) Destroy() {
 		r.backend.DestroyPipeline(r.cullPipeline)
 		r.backend.DestroyPipeline(r.skinPipeline)
 		r.backend.DestroyPipeline(r.particleUpdatePipeline)
+		r.backend.DestroyPipeline(r.particleSortKeysPipeline)
+		r.backend.DestroyPipeline(r.particleSortStepPipeline)
 		r.backend.DestroyPipeline(r.shadowPipeline)
 		for _, p := range r.prepassPipelines {
 			r.backend.DestroyPipeline(p)

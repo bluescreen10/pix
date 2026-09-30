@@ -60,6 +60,8 @@ import _ "embed"
 //go:generate go run ../cmd/shadercompile -i src/tonemap.frag.glsl -o spv:build/tonemap.frag.spv -o metallib:build/tonemap.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/halftone.frag.glsl -o spv:build/halftone.frag.spv -o metallib:build/halftone.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/particle_update.comp.glsl -o spv:build/particle_update.comp.spv -o metallib:build/particle_update.comp.metalbin
+//go:generate go run ../cmd/shadercompile -i src/particle_sort_keys.comp.glsl -o spv:build/particle_sort_keys.comp.spv -o metallib:build/particle_sort_keys.comp.metalbin
+//go:generate go run ../cmd/shadercompile -i src/particle_sort_step.comp.glsl -o spv:build/particle_sort_step.comp.spv -o metallib:build/particle_sort_step.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/particle_draw.vert.glsl -o spv:build/particle_draw.vert.spv -o metallib:build/particle_draw.vert.metalbin
 //go:generate go run ../cmd/shadercompile -i src/particle_basic.frag.glsl -o spv:build/particle_basic.frag.spv -o metallib:build/particle_basic.frag.metalbin
 
@@ -150,6 +152,12 @@ var OverlayFrag []byte
 
 //go:embed build/particle_update.comp.spv
 var ParticleUpdate []byte
+
+//go:embed build/particle_sort_keys.comp.spv
+var ParticleSortKeys []byte
+
+//go:embed build/particle_sort_step.comp.spv
+var ParticleSortStep []byte
 
 //go:embed build/particle_draw.vert.spv
 var ParticleDraw []byte

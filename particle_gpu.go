@@ -50,10 +50,36 @@ type particleDrawRoot struct {
 	// passed unconditionally, same as drawRoot's (drawable.go); a particle shader
 	// reads it or ignores it.
 	time float32
-	pad0 uint32
+	// order is a sorted container's back-to-front order, or 0 to draw its particles in
+	// compaction order.
+	order uint64
 }
 
 var particleDrawRootSize = uint32(unsafe.Sizeof(particleDrawRoot{}))
+
+// particleSortKeysRoot matches PC in particle_sort_keys.comp.glsl: one per sorted
+// container per frame — see encodeParticleSorting.
+type particleSortKeysRoot struct {
+	particles, indirect, models, order uint64
+	// depthPlane gives a point's view depth: dot(depthPlane.xyz, p) + depthPlane.w.
+	depthPlane  glm.Vec4f
+	transformID uint32
+	// count is the entries in order: the capacity rounded up to a power of two.
+	count      uint32
+	pad0, pad1 uint32
+}
+
+// particleSortStepRoot matches PC in particle_sort_step.comp.glsl: one per step of
+// the bitonic sort.
+type particleSortStepRoot struct {
+	order                             uint64
+	count, blockSize, partnerDistance uint32
+	pad0, pad1, pad2                  uint32
+}
+
+// sortEntrySize is the size of one entry of a sorted container's order buffer: a
+// float key and a particle index.
+const sortEntrySize = 8
 
 var particleUpdateRootSize = uint32(unsafe.Sizeof(particleUpdateRoot{}))
 

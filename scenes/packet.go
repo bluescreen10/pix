@@ -99,6 +99,7 @@ type ParticlePacket struct {
 	Material  materials.ID
 	Capacity  uint32
 	Update    ParticleUpdate
+	Sort      ParticleSort
 
 	// DT is the simulation time to advance, accumulated since the last extraction; 0
 	// means no step was requested and the renderer retains the current state rather

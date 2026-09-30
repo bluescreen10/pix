@@ -74,6 +74,12 @@ var metalOverlayFrag []byte
 //go:embed build/particle_update.comp.metalbin
 var metalParticleUpdate []byte
 
+//go:embed build/particle_sort_keys.comp.metalbin
+var metalParticleSortKeys []byte
+
+//go:embed build/particle_sort_step.comp.metalbin
+var metalParticleSortStep []byte
+
 //go:embed build/particle_draw.vert.metalbin
 var metalParticleDraw []byte
 
@@ -121,6 +127,8 @@ var metalVariants = []struct{ spirv, metal []byte }{
 	{OverlayVert, metalOverlayVert},
 	{OverlayFrag, metalOverlayFrag},
 	{ParticleUpdate, metalParticleUpdate},
+	{ParticleSortKeys, metalParticleSortKeys},
+	{ParticleSortStep, metalParticleSortStep},
 	{ParticleDraw, metalParticleDraw},
 	{ParticleBasicFragment, metalParticleBasicFragment},
 }

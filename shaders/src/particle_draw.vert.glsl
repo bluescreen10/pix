@@ -38,6 +38,9 @@ layout(buffer_reference, scalar) readonly buffer AttrBuf { uint v[]; };
 layout(buffer_reference, scalar) readonly buffer DescBuf { GeoDesc v[]; };
 layout(buffer_reference, scalar) readonly buffer ModelBuf { mat4 v[]; };
 layout(buffer_reference, scalar) readonly buffer ParticleBuf { ParticleRecord v[]; };
+// A sorted system's back-to-front order (see particle_sort_keys.comp.glsl).
+struct SortEntry { float key; uint particle; };
+layout(buffer_reference, scalar) readonly buffer OrderBuf { SortEntry v[]; };
 
 // Matches particle_common.glsl's PC exactly (see that file's comment on why this is
 // declared separately rather than shared via #include) and particleDrawRoot in
@@ -56,6 +59,9 @@ layout(push_constant, scalar) uniform PC {
     uint materialID;
     uint transformID;
     float time;
+    // order is a sorted system's back-to-front order, or 0 to draw the particles in the
+    // order the update kernel compacted them.
+    uint64_t order;
 } pc;
 
 layout(location = 0) out vec4 vColor;
@@ -72,7 +78,11 @@ vec3 rotate(vec4 q, vec3 v) {
 }
 
 void main() {
-    ParticleRecord p = pc.particles.v[uint(gl_InstanceIndex)];
+    uint particle = uint(gl_InstanceIndex);
+    if (pc.order != 0ul) {
+        particle = OrderBuf(pc.order).v[particle].particle;
+    }
+    ParticleRecord p = pc.particles.v[particle];
     GeoDesc g = pc.descs.v[pc.geometryID];
     mat4 m = pc.models.v[pc.transformID];
     vColor = p.color;

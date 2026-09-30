@@ -273,7 +273,10 @@ type particleState struct {
 	// reads it directly, so births reach the compacted buffer through the same atomic
 	// append survivors use, without the CPU tracking the GPU's running alive count.
 	pendingBuf gpu.Buffer
-	ready      bool
+	// orderBuf is a sorted container's back-to-front order, rebuilt every frame (see
+	// encodeParticleSorting); unallocated for a container that is not sorted.
+	orderBuf gpu.Buffer
+	ready    bool
 	// epoch mirrors the packet's; a change means the system was cleared and its buffers
 	// must start empty again.
 	epoch uint64
@@ -291,5 +294,8 @@ func (ps *particleState) destroy(backend gpu.Backend) {
 	}
 	if ps.pendingBuf.IsValid() {
 		backend.Free(ps.pendingBuf)
+	}
+	if ps.orderBuf.IsValid() {
+		backend.Free(ps.orderBuf)
 	}
 }

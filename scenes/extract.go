@@ -273,6 +273,7 @@ func (s *Scene) extractParticles() {
 			Material:  d.material.ID(),
 			Capacity:  d.capacity,
 			Update:    d.update,
+			Sort:      d.sort,
 			DT:        d.dt,
 			Epoch:     d.epoch,
 			Newborns:  IndexRange{First: uint32(len(newborns)), Count: uint32(len(d.pending))},

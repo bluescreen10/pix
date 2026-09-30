@@ -134,11 +134,13 @@ const (
 type ParticleSort uint8
 
 const (
-	// ParticleSortNone uses GPU compaction order. The only sort mode implemented
-	// in this version.
+	// ParticleSortNone uses GPU compaction order: right for opaque and additive
+	// particles, which look the same in any order.
 	ParticleSortNone ParticleSort = iota
-	// ParticleSortBackToFront sorts particle centers by camera-space depth per
-	// view. Not yet implemented — constructing a container with it panics.
+	// ParticleSortBackToFront draws the particles farthest first, by each particle
+	// center's depth along the camera's view direction, sorted on the GPU every frame.
+	// It orders a container's particles among themselves, not against other
+	// containers or meshes.
 	ParticleSortBackToFront
 )
 
@@ -211,8 +213,8 @@ func (c ParticleContainer) data() *particleData {
 // empty, with emission enabled. Zero capacity is valid; negative capacity is a
 // programming error.
 //
-// ParticleFaceCamera, ParticleSortBackToFront, and a non-nil Update.Shader are not
-// yet implemented in this version and panic here rather than silently degrading.
+// ParticleFaceCamera and a non-nil Update.Shader are not yet implemented in this
+// version and panic here rather than silently degrading.
 //
 // config.Material is a *materials.BasicParticleMaterial (see ParticleConfig's doc
 // comment) — its own dedicated type carrying pix's particle shaders directly,
@@ -223,9 +225,6 @@ func (s *Scene) NewParticleContainer(config ParticleConfig, capacity int) Partic
 	}
 	if config.Facing == ParticleFaceCamera {
 		panic("pix: ParticleFaceCamera is not yet implemented")
-	}
-	if config.Sort == ParticleSortBackToFront {
-		panic("pix: ParticleSortBackToFront is not yet implemented")
 	}
 	if config.Update.Shader != nil {
 		panic("pix: custom particle update shaders are not yet implemented")

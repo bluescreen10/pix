@@ -34,6 +34,8 @@ layout(push_constant, scalar) uniform PC {
     // time is elapsed seconds since the scene's clock started (Scene.clockStart),
     // passed to every vertex/fragment shader pair unconditionally — read it or not.
     float time;
+    // order is read by the vertex stage only (see particle_draw.vert.glsl).
+    uint64_t order;
 } pc;
 
 layout(location = 0) in vec4 vColor;
