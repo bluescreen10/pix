@@ -114,3 +114,48 @@ func TestBlendChangeRebatches(t *testing.T) {
 			"the draw list kept the opaque pipeline it batched with", px[i], px[i+1], px[i+2])
 	}
 }
+
+// TestTransparentBehindOpaqueIsHidden renders a 50%-alpha blue quad behind an opaque
+// red one. Blended surfaces are drawn in a render pass of their own, after the opaque
+// ones; that pass must test against the depth the opaque pass left, or the blue quad
+// blends over the red one that hides it.
+func TestTransparentBehindOpaqueIsHidden(t *testing.T) {
+	const size = 96
+	r, err := pix.NewOffscreenRenderer(size, size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	r.SetClearColor([4]float32{0, 0, 0, 1})
+	scene := scenes.New()
+	defer scene.Destroy()
+	scene.SetAmbient(colors.RGB32F{1, 1, 1}) // full ambient → albedo shows directly
+
+	quad := func(z float32) geometries.Geometry {
+		return r.GeometryStore.Create(geometries.GeometryConfig{
+			Attributes: []geometries.Attribute{
+				geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, []glm.Vec3f{{-0.8, -0.8, z}, {0.8, -0.8, z}, {0.8, 0.8, z}, {-0.8, 0.8, z}}),
+			},
+			Indices: []uint32{0, 1, 2, 0, 2, 3},
+		})
+	}
+
+	red := r.NewPBRMaterial()
+	red.SetColor(colors.RGBA32F{1, 0, 0, 1})
+	blue := r.NewPBRMaterial()
+	blue.SetColor(colors.RGBA32F{0, 0, 1, 0.5})
+	blue.SetBlend(materials.BlendAlpha)
+	scene.Add(scene.NewMesh(quad(0), red))     // front, opaque
+	scene.Add(scene.NewMesh(quad(-0.5), blue)) // behind, transparent
+
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 1000)
+	scene.Add(cam)
+	cam.SetPosition(glm.Vec3f{0, 0, 2})
+	r.Render(scene)
+
+	px := r.Pixels()
+	i := (size/2*size + size/2) * 4 // center (overlap)
+	if px[i] < 200 || px[i+1] != 0 || px[i+2] != 0 {
+		t.Fatalf("center = (%d,%d,%d), want opaque red with no blue blended over it", px[i], px[i+1], px[i+2])
+	}
+}

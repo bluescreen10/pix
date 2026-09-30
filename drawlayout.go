@@ -2,6 +2,7 @@ package pix
 
 import (
 	"iter"
+	"slices"
 	"sort"
 
 	"github.com/bluescreen10/pix/geometries"
@@ -85,6 +86,28 @@ func rasterSpans(batches []batch) iter.Seq2[int, int] {
 			first = end
 		}
 	}
+}
+
+// batchRange is the batches from first up to, but not including, end.
+type batchRange struct {
+	first, end int
+}
+
+// isEmpty reports whether the range holds no batches.
+func (r batchRange) isEmpty() bool {
+	return r.first == r.end
+}
+
+// splitByBlend returns the range of opaque batches and the range of blended batches
+// after it. orderBatches puts every opaque batch first, so each is one contiguous run.
+func splitByBlend(batches []batch) (opaque, transparent batchRange) {
+	split := slices.IndexFunc(batches, func(b batch) bool {
+		return b.blend != materials.BlendOpaque
+	})
+	if split < 0 {
+		split = len(batches)
+	}
+	return batchRange{first: 0, end: split}, batchRange{first: split, end: len(batches)}
 }
 
 // isLayoutStale reports whether a layout still describes the scene the packet holds.

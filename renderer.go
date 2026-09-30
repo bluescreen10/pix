@@ -2,7 +2,6 @@ package pix
 
 import (
 	"fmt"
-	"github.com/bluescreen10/pix/postprocess"
 	"image"
 	"image/png"
 	"math"
@@ -13,6 +12,8 @@ import (
 	"strings"
 	"time"
 	"unsafe"
+
+	"github.com/bluescreen10/pix/postprocess"
 
 	"github.com/bluescreen10/gamekit"
 	"github.com/bluescreen10/gamekit/gpu"
@@ -1536,15 +1537,26 @@ func (r *Renderer) encodeDepthPrepass(st *renderState, main view, cmd gpu.Comman
 }
 
 // encodeDrawingPass shades the scene into image — the HDR scene image, or the target
-// itself — every batch, opaque and blended, then the particles. It clears depth unless
-// the prepass already filled it.
+// itself — in two render passes: the opaque batches, then the blended batches and the
+// particles over them. Two rather than one so that work needing the finished opaque
+// scene — a sky drawn behind it, a copy of it for refraction — can run in between.
 func (r *Renderer) encodeDrawingPass(st *renderState, views frameViews, depthFilled bool, image gpu.Texture, cmd gpu.CommandBuffer) {
+	opaque, transparent := splitByBlend(st.layout.batches)
+
+	r.profiler.beginPass(GPUPassForward, cmd)
+	r.encodeOpaquePass(opaque, st, views, depthFilled, image, cmd)
+	r.encodeTransparentPass(transparent, st, views, image, cmd)
+	r.profiler.endPass(GPUPassForward, cmd)
+}
+
+// encodeOpaquePass clears image and draws the opaque batches into it. It clears depth
+// unless the prepass already filled it.
+func (r *Renderer) encodeOpaquePass(batches batchRange, st *renderState, views frameViews, depthFilled bool, image gpu.Texture, cmd gpu.CommandBuffer) {
 	depthLoad := gpu.LoadClear
 	if depthFilled {
 		depthLoad = gpu.LoadKeep
 	}
 
-	r.profiler.beginPass(GPUPassForward, cmd)
 	cmd.BeginRenderPass(gpu.RenderTargets{
 		Color: []gpu.ColorAttachment{{Texture: image, Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: [4]float32(r.clear)}},
 		Depth: &gpu.DepthAttachment{Texture: r.depth, Load: depthLoad, Store: gpu.StoreKeep, Clear: 0.0},
@@ -1552,20 +1564,41 @@ func (r *Renderer) encodeDrawingPass(st *renderState, views frameViews, depthFil
 	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
 	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
 
-	r.drawBatches(st, views, cmd)
+	r.drawBatches(batches, st, views, cmd)
+
+	cmd.EndRenderPass()
+}
+
+// encodeTransparentPass draws the blended batches, then the particles, over the opaque
+// scene in image, testing against the depth it left. A frame with neither skips the
+// pass: ending one render pass and starting another stores both attachments and loads
+// them back, which is a cost for nothing when nothing is drawn.
+func (r *Renderer) encodeTransparentPass(batches batchRange, st *renderState, views frameViews, image gpu.Texture, cmd gpu.CommandBuffer) {
+	if batches.isEmpty() && len(r.frame.Particles.Data) == 0 {
+		return
+	}
+
+	cmd.BeginRenderPass(gpu.RenderTargets{
+		Color: []gpu.ColorAttachment{{Texture: image, Load: gpu.LoadKeep, Store: gpu.StoreKeep}},
+		Depth: &gpu.DepthAttachment{Texture: r.depth, Load: gpu.LoadKeep, Store: gpu.StoreKeep},
+	})
+	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
+	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
+
+	r.drawBatches(batches, st, views, cmd)
 	r.drawParticles(st, views, cmd)
 
 	cmd.EndRenderPass()
-	r.profiler.endPass(GPUPassForward, cmd)
 }
 
-// drawBatches issues one multi-draw-indirect call per raster span: every per-geometry
-// command sharing a pipeline goes in a single DrawIndexedIndirect. Each command's
-// firstInstance is its region base, so gl_InstanceIndex indexes the compacted visible
-// buffer directly.
-func (r *Renderer) drawBatches(st *renderState, views frameViews, cmd gpu.CommandBuffer) {
+// drawBatches issues one multi-draw-indirect call per raster span in batches: every
+// per-geometry command sharing a pipeline goes in a single DrawIndexedIndirect. Each
+// command's firstInstance is its region base, so gl_InstanceIndex indexes the compacted
+// visible buffer directly.
+func (r *Renderer) drawBatches(batches batchRange, st *renderState, views frameViews, cmd gpu.CommandBuffer) {
 	root := r.sceneRoot(st, views)
-	for first, count := range rasterSpans(st.layout.batches) {
+	for offset, count := range rasterSpans(st.layout.batches[batches.first:batches.end]) {
+		first := batches.first + offset
 		b := &st.layout.batches[first]
 		root.materials = b.pool.RecordsAddr()
 		cmd.SetPipeline(r.drawPipelines[r.pipelineForPool(b.pool, b.cull, b.blend)])
