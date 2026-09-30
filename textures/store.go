@@ -103,7 +103,7 @@ func (t *Store) Create(rgba []byte, w, h int, format Format) Texture {
 	for i, l := range levels {
 		put(uint32(i+1), l)
 	}
-	cmd.PrepareSampled(tex, gpu.StageFragment)
+	cmd.Barrier(gpu.StageTransfer, gpu.StageVertex|gpu.StageFragment|gpu.StageCompute, 0)
 	t.backend.Wait(t.backend.Submit(cmd))
 	t.backend.Free(staging)
 
@@ -118,6 +118,35 @@ func (t *Store) CreateDepthTarget(w, h uint32) Texture {
 		Kind: gpu.Texture2D, Width: w, Height: h,
 		Format: gpu.FormatDepth32F, Usage: gpu.TextureDepth | gpu.TextureSampled,
 		Label: "shadow-map",
+	})
+	return t.handle(tex)
+}
+
+// WritableConfig describes a texture that compute shaders write: a simulation's state,
+// a baked lookup table, a noise volume.
+type WritableConfig struct {
+	// Kind is the texture's shape. Depth is a 3D texture's depth and Layers an array's
+	// layer count — a cube's is 6; each is 1 when zero.
+	Kind          gpu.TextureKind
+	Width, Height uint32
+	Depth         uint32
+	Layers        uint32
+	// Format is a gpu.Format rather than a Format: what the texture holds is the writing
+	// shader's to define, not an image's to describe.
+	Format gpu.Format
+	Label  string
+}
+
+// CreateWritable allocates a texture that compute shaders write, through the heap's
+// storage arrays (gImages3D in bindless.glsl), and any shader samples, through its
+// sampled ones (gTextures3D) — at the same Index. Nothing is uploaded: its contents are
+// undefined until written, and whatever samples it has to come after whatever writes it.
+func (t *Store) CreateWritable(config WritableConfig) Texture {
+	tex := t.backend.CreateTexture(gpu.TextureDescriptor{
+		Kind: config.Kind, Width: config.Width, Height: config.Height,
+		Depth: config.Depth, Layers: config.Layers,
+		Format: config.Format, Usage: gpu.TextureSampled | gpu.TextureStorage,
+		Label: config.Label,
 	})
 	return t.handle(tex)
 }

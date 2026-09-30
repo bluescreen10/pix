@@ -755,6 +755,7 @@ func (r *Renderer) Capture() []byte {
 		r.pixels = make([]byte, n)
 	}
 	cmd := r.backend.Begin()
+	cmd.Barrier(gpu.StageColorOutput, gpu.StageTransfer, 0)
 	cmd.CopyTextureToBuffer(r.readback, r.target, 0, 0)
 	f := r.backend.Submit(cmd)
 	r.backend.Wait(f)
@@ -1311,12 +1312,13 @@ func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture,
 	depthFilled := r.encodeDepthPrepass(st, views.main, cmd)
 	r.encodeFrameSteps(FrameStageAfterDepth, cmd)
 
-	// 4g. Shade. Without HDR that is the finished image.
+	// 4g. Shade. Without HDR that is the finished image. With it, the post-processing
+	// chain samples the scene image, and may sample its depth.
 	r.encodeDrawingPass(st, views, depthFilled, sceneImage, cmd)
 	if !r.hdr {
 		return
 	}
-	cmd.PrepareSampled(r.sceneColor, gpu.StageFragment)
+	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth, gpu.StageFragment, 0)
 
 	// 4h. Run the post-processing chain over the scene image, then tone-map the result
 	// into the target.
@@ -1355,9 +1357,11 @@ func (r *Renderer) prepareStepFrame(st *renderState, views frameViews, image gpu
 }
 
 // encodeFrameSteps runs the steps added at stage, in the order they were added, each
-// told only what the stage has filled. Then it orders everything they wrote before the
-// rest of the frame: a barrier covers what compute wrote to buffers, and the images
-// they drew into are ordered by the next pass that uses them.
+// told only what the stage has filled. A barrier on either side orders the steps
+// against the rest of the frame: before, everything drawn so far against what the
+// steps read or draw over; after, whatever they wrote — by compute, by a draw, into a
+// buffer or an image — against everything after them. Between their own passes, the
+// steps order themselves.
 func (r *Renderer) encodeFrameSteps(stage FrameStage, cmd gpu.CommandBuffer) {
 	if !r.hasFrameStepsAt(stage) {
 		return
@@ -1366,18 +1370,17 @@ func (r *Renderer) encodeFrameSteps(stage FrameStage, cmd gpu.CommandBuffer) {
 	frame := r.stepFrame
 	if stage < FrameStageAfterDepth {
 		frame.SceneDepth = gpu.Texture{}
-	} else {
-		cmd.PrepareSampled(frame.SceneDepth, gpu.StageCompute|gpu.StageFragment)
 	}
 	if stage < FrameStageAfterOpaque {
 		frame.SceneColor = gpu.Texture{}
 		frame.SceneColorFormat = gpu.FormatUndefined
 	}
 
+	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth, gpu.StageCompute|gpu.StageFragment|gpu.StageColorOutput|gpu.StageDepth, 0)
 	for _, step := range r.frameSteps[stage] {
 		step.Encode(&frame, cmd)
 	}
-	cmd.Barrier(gpu.StageCompute, gpu.StageIndirect|gpu.StageVertex|gpu.StageFragment|gpu.StageCompute, 0)
+	cmd.Barrier(gpu.StageCompute|gpu.StageFragment|gpu.StageColorOutput, gpu.StageIndirect|gpu.StageVertex|gpu.StageFragment|gpu.StageCompute|gpu.StageColorOutput|gpu.StageDepth, 0)
 }
 
 // encodeCompute runs everything the frame computes before it draws. Skinning writes
@@ -1531,11 +1534,10 @@ func (r *Renderer) encodeShadowPasses(st *renderState, shadows []view, cmd gpu.C
 			end++
 		}
 		r.encodeShadowMap(shadows[start:end], st, cmd)
-		//FIXME: use VK_KHR_unified_image_layouts; that would remove PrepareSampled from
-		// the RHI entirely.
-		cmd.PrepareSampled(r.TextureStore.GPU(shadows[start].shadowMap), gpu.StageFragment)
 		start = end
 	}
+	// Every map is written before anything samples one, so one barrier covers them all.
+	cmd.Barrier(gpu.StageDepth, gpu.StageFragment, 0)
 	r.profiler.endPass(GPUPassShadow, cmd)
 }
 
@@ -1660,6 +1662,8 @@ func (r *Renderer) encodeDepthPrepass(st *renderState, main view, cmd gpu.Comman
 	}
 
 	cmd.EndRenderPass()
+	// The drawing pass tests against this depth, and loads it when drew is set.
+	cmd.Barrier(gpu.StageDepth, gpu.StageDepth, 0)
 	r.profiler.endPass(GPUPassPrepass, cmd)
 	return drew
 }
@@ -1709,6 +1713,8 @@ func (r *Renderer) encodeTransparentPass(batches batchRange, st *renderState, vi
 		return
 	}
 
+	// Blending reads what the opaque pass wrote, and the depth test its depth.
+	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth, gpu.StageColorOutput|gpu.StageDepth, 0)
 	cmd.BeginRenderPass(gpu.RenderTargets{
 		Color: []gpu.ColorAttachment{{Texture: image, Load: gpu.LoadKeep, Store: gpu.StoreKeep}},
 		Depth: &gpu.DepthAttachment{Texture: r.depth, Load: gpu.LoadKeep, Store: gpu.StoreKeep},
@@ -1774,8 +1780,9 @@ func (r *Renderer) drawParticles(st *renderState, views frameViews, cmd gpu.Comm
 // itself.
 //
 // The steps ping-pong between the scene image and a second image of the same size: each
-// reads the one the step before it wrote, and writes the other. Every step may read the
-// scene's depth too, so it is made ready to sample once, before the first.
+// reads the one the step before it wrote, and writes the other — so between two steps,
+// what one wrote must be ordered before the next samples it, and what one sampled
+// before the next overwrites it.
 func (r *Renderer) encodePostProcessing(cmd gpu.CommandBuffer) gpu.Texture {
 	if len(r.postProcessing) == 0 {
 		return r.sceneColor
@@ -1783,7 +1790,6 @@ func (r *Renderer) encodePostProcessing(cmd gpu.CommandBuffer) gpu.Texture {
 	if !r.postColor.IsValid() {
 		r.postColor = postprocess.CreateImage(r.backend, r.width, r.height, "post-color")
 	}
-	cmd.PrepareSampled(r.depth, gpu.StageFragment)
 
 	image := r.sceneColor
 	for _, step := range r.postProcessing {
@@ -1793,7 +1799,7 @@ func (r *Renderer) encodePostProcessing(cmd gpu.CommandBuffer) gpu.Texture {
 		}
 		frame := r.postProcessingFrame(image, next)
 		step.Encode(&frame, cmd)
-		cmd.PrepareSampled(next, gpu.StageFragment)
+		cmd.Barrier(gpu.StageColorOutput|gpu.StageFragment, gpu.StageFragment|gpu.StageColorOutput, 0)
 		image = next
 	}
 	return image
@@ -1848,6 +1854,7 @@ func (r *Renderer) recordScreenshot(target gpu.Texture, cmd gpu.CommandBuffer) {
 		r.readback = r.backend.Alloc(uint64(n), gpu.MemoryHost, "readback")
 		r.pixels = make([]byte, n)
 	}
+	cmd.Barrier(gpu.StageColorOutput, gpu.StageTransfer, 0)
 	cmd.CopyTextureToBuffer(r.readback, target, 0, 0)
 }
 
@@ -1873,6 +1880,10 @@ func (r *Renderer) encodeOverlay(target gpu.Texture, cmd gpu.CommandBuffer) {
 		return
 	}
 
+	// The overlay blends over whatever wrote the target last, after a screenshot has
+	// copied it, and loads the depth the scene wrote and the post-processing chain may
+	// have sampled.
+	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth|gpu.StageFragment|gpu.StageTransfer, gpu.StageColorOutput|gpu.StageDepth, 0)
 	cmd.BeginRenderPass(gpu.RenderTargets{
 		Color: []gpu.ColorAttachment{{Texture: target, Load: gpu.LoadKeep, Store: gpu.StoreKeep}},
 		Depth: &gpu.DepthAttachment{Texture: r.depth, Load: gpu.LoadKeep, Store: gpu.StoreKeep},

@@ -1,0 +1,123 @@
+package pix_test
+
+import (
+	"encoding/binary"
+	"math"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/bluescreen10/gamekit/gpu"
+	"github.com/bluescreen10/gamekit/utils"
+	"github.com/bluescreen10/pix"
+	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/geometries"
+	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/materials"
+	"github.com/bluescreen10/pix/scenes"
+	"github.com/bluescreen10/pix/textures"
+)
+
+//go:generate go run ./cmd/shadercompile -i testdata/volume_write.comp.glsl -o spv:testdata/build/volume_write.comp.spv -o metallib:testdata/build/volume_write.comp.metalbin
+//go:generate go run ./cmd/shadercompile -i testdata/volume_material.frag.glsl -o spv:testdata/build/volume_material.frag.spv -o metallib:testdata/build/volume_material.frag.metalbin
+
+// volumeSize is the side of the volume the tests below write and sample.
+const volumeSize = 4
+
+// volumeStep fills a writable volume at the start of every frame, with volume_write:
+// the near half of its depth red, the far half green.
+type volumeStep struct {
+	volume   textures.Texture
+	shader   []byte
+	backend  gpu.Backend
+	pipeline gpu.Pipeline
+}
+
+func (s *volumeStep) Encode(frame *pix.Frame, cmd gpu.CommandBuffer) {
+	if !s.pipeline.IsValid() {
+		s.backend = frame.Backend
+		s.pipeline = frame.Backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: s.shader, Label: "volume-write"})
+	}
+	cmd.SetPipeline(s.pipeline)
+	data := [4]uint32{s.volume.Index(), volumeSize}
+	cmd.Dispatch(utils.ToBytes(&data), 1, 1, 1)
+}
+
+func (s *volumeStep) Release() {
+	if s.pipeline.IsValid() {
+		s.backend.DestroyPipeline(s.pipeline)
+		s.pipeline = gpu.Pipeline{}
+	}
+}
+
+// TestComputeWrittenVolumeIsSampledByMaterial is the whole path a simulation takes to
+// the screen: a frame step's compute shader writes a writable 3D texture, and a
+// material samples it, by the same index, in the frame's drawing. The material shows
+// the depth its record asks for, so the near depth reads red and the far one green.
+func TestComputeWrittenVolumeIsSampledByMaterial(t *testing.T) {
+	r, err := pix.NewOffscreenRenderer(postSize, postSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
+
+	volume := r.TextureStore.CreateWritable(textures.WritableConfig{
+		Kind: gpu.Texture3D, Width: volumeSize, Height: volumeSize, Depth: volumeSize,
+		Format: gpu.FormatRGBA8Unorm, Label: "volume",
+	})
+	defer volume.Release()
+	r.AddFrameStep(pix.FrameStageStart, &volumeStep{volume: volume, shader: testShader(t, r, "volume_write.comp")})
+
+	material := r.NewRawMaterial(materials.Shader{Fragment: testShader(t, r, "volume_material.frag")}, 16, 1)
+	material.SetTexture(0, volume)
+	setVolumeRecord := func(depth float32) {
+		record := material.Record()
+		binary.LittleEndian.PutUint32(record[0:], volume.Index())
+		binary.LittleEndian.PutUint32(record[4:], r.TextureStore.DefaultSampler())
+		binary.LittleEndian.PutUint32(record[8:], math.Float32bits(depth))
+	}
+
+	scene := scenes.New()
+	defer scene.Destroy()
+	quad := r.GeometryStore.Create(geometries.GeometryConfig{
+		Attributes: []geometries.Attribute{
+			geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, []glm.Vec3f{{-0.5, -0.5, 0}, {0.5, -0.5, 0}, {0.5, 0.5, 0}, {-0.5, 0.5, 0}}),
+		},
+		Indices: []uint32{0, 1, 2, 0, 2, 3},
+	})
+	scene.Add(scene.NewMesh(quad, material))
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
+	cam.SetPosition(glm.Vec3f{0, 0, 2})
+
+	for _, probe := range []struct {
+		depth float32
+		want  [3]byte
+		name  string
+	}{
+		{0.25, [3]byte{255, 0, 0}, "near half, red"},
+		{0.75, [3]byte{0, 255, 0}, "far half, green"},
+	} {
+		setVolumeRecord(probe.depth)
+		r.Render(scene)
+		if got := pixelAt(r, postSize/2, postSize/2); got != probe.want {
+			t.Errorf("depth %v: center = %v, want %v, the %s", probe.depth, got, probe.want, probe.name)
+		}
+	}
+}
+
+// testShader returns one of this package's test shaders, compiled for the renderer's
+// backend (see the go:generate lines above).
+func testShader(t *testing.T, r *pix.Renderer, name string) []byte {
+	t.Helper()
+	extension := ".spv"
+	if backend, ok := r.Backend().(interface{ ShaderFormat() string }); ok && backend.ShaderFormat() == "metal" {
+		extension = ".metalbin"
+	}
+	code, err := os.ReadFile(filepath.Join("testdata", "build", name+extension))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return code
+}

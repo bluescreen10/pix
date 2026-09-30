@@ -100,7 +100,8 @@ func (b *Bloom) encodeChain(frame *Frame, cmd gpu.CommandBuffer) {
 			root.firstLevel = 1
 		}
 		b.downsample.Draw(level.image, level.width, level.height, gpu.LoadClear, utils.ToBytes(&root), cmd)
-		cmd.PrepareSampled(level.image, gpu.StageFragment)
+		// The next level samples this one, and the way back up blends into it.
+		cmd.Barrier(gpu.StageColorOutput, gpu.StageFragment|gpu.StageColorOutput, 0)
 		source, width, height = level.image, level.width, level.height
 	}
 
@@ -108,7 +109,7 @@ func (b *Bloom) encodeChain(frame *Frame, cmd gpu.CommandBuffer) {
 		smaller, larger := b.chain[i], b.chain[i-1]
 		root := bloomUpsampleRoot{Root: frame.Root(smaller.image, smaller.width, smaller.height), radius: radius}
 		b.upsample.Draw(larger.image, larger.width, larger.height, gpu.LoadKeep, utils.ToBytes(&root), cmd)
-		cmd.PrepareSampled(larger.image, gpu.StageFragment)
+		cmd.Barrier(gpu.StageColorOutput, gpu.StageFragment|gpu.StageColorOutput, 0)
 	}
 }
 
