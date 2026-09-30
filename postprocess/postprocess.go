@@ -37,6 +37,16 @@ type Frame struct {
 	// Time is seconds since the scene's clock started.
 	Time float32
 
+	// ViewProj is the matrix the scene was drawn with — clip-space Y flipped, for
+	// Vulkan's Y-down NDC — and InverseViewProj takes its clip space back to world
+	// space. Eye is the camera's position.
+	ViewProj        glm.Mat4f
+	InverseViewProj glm.Mat4f
+	Eye             glm.Vec3f
+	// SceneDepth is the scene's depth, ready to sample: FormatDepth32F, reversed, so 1
+	// is the near plane and 0 the far one. A step must not write it.
+	SceneDepth gpu.Texture
+
 	// Backend is the GPU backend, for a step creating resources of its own.
 	Backend gpu.Backend
 	// LinearSampler is a linear, clamp-to-edge sampler, the one every pass reads through.
@@ -50,6 +60,7 @@ func (f *Frame) Root(image gpu.Texture, width, height uint32) Root {
 		LinearSampler: f.LinearSampler.Index,
 		TexelSize:     glm.Vec2f{1 / float32(width), 1 / float32(height)},
 		Time:          f.Time,
+		SceneDepth:    f.SceneDepth.Index,
 	}
 }
 
@@ -57,12 +68,14 @@ func (f *Frame) Root(image gpu.Texture, width, height uint32) Root {
 // about the image it reads. A pass's own parameters follow it in the root.
 type Root struct {
 	// Source is the bindless index of the image to read, and LinearSampler of the
-	// sampler to read it through. TexelSize is 1/size of Source.
+	// sampler to read it through. TexelSize is 1/size of Source. SceneDepth is the
+	// bindless index of Frame.SceneDepth.
 	Source        uint32
 	LinearSampler uint32
 	TexelSize     glm.Vec2f
 	Time          float32
-	_             [3]float32
+	SceneDepth    uint32
+	_             [2]float32
 }
 
 // With returns the root with a pass's own parameters appended, padded to the multiple of

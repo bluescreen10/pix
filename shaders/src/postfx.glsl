@@ -17,7 +17,8 @@
 
 // source is the bindless index of the image to read — the scene, or the previous step's
 // result — and linearSampler a linear, clamp-to-edge sampler. texelSize is 1/size of
-// source; time is seconds since the scene's clock started.
+// source; time is seconds since the scene's clock started. sceneDepth is the bindless
+// index of the scene's depth, reversed: 1 at the near plane, 0 at the far one.
 //
 // A shader including this declares, before it, the extensions it relies on:
 // GL_EXT_nonuniform_qualifier and GL_EXT_scalar_block_layout.
@@ -26,9 +27,9 @@
     uint linearSampler;     \
     vec2 texelSize;         \
     float time;             \
+    uint sceneDepth;        \
     float postfxPad0;       \
-    float postfxPad1;       \
-    float postfxPad2;
+    float postfxPad1;
 
 layout(location = 0) in vec2 vUV;
 

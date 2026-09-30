@@ -1774,11 +1774,16 @@ func (r *Renderer) drawParticles(st *renderState, views frameViews, cmd gpu.Comm
 // itself.
 //
 // The steps ping-pong between the scene image and a second image of the same size: each
-// reads the one the step before it wrote, and writes the other.
+// reads the one the step before it wrote, and writes the other. Every step may read the
+// scene's depth too, so it is made ready to sample once, before the first.
 func (r *Renderer) encodePostProcessing(cmd gpu.CommandBuffer) gpu.Texture {
-	if len(r.postProcessing) > 0 && !r.postColor.IsValid() {
+	if len(r.postProcessing) == 0 {
+		return r.sceneColor
+	}
+	if !r.postColor.IsValid() {
 		r.postColor = postprocess.CreateImage(r.backend, r.width, r.height, "post-color")
 	}
+	cmd.PrepareSampled(r.depth, gpu.StageFragment)
 
 	image := r.sceneColor
 	for _, step := range r.postProcessing {
@@ -1810,13 +1815,17 @@ func (r *Renderer) encodeToneMapping(image, target gpu.Texture, cmd gpu.CommandB
 // is given.
 func (r *Renderer) postProcessingFrame(source, target gpu.Texture) postprocess.Frame {
 	return postprocess.Frame{
-		Source:        source,
-		Target:        target,
-		Width:         r.width,
-		Height:        r.height,
-		Time:          r.frame.Time,
-		Backend:       r.backend,
-		LinearSampler: r.ensureLinearSampler(),
+		Source:          source,
+		Target:          target,
+		Width:           r.width,
+		Height:          r.height,
+		Time:            r.frame.Time,
+		ViewProj:        r.stepFrame.ViewProj,
+		InverseViewProj: r.stepFrame.InverseViewProj,
+		Eye:             r.stepFrame.Eye,
+		SceneDepth:      r.depth,
+		Backend:         r.backend,
+		LinearSampler:   r.ensureLinearSampler(),
 	}
 }
 
