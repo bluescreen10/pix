@@ -26,6 +26,10 @@ const (
 // (or whose map isn't allocated) stores this, and the lit shaders skip sampling.
 const noShadowMap uint32 = 0xFFFFFFFF
 
+// noLightMask is the mask sentinel: a directional light with no mask (see
+// scenes.LightMask), which lets all of its light through.
+const noLightMask uint32 = 0xFFFFFFFF
+
 type gpuDirLight struct {
 	dir   [4]float32 // xyz = travel direction; w unused
 	color [4]float32 // rgb; w = intensity
@@ -49,6 +53,33 @@ type gpuDirLight struct {
 	// order to step by texels; filter is the renderer's ShadowFilter.
 	mapSide uint32
 	filter  ShadowFilter
+	// maskU and maskV take a world position to the light's mask: its texture coordinates
+	// are (dot(maskU.xyz, p) + maskU.w, dot(maskV.xyz, p) + maskV.w) — see
+	// maskProjection. mask is the mask's heap index, or noLightMask, and maskSampler
+	// the sampler it is read with.
+	maskU, maskV glm.Vec4f
+	mask         uint32
+	maskSampler  uint32
+}
+
+// maskProjection returns the two planes that take a world position to a directional
+// light's mask coordinates. The mask lies across the light, so every point on one of
+// its rays reads the same texel: its axes are world x and z, tilted to be square to the
+// light — u along x and v along z for a light travelling straight down — and a light
+// travelling along x takes z for its u instead. One repeat spans size world units, and
+// the mask is moved through the world by offset.
+func maskProjection(dir glm.Vec3f, size float32, offset glm.Vec3f) (u, v glm.Vec4f) {
+	axis := glm.Vec3f{1, 0, 0}
+	if math32.Abs(dir.Dot(axis)) > 0.99 {
+		axis = glm.Vec3f{0, 0, 1}
+	}
+	// World x, with whatever part of it runs along the light taken out.
+	uAxis := axis.Sub(dir.Scale(dir.Dot(axis))).Normalize()
+	vAxis := dir.Cross(uAxis)
+	scale := 1 / size
+	u = uAxis.Scale(scale).Vec4(-uAxis.Dot(offset) * scale)
+	v = vAxis.Scale(scale).Vec4(-vAxis.Dot(offset) * scale)
+	return u, v
 }
 
 type gpuPointLight struct {
@@ -126,6 +157,9 @@ func NewLights(b gpu.Backend) *Lights {
 //
 // filter is the kernel directional lookups use, which the shader reads per light.
 //
+// maskSampler is the sampler light masks are read with: linear and repeating, so a
+// mask tiles the world without seams.
+//
 // fog is where a volumetric fog's volume is, which the table carries in place of the
 // colour and distances the other fog models put there; the renderer passes a zero
 // lookup when the scene's fog is not volumetric.
@@ -134,7 +168,7 @@ func NewLights(b gpu.Backend) *Lights {
 // renderer's global toggle. A light whose map is still allocated but no longer being
 // re-rendered must publish noShadowMap, or the shader keeps sampling a frozen map and
 // the shadow stays on screen after it was turned off.
-func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPacket, res map[scenes.LightID]*shadowResource, shadows bool, filter ShadowFilter, fog fogLookup) {
+func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPacket, res map[scenes.LightID]*shadowResource, shadows bool, filter ShadowFilter, maskSampler uint32, fog fogLookup) {
 	var next gpuLights
 	next.ambient = env.Ambient.RGBA(1)
 	fs := env.Fog
@@ -169,6 +203,11 @@ func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPack
 				dir:       dir.Vec4(0),
 				color:     lp.Color.RGBA(lp.Intensity),
 				shadowMap: noShadowMap,
+				mask:      noLightMask,
+			}
+			if lp.MaskSize > 0 {
+				gl.mask, gl.maskSampler = lp.MaskTexture, maskSampler
+				gl.maskU, gl.maskV = maskProjection(dir, lp.MaskSize, lp.MaskOffset)
 			}
 			// A casting light with an allocated map contributes its view-projection (the
 			// un-flipped matrix the depth pass used) and heap index for shader sampling.

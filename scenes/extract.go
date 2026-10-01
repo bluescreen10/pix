@@ -190,6 +190,11 @@ func (s *Scene) extractLights() {
 			ID: l.id, Kind: LightDirectional, Direction: l.Direction,
 			Color: l.Color, Intensity: l.Intensity,
 		}
+		if l.mask.IsEnabled() {
+			lp.MaskTexture = l.mask.Texture.Index()
+			lp.MaskSize = l.mask.Size
+			lp.MaskOffset = l.mask.Offset
+		}
 		applyShadowSettings(&lp, l.shadow)
 		out = append(out, lp)
 	}

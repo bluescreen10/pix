@@ -183,8 +183,8 @@ vec3 shadeSurface(Surface s, vec3 worldPos, vec3 V, uint shadowSamp, float diffu
         // roughly half the fragments in a closed scene face away from any given light.
         if (dot(s.normal, Ldir) <= 0.0) continue;
         float sh = receives ? dirShadowFactor(L, i, worldPos, s.normal, viewDist, shadowSamp) : 1.0;
-        lo += sh * cookTorrance(s.normal, V, Ldir, L.dirs[i].color.rgb * L.dirs[i].color.w,
-                                s.albedo, pbrMetallic(s), pbrRoughness(s), diffuseScale);
+        vec3 radiance = L.dirs[i].color.rgb * L.dirs[i].color.w * dirMask(L, i, worldPos);
+        lo += sh * cookTorrance(s.normal, V, Ldir, radiance, s.albedo, pbrMetallic(s), pbrRoughness(s), diffuseScale);
     }
     for (uint i = 0u; i < L.numPoint; i++) {
         PointLight pl = L.points[i];

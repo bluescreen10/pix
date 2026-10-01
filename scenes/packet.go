@@ -161,6 +161,13 @@ type LightPacket struct {
 	CastsShadow bool
 	ShadowSize  uint32  // Requested resolution per side; 0 means the renderer's default.
 	ShadowBias  float32 // Extra depth offset in WORLD units, on top of a derived term.
+
+	// Directional: the light's mask (see LightMask), as the values a renderer needs —
+	// the texture's bindless index, the world size of one repeat, and its offset. A
+	// MaskSize of 0 means the light has no mask.
+	MaskTexture uint32
+	MaskSize    float32
+	MaskOffset  glm.Vec3f
 }
 
 // EnvironmentPacket is the scene-wide lighting environment.

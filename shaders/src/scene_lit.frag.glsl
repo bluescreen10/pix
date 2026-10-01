@@ -58,7 +58,8 @@ void main() {
         // nor the shadow lookup that would scale it is worth paying for.
         if (dot(N, Ldir) <= 0.0) continue;
         float sh = receives ? dirShadowFactor(L, i, vWorldPos, N, viewDist, shadowSamp) : 1.0;
-        lit += sh * blinnPhong(N, V, Ldir, L.dirs[i].color.rgb * L.dirs[i].color.w, albedo, m.specular, m.shininess);
+        vec3 radiance = L.dirs[i].color.rgb * L.dirs[i].color.w * dirMask(L, i, vWorldPos);
+        lit += sh * blinnPhong(N, V, Ldir, radiance, albedo, m.specular, m.shininess);
     }
     for (uint i = 0u; i < L.numPoint; i++) {
         PointLight pl = L.points[i];

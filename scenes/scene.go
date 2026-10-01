@@ -780,4 +780,7 @@ func (s *Scene) Destroy() {
 		sm.outputGeo.Release()
 		sm.material.Release()
 	}
+	for _, l := range s.dirLights {
+		l.SetMask(LightMask{})
+	}
 }

@@ -6,6 +6,7 @@ package scenes
 import (
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/textures"
 )
 
 // LightShadow is a light's shadow SETTINGS — the resolution and bias a caller asks
@@ -67,7 +68,33 @@ type DirectionalLight struct {
 	Color     colors.RGB32F
 	Intensity float32
 	shadow    *LightShadow
+	mask      LightMask
 	id        LightID
+}
+
+// LightMask is a texture laid over the world across a directional light, scaling how
+// much of the light gets through: the shadow of clouds far above. Shadow maps are the
+// wrong tool for that — fitted to the view, sharp, and only as far as the shadow
+// distance — where a mask is soft, fixed in the world, and covers everything.
+//
+// Its red channel is the fraction of the light let through: 1 fully lit, 0 none. A
+// point reads the texel its ray of light crosses, so the mask shades as if cast from
+// above everything in the scene.
+type LightMask struct {
+	// Texture is the mask. The light holds a reference of its own while it is set.
+	Texture textures.Texture
+	// Size is how many world units one repeat of the texture spans; it repeats beyond.
+	// For a light travelling straight down, u runs along world x and v along world z,
+	// like a map; for a slanted one the two axes tilt with it. Zero or less disables
+	// the mask.
+	Size float32
+	// Offset moves the mask through the world, in world units: animate it for wind.
+	Offset glm.Vec3f
+}
+
+// IsEnabled reports whether the mask takes effect: it has a texture and a size.
+func (m LightMask) IsEnabled() bool {
+	return m.Texture.IsValid() && m.Size > 0
 }
 
 // ID is this light's stable identity, which the renderer keys its shadow resources on.
@@ -90,6 +117,25 @@ func (l *DirectionalLight) SetCastShadow(on bool) {
 // Shadow returns the light's shadow settings, or nil if it does not cast shadows.
 func (l *DirectionalLight) Shadow() *LightShadow {
 	return l.shadow
+}
+
+// SetMask sets the light's mask (see LightMask), replacing any earlier one; a zero
+// LightMask removes it. The light takes its own reference to the texture, so the
+// caller may release theirs.
+func (l *DirectionalLight) SetMask(mask LightMask) {
+	if mask.Texture.IsValid() {
+		mask.Texture = mask.Texture.Copy()
+	}
+	// Released after the copy, so setting the mask a light already has cannot free it.
+	if l.mask.Texture.IsValid() {
+		l.mask.Texture.Release()
+	}
+	l.mask = mask
+}
+
+// Mask returns the light's mask, or a zero LightMask if it has none.
+func (l *DirectionalLight) Mask() LightMask {
+	return l.mask
 }
 
 // PointLight is an omnidirectional light at Position with a linear falloff to zero at

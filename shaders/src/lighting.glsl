@@ -15,6 +15,7 @@ const uint FOG_EXP2 = 2u;
 const uint FOG_VOLUMETRIC = 3u;
 
 const uint NO_SHADOW = 0xFFFFFFFFu; // shadowMap sentinel: light casts no shadow
+const uint NO_MASK = 0xFFFFFFFFu;   // mask sentinel: directional light has no mask
 
 #define MAX_CASCADES 4
 struct DirLight {
@@ -31,6 +32,12 @@ struct DirLight {
     // needs to step in texels; shadowFilter is pix.ShadowFilter.
     uint shadowMapSide;
     uint shadowFilter;
+    // maskU and maskV take a world position to the light's mask coordinates, and mask
+    // is its heap index, or NO_MASK (see dirMask and pix.maskProjection).
+    vec4 maskU;
+    vec4 maskV;
+    uint mask;
+    uint maskSampler;
 };
 struct PointLight { vec4 pos; vec4 color; mat4 shadowVP[6]; uint shadowMap[6]; float shadowBias; uint pad0; };
 struct SpotLight { vec4 pos; vec4 dir; vec4 color; mat4 shadowVP; float cosInner; uint shadowMap; float shadowBias; uint pad0; };
@@ -271,6 +278,19 @@ float dirShadowFactor(LightBuf L, uint li, vec3 worldPos, vec3 N, float viewDist
     if (t <= 0.0) return sh;
 
     return mix(sh, sampleCascade(L, li, i + 1u, n, worldPos, N, off, shadowSamp), t);
+}
+
+// dirMask is how much of directional light li gets through its mask at worldPos — the
+// mask's red channel where the light's ray through worldPos crosses it, or 1 for a light
+// without one. Clouds far above shade a point this way (see scenes.LightMask). It reads
+// the mask's base level by name, so a compute shader reads it as a fragment shader does.
+float dirMask(LightBuf L, uint li, vec3 worldPos) {
+    if (L.dirs[li].mask == NO_MASK) {
+        return 1.0;
+    }
+    vec2 uv = vec2(dot(L.dirs[li].maskU.xyz, worldPos) + L.dirs[li].maskU.w,
+                   dot(L.dirs[li].maskV.xyz, worldPos) + L.dirs[li].maskV.w);
+    return textureLod(sampler2D(gTextures[nonuniformEXT(L.dirs[li].mask)], gSamplers[nonuniformEXT(L.dirs[li].maskSampler)]), uv, 0.0).r;
 }
 
 // pointShadowFactor picks the cube face for the light→fragment direction (dominant

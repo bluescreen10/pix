@@ -1169,7 +1169,7 @@ func shadowView(cam Camera, shadowMap textures.Texture, x int32, width, height u
 // The global shadow toggle goes in with them: without it, disabling shadows would only
 // stop the maps being refreshed, and the shader would keep sampling the last ones.
 func (r *Renderer) extractLights(p *scenes.FramePacket, st *renderState) {
-	st.lights.rebuild(p.Environment, p.Lights.Data, st.shadows, r.shadowsEnabled, r.shadowFilter, r.fogLookupFor(p.Environment.Fog))
+	st.lights.rebuild(p.Environment, p.Lights.Data, st.shadows, r.shadowsEnabled, r.shadowFilter, r.TextureStore.DefaultSampler(), r.fogLookupFor(p.Environment.Fog))
 	st.lights.Sync()
 }
 

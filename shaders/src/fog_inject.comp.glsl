@@ -9,7 +9,8 @@
 // fog_inject — the first of volumetric fog's two passes. For every froxel of the volume
 // laid over the camera's view it works out how dense the fog is there, and how much
 // light the fog there sends toward the camera: ambient light, its own emission, and
-// every directional, point and spot light, each through its shadow map. It writes that,
+// every directional, point and spot light, each through its shadow map — and a
+// directional light through its mask too. It writes that,
 // per unit of distance, with the density, into the medium volume, which fog_integrate
 // then accumulates along each column.
 #define PIX_NO_FRAGMENT_FOG
@@ -90,7 +91,7 @@ void main() {
     vec3 inscattered = L.ambient.rgb;
     for (uint i = 0u; i < L.numDir; i++) {
         vec3 travel = normalize(L.dirs[i].dir.xyz);
-        vec3 radiance = L.dirs[i].color.rgb * L.dirs[i].color.w;
+        vec3 radiance = L.dirs[i].color.rgb * L.dirs[i].color.w * dirMask(L, i, p);
         inscattered += radiance * phase(dot(travel, -ray), pc.anisotropy) * dirShadow(L, i, p, d, pc.shadowSampler);
     }
     for (uint i = 0u; i < L.numPoint; i++) {
