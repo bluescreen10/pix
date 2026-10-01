@@ -116,6 +116,17 @@ type Renderer struct {
 	linearSampler  gpu.Sampler
 	toneMapPass    *postprocess.FullscreenPass
 
+	// Volumetric fog: how finely it is simulated; the medium volume the inject pass writes
+	// and the fog volume the integrate pass accumulates from it, created when a scene
+	// first asks for volumetric fog; the two passes' pipelines; and the pass that fogs
+	// the background, built for the format it was last drawn into.
+	volumetricFog        VolumetricFogSettings
+	fogMedium, fogVolume gpu.Texture
+	fogInjectPipeline    gpu.Pipeline
+	fogIntegratePipeline gpu.Pipeline
+	fogBackgroundPass    *postprocess.FullscreenPass
+	fogBackgroundFormat  gpu.Format
+
 	// frameSteps is the work added at each stage of the frame, in the order it runs; and
 	// stepFrame what the steps are told, rebuilt every frame (see frame_step.go).
 	frameSteps [frameStageCount][]FrameStep
@@ -483,6 +494,22 @@ func (r *Renderer) ShadowFilter() ShadowFilter {
 // It takes effect on the next Render; nothing needs reallocating.
 func (r *Renderer) SetShadowFilter(filter ShadowFilter) {
 	r.shadowFilter = filter
+}
+
+// VolumetricFog returns how finely the renderer simulates volumetric fog, as last set
+// (see SetVolumetricFog).
+func (r *Renderer) VolumetricFog() VolumetricFogSettings {
+	return r.volumetricFog
+}
+
+// SetVolumetricFog sets how finely the renderer simulates volumetric fog: the
+// resolution of the volume of froxels laid over the camera's view, for any scene whose
+// fog is a scenes.VolumetricFog. Finer costs more, in the two compute passes that fill
+// the volume every frame and in the memory it takes. The volume is rebuilt at the new
+// size the next time such a scene renders.
+func (r *Renderer) SetVolumetricFog(settings VolumetricFogSettings) {
+	r.volumetricFog = settings
+	r.releaseFogVolumes()
 }
 
 // ShadowView returns the shadow resources the renderer holds for one light of one
@@ -878,20 +905,26 @@ func (r *Renderer) Render(scene scenes.Producer) {
 		panic("renderer has no target")
 	}
 
-	// 1. Begin the frame. One command buffer holds all of it: the shared uploads record
+	// 1. Run the console before anything of the frame exists. Its commands change the
+	// renderer's settings, and some — switching HDR, say — rebuild resources the frame
+	// would be recording against, uploading some of them with a command buffer of their
+	// own. They have to land between frames, not in the middle of one.
+	r.updateConsole()
+
+	// 2. Begin the frame. One command buffer holds all of it: the shared uploads record
 	// into it ahead of the frame's work, ordered against it by a barrier, rather than
 	// paying for a submit of their own.
 	r.profiler.beginFrame()
 	cmd := r.backend.Begin()
 
-	// 2. Extract: compare the scene's packet against this source's GPU state, and
+	// 3. Extract: compare the scene's packet against this source's GPU state, and
 	// re-sync whatever has gone stale.
 	st, views := r.extract(scene)
 
-	// 3. Build the overlay — the HUD and the console — on the CPU.
+	// 4. Build the overlay — the HUD and the console — on the CPU.
 	r.buildOverlay()
 
-	// 4. Acquire the target, upload the resources every scene shares, and encode the
+	// 5. Acquire the target, upload the resources every scene shares, and encode the
 	// frame's GPU work.
 	//
 	// The upload comes after the acquire deliberately. A shared store may reallocate a
@@ -903,21 +936,30 @@ func (r *Renderer) Render(scene scenes.Producer) {
 	r.uploadSharedResources(cmd)
 	r.encode(st, views, target, cmd)
 
-	// 5. Capture, before the overlay goes on top: a screenshot is of the scene, not of
+	// 6. Capture, before the overlay goes on top: a screenshot is of the scene, not of
 	// the tools used to inspect it.
 	r.recordScreenshot(target, cmd)
 
-	// 6. Draw the overlay.
+	// 7. Draw the overlay.
 	r.encodeOverlay(target, cmd)
 
-	// 7. Submit, then finish the frame.
+	// 8. Submit, then finish the frame.
 	r.submit(cmd)
 	r.finishFrame()
 }
 
 // ---------------------------------------------------------------------------------------
-// 2. Extract
+// 3. Extract
 // ---------------------------------------------------------------------------------------
+
+// updateConsole lets the console read this frame's input and run what it was given. It
+// reads input every frame, open or not: the key that opens it arrives while it is
+// closed.
+func (r *Renderer) updateConsole() {
+	if r.console != nil {
+		r.console.Update()
+	}
+}
 
 // extract brings one source's GPU state up to date with the frame its scene describes,
 // and returns that state along with the views the frame renders from.
@@ -925,7 +967,7 @@ func (r *Renderer) Render(scene scenes.Producer) {
 // Everything a packet says becomes renderer-owned state here, and nowhere else. Once it
 // returns, nothing downstream reads the scene.
 func (r *Renderer) extract(scene scenes.Producer) (*renderState, frameViews) {
-	// 2a. Look up the source's state, and take the scene's packet. Extraction settles
+	// 3a. Look up the source's state, and take the scene's packet. Extraction settles
 	// the scene first — transforms, skinning, the clock — and must happen exactly once
 	// a frame: a second call would get a packet whose per-frame flags, such as
 	// TransformsDirty, the first had already consumed.
@@ -933,7 +975,7 @@ func (r *Renderer) extract(scene scenes.Producer) (*renderState, frameViews) {
 	scene.Extract(&r.frame)
 	p := &r.frame
 
-	// 2b–2f. Re-sync each part of the state that the packet describes.
+	// 3b–3f. Re-sync each part of the state that the packet describes.
 	r.extractTransforms(p, st)
 	views := r.extractViews(p, st)
 	r.extractLights(p, st)
@@ -1127,8 +1169,25 @@ func shadowView(cam Camera, shadowMap textures.Texture, x int32, width, height u
 // The global shadow toggle goes in with them: without it, disabling shadows would only
 // stop the maps being refreshed, and the shader would keep sampling the last ones.
 func (r *Renderer) extractLights(p *scenes.FramePacket, st *renderState) {
-	st.lights.rebuild(p.Environment, p.Lights.Data, st.shadows, r.shadowsEnabled, r.shadowFilter)
+	st.lights.rebuild(p.Environment, p.Lights.Data, st.shadows, r.shadowsEnabled, r.shadowFilter, r.fogLookupFor(p.Environment.Fog))
 	st.lights.Sync()
+}
+
+// fogLookupFor returns where lit shaders find a volumetric fog's volume, or a zero
+// lookup when the fog is not volumetric. The volume is encoded later in the frame, but
+// it is ensured here, ahead of that: the light table, written now, carries its index.
+func (r *Renderer) fogLookupFor(fog scenes.FogState) fogLookup {
+	if fog.Mode != scenes.FogVolumetric {
+		return fogLookup{}
+	}
+	size := r.ensureFogVolumes()
+	return fogLookup{
+		volume:  r.fogVolume.Index,
+		sampler: r.ensureLinearSampler().Index,
+		slices:  size.Depth,
+		width:   r.width,
+		height:  r.height,
+	}
 }
 
 // collectDrawables rebuilds the draw layout and its buffers when the layout no longer
@@ -1198,11 +1257,6 @@ func (r *Renderer) extractParticles(p *scenes.FramePacket, st *renderState) {
 // buildOverlay composes this frame's overlay from everything that draws into it: the
 // FPS HUD and the console, in that order (the console panel covers the HUD when open).
 func (r *Renderer) buildOverlay() {
-	// The console reads its input every frame, open or not: the key that opens it
-	// arrives while it is closed.
-	if r.console != nil {
-		r.console.Update()
-	}
 	if !r.overlayActive() {
 		return
 	}
@@ -1250,7 +1304,7 @@ func (r *Renderer) buildOverlay() {
 }
 
 // ---------------------------------------------------------------------------------------
-// 4. Encode
+// 5. Encode
 // ---------------------------------------------------------------------------------------
 
 // acquireTarget returns the texture this frame draws into. For a window that means
@@ -1283,7 +1337,7 @@ func (r *Renderer) uploadSharedResources(cmd gpu.CommandBuffer) {
 func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture, cmd gpu.CommandBuffer) {
 	r.profiler.beginGPUFrame(cmd)
 
-	// 4a. The scene is shaded into the HDR scene image, or without HDR straight into the
+	// 5a. The scene is shaded into the HDR scene image, or without HDR straight into the
 	// target. Tell the frame steps so, then run the ones that go before everything else.
 	sceneImage := target
 	if r.hdr {
@@ -1292,21 +1346,21 @@ func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture,
 	r.prepareStepFrame(st, views, sceneImage)
 	r.encodeFrameSteps(FrameStageStart, cmd)
 
-	// 4b. Compute: skin, cull every view, simulate particles.
+	// 5b. Compute: skin, cull every view, simulate particles.
 	r.encodeCompute(st, views, cmd)
 
-	// 4c. Fill the shadow maps.
+	// 5c. Fill the shadow maps.
 	r.encodeShadowPasses(st, views.shadows, cmd)
 	r.encodeFrameSteps(FrameStageAfterShadows, cmd)
 
-	// 4d. Without a view there is no scene to draw. The target is still cleared, so the
+	// 5d. Without a view there is no scene to draw. The target is still cleared, so the
 	// overlay has a defined frame to go on.
 	if !views.hasMainView {
 		r.encodeTargetClear(target, cmd)
 		return
 	}
 
-	// 4e. A debug view replaces shading entirely, so nothing after it runs. It draws
+	// 5e. A debug view replaces shading entirely, so nothing after it runs. It draws
 	// straight into the target: its values are data, not light, and neither the
 	// post-processing chain nor tone mapping should touch them.
 	if r.debugViewActive() {
@@ -1314,11 +1368,15 @@ func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture,
 		return
 	}
 
-	// 4f. Fill depth first, if enabled, so shading runs once per pixel.
+	// 5f. Fill the volumetric fog's volume, which shading reads, from the lights and the
+	// shadow maps just filled.
+	r.encodeVolumetricFog(st, views, cmd)
+
+	// 5g. Fill depth first, if enabled, so shading runs once per pixel.
 	depthFilled := r.encodeDepthPrepass(st, views.main, cmd)
 	r.encodeFrameSteps(FrameStageAfterDepth, cmd)
 
-	// 4g. Shade. Without HDR that is the finished image. With it, the post-processing
+	// 5h. Shade. Without HDR that is the finished image. With it, the post-processing
 	// chain samples the scene image, and may sample its depth.
 	r.encodeDrawingPass(st, views, depthFilled, sceneImage, cmd)
 	if !r.hdr {
@@ -1326,7 +1384,7 @@ func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture,
 	}
 	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth, gpu.StageFragment, 0)
 
-	// 4h. Run the post-processing chain over the scene image, then tone-map the result
+	// 5i. Run the post-processing chain over the scene image, then tone-map the result
 	// into the target.
 	r.profiler.beginPass(GPUPassPostProcessing, cmd)
 	image := r.encodePostProcessing(cmd)
@@ -1600,8 +1658,9 @@ func (r *Renderer) encodeShadowPasses(st *renderState, shadows []view, cmd gpu.C
 		r.encodeShadowMap(shadows[start:end], st, cmd)
 		start = end
 	}
-	// Every map is written before anything samples one, so one barrier covers them all.
-	cmd.Barrier(gpu.StageDepth, gpu.StageFragment, 0)
+	// Every map is written before anything samples one, so one barrier covers them all:
+	// lit shaders, and the volumetric fog's compute pass.
+	cmd.Barrier(gpu.StageDepth, gpu.StageFragment|gpu.StageCompute, 0)
 	r.profiler.endPass(GPUPassShadow, cmd)
 }
 
@@ -1669,6 +1728,50 @@ func (r *Renderer) encodeDebugView(st *renderState, views frameViews, target gpu
 	}
 
 	cmd.EndRenderPass()
+}
+
+// encodeVolumetricFog fills the fog volume for a scene whose fog is volumetric, in two
+// compute passes. The first writes, for every froxel, how dense the fog is there and
+// how much light it sends toward the camera; the second accumulates that along each
+// column, from the camera out, into what the fog between the camera and each froxel
+// adds and lets through — which lit shaders then look up (see applyFog).
+func (r *Renderer) encodeVolumetricFog(st *renderState, views frameViews, cmd gpu.CommandBuffer) {
+	fog := r.frame.Environment.Fog
+	if fog.Mode != scenes.FogVolumetric {
+		return
+	}
+
+	size := r.volumetricFog.resolved()
+	extent := [3]uint32{size.Width, size.Height, size.Depth}
+	inject := fogInjectRoot{
+		inverseViewProj: r.stepFrame.InverseViewProj,
+		lights:          st.lights.Addr(),
+		eye:             views.eye,
+		density:         fog.Density,
+		albedo:          glm.Vec3f(fog.Albedo),
+		anisotropy:      fog.Anisotropy,
+		emission:        glm.Vec3f(fog.Emission),
+		baseHeight:      fog.BaseHeight,
+		heightFalloff:   fog.HeightFalloff,
+		reach:           fog.Reach,
+		medium:          r.fogMedium.Index,
+		shadowSampler:   r.shadowSampler.Index,
+		size:            extent,
+	}
+	cmd.SetPipeline(r.fogInjectPipeline)
+	cmd.Dispatch(utils.ToBytes(&inject), (size.Width+3)/4, (size.Height+3)/4, (size.Depth+3)/4)
+	cmd.Barrier(gpu.StageCompute, gpu.StageCompute, 0)
+
+	integrate := fogIntegrateRoot{
+		medium:  r.fogMedium.Index,
+		volume:  r.fogVolume.Index,
+		sampler: r.ensureLinearSampler().Index,
+		reach:   fog.Reach,
+		size:    extent,
+	}
+	cmd.SetPipeline(r.fogIntegratePipeline)
+	cmd.Dispatch(utils.ToBytes(&integrate), (size.Width+7)/8, (size.Height+7)/8, 1)
+	cmd.Barrier(gpu.StageCompute, gpu.StageFragment, 0)
 }
 
 // encodeDepthPrepass fills depth for the opaque geometry in a pass of its own, and
@@ -1743,6 +1846,7 @@ func (r *Renderer) encodeDrawingPass(st *renderState, views frameViews, depthFil
 	r.profiler.beginPass(GPUPassForward, cmd)
 	r.encodeOpaquePass(opaque, st, views, depthFilled, image, cmd)
 	r.encodeFrameSteps(FrameStageAfterOpaque, cmd)
+	r.encodeFogBackground(image, cmd)
 	r.encodeTransparentPass(transparent, st, views, image, cmd)
 	r.encodeFrameSteps(FrameStageAfterTransparent, cmd)
 	r.profiler.endPass(GPUPassForward, cmd)
@@ -1766,6 +1870,29 @@ func (r *Renderer) encodeOpaquePass(batches batchRange, st *renderState, views f
 	r.drawBatches(batches, st, views, cmd)
 
 	cmd.EndRenderPass()
+}
+
+// encodeFogBackground fogs the pixels no geometry covers, for a scene whose fog is
+// volumetric: no lit shader runs for them, so no applyFog reaches them, and without it
+// distant geometry would fade into fog against a background that stays clear. They take
+// the fog out to the volume's reach.
+//
+// It runs after the steps that draw behind the opaque scene — a sky — so the fog lies
+// over them as well, and before anything blended, which fogs itself.
+func (r *Renderer) encodeFogBackground(image gpu.Texture, cmd gpu.CommandBuffer) {
+	if r.frame.Environment.Fog.Mode != scenes.FogVolumetric {
+		return
+	}
+
+	pass := r.ensureFogBackgroundPass()
+	// It reads the depth the opaque pass wrote, and blends over what it, or a step, drew.
+	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth, gpu.StageFragment|gpu.StageColorOutput, 0)
+	frame := r.postProcessingFrame(image, image)
+	params := fogBackgroundParams{
+		volume:    r.fogVolume.Index,
+		lastSlice: 1 - 0.5/float32(r.volumetricFog.resolved().Depth),
+	}
+	pass.Draw(image, r.width, r.height, gpu.LoadKeep, frame.Root(image, r.width, r.height).With(utils.ToBytes(&params)), cmd)
 }
 
 // encodeTransparentPass draws the blended batches, back to front, then the particles,
@@ -1950,7 +2077,7 @@ func (r *Renderer) recordScreenshot(target gpu.Texture, cmd gpu.CommandBuffer) {
 }
 
 // ---------------------------------------------------------------------------------------
-// 6. Overlay
+// 7. Overlay
 // ---------------------------------------------------------------------------------------
 
 // encodeOverlay draws the HUD and the console over the finished frame, in a pass of its
@@ -1991,7 +2118,7 @@ func (r *Renderer) encodeOverlay(target gpu.Texture, cmd gpu.CommandBuffer) {
 }
 
 // ---------------------------------------------------------------------------------------
-// 7. Submit
+// 8. Submit
 // ---------------------------------------------------------------------------------------
 
 // submit hands the frame to the GPU and blocks until it is done: presented, for a
@@ -2145,6 +2272,58 @@ func (r *Renderer) ensureShadowSampler() {
 		Compare: gpu.CompareGreaterEqual, // reversed-Z: nearer is greater
 		Label:   "shadow-cmp",
 	})
+}
+
+// ensureFogVolumes creates volumetric fog's two volumes, at the size the settings ask
+// for, on first use, and returns that size: the medium the inject pass writes, and the
+// fog the integrate pass accumulates from it. Half floats hold light above 1.0 and a
+// transmittance fine enough not to band.
+func (r *Renderer) ensureFogVolumes() VolumetricFogSettings {
+	size := r.volumetricFog.resolved()
+	if !r.fogVolume.IsValid() {
+		volume := gpu.TextureDescriptor{
+			Kind: gpu.Texture3D, Width: size.Width, Height: size.Height, Depth: size.Depth,
+			Format: gpu.FormatRGBA16F, Usage: gpu.TextureSampled | gpu.TextureStorage,
+		}
+		volume.Label = "fog-medium"
+		r.fogMedium = r.backend.CreateTexture(volume)
+		volume.Label = "fog-volume"
+		r.fogVolume = r.backend.CreateTexture(volume)
+	}
+	return size
+}
+
+// releaseFogVolumes destroys volumetric fog's volumes, if any, for ensureFogVolumes to
+// make again.
+func (r *Renderer) releaseFogVolumes() {
+	for _, t := range []*gpu.Texture{&r.fogMedium, &r.fogVolume} {
+		if t.IsValid() {
+			r.backend.DestroyTexture(*t)
+			*t = gpu.Texture{}
+		}
+	}
+}
+
+// ensureFogBackgroundPass builds the pass that fogs the background, for the format the
+// scene is shaded into, on first use and again whenever that format changes. It
+// composites through "over" blending, which every backend has (see
+// fog_background.frag.glsl for how that comes out as the fog).
+func (r *Renderer) ensureFogBackgroundPass() *postprocess.FullscreenPass {
+	format := r.sceneFormat()
+	if r.fogBackgroundPass != nil && r.fogBackgroundFormat == format {
+		return r.fogBackgroundPass
+	}
+	if r.fogBackgroundPass != nil {
+		r.fogBackgroundPass.Release()
+	}
+	r.fogBackgroundPass = postprocess.NewFullscreenPass(r.backend, postprocess.FullscreenPassDescriptor{
+		Fragment: shaders.ForBackend(r.backend, shaders.FogBackground),
+		Format:   format,
+		Blend:    []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}}},
+		Label:    "fog-background",
+	})
+	r.fogBackgroundFormat = format
+	return r.fogBackgroundPass
 }
 
 // ensureLinearSampler creates the linear, clamp-to-edge sampler every post-processing
@@ -2608,6 +2787,8 @@ func (r *Renderer) buildPipelines() {
 		r.backend.DestroyPipeline(r.particleUpdatePipeline)
 		r.backend.DestroyPipeline(r.particleSortKeysPipeline)
 		r.backend.DestroyPipeline(r.particleSortStepPipeline)
+		r.backend.DestroyPipeline(r.fogInjectPipeline)
+		r.backend.DestroyPipeline(r.fogIntegratePipeline)
 		r.backend.DestroyPipeline(r.shadowPipeline)
 		for _, p := range r.prepassPipelines {
 			r.backend.DestroyPipeline(p)
@@ -2621,6 +2802,8 @@ func (r *Renderer) buildPipelines() {
 	r.particleUpdatePipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleUpdate), Entry: "main", Label: "particle-update"})
 	r.particleSortKeysPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleSortKeys), Entry: "main", Label: "particle-sort-keys"})
 	r.particleSortStepPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleSortStep), Entry: "main", Label: "particle-sort-step"})
+	r.fogInjectPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.FogInject), Entry: "main", Label: "fog-inject"})
+	r.fogIntegratePipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.FogIntegrate), Entry: "main", Label: "fog-integrate"})
 	// Depth-only passes: position-only vertex-pull, no colour attachment, writes depth.
 	//
 	// No fragment shader at all: a stage that outputs nothing is not free — it still
@@ -3086,6 +3269,8 @@ func (r *Renderer) Destroy() {
 		r.backend.DestroyPipeline(r.particleUpdatePipeline)
 		r.backend.DestroyPipeline(r.particleSortKeysPipeline)
 		r.backend.DestroyPipeline(r.particleSortStepPipeline)
+		r.backend.DestroyPipeline(r.fogInjectPipeline)
+		r.backend.DestroyPipeline(r.fogIntegratePipeline)
 		r.backend.DestroyPipeline(r.shadowPipeline)
 		for _, p := range r.prepassPipelines {
 			r.backend.DestroyPipeline(p)
@@ -3112,6 +3297,10 @@ func (r *Renderer) Destroy() {
 			step.Release()
 		}
 		r.frameSteps[stage] = nil
+	}
+	r.releaseFogVolumes()
+	if r.fogBackgroundPass != nil {
+		r.fogBackgroundPass.Release()
 	}
 	for _, t := range []gpu.Texture{r.depth, r.sceneColor, r.postColor} {
 		if t.IsValid() {

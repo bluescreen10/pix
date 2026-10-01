@@ -59,6 +59,9 @@ import _ "embed"
 //go:generate go run ../cmd/shadercompile -i src/bloom_composite.frag.glsl -o spv:build/bloom_composite.frag.spv -o metallib:build/bloom_composite.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/tonemap.frag.glsl -o spv:build/tonemap.frag.spv -o metallib:build/tonemap.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/halftone.frag.glsl -o spv:build/halftone.frag.spv -o metallib:build/halftone.frag.metalbin
+//go:generate go run ../cmd/shadercompile -i src/fog_inject.comp.glsl -o spv:build/fog_inject.comp.spv -o metallib:build/fog_inject.comp.metalbin
+//go:generate go run ../cmd/shadercompile -i src/fog_integrate.comp.glsl -o spv:build/fog_integrate.comp.spv -o metallib:build/fog_integrate.comp.metalbin
+//go:generate go run ../cmd/shadercompile -i src/fog_background.frag.glsl -o spv:build/fog_background.frag.spv -o metallib:build/fog_background.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/particle_update.comp.glsl -o spv:build/particle_update.comp.spv -o metallib:build/particle_update.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/particle_sort_keys.comp.glsl -o spv:build/particle_sort_keys.comp.spv -o metallib:build/particle_sort_keys.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/particle_sort_step.comp.glsl -o spv:build/particle_sort_step.comp.spv -o metallib:build/particle_sort_step.comp.metalbin
@@ -147,6 +150,20 @@ var OverlayVert []byte
 
 //go:embed build/overlay.frag.spv
 var OverlayFrag []byte
+
+// --- volumetric fog (see Renderer.SetVolumetricFog) ---
+//
+// FogInject and FogIntegrate build the fog volume each frame; lit shaders read it in
+// applyFog, and FogBackground fogs the pixels no geometry covers.
+
+//go:embed build/fog_inject.comp.spv
+var FogInject []byte
+
+//go:embed build/fog_integrate.comp.spv
+var FogIntegrate []byte
+
+//go:embed build/fog_background.frag.spv
+var FogBackground []byte
 
 // --- particles ---
 

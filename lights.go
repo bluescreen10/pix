@@ -126,16 +126,27 @@ func NewLights(b gpu.Backend) *Lights {
 //
 // filter is the kernel directional lookups use, which the shader reads per light.
 //
+// fog is where a volumetric fog's volume is, which the table carries in place of the
+// colour and distances the other fog models put there; the renderer passes a zero
+// lookup when the scene's fog is not volumetric.
+//
 // shadows reports whether shadow maps may be advertised to the shader at all — the
 // renderer's global toggle. A light whose map is still allocated but no longer being
 // re-rendered must publish noShadowMap, or the shader keeps sampling a frozen map and
 // the shadow stays on screen after it was turned off.
-func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPacket, res map[scenes.LightID]*shadowResource, shadows bool, filter ShadowFilter) {
+func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPacket, res map[scenes.LightID]*shadowResource, shadows bool, filter ShadowFilter, fog fogLookup) {
 	var next gpuLights
 	next.ambient = env.Ambient.RGBA(1)
 	fs := env.Fog
 	next.fogColor = fs.Color.RGBA(float32(fs.Mode))
 	next.fogParams = glm.Vec4f{fs.Near, fs.Far, fs.Density, 0}
+	if fs.Mode == scenes.FogVolumetric {
+		// Volumetric fog is looked up rather than computed (see applyFog): the colour
+		// carries the screen the volume lies over and the fog's reach, the parameters
+		// where the volume is. Indices are small integers, which a float holds exactly.
+		next.fogColor = colors.RGBA32F{1 / float32(fog.width), 1 / float32(fog.height), fs.Reach, float32(fs.Mode)}
+		next.fogParams = glm.Vec4f{float32(fog.volume), float32(fog.sampler), float32(fog.slices), 0}
+	}
 
 	//FIXME: remove enclosure, use a helper method
 	//

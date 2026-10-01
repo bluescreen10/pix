@@ -71,6 +71,15 @@ var metalOverlayVert []byte
 //go:embed build/overlay.frag.metalbin
 var metalOverlayFrag []byte
 
+//go:embed build/fog_inject.comp.metalbin
+var metalFogInject []byte
+
+//go:embed build/fog_integrate.comp.metalbin
+var metalFogIntegrate []byte
+
+//go:embed build/fog_background.frag.metalbin
+var metalFogBackground []byte
+
 //go:embed build/particle_update.comp.metalbin
 var metalParticleUpdate []byte
 
@@ -126,6 +135,9 @@ var metalVariants = []struct{ spirv, metal []byte }{
 	{PBRFragment, metalPBRFragment},
 	{OverlayVert, metalOverlayVert},
 	{OverlayFrag, metalOverlayFrag},
+	{FogInject, metalFogInject},
+	{FogIntegrate, metalFogIntegrate},
+	{FogBackground, metalFogBackground},
 	{ParticleUpdate, metalParticleUpdate},
 	{ParticleSortKeys, metalParticleSortKeys},
 	{ParticleSortStep, metalParticleSortStep},

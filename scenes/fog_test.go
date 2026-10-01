@@ -79,3 +79,41 @@ func TestExp2FogDistanceMeaning(t *testing.T) {
 		t.Errorf("visibility at Distance/10 = %.4f, want > 0.97 (foreground should stay clear)", got)
 	}
 }
+
+// TestVolumetricFogPacking: a volumetric fog resolves to its own mode, its distances
+// turned into the density and falloff the shaders work in, and a zero visibility or
+// reach turns it off rather than simulating nothing.
+func TestVolumetricFogPacking(t *testing.T) {
+	fog := scenes.NewVolumetricFog(20, 80)
+	fog.Albedo = colors.RGB32F{0.9, 0.8, 0.7}
+	fog.Emission = colors.RGB32F{0.1, 0, 0}
+	fog.Anisotropy = 0.6
+	fog.BaseHeight = 2
+	fog.Thickness = 4
+
+	want := scenes.FogState{
+		Mode: scenes.FogVolumetric, Density: 0.05,
+		Albedo: colors.RGB32F{0.9, 0.8, 0.7}, Emission: colors.RGB32F{0.1, 0, 0},
+		Anisotropy: 0.6, BaseHeight: 2, HeightFalloff: 0.25, Reach: 80,
+	}
+	if got := scenes.StateOf(fog); got != want {
+		t.Errorf("StateOf = %+v, want %+v", got, want)
+	}
+
+	fog.Thickness = 0
+	if got := scenes.StateOf(fog); got.HeightFalloff != 0 {
+		t.Errorf("with zero thickness, HeightFalloff = %v, want 0: the same at every height", got.HeightFalloff)
+	}
+	for _, off := range []struct {
+		name              string
+		visibility, reach float32
+	}{
+		{"zero visibility", 0, 80},
+		{"zero reach", 20, 0},
+	} {
+		fog.Visibility, fog.Reach = off.visibility, off.reach
+		if got := scenes.StateOf(fog); got.Mode != scenes.FogNone {
+			t.Errorf("with %s, mode = %d, want FogNone", off.name, got.Mode)
+		}
+	}
+}

@@ -12,11 +12,12 @@ const (
 	FogNone uint32 = iota
 	FogLinear
 	FogExp2
+	FogVolumetric
 )
 
-// Fog is a scene-wide distance fog model. Implementations are LinearFog (a linear
-// ramp between two distances) and Exp2Fog (exponential-squared falloff); a nil Fog —
-// the default — disables fogging entirely.
+// Fog is a scene-wide fog model. Implementations are LinearFog (a linear ramp between
+// two distances), Exp2Fog (exponential-squared falloff) and VolumetricFog (a lit medium
+// the renderer simulates); a nil Fog — the default — disables fogging entirely.
 //
 // Fog is applied to lit surfaces in linear space, before the sRGB encode, so it
 // blends the shaded colour toward the fog colour rather than washing it out. Set the
@@ -37,6 +38,17 @@ type FogState struct {
 	Near    float32
 	Far     float32
 	Density float32
+
+	// The rest describe a volumetric fog (see VolumetricFog); the other models leave
+	// them zero. Density above is its density at BaseHeight, and HeightFalloff how much
+	// it thins per unit of height above that: the inverses of the Visibility and
+	// Thickness it was given, which is what the shaders work in.
+	Albedo        colors.RGB32F
+	Emission      colors.RGB32F
+	Anisotropy    float32
+	BaseHeight    float32
+	HeightFalloff float32
+	Reach         float32
 }
 
 // LinearFog ramps linearly from no fog at Near to full fog at Far, and is the
@@ -103,6 +115,70 @@ func (f *Exp2Fog) fogState() FogState {
 		return FogState{Mode: FogNone}
 	}
 	return FogState{Color: f.Color, Mode: FogExp2, Density: exp2DensityScale / f.Distance}
+}
+
+// VolumetricFog is fog the renderer simulates as a medium filling the space in front of
+// the camera: lights scatter through it, so a lamp shows a glow and shadows cut shafts
+// through it, and every surface, opaque or blended, is fogged by what lies between it
+// and the camera. It costs two compute passes a frame; how finely they sample it is the
+// renderer's to choose (see pix.Renderer.SetVolumetricFog).
+//
+// Its extents are distances rather than densities, for the reason Exp2Fog gives: a
+// density is an inverse length, so a value that reads sensibly in one scene's units
+// erases another scene or does nothing in it. A distance is in the units you already
+// build the scene in.
+//
+// The fields are exported and read every frame, so they can be animated in place.
+type VolumetricFog struct {
+	// Visibility is how far you can see through the fog at BaseHeight and below: a
+	// surface that far away still shows 37% (1/e) of its light. Zero or less disables
+	// the fog.
+	Visibility float32
+	// BaseHeight is where the fog starts to thin, and Thickness how quickly: every
+	// Thickness units above BaseHeight it is a third (1/e) as dense, so it pools in low
+	// ground. A Thickness of zero keeps the fog the same at every height.
+	BaseHeight float32
+	Thickness  float32
+	// Reach is how far from the camera the fog is simulated. A surface beyond it is
+	// fogged as if it were at Reach. Zero or less disables the fog.
+	Reach float32
+
+	// Albedo is the fraction of the light the fog takes out that it scatters rather
+	// than absorbs, per channel: lit fog takes its colour, and black fog only darkens.
+	// Emission is light the fog gives off on its own, per unit of density.
+	Albedo   colors.RGB32F
+	Emission colors.RGB32F
+
+	// Anisotropy is how much of the light the fog scatters keeps going forward: 0
+	// scatters it evenly, and toward 1 looking at a light shows a bright halo around
+	// it. Negative values scatter it back toward the light.
+	Anisotropy float32
+}
+
+// NewVolumetricFog returns white fog you can see visibility world units into,
+// simulated out to reach world units from the camera, the same at every height.
+func NewVolumetricFog(visibility, reach float32) *VolumetricFog {
+	return &VolumetricFog{Visibility: visibility, Reach: reach, Albedo: colors.RGB32F{1, 1, 1}}
+}
+
+func (f *VolumetricFog) fogState() FogState {
+	if f.Visibility <= 0 || f.Reach <= 0 {
+		return FogState{Mode: FogNone}
+	}
+	var falloff float32
+	if f.Thickness > 0 {
+		falloff = 1 / f.Thickness
+	}
+	return FogState{
+		Mode:          FogVolumetric,
+		Density:       1 / f.Visibility,
+		Albedo:        f.Albedo,
+		Emission:      f.Emission,
+		Anisotropy:    f.Anisotropy,
+		BaseHeight:    f.BaseHeight,
+		HeightFalloff: falloff,
+		Reach:         f.Reach,
+	}
 }
 
 // StateOf returns the resolved state for a Fog, treating nil as "no fog" so callers

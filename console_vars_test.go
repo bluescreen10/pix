@@ -8,6 +8,7 @@ import (
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/console"
 	"github.com/bluescreen10/pix/input"
+	"github.com/bluescreen10/pix/scenes"
 )
 
 // nullInput satisfies console.Input without a window: these tests drive the console
@@ -202,4 +203,66 @@ func lastConsoleLine(c *console.Console) string {
 		return ""
 	}
 	return lines[len(lines)-1]
+}
+
+// typedInput plays back keyboard input, one frame's worth per Update: the console
+// drains Chars and Keys once a frame.
+type typedInput struct {
+	frames []typedFrame
+}
+
+// typedFrame is what typedInput delivers in one frame.
+type typedFrame struct {
+	chars []rune
+	keys  []input.KeyEvent
+}
+
+func (in *typedInput) Keys() []input.KeyEvent {
+	if len(in.frames) == 0 {
+		return nil
+	}
+	return in.frames[0].keys
+}
+
+// Chars delivers the frame's text and moves on to the next frame: the console reads
+// Keys first, then Chars.
+func (in *typedInput) Chars() []rune {
+	if len(in.frames) == 0 {
+		return nil
+	}
+	chars := in.frames[0].chars
+	in.frames = in.frames[1:]
+	return chars
+}
+
+// TestConsoleCommandReconfiguresBetweenFrames: a command typed into the console runs
+// while the renderer draws a frame, and switching HDR off rebuilds the renderer's
+// resources — uploading the console's own font among them, which needs a command
+// buffer of its own. It must take effect between frames, not in the middle of one,
+// where the frame's command buffer is already open.
+func TestConsoleCommandReconfiguresBetweenFrames(t *testing.T) {
+	r, err := pix.NewOffscreenRenderer(64, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	r.EnableHDR(true)
+	scene := scenes.New()
+	defer scene.Destroy()
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
+
+	enter := input.KeyEvent{Key: input.KeyEnter, Action: input.KeyPress}
+	r.EnableConsole(&typedInput{frames: []typedFrame{
+		{keys: []input.KeyEvent{{Key: console.DefaultToggleKey, Action: input.KeyPress}}},
+		{chars: []rune("set hdr off"), keys: []input.KeyEvent{enter}},
+	}})
+
+	for range 3 {
+		r.Render(scene)
+	}
+
+	if r.HDREnabled() {
+		t.Error("HDREnabled() = true, want the typed command to have switched it off")
+	}
 }

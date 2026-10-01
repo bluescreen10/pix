@@ -8,10 +8,11 @@
 const uint MAX_DIR = 4u;
 const uint MAX_POINT = 16u;
 const uint MAX_SPOT = 8u;
-// Fog modes, mirroring pix.fogNone/fogLinear/fogExp2.
+// Fog modes, mirroring scenes.FogNone/FogLinear/FogExp2/FogVolumetric.
 const uint FOG_NONE = 0u;
 const uint FOG_LINEAR = 1u;
 const uint FOG_EXP2 = 2u;
+const uint FOG_VOLUMETRIC = 3u;
 
 const uint NO_SHADOW = 0xFFFFFFFFu; // shadowMap sentinel: light casts no shadow
 
@@ -84,7 +85,9 @@ ShadowSlot shadowSlot(uint slot, uint slots, uint mapSide) {
 }
 
 // shadowTap is one hardware PCF fetch: the comparison and the bilinear blend of its four
-// texels both happen in the texture unit, so a single tap already spans 2x2.
+// texels both happen in the texture unit, so a single tap already spans 2x2. It names
+// its level, the map's only one, rather than letting derivatives pick it: compute
+// shaders, which have none, sample shadows too (see fog_inject.comp.glsl).
 //
 // uv is in the SHADOW CAMERA's own [0,1], not the texture's; the slot maps it the rest
 // of the way. Taking that as a precomputed value rather than deriving it per tap matters
@@ -92,7 +95,7 @@ ShadowSlot shadowSlot(uint slot, uint slots, uint mapSide) {
 float shadowTap(uint shadowMap, uint shadowSamp, vec2 uv, float ref, ShadowSlot s) {
     uv = clamp(uv, s.lo, s.hi);
     uv.x = uv.x * s.scale + s.offset;
-    return texture(sampler2DShadow(gShadowTextures[nonuniformEXT(shadowMap)], gSamplers[nonuniformEXT(shadowSamp)]), vec3(uv, ref));
+    return textureLod(sampler2DShadow(gShadowTextures[nonuniformEXT(shadowMap)], gSamplers[nonuniformEXT(shadowSamp)]), vec3(uv, ref), 0.0);
 }
 
 // shadowSoft is a 5x5 Gaussian approximation in nine hardware PCF taps.
@@ -297,6 +300,19 @@ float spotAttenuation(SpotLight sl, vec3 worldPos, vec3 Ldir, float dist) {
     return atten;
 }
 
+// fogVolumeSlice is the depth coordinate in the volumetric fog volume for a point d
+// world units from the eye. Slices are spaced by the square root of the distance, so
+// they crowd near the camera, where a slice covers the most screen; and the volume
+// holds, at each slice's centre, the fog up to that slice's far edge, which a lookup
+// half a slice back lands on. slices is the volume's depth in slices, and reach how far
+// from the eye it extends.
+float fogVolumeSlice(float d, float reach, float slices) {
+    return sqrt(clamp(d / reach, 0.0, 1.0)) - 0.5 / slices;
+}
+
+// applyFog reads gl_FragCoord, which only a fragment shader has; a compute shader that
+// includes this file for its light table defines PIX_NO_FRAGMENT_FOG to leave it out.
+#ifndef PIX_NO_FRAGMENT_FOG
 // applyFog blends a LINEAR-space shaded colour toward the scene's fog colour by
 // distance from the eye. Fog is a physical blend between the surface and the medium
 // in front of it, so it belongs in linear light, before anything encodes for display.
@@ -311,6 +327,16 @@ vec3 applyFog(vec3 lit, vec3 worldPos, vec3 eye, vec4 fogColor, vec4 fogParams) 
     uint mode = uint(fogColor.w);
     if (mode == FOG_NONE) return lit;
     float d = distance(worldPos, eye);
+    if (mode == FOG_VOLUMETRIC) {
+        // The renderer has already worked out, for every froxel, what the fog between
+        // it and the eye adds and how much it lets through (see fog_integrate.comp);
+        // all that is left is to look it up. fogColor is (1/width, 1/height of the
+        // screen the volume lies over, the fog's reach, mode), fogParams (volume,
+        // sampler, slices, _) — see pix.Lights.rebuild.
+        vec3 uvw = vec3(gl_FragCoord.xy * fogColor.xy, fogVolumeSlice(d, fogColor.z, fogParams.z));
+        vec4 fog = textureLod(sampler3D(gTextures3D[nonuniformEXT(uint(fogParams.x))], gSamplers[nonuniformEXT(uint(fogParams.y))]), uvw, 0.0);
+        return lit * fog.a + fog.rgb;
+    }
     // f is transmittance: 1 = the surface is fully visible, 0 = fully fogged out.
     float f;
     if (mode == FOG_LINEAR) {
@@ -323,5 +349,6 @@ vec3 applyFog(vec3 lit, vec3 worldPos, vec3 eye, vec4 fogColor, vec4 fogParams) 
     }
     return mix(fogColor.rgb, lit, f);
 }
+#endif // PIX_NO_FRAGMENT_FOG
 
 #endif // PIX_LIGHTING_GLSL
