@@ -138,8 +138,8 @@ type WritableConfig struct {
 }
 
 // CreateWritable allocates a texture that compute shaders write, through the heap's
-// storage arrays (gImages3D in bindless.glsl), and any shader samples, through its
-// sampled ones (gTextures3D) — at the same Index. Nothing is uploaded: its contents are
+// storage arrays (gImages and gImages3D in bindless.glsl), and any shader samples,
+// through its sampled ones (gTextures and gTextures3D) — at the same Index. Nothing is uploaded: its contents are
 // undefined until written, and whatever samples it has to come after whatever writes it.
 func (t *Store) CreateWritable(config WritableConfig) Texture {
 	tex := t.backend.CreateTexture(gpu.TextureDescriptor{

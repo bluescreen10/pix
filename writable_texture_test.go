@@ -20,30 +20,33 @@ import (
 
 //go:generate go run ./cmd/shadercompile -i testdata/volume_write.comp.glsl -o spv:testdata/build/volume_write.comp.spv -o metallib:testdata/build/volume_write.comp.metalbin
 //go:generate go run ./cmd/shadercompile -i testdata/volume_material.frag.glsl -o spv:testdata/build/volume_material.frag.spv -o metallib:testdata/build/volume_material.frag.metalbin
+//go:generate go run ./cmd/shadercompile -i testdata/image_write.comp.glsl -o spv:testdata/build/image_write.comp.spv -o metallib:testdata/build/image_write.comp.metalbin
 
 // volumeSize is the side of the volume the tests below write and sample.
 const volumeSize = 4
 
-// volumeStep fills a writable volume at the start of every frame, with volume_write:
-// the near half of its depth red, the far half green.
-type volumeStep struct {
-	volume   textures.Texture
+// writeStep fills a writable texture at the start of every frame, with one workgroup of
+// a test shader whose root is the texture's index and side: every test shader here
+// covers its whole texture in a single workgroup.
+type writeStep struct {
+	texture  textures.Texture
+	side     uint32
 	shader   []byte
 	backend  gpu.Backend
 	pipeline gpu.Pipeline
 }
 
-func (s *volumeStep) Encode(frame *pix.Frame, cmd gpu.CommandBuffer) {
+func (s *writeStep) Encode(frame *pix.Frame, cmd gpu.CommandBuffer) {
 	if !s.pipeline.IsValid() {
 		s.backend = frame.Backend
-		s.pipeline = frame.Backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: s.shader, Label: "volume-write"})
+		s.pipeline = frame.Backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: s.shader, Label: "texture-write"})
 	}
 	cmd.SetPipeline(s.pipeline)
-	data := [4]uint32{s.volume.Index(), volumeSize}
+	data := [4]uint32{s.texture.Index(), s.side}
 	cmd.Dispatch(utils.ToBytes(&data), 1, 1, 1)
 }
 
-func (s *volumeStep) Release() {
+func (s *writeStep) Release() {
 	if s.pipeline.IsValid() {
 		s.backend.DestroyPipeline(s.pipeline)
 		s.pipeline = gpu.Pipeline{}
@@ -67,7 +70,7 @@ func TestComputeWrittenVolumeIsSampledByMaterial(t *testing.T) {
 		Format: gpu.FormatRGBA8Unorm, Label: "volume",
 	})
 	defer volume.Release()
-	r.AddFrameStep(pix.FrameStageStart, &volumeStep{volume: volume, shader: testShader(t, r, "volume_write.comp")})
+	r.AddFrameStep(pix.FrameStageStart, &writeStep{texture: volume, side: volumeSize, shader: testShader(t, r, "volume_write.comp")})
 
 	material := r.NewRawMaterial(materials.Shader{Fragment: testShader(t, r, "volume_material.frag")}, 16, 1)
 	material.SetTexture(0, volume)
@@ -104,6 +107,49 @@ func TestComputeWrittenVolumeIsSampledByMaterial(t *testing.T) {
 		if got := pixelAt(r, postSize/2, postSize/2); got != probe.want {
 			t.Errorf("depth %v: center = %v, want %v, the %s", probe.depth, got, probe.want, probe.name)
 		}
+	}
+}
+
+// TestComputeWrittenImageIsSampledByBasicMaterial: a writable 2D texture works wherever a
+// texture does. A frame step's compute shader fills one with orange, through the heap's
+// 2D storage array, and a stock BasicMaterial shows it as its colour map: 0.5 is stored
+// as 128/255, which the display target encodes as 188.
+func TestComputeWrittenImageIsSampledByBasicMaterial(t *testing.T) {
+	r, err := pix.NewOffscreenRenderer(postSize, postSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
+
+	const side = 8
+	image := r.TextureStore.CreateWritable(textures.WritableConfig{
+		Kind: gpu.Texture2D, Width: side, Height: side, Format: gpu.FormatRGBA8Unorm, Label: "image",
+	})
+	defer image.Release()
+	r.AddFrameStep(pix.FrameStageStart, &writeStep{texture: image, side: side, shader: testShader(t, r, "image_write.comp")})
+
+	material := r.NewBasicMaterial()
+	material.SetColorMap(image)
+	material.SetColorMapSampler(r.TextureStore.DefaultSampler())
+	scene := scenes.New()
+	defer scene.Destroy()
+	quad := r.GeometryStore.Create(geometries.GeometryConfig{
+		Attributes: []geometries.Attribute{
+			geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, []glm.Vec3f{{-0.5, -0.5, 0}, {0.5, -0.5, 0}, {0.5, 0.5, 0}, {-0.5, 0.5, 0}}),
+			geometries.NewAttribute(geometries.AttributeUV, geometries.Float32x2, []glm.Vec2f{{0, 1}, {1, 1}, {1, 0}, {0, 0}}),
+		},
+		Indices: []uint32{0, 1, 2, 0, 2, 3},
+	})
+	scene.Add(scene.NewMesh(quad, material))
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
+	cam.SetPosition(glm.Vec3f{0, 0, 2})
+
+	r.Render(scene)
+
+	if got, want := pixelAt(r, postSize/2, postSize/2), [3]byte{255, 188, 0}; got != want {
+		t.Errorf("center = %v, want %v, the orange the compute shader wrote", got, want)
 	}
 }
 
