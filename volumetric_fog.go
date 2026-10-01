@@ -62,11 +62,3 @@ type fogBackgroundParams struct {
 	lastSlice float32
 	_         [2]uint32
 }
-
-// fogLookup is what lit shaders need to look volumetric fog up (see applyFog): the fog
-// volume's heap index, the sampler to read it with, its depth in slices, and the size
-// of the screen it lies over. A zero fogLookup means there is no volume to look up.
-type fogLookup struct {
-	volume, sampler, slices uint32
-	width, height           uint32
-}

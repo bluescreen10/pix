@@ -217,7 +217,7 @@ func (s *Scene) extractLights() {
 		out = append(out, lp)
 	}
 	s.packet.Lights.Data = out
-	s.packet.Environment = EnvironmentPacket{Ambient: s.ambient, Fog: StateOf(s.fog)}
+	s.packet.Environment = EnvironmentPacket{Ambient: s.ambient, Fog: StateOf(s.fog), Map: environmentState(s.environment)}
 }
 
 // applyShadowSettings copies a light's shadow settings into its packet. A nil shadow

@@ -115,9 +115,17 @@ type gpuLights struct {
 	numPoint  uint32
 	numSpot   uint32
 	pad0      uint32
-	dirs      [MaxDirLights]gpuDirLight
-	points    [MaxPointLights]gpuPointLight
-	spots     [MaxSpotLights]gpuSpotLight
+	// The environment the scene is lit by — see environmentState and lighting.glsl;
+	// envRadiance is noEnvironment when there is none.
+	envRadiance  uint32
+	envSampler   uint32
+	envMips      uint32
+	envBRDF      uint32
+	envIntensity float32
+	envRotation  float32
+	dirs         [MaxDirLights]gpuDirLight
+	points       [MaxPointLights]gpuPointLight
+	spots        [MaxSpotLights]gpuSpotLight
 }
 
 var lightsSize = uint64(unsafe.Sizeof(gpuLights{}))
@@ -160,17 +168,31 @@ func NewLights(b gpu.Backend) *Lights {
 // maskSampler is the sampler light masks are read with: linear and repeating, so a
 // mask tiles the world without seams.
 //
-// fog is where a volumetric fog's volume is, which the table carries in place of the
-// colour and distances the other fog models put there; the renderer passes a zero
-// lookup when the scene's fog is not volumetric.
+// environment is the scene's environment light, with no resources when it has none;
+// environmentSampler and environmentBRDF are the renderer's, which every scene's
+// environment light is read with.
+//
+// fogVolume, read with fogSampler, is a volumetric fog's volume, fogSize its
+// resolution, and screenWidth x screenHeight the screen it lies over: the table
+// carries them in place of the colour and distances the other fog models put there.
+// They are read only when the scene's fog is volumetric.
 //
 // shadows reports whether shadow maps may be advertised to the shader at all — the
 // renderer's global toggle. A light whose map is still allocated but no longer being
 // re-rendered must publish noShadowMap, or the shader keeps sampling a frozen map and
 // the shadow stays on screen after it was turned off.
-func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPacket, res map[scenes.LightID]*shadowResource, shadows bool, filter ShadowFilter, maskSampler uint32, fog fogLookup) {
+func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPacket, res map[scenes.LightID]*shadowResource, shadows bool, filter ShadowFilter, maskSampler uint32, environment *environmentState, environmentSampler gpu.Sampler, environmentBRDF gpu.Texture,
+	fogVolume gpu.Texture, fogSampler gpu.Sampler, fogSize VolumetricFogSettings, screenWidth, screenHeight uint32) {
 	var next gpuLights
 	next.ambient = env.Ambient.RGBA(1)
+	next.envRadiance = noEnvironment
+	if environment.radiance.IsValid() {
+		next.envRadiance = environment.radiance.Index
+		next.envSampler = environmentSampler.Index
+		next.envMips = environmentMips
+		next.envBRDF = environmentBRDF.Index
+		next.envIntensity, next.envRotation = env.Map.Intensity, env.Map.Rotation
+	}
 	fs := env.Fog
 	next.fogColor = fs.Color.RGBA(float32(fs.Mode))
 	next.fogParams = glm.Vec4f{fs.Near, fs.Far, fs.Density, 0}
@@ -178,8 +200,8 @@ func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPack
 		// Volumetric fog is looked up rather than computed (see applyFog): the colour
 		// carries the screen the volume lies over and the fog's reach, the parameters
 		// where the volume is. Indices are small integers, which a float holds exactly.
-		next.fogColor = colors.RGBA32F{1 / float32(fog.width), 1 / float32(fog.height), fs.Reach, float32(fs.Mode)}
-		next.fogParams = glm.Vec4f{float32(fog.volume), float32(fog.sampler), float32(fog.slices), 0}
+		next.fogColor = colors.RGBA32F{1 / float32(screenWidth), 1 / float32(screenHeight), fs.Reach, float32(fs.Mode)}
+		next.fogParams = glm.Vec4f{float32(fogVolume.Index), float32(fogSampler.Index), float32(fogSize.Depth), 0}
 	}
 
 	//FIXME: remove enclosure, use a helper method

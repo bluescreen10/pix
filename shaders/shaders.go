@@ -59,6 +59,9 @@ import _ "embed"
 //go:generate go run ../cmd/shadercompile -i src/bloom_composite.frag.glsl -o spv:build/bloom_composite.frag.spv -o metallib:build/bloom_composite.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/tonemap.frag.glsl -o spv:build/tonemap.frag.spv -o metallib:build/tonemap.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/halftone.frag.glsl -o spv:build/halftone.frag.spv -o metallib:build/halftone.frag.metalbin
+//go:generate go run ../cmd/shadercompile -i src/env_prefilter.comp.glsl -o spv:build/env_prefilter.comp.spv -o metallib:build/env_prefilter.comp.metalbin
+//go:generate go run ../cmd/shadercompile -i src/env_brdf.comp.glsl -o spv:build/env_brdf.comp.spv -o metallib:build/env_brdf.comp.metalbin
+//go:generate go run ../cmd/shadercompile -i src/env_background.frag.glsl -o spv:build/env_background.frag.spv -o metallib:build/env_background.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/fog_inject.comp.glsl -o spv:build/fog_inject.comp.spv -o metallib:build/fog_inject.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/fog_integrate.comp.glsl -o spv:build/fog_integrate.comp.spv -o metallib:build/fog_integrate.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/fog_background.frag.glsl -o spv:build/fog_background.frag.spv -o metallib:build/fog_background.frag.metalbin
@@ -150,6 +153,21 @@ var OverlayVert []byte
 
 //go:embed build/overlay.frag.spv
 var OverlayFrag []byte
+
+// --- environment lighting (see scenes.Environment) ---
+//
+// EnvPrefilter and EnvBRDF derive an environment's light — its blurred reflections,
+// the roughest of which is its diffuse light too, and the table reflections are
+// weighted by; EnvBackground draws it behind the scene.
+
+//go:embed build/env_prefilter.comp.spv
+var EnvPrefilter []byte
+
+//go:embed build/env_brdf.comp.spv
+var EnvBRDF []byte
+
+//go:embed build/env_background.frag.spv
+var EnvBackground []byte
 
 // --- volumetric fog (see Renderer.SetVolumetricFog) ---
 //

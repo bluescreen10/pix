@@ -145,6 +145,8 @@ type Scene struct {
 
 	// fog is the active distance-fog model, or nil when fog is disabled.
 	fog Fog
+	// environment is the light surrounding the scene, or nil for flat ambient light.
+	environment *Environment
 
 	// ambient is the scene-wide ambient light term.
 	ambient colors.RGB32F

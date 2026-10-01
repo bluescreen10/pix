@@ -50,7 +50,12 @@ void main() {
     uint shadowSamp = pc.shadowSampler;
     bool receives = (vFlags & FLAG_RECEIVES_SHADOW) != 0u;
 
-    vec3 lit = L.ambient.rgb * albedo;
+    // The environment's diffuse light where the scene has one, else the ambient colour.
+    vec3 ambient = L.ambient.rgb;
+    if (hasEnvironment(L)) {
+        ambient = environmentDiffuse(L, N);
+    }
+    vec3 lit = ambient * albedo;
     float viewDist = length(pc.eye.xyz - vWorldPos);
     for (uint i = 0u; i < L.numDir; i++) {
         vec3 Ldir = normalize(-L.dirs[i].dir.xyz);

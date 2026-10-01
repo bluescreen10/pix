@@ -174,6 +174,19 @@ type LightPacket struct {
 type EnvironmentPacket struct {
 	Ambient colors.RGB32F
 	Fog     FogState
+	Map     EnvironmentMapState
+}
+
+// EnvironmentMapState is the resolved form of an Environment: the values a packet
+// carries. Texture is its image's bindless index, and Revision changes whenever the
+// image does — so a renderer derives the environment's light again only then. A zero
+// Revision means the scene has no environment.
+type EnvironmentMapState struct {
+	Texture    uint32
+	Revision   uint64
+	Intensity  float32
+	Rotation   float32
+	Background bool
 }
 
 // Producer is anything that can describe a frame: a scene graph, an ECS, an editor, a

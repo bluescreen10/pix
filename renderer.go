@@ -115,6 +115,18 @@ type Renderer struct {
 	linearSampler  gpu.Sampler
 	toneMapPass    *postprocess.FullscreenPass
 
+	// Environment lighting: the sampler environments are read with — linear, mipmapped,
+	// wrapping around the vertical and clamped at the poles — the two passes that derive
+	// an environment's light, the BRDF table they share, computed once, and the pass
+	// that draws an environment behind the scene, built for the format last drawn into.
+	environmentSampler   gpu.Sampler
+	envPrefilterPipeline gpu.Pipeline
+	envBRDFPipeline      gpu.Pipeline
+	envBRDF              gpu.Texture
+	envBRDFComputed      bool
+	envBackgroundPass    *postprocess.FullscreenPass
+	envBackgroundFormat  gpu.Format
+
 	// Volumetric fog: how finely it is simulated; the medium volume the inject pass writes
 	// and the fog volume the integrate pass accumulates from it, created when a scene
 	// first asks for volumetric fog; the two passes' pipelines; and the pass that fogs
@@ -1158,25 +1170,40 @@ func shadowView(cam Camera, shadowMap textures.Texture, x int32, width, height u
 // The global shadow toggle goes in with them: without it, disabling shadows would only
 // stop the maps being refreshed, and the shader would keep sampling the last ones.
 func (r *Renderer) extractLights(p *scenes.FramePacket, st *renderState) {
-	st.lights.rebuild(p.Environment, p.Lights.Data, st.shadows, r.shadowsEnabled, r.shadowFilter, r.TextureStore.DefaultSampler(), r.fogLookupFor(p.Environment.Fog))
+	r.prepareEnvironment(p.Environment.Map, &st.environment)
+	r.prepareVolumetricFog(p.Environment.Fog)
+	st.lights.rebuild(p.Environment, p.Lights.Data, st.shadows, r.shadowsEnabled, r.shadowFilter, r.TextureStore.DefaultSampler(),
+		&st.environment, r.environmentSampler, r.envBRDF,
+		r.fogVolume, r.linearSampler, r.volumetricFog.resolved(), r.width, r.height)
 	st.lights.Sync()
 }
 
-// fogLookupFor returns where lit shaders find a volumetric fog's volume, or a zero
-// lookup when the fog is not volumetric. The volume is encoded later in the frame, but
-// it is ensured here, ahead of that: the light table, written now, carries its index.
-func (r *Renderer) fogLookupFor(fog scenes.FogState) fogLookup {
+// prepareEnvironment creates a scene's environment-light resources on its behalf, the
+// first time the scene has an environment, and frees them once it no longer does. The
+// light is derived later in the frame (see encodeEnvironment), but the resources are
+// made here, ahead of that, because the light table written now carries their indices.
+// For the same reason the sampler and the BRDF table — the renderer's own, shared by
+// every scene — are made here too.
+func (r *Renderer) prepareEnvironment(environment scenes.EnvironmentMapState, state *environmentState) {
+	if environment.Revision == 0 {
+		state.destroy(r.backend)
+		return
+	}
+	r.ensureEnvironment(state)
+	r.ensureEnvironmentSampler()
+	r.ensureEnvironmentBRDF()
+}
+
+// prepareVolumetricFog creates volumetric fog's volumes, and the sampler lit shaders
+// read them with, the first time a scene asks for volumetric fog. The volumes are
+// encoded later in the frame (see encodeVolumetricFog), but are made here, ahead of
+// that, because the light table written now carries the fog volume's index.
+func (r *Renderer) prepareVolumetricFog(fog scenes.FogState) {
 	if fog.Mode != scenes.FogVolumetric {
-		return fogLookup{}
+		return
 	}
-	size := r.ensureFogVolumes()
-	return fogLookup{
-		volume:  r.fogVolume.Index,
-		sampler: r.ensureLinearSampler().Index,
-		slices:  size.Depth,
-		width:   r.width,
-		height:  r.height,
-	}
+	r.ensureFogVolumes()
+	r.ensureLinearSampler()
 }
 
 // collectDrawables rebuilds the draw layout and its buffers when the layout no longer
@@ -1334,6 +1361,7 @@ func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture,
 	}
 	r.prepareStepFrame(st, views, sceneImage)
 	r.encodeFrameSteps(FrameStageStart, cmd)
+	r.encodeEnvironment(st, cmd)
 
 	// 5b. Compute: skin, cull every view, simulate particles.
 	r.encodeCompute(st, views, cmd)
@@ -1434,6 +1462,46 @@ func (r *Renderer) encodeFrameSteps(stage FrameStage, cmd gpu.CommandBuffer) {
 		step.Encode(&frame, cmd)
 	}
 	cmd.Barrier(gpu.StageCompute|gpu.StageFragment|gpu.StageColorOutput, gpu.StageIndirect|gpu.StageVertex|gpu.StageFragment|gpu.StageCompute|gpu.StageColorOutput|gpu.StageDepth, 0)
+}
+
+// encodeEnvironment derives the scene's environment light from its image, when the
+// image has changed since it last was — after the first frame steps, so that a sky
+// drawing the image in one is lit by the same frame. It prefilters the reflections one
+// mip at a time, each mip blurring the one before it; the roughest is the diffuse light
+// too. The BRDF table every environment shares is computed the first time.
+func (r *Renderer) encodeEnvironment(st *renderState, cmd gpu.CommandBuffer) {
+	environment := r.frame.Environment.Map
+	if environment.Revision == 0 || environment.Revision == st.environment.revision {
+		return
+	}
+	sampler := r.ensureEnvironmentSampler().Index
+
+	if !r.envBRDFComputed {
+		table := envBRDFRoot{table: r.envBRDF.Index}
+		cmd.SetPipeline(r.envBRDFPipeline)
+		cmd.Dispatch(utils.ToBytes(&table), environmentBRDFSize/8, environmentBRDFSize/8, 1)
+		r.envBRDFComputed = true
+	}
+
+	cmd.SetPipeline(r.envPrefilterPipeline)
+	for mip := range uint32(environmentMips) {
+		width, height := uint32(environmentRadianceWidth)>>mip, uint32(environmentRadianceHeight)>>mip
+		prefilter := envPrefilterRoot{
+			source:        environment.Texture,
+			target:        st.environment.mipViews[mip].Index,
+			sampler:       sampler,
+			blurRoughness: environmentMipBlurs[mip],
+			size:          [2]uint32{width, height},
+		}
+		if mip > 0 {
+			// Each blurred mip reads the one before it, written by the dispatch before.
+			cmd.Barrier(gpu.StageCompute, gpu.StageCompute, 0)
+			prefilter.source, prefilter.sourceLod = st.environment.radiance.Index, float32(mip-1)
+		}
+		cmd.Dispatch(utils.ToBytes(&prefilter), (width+7)/8, (height+7)/8, 1)
+	}
+	cmd.Barrier(gpu.StageCompute, gpu.StageFragment|gpu.StageCompute, 0)
+	st.environment.revision = environment.Revision
 }
 
 // encodeCompute runs everything the frame computes before it draws. Skinning writes
@@ -1834,6 +1902,7 @@ func (r *Renderer) encodeDrawingPass(st *renderState, views frameViews, depthFil
 
 	r.profiler.beginPass(GPUPassForward, cmd)
 	r.encodeOpaquePass(opaque, st, views, depthFilled, image, cmd)
+	r.encodeEnvironmentBackground(image, cmd)
 	r.encodeFrameSteps(FrameStageAfterOpaque, cmd)
 	r.encodeFogBackground(image, cmd)
 	r.encodeTransparentPass(transparent, st, views, image, cmd)
@@ -1859,6 +1928,29 @@ func (r *Renderer) encodeOpaquePass(batches batchRange, st *renderState, views f
 	r.drawBatches(batches, st, views, cmd)
 
 	cmd.EndRenderPass()
+}
+
+// encodeEnvironmentBackground draws the scene's environment behind it, when it asks to
+// be: the image itself, in the direction each pixel looks, wherever no geometry is. It
+// runs straight after the opaque pass, so that the steps after it — a sky — and the
+// volumetric fog's background are drawn over it.
+func (r *Renderer) encodeEnvironmentBackground(image gpu.Texture, cmd gpu.CommandBuffer) {
+	environment := r.frame.Environment.Map
+	if environment.Revision == 0 || !environment.Background {
+		return
+	}
+
+	pass := r.ensureEnvironmentBackgroundPass()
+	// It tests against the depth the opaque pass wrote, and draws over what it cleared.
+	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth, gpu.StageDepth|gpu.StageColorOutput, 0)
+	frame := r.postProcessingFrame(image, image)
+	params := envBackgroundParams{
+		inverseViewProj: r.stepFrame.InverseViewProj,
+		environment:     environment.Texture,
+		intensity:       environment.Intensity,
+		rotation:        environment.Rotation,
+	}
+	pass.DrawWithDepth(image, r.depth, r.width, r.height, gpu.LoadKeep, frame.Root(image, r.width, r.height).With(utils.ToBytes(&params)), cmd)
 }
 
 // encodeFogBackground fogs the pixels no geometry covers, for a scene whose fog is
@@ -2264,23 +2356,87 @@ func (r *Renderer) ensureShadowSampler() {
 	})
 }
 
-// ensureFogVolumes creates volumetric fog's two volumes, at the size the settings ask
-// for, on first use, and returns that size: the medium the inject pass writes, and the
-// fog the integrate pass accumulates from it. Half floats hold light above 1.0 and a
-// transmittance fine enough not to band.
-func (r *Renderer) ensureFogVolumes() VolumetricFogSettings {
-	size := r.volumetricFog.resolved()
-	if !r.fogVolume.IsValid() {
-		volume := gpu.TextureDescriptor{
-			Kind: gpu.Texture3D, Width: size.Width, Height: size.Height, Depth: size.Depth,
-			Format: gpu.FormatRGBA16F, Usage: gpu.TextureSampled | gpu.TextureStorage,
-		}
-		volume.Label = "fog-medium"
-		r.fogMedium = r.backend.CreateTexture(volume)
-		volume.Label = "fog-volume"
-		r.fogVolume = r.backend.CreateTexture(volume)
+// ensureEnvironment creates one scene's environment-light resources on first use: the
+// prefiltered reflections and a storage view of each of their mips. Half floats hold an
+// environment's light above 1.0.
+func (r *Renderer) ensureEnvironment(e *environmentState) {
+	if e.radiance.IsValid() {
+		return
 	}
-	return size
+	e.radiance = r.backend.CreateTexture(gpu.TextureDescriptor{
+		Kind: gpu.Texture2D, Width: environmentRadianceWidth, Height: environmentRadianceHeight,
+		Mips: environmentMips, Format: gpu.FormatRGBA16F,
+		Usage: gpu.TextureSampled | gpu.TextureStorage, Label: "environment-radiance",
+	})
+	for mip := range uint32(environmentMips) {
+		e.mipViews[mip] = r.backend.TextureView(e.radiance, gpu.Texture2D, mip, 1, 0, 1)
+	}
+}
+
+// ensureEnvironmentSampler creates the sampler environment images are read with, on
+// first use: linear and mipmapped, wrapping around the vertical, where an
+// equirectangular image's left and right edges meet, and clamped at the poles.
+func (r *Renderer) ensureEnvironmentSampler() gpu.Sampler {
+	if !r.environmentSampler.IsValid() {
+		r.environmentSampler = r.backend.CreateSampler(gpu.SamplerDescriptor{
+			MinLinear: true, MagLinear: true, MipLinear: true,
+			AddressU: gpu.AddressRepeat, AddressV: gpu.AddressClamp, AddressW: gpu.AddressClamp,
+			Label: "environment",
+		})
+	}
+	return r.environmentSampler
+}
+
+// ensureEnvironmentBRDF creates the BRDF table on first use; encodeEnvironment fills it.
+func (r *Renderer) ensureEnvironmentBRDF() gpu.Texture {
+	if !r.envBRDF.IsValid() {
+		r.envBRDF = r.backend.CreateTexture(gpu.TextureDescriptor{
+			Kind: gpu.Texture2D, Width: environmentBRDFSize, Height: environmentBRDFSize,
+			Format: gpu.FormatRG16F, Usage: gpu.TextureSampled | gpu.TextureStorage, Label: "environment-brdf",
+		})
+	}
+	return r.envBRDF
+}
+
+// ensureEnvironmentBackgroundPass builds the pass that draws an environment behind the
+// scene, for the format the scene is shaded into, on first use and whenever that format
+// changes. Like the fog's background, its depth test confines it to where no geometry is.
+func (r *Renderer) ensureEnvironmentBackgroundPass() *postprocess.FullscreenPass {
+	format := r.sceneFormat()
+	if r.envBackgroundPass != nil && r.envBackgroundFormat == format {
+		return r.envBackgroundPass
+	}
+	if r.envBackgroundPass != nil {
+		r.envBackgroundPass.Release()
+	}
+	r.envBackgroundPass = postprocess.NewFullscreenPass(r.backend, postprocess.FullscreenPassDescriptor{
+		Fragment:     shaders.ForBackend(r.backend, shaders.EnvBackground),
+		Format:       format,
+		DepthFormat:  gpu.FormatDepth32F,
+		DepthCompare: gpu.CompareGreaterEqual,
+		Label:        "environment-background",
+	})
+	r.envBackgroundFormat = format
+	return r.envBackgroundPass
+}
+
+// ensureFogVolumes creates volumetric fog's two volumes, at the size the settings ask
+// for, on first use: the medium the inject pass writes, and the fog the integrate pass
+// accumulates from it. Half floats hold light above 1.0 and a
+// transmittance fine enough not to band.
+func (r *Renderer) ensureFogVolumes() {
+	if r.fogVolume.IsValid() {
+		return
+	}
+	size := r.volumetricFog.resolved()
+	volume := gpu.TextureDescriptor{
+		Kind: gpu.Texture3D, Width: size.Width, Height: size.Height, Depth: size.Depth,
+		Format: gpu.FormatRGBA16F, Usage: gpu.TextureSampled | gpu.TextureStorage,
+	}
+	volume.Label = "fog-medium"
+	r.fogMedium = r.backend.CreateTexture(volume)
+	volume.Label = "fog-volume"
+	r.fogVolume = r.backend.CreateTexture(volume)
 }
 
 // releaseFogVolumes destroys volumetric fog's volumes, if any, for ensureFogVolumes to
@@ -2782,6 +2938,8 @@ func (r *Renderer) buildPipelines() {
 		r.backend.DestroyPipeline(r.particleUpdatePipeline)
 		r.backend.DestroyPipeline(r.particleSortKeysPipeline)
 		r.backend.DestroyPipeline(r.particleSortStepPipeline)
+		r.backend.DestroyPipeline(r.envPrefilterPipeline)
+		r.backend.DestroyPipeline(r.envBRDFPipeline)
 		r.backend.DestroyPipeline(r.fogInjectPipeline)
 		r.backend.DestroyPipeline(r.fogIntegratePipeline)
 		r.backend.DestroyPipeline(r.shadowPipeline)
@@ -2797,6 +2955,8 @@ func (r *Renderer) buildPipelines() {
 	r.particleUpdatePipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleUpdate), Entry: "main", Label: "particle-update"})
 	r.particleSortKeysPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleSortKeys), Entry: "main", Label: "particle-sort-keys"})
 	r.particleSortStepPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleSortStep), Entry: "main", Label: "particle-sort-step"})
+	r.envPrefilterPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.EnvPrefilter), Entry: "main", Label: "env-prefilter"})
+	r.envBRDFPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.EnvBRDF), Entry: "main", Label: "env-brdf"})
 	r.fogInjectPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.FogInject), Entry: "main", Label: "fog-inject"})
 	r.fogIntegratePipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.FogIntegrate), Entry: "main", Label: "fog-integrate"})
 	// Depth-only passes: position-only vertex-pull, no colour attachment, writes depth.
@@ -3240,6 +3400,7 @@ func (r *Renderer) releaseState(st *renderState) {
 	for _, ps := range st.particles {
 		ps.destroy(r.backend)
 	}
+	st.environment.destroy(r.backend)
 }
 
 // Destroy releases the renderer's GPU resources and the backend it owns.
@@ -3257,6 +3418,8 @@ func (r *Renderer) Destroy() {
 		r.backend.DestroyPipeline(r.particleUpdatePipeline)
 		r.backend.DestroyPipeline(r.particleSortKeysPipeline)
 		r.backend.DestroyPipeline(r.particleSortStepPipeline)
+		r.backend.DestroyPipeline(r.envPrefilterPipeline)
+		r.backend.DestroyPipeline(r.envBRDFPipeline)
 		r.backend.DestroyPipeline(r.fogInjectPipeline)
 		r.backend.DestroyPipeline(r.fogIntegratePipeline)
 		r.backend.DestroyPipeline(r.shadowPipeline)
@@ -3285,6 +3448,15 @@ func (r *Renderer) Destroy() {
 			step.Release()
 		}
 		r.frameSteps[stage] = nil
+	}
+	if r.envBRDF.IsValid() {
+		r.backend.DestroyTexture(r.envBRDF)
+	}
+	if r.envBackgroundPass != nil {
+		r.envBackgroundPass.Release()
+	}
+	if r.environmentSampler.IsValid() {
+		r.backend.DestroySampler(r.environmentSampler)
 	}
 	r.releaseFogVolumes()
 	if r.fogBackgroundPass != nil {

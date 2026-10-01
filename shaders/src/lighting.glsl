@@ -4,6 +4,7 @@
 #define PIX_LIGHTING_GLSL
 
 #include "bindless.glsl"
+#include "environment.glsl"
 
 const uint MAX_DIR = 4u;
 const uint MAX_POINT = 16u;
@@ -16,6 +17,7 @@ const uint FOG_VOLUMETRIC = 3u;
 
 const uint NO_SHADOW = 0xFFFFFFFFu; // shadowMap sentinel: light casts no shadow
 const uint NO_MASK = 0xFFFFFFFFu;   // mask sentinel: directional light has no mask
+const uint NO_ENVIRONMENT = 0xFFFFFFFFu; // envRadiance sentinel: the scene has no environment
 
 #define MAX_CASCADES 4
 struct DirLight {
@@ -49,6 +51,16 @@ layout(buffer_reference, scalar) readonly buffer LightBuf {
     uint numPoint;
     uint numSpot;
     uint pad0;
+    // The environment the scene is lit by (see pix.environmentState): its prefiltered
+    // reflections — one mip per roughness, the roughest also its diffuse light — and the
+    // BRDF table reflections are weighted by; envRadiance is NO_ENVIRONMENT when there
+    // is none.
+    uint envRadiance;
+    uint envSampler;
+    uint envMips;
+    uint envBRDF;
+    float envIntensity;
+    float envRotation;
     DirLight dirs[MAX_DIR];
     PointLight points[MAX_POINT];
     SpotLight spots[MAX_SPOT];
@@ -291,6 +303,48 @@ float dirMask(LightBuf L, uint li, vec3 worldPos) {
     vec2 uv = vec2(dot(L.dirs[li].maskU.xyz, worldPos) + L.dirs[li].maskU.w,
                    dot(L.dirs[li].maskV.xyz, worldPos) + L.dirs[li].maskV.w);
     return textureLod(sampler2D(gTextures[nonuniformEXT(L.dirs[li].mask)], gSamplers[nonuniformEXT(L.dirs[li].maskSampler)]), uv, 0.0).r;
+}
+
+// environmentFrame turns a world direction into the environment's own, undoing its
+// rotation about the vertical.
+vec3 environmentFrame(LightBuf L, vec3 dir) {
+    return unrotateEnvironment(dir, L.envRotation);
+}
+
+// hasEnvironment reports whether the scene is lit by an environment rather than by its
+// flat ambient colour.
+bool hasEnvironment(LightBuf L) {
+    return L.envRadiance != NO_ENVIRONMENT;
+}
+
+// environmentDiffuse is the light a white diffuse surface facing N takes from the
+// environment: the same kind of value as the ambient colour it replaces, so a uniform
+// white environment lights such a surface to exactly 1. It is the roughest mip of the
+// prefiltered reflections, looked up along the normal — what three.js and Godot take
+// for a sky's diffuse light too. That mip is the environment blurred by a GGX lobe of
+// roughness 1, a little narrower than the cosine lobe diffuse light is, which is close
+// enough for light that changes this slowly across normals.
+vec3 environmentDiffuse(LightBuf L, vec3 N) {
+    vec2 uv = equirectUV(environmentFrame(L, N));
+    return textureLod(sampler2D(gTextures[nonuniformEXT(L.envRadiance)], gSamplers[nonuniformEXT(L.envSampler)]), uv, float(L.envMips - 1u)).rgb * L.envIntensity;
+}
+
+// environmentSpecular is the environment as a surface of the given roughness mirrors it
+// along R: the prefiltered image, at the mip blurred for that roughness.
+vec3 environmentSpecular(LightBuf L, vec3 R, float roughness) {
+    vec2 uv = equirectUV(environmentFrame(L, R));
+    float lod = roughness * float(L.envMips - 1u);
+    return textureLod(sampler2D(gTextures[nonuniformEXT(L.envRadiance)], gSamplers[nonuniformEXT(L.envSampler)]), uv, lod).rgb * L.envIntensity;
+}
+
+// environmentBRDF is the split-sum pair (scale, bias) a reflection of the environment
+// is weighted by: it reflects f0 * scale + bias of what environmentSpecular returns.
+// The table is read through the environment's sampler, which wraps across, so the
+// lookup stays half a texel inside the table's edges: at NdotV = 1 it would otherwise
+// blend in the NdotV = 0 column.
+vec2 environmentBRDF(LightBuf L, float NdotV, float roughness) {
+    vec2 uv = clamp(vec2(NdotV, roughness), vec2(0.5 / ENV_BRDF_SIZE), vec2(1.0 - 0.5 / ENV_BRDF_SIZE));
+    return textureLod(sampler2D(gTextures[nonuniformEXT(L.envBRDF)], gSamplers[nonuniformEXT(L.envSampler)]), uv, 0.0).rg;
 }
 
 // pointShadowFactor picks the cube face for the light→fragment direction (dominant

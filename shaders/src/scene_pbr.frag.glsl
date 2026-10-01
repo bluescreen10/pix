@@ -162,6 +162,21 @@ vec3 cookTorrance(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float meta
     return (kd * albedo / PI * diffuseScale + spec) * radiance * ndl;
 }
 
+// environmentLight is what a surface takes from the scene's environment, in place of
+// the flat ambient colour: its diffuse light, less the share Fresnel reflects instead,
+// and its reflection of the environment, blurred for its roughness and weighted by the
+// split-sum table.
+vec3 environmentLight(LightBuf L, Surface s, vec3 V, float diffuseScale) {
+    float rough = pbrRoughness(s);
+    float metal = pbrMetallic(s);
+    vec3 f0 = mix(vec3(0.04), s.albedo, metal);
+    vec2 brdf = environmentBRDF(L, max(dot(s.normal, V), 0.0), rough);
+    vec3 reflected = f0 * brdf.x + brdf.y;
+    vec3 specular = environmentSpecular(L, reflect(-V, s.normal), rough) * reflected;
+    vec3 diffuse = (vec3(1.0) - reflected) * (1.0 - metal) * s.albedo * environmentDiffuse(L, s.normal) * diffuseScale;
+    return diffuse + specular;
+}
+
 // shadeSurface accumulates every light in the table onto a Surface and returns the
 // LINEAR result (ambient + direct + emissive) — the caller encodes it once. receives
 // lets the forward path honour a drawable's receive-shadow flag.
@@ -210,7 +225,11 @@ vec3 shadeSurface(Surface s, vec3 worldPos, vec3 V, uint shadowSamp, float diffu
         lo += sh * cookTorrance(s.normal, V, Ldir, sl.color.rgb * sl.color.w * atten,
                                 s.albedo, pbrMetallic(s), pbrRoughness(s), diffuseScale);
     }
-    return L.ambient.rgb * s.albedo * diffuseScale + lo + s.emissive;
+    vec3 ambient = L.ambient.rgb * s.albedo * diffuseScale;
+    if (hasEnvironment(L)) {
+        ambient = environmentLight(L, s, V, diffuseScale);
+    }
+    return ambient + lo + s.emissive;
 }
 
 // ---------------------------------------------------------------------------
@@ -250,11 +269,15 @@ void main() {
         // away, and a signed dot would read every one of them as pure grazing.
         float ndv = abs(dot(s.normal, V));
         float fres = 0.04 + 0.96 * pow(1.0 - ndv, 5.0);
-        // There is no environment probe yet, so the rim has nothing to reflect and
-        // Fresnel alone would turn the silhouette opaque black. Stand the ambient
-        // term in for the surroundings: it is what an environment would contribute
-        // if we had one, and it keeps the rim additive rather than a dark outline.
-        lit += fres * transmission * pc.lights.ambient.rgb;
+        // The rim reflects the surroundings: the environment, where the scene has
+        // one. Without one, Fresnel alone would turn the silhouette opaque black, so
+        // the ambient colour stands in for the surroundings and keeps the rim
+        // additive rather than a dark outline.
+        vec3 surroundings = pc.lights.ambient.rgb;
+        if (hasEnvironment(pc.lights)) {
+            surroundings = environmentSpecular(pc.lights, reflect(-V, s.normal), pbrRoughness(s));
+        }
+        lit += fres * transmission * surroundings;
         float refl = max(fres * fres, dot(lit, vec3(0.2126, 0.7152, 0.0722)));
         alpha = clamp(baseAlpha * mix(1.0, refl, transmission), 0.04, 1.0);
     }

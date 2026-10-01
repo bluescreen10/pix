@@ -43,6 +43,9 @@ type renderState struct {
 	// particles is each particle system's simulation, keyed by its stable id.
 	particles map[scenes.ParticleID]*particleState
 
+	// environment is the light derived from the scene's environment, if it has one.
+	environment environmentState
+
 	// backToFront is the blended batches in this frame's draw order, farthest first:
 	// scratch, kept so sorting them every frame allocates nothing.
 	backToFront []batchDistance
