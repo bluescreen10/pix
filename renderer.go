@@ -109,7 +109,6 @@ type Renderer struct {
 	// straight into the target. Each step owns whatever else it draws with.
 	hdr            bool
 	toneMapping    ToneMapOperator
-	exposureStops  float32
 	postProcessing []postprocess.Step
 	sceneColor     gpu.Texture
 	postColor      gpu.Texture // only while the chain has steps
@@ -578,7 +577,8 @@ func (r *Renderer) HDREnabled() bool {
 
 // EnableHDR renders frames in high dynamic range: the scene is shaded into an offscreen
 // image in linear, unclamped light, the post-processing chain runs over it, and a
-// tone-map pass maps the result into the target (see SetToneMapping and SetExposure).
+// tone-map pass maps the result into the target (see SetToneMapping, and the camera's
+// SetExposure).
 //
 // Off — the default — the scene draws straight into the target: no offscreen image, no
 // extra pass, and no post-processing. Light brighter than white clips.
@@ -603,17 +603,6 @@ func (r *Renderer) ToneMapping() ToneMapOperator {
 // display can show. The default is ToneMapNeutral. It has no effect without HDR.
 func (r *Renderer) SetToneMapping(operator ToneMapOperator) {
 	r.toneMapping = operator
-}
-
-// Exposure is the scale applied to an HDR frame's light before tone mapping, in stops.
-func (r *Renderer) Exposure() float32 {
-	return r.exposureStops
-}
-
-// SetExposure scales an HDR frame's light before tone mapping, in stops: +1 doubles it,
-// -1 halves it, and 0 — the default — leaves it unchanged. It has no effect without HDR.
-func (r *Renderer) SetExposure(stops float32) {
-	r.exposureStops = stops
 }
 
 // PostProcessing returns the effects the renderer runs over the shaded scene, in order.
@@ -2024,14 +2013,14 @@ func (r *Renderer) encodePostProcessing(cmd gpu.CommandBuffer) gpu.Texture {
 	return image
 }
 
-// encodeToneMapping maps the finished HDR image into the target: exposed, and through
-// the tone-map curve. The target encodes it for display.
+// encodeToneMapping maps the finished HDR image into the target: exposed as the main
+// camera asks, and through the tone-map curve. The target encodes it for display.
 func (r *Renderer) encodeToneMapping(image, target gpu.Texture, cmd gpu.CommandBuffer) {
 	frame := r.postProcessingFrame(image, target)
 	root := toneMapRoot{
 		Root:     frame.Root(image, r.width, r.height),
 		operator: r.toneMapping,
-		exposure: r.exposureStops,
+		exposure: r.frame.Views[0].Exposure,
 	}
 	r.toneMapPass.Draw(target, r.width, r.height, gpu.LoadClear, utils.ToBytes(&root), cmd)
 }
@@ -3151,13 +3140,6 @@ func (r *Renderer) registerBuiltins(c *console.Console) {
 			return nil
 		},
 		"render in HDR: offscreen scene image, post-processing, tone mapping")
-
-	console.BindFunc(c, "exposure", r.Exposure,
-		func(v float32) error {
-			r.SetExposure(v)
-			return nil
-		},
-		"HDR light scale before tone mapping, in stops")
 
 	console.BindFunc(c, "stats", r.StatsVisible,
 		func(v bool) error { r.ShowFPS(v); return nil },

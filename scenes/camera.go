@@ -24,7 +24,9 @@ type cameraData struct {
 	// Orthographic: the view volume's extents across the view, in view space.
 	left, right, bottom, top float32
 	near, far                float32
-	ownerNode                uint32
+	// exposure scales the light the camera sees before it is tone-mapped, in stops.
+	exposure  float32
+	ownerNode uint32
 }
 
 // projection is the camera's projection matrix in Pix's canonical convention:
@@ -145,6 +147,21 @@ func (c Camera) SetNear(near float32) {
 // SetFar sets the distance to the far clipping plane.
 func (c Camera) SetFar(far float32) {
 	c.data().far = far
+}
+
+// Exposure is how much the camera scales the light it sees before tone mapping, in
+// stops (see SetExposure).
+func (c Camera) Exposure() float32 {
+	return c.data().exposure
+}
+
+// SetExposure scales the light the camera sees before it is tone-mapped, in stops: +1
+// doubles it, -1 halves it, and 0 — the default — leaves it unchanged. It belongs to
+// the camera rather than the renderer because it is the viewer's: two cameras on one
+// scene, or one going from daylight into a dark room, want their own. It has no effect
+// without HDR, where nothing is tone-mapped.
+func (c Camera) SetExposure(stops float32) {
+	c.data().exposure = stops
 }
 
 // lookRotation is the rotation that turns -Z to forward and +Y as close to up as

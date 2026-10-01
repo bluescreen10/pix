@@ -114,18 +114,35 @@ func TestHDRKeepsLightAboveWhite(t *testing.T) {
 	}
 }
 
-// TestExposureScalesLight: each stop of exposure doubles the light before tone mapping,
-// so a surface of 0.25 at +1 stop draws exactly as one of 0.5 at none.
-func TestExposureScalesLight(t *testing.T) {
-	r, scene := postScene(t, colors.RGBA32F{0.25, 0.25, 0.25, 1}, 0.8)
+// TestCameraExposureScalesLight: each stop of the camera's exposure doubles the light
+// before tone mapping, so a surface of 0.25 at +1 stop draws exactly as one of 0.5 at
+// none; and it is read every frame, so changing it changes the next one.
+func TestCameraExposureScalesLight(t *testing.T) {
+	r, err := pix.NewOffscreenRenderer(postSize, postSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
 	r.EnableHDR(true)
 	r.SetToneMapping(pix.ToneMapNone)
-	r.SetExposure(1)
-	r.Render(scene)
+	scene := scenes.New()
+	defer scene.Destroy()
+	addWall(r, scene, colors.RGBA32F{0.25, 0.25, 0.25, 1}, 1, -2)
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
 
-	got := pixelAt(r, postSize/2, postSize/2)
-	if d := int(got[0]) - srgbByte(0.5); d < -1 || d > 1 {
-		t.Errorf("centre = %v at +1 stop, want %d: 0.25 doubled to 0.5", got, srgbByte(0.5))
+	for _, exposure := range []struct {
+		stops float32
+		want  float32
+	}{
+		{1, 0.5},    // 0.25 doubled
+		{-1, 0.125}, // 0.25 halved
+	} {
+		cam.SetExposure(exposure.stops)
+		r.Render(scene)
+		if got := pixelAt(r, postSize/2, postSize/2); !isNear(got[0], float64(exposure.want), 1) {
+			t.Errorf("centre = %v at %+v stops, want %d: 0.25 scaled to %v", got, exposure.stops, srgbByte(exposure.want), exposure.want)
+		}
 	}
 }
 

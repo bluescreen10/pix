@@ -167,6 +167,7 @@ func (s *Scene) extractViews() {
 			View:       world.Inv(),
 			Projection: c.projection(),
 			Position:   glm.Vec3f{world[12], world[13], world[14]},
+			Exposure:   c.exposure,
 		})
 	}
 	s.packet.Views = out

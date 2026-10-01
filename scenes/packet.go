@@ -332,6 +332,9 @@ type ViewPacket struct {
 	View       glm.Mat4f
 	Projection glm.Mat4f
 	Position   glm.Vec3f
+	// Exposure scales the light the view sees before tone mapping, in stops (see
+	// Camera.SetExposure).
+	Exposure float32
 }
 
 // ViewProjection returns the view's world-to-clip matrix.
