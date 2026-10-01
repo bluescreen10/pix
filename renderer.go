@@ -1885,14 +1885,15 @@ func (r *Renderer) encodeFogBackground(image gpu.Texture, cmd gpu.CommandBuffer)
 	}
 
 	pass := r.ensureFogBackgroundPass()
-	// It reads the depth the opaque pass wrote, and blends over what it, or a step, drew.
-	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth, gpu.StageFragment|gpu.StageColorOutput, 0)
+	// It tests against the depth the opaque pass wrote, and blends over what it, or a
+	// step, drew.
+	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth, gpu.StageDepth|gpu.StageColorOutput, 0)
 	frame := r.postProcessingFrame(image, image)
 	params := fogBackgroundParams{
 		volume:    r.fogVolume.Index,
 		lastSlice: 1 - 0.5/float32(r.volumetricFog.resolved().Depth),
 	}
-	pass.Draw(image, r.width, r.height, gpu.LoadKeep, frame.Root(image, r.width, r.height).With(utils.ToBytes(&params)), cmd)
+	pass.DrawWithDepth(image, r.depth, r.width, r.height, gpu.LoadKeep, frame.Root(image, r.width, r.height).With(utils.ToBytes(&params)), cmd)
 }
 
 // encodeTransparentPass draws the blended batches, back to front, then the particles,
@@ -2305,9 +2306,12 @@ func (r *Renderer) releaseFogVolumes() {
 }
 
 // ensureFogBackgroundPass builds the pass that fogs the background, for the format the
-// scene is shaded into, on first use and again whenever that format changes. It
-// composites through "over" blending, which every backend has (see
-// fog_background.frag.glsl for how that comes out as the fog).
+// scene is shaded into, on first use and again whenever that format changes. Its depth
+// test is what confines it to the background: the triangle lies on the far plane, so
+// it passes only where depth still holds the far plane's clear value, and pixels with
+// geometry are rejected before the shader runs. It composites through "over" blending,
+// which every backend has (see fog_background.frag.glsl for how that comes out as the
+// fog).
 func (r *Renderer) ensureFogBackgroundPass() *postprocess.FullscreenPass {
 	format := r.sceneFormat()
 	if r.fogBackgroundPass != nil && r.fogBackgroundFormat == format {
@@ -2317,10 +2321,12 @@ func (r *Renderer) ensureFogBackgroundPass() *postprocess.FullscreenPass {
 		r.fogBackgroundPass.Release()
 	}
 	r.fogBackgroundPass = postprocess.NewFullscreenPass(r.backend, postprocess.FullscreenPassDescriptor{
-		Fragment: shaders.ForBackend(r.backend, shaders.FogBackground),
-		Format:   format,
-		Blend:    []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}}},
-		Label:    "fog-background",
+		Fragment:     shaders.ForBackend(r.backend, shaders.FogBackground),
+		Format:       format,
+		Blend:        []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}}},
+		DepthFormat:  gpu.FormatDepth32F,
+		DepthCompare: gpu.CompareGreaterEqual,
+		Label:        "fog-background",
 	})
 	r.fogBackgroundFormat = format
 	return r.fogBackgroundPass
