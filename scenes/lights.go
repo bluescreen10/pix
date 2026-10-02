@@ -92,6 +92,24 @@ type LightMask struct {
 	Offset glm.Vec3f
 }
 
+// LightMaskAxes returns the world directions a directional light's mask runs along, for
+// a light shining along direction: u and v, square to the light and to each other. A
+// world position p reads the mask at (u·(p - Offset), v·(p - Offset)) / Size, so every
+// point on one of the light's rays reads the same texel. For a light shining straight
+// down u is world x and v world z; a slanted light tilts them with it, and one shining
+// along x takes z for u instead.
+func LightMaskAxes(direction glm.Vec3f) (u, v glm.Vec3f) {
+	dir := direction.Normalize()
+	axis := glm.Vec3f{1, 0, 0}
+	if d := dir.Dot(axis); d > 0.99 || d < -0.99 {
+		axis = glm.Vec3f{0, 0, 1}
+	}
+	// World x, with whatever part of it runs along the light taken out.
+	u = axis.Sub(dir.Scale(dir.Dot(axis))).Normalize()
+	v = dir.Cross(u)
+	return u, v
+}
+
 // IsEnabled reports whether the mask takes effect: it has a texture and a size.
 func (m LightMask) IsEnabled() bool {
 	return m.Texture.IsValid() && m.Size > 0

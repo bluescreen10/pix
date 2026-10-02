@@ -63,19 +63,10 @@ type gpuDirLight struct {
 }
 
 // maskProjection returns the two planes that take a world position to a directional
-// light's mask coordinates. The mask lies across the light, so every point on one of
-// its rays reads the same texel: its axes are world x and z, tilted to be square to the
-// light — u along x and v along z for a light travelling straight down — and a light
-// travelling along x takes z for its u instead. One repeat spans size world units, and
-// the mask is moved through the world by offset.
+// light's mask coordinates, along the axes scenes.LightMaskAxes gives: one repeat spans
+// size world units, and the mask is moved through the world by offset.
 func maskProjection(dir glm.Vec3f, size float32, offset glm.Vec3f) (u, v glm.Vec4f) {
-	axis := glm.Vec3f{1, 0, 0}
-	if math32.Abs(dir.Dot(axis)) > 0.99 {
-		axis = glm.Vec3f{0, 0, 1}
-	}
-	// World x, with whatever part of it runs along the light taken out.
-	uAxis := axis.Sub(dir.Scale(dir.Dot(axis))).Normalize()
-	vAxis := dir.Cross(uAxis)
+	uAxis, vAxis := scenes.LightMaskAxes(dir)
 	scale := 1 / size
 	u = uAxis.Scale(scale).Vec4(-uAxis.Dot(offset) * scale)
 	v = vAxis.Scale(scale).Vec4(-vAxis.Dot(offset) * scale)

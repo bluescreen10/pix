@@ -119,6 +119,9 @@ var metalBloomComposite []byte
 //go:embed build/tonemap.frag.metalbin
 var metalToneMap []byte
 
+//go:embed build/fxaa.frag.metalbin
+var metalFXAA []byte
+
 //go:embed build/halftone.frag.metalbin
 var metalHalftone []byte
 
@@ -128,6 +131,7 @@ var metalVariants = []struct{ spirv, metal []byte }{
 	{BloomUpsample, metalBloomUpsample},
 	{BloomComposite, metalBloomComposite},
 	{ToneMap, metalToneMap},
+	{FXAA, metalFXAA},
 	{Halftone, metalHalftone},
 	{SceneCull, metalSceneCull},
 	{SceneSkin, metalSceneSkin},

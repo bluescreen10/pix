@@ -13,6 +13,9 @@ type FullscreenPassDescriptor struct {
 	// Format is the colour format of the images the pass draws into. The zero value
 	// is ImageFormat.
 	Format gpu.Format
+	// Samples is how many samples per pixel the images the pass draws into hold — more
+	// than one when it draws into a multisampled scene. 0 means one.
+	Samples uint8
 	// Blend is nil to replace what is in the target, or a blend state to combine with it.
 	Blend []gpu.BlendState
 	// DepthFormat, when set, has the pass test its fragments against a depth image of
@@ -48,6 +51,7 @@ func NewFullscreenPass(backend gpu.Backend, desc FullscreenPassDescriptor) *Full
 		DepthFormat:    desc.DepthFormat,
 		DepthTest:      desc.DepthFormat != gpu.FormatUndefined,
 		DepthCompare:   desc.DepthCompare,
+		Samples:        desc.Samples,
 		CullMode:       gpu.CullNone,
 		Label:          desc.Label,
 	})

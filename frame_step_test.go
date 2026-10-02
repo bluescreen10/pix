@@ -182,6 +182,39 @@ func TestFrameStepClockAdvances(t *testing.T) {
 	}
 }
 
+// TestFrameStepSeesThePreviousViewProj: a step is told the matrix the scene was drawn
+// with the frame before — its own the first time — so it can find where what it drew
+// then is now.
+func TestFrameStepSeesThePreviousViewProj(t *testing.T) {
+	r, err := pix.NewOffscreenRenderer(postSize, postSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.Destroy)
+	scene := scenes.New()
+	t.Cleanup(scene.Destroy)
+	camera := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(camera)
+	var log []string
+	step := &recordingStep{name: "step", log: &log}
+	r.AddFrameStep(pix.FrameStageStart, step)
+
+	r.Render(scene)
+	camera.SetPosition(glm.Vec3f{1, 0, 0})
+	r.Render(scene)
+
+	first, second := step.frames[0], step.frames[1]
+	if first.PreviousViewProj != first.ViewProj {
+		t.Errorf("first frame's PreviousViewProj = %v, want its own ViewProj %v", first.PreviousViewProj, first.ViewProj)
+	}
+	if second.ViewProj == first.ViewProj {
+		t.Fatal("moving the camera did not change ViewProj")
+	}
+	if second.PreviousViewProj != first.ViewProj {
+		t.Errorf("second frame's PreviousViewProj = %v, want the first frame's ViewProj %v", second.PreviousViewProj, first.ViewProj)
+	}
+}
+
 // TestFrameStepAfterOpaqueDrawsUnderTransparent: a step after the opaque pass replaces
 // the opaque scene, and blended surfaces are then drawn over what it left. The step
 // clears to green: where the blue quad is, it blends over the green; where nothing is,

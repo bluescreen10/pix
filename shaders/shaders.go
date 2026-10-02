@@ -58,6 +58,7 @@ import _ "embed"
 //go:generate go run ../cmd/shadercompile -i src/bloom_upsample.frag.glsl -o spv:build/bloom_upsample.frag.spv -o metallib:build/bloom_upsample.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/bloom_composite.frag.glsl -o spv:build/bloom_composite.frag.spv -o metallib:build/bloom_composite.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/tonemap.frag.glsl -o spv:build/tonemap.frag.spv -o metallib:build/tonemap.frag.metalbin
+//go:generate go run ../cmd/shadercompile -i src/fxaa.frag.glsl -o spv:build/fxaa.frag.spv -o metallib:build/fxaa.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/halftone.frag.glsl -o spv:build/halftone.frag.spv -o metallib:build/halftone.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/env_prefilter.comp.glsl -o spv:build/env_prefilter.comp.spv -o metallib:build/env_prefilter.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/env_brdf.comp.glsl -o spv:build/env_brdf.comp.spv -o metallib:build/env_brdf.comp.metalbin
@@ -139,6 +140,11 @@ var BloomComposite []byte
 
 //go:embed build/tonemap.frag.spv
 var ToneMap []byte
+
+// FXAA smooths the finished frame's edges, after tone mapping (see pix.AntiAliasingFXAA).
+//
+//go:embed build/fxaa.frag.spv
+var FXAA []byte
 
 //go:embed build/halftone.frag.spv
 var Halftone []byte

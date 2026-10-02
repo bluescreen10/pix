@@ -2,6 +2,7 @@ package pix
 
 import (
 	"github.com/bluescreen10/gamekit/gpu"
+	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
 )
 
@@ -54,6 +55,11 @@ type renderState struct {
 	// it has: what a frame step's DeltaTime is measured from.
 	previousTime float32
 	hasRendered  bool
+	// previousViewProj is the matrix the source's main view was last drawn with, for
+	// frame steps that reproject what they drew then (see Frame.PreviousViewProj); valid
+	// once hasPreviousView.
+	previousViewProj glm.Mat4f
+	hasPreviousView  bool
 }
 
 // cullBuffers is what one view's cull writes: each batch's indirect arguments, with the

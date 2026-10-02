@@ -1,6 +1,7 @@
 package postprocess_test
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -40,39 +41,51 @@ func (s *depthStep) Release() {
 	}
 }
 
-// TestStepReadsSceneDepth: a step can sample the depth the scene was drawn with. The
-// quad is black, so nothing of the scene's colour can pass for depth: the centre shows
-// the quad's depth, and the empty corner the cleared far plane, which is 0.
+// TestStepReadsSceneDepth: a step can sample the depth the scene was drawn with — with
+// MSAA, the depth resolved from its samples. The quad is black, so nothing of the
+// scene's colour can pass for depth: the centre shows the quad's depth, and the empty
+// corner the cleared far plane, which is 0.
 func TestStepReadsSceneDepth(t *testing.T) {
-	r, scene := postScene(t, colors.RGBA32F{0, 0, 0, 1}, 0.2)
-	r.EnableHDR(true)
-	r.AddPostProcessingStep(&depthStep{})
+	for _, samples := range []uint8{1, 4} {
+		t.Run(fmt.Sprintf("%d samples", samples), func(t *testing.T) {
+			r, scene := postScene(t, colors.RGBA32F{0, 0, 0, 1}, 0.2)
+			r.EnableHDR(true)
+			r.EnableAntiAliasing(samples > 1)
+			r.AddPostProcessingStep(&depthStep{})
 
-	r.Render(scene)
+			r.Render(scene)
 
-	if center := pixelAt(r, postSize/2, postSize/2); center[0] == 0 {
-		t.Errorf("center = %v, want the quad's depth in red", center)
-	}
-	if corner := pixelAt(r, 0, 0); corner != [3]byte{} {
-		t.Errorf("corner = %v, want black, the far plane's depth of 0", corner)
+			if center := pixelAt(r, postSize/2, postSize/2); center[0] == 0 {
+				t.Errorf("center = %v, want the quad's depth in red", center)
+			}
+			if corner := pixelAt(r, 0, 0); corner != [3]byte{} {
+				t.Errorf("corner = %v, want black, the far plane's depth of 0", corner)
+			}
+		})
 	}
 }
 
 // TestShaderStepReadsSceneDepth: the root every post-processing pass is pushed carries
 // the scene's depth, so a ShaderStep — whose Params are written before any frame says
-// where depth is — can still read it. The test shader draws depth as grey.
+// where depth is — can still read it, with MSAA or without. The test shader draws depth
+// as grey.
 func TestShaderStepReadsSceneDepth(t *testing.T) {
-	r, scene := postScene(t, colors.RGBA32F{0, 0, 0, 1}, 0.2)
-	r.EnableHDR(true)
-	r.AddPostProcessingStep(&postprocess.ShaderStep{Fragment: testShader(t, r, "scene_depth.frag"), Label: "scene depth"})
+	for _, samples := range []uint8{1, 4} {
+		t.Run(fmt.Sprintf("%d samples", samples), func(t *testing.T) {
+			r, scene := postScene(t, colors.RGBA32F{0, 0, 0, 1}, 0.2)
+			r.EnableHDR(true)
+			r.EnableAntiAliasing(samples > 1)
+			r.AddPostProcessingStep(&postprocess.ShaderStep{Fragment: testShader(t, r, "scene_depth.frag"), Label: "scene depth"})
 
-	r.Render(scene)
+			r.Render(scene)
 
-	if center := pixelAt(r, postSize/2, postSize/2); center[0] == 0 {
-		t.Errorf("center = %v, want the quad's depth as grey", center)
-	}
-	if corner := pixelAt(r, 0, 0); corner != [3]byte{} {
-		t.Errorf("corner = %v, want black, the far plane's depth of 0", corner)
+			if center := pixelAt(r, postSize/2, postSize/2); center[0] == 0 {
+				t.Errorf("center = %v, want the quad's depth as grey", center)
+			}
+			if corner := pixelAt(r, 0, 0); corner != [3]byte{} {
+				t.Errorf("corner = %v, want black, the far plane's depth of 0", corner)
+			}
+		})
 	}
 }
 

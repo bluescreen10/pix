@@ -115,28 +115,45 @@ type Renderer struct {
 	linearSampler  gpu.Sampler
 	toneMapPass    *postprocess.FullscreenPass
 
+	// Anti-aliasing: whether it is on, and by which method (see SetAntiAliasing).
+	//
+	// With MSAA the scene's passes draw into multisampledColor, in the scene's format,
+	// and multisampledDepth, and once they are done both are resolved into the scene
+	// image and depth, which are what everything after them samples (see
+	// encodeSceneResolve). Without it neither exists, and the passes draw into the scene
+	// image and depth directly.
+	//
+	// With FXAA the frame is finished in fxaaSource, in the target's format, rather than
+	// in the target, and fxaaPass smooths it into the target (see encodeFXAA). Without it
+	// neither exists.
+	antiAliasingEnabled bool
+	antiAliasing        AntiAliasing
+	multisampledColor   gpu.Texture
+	multisampledDepth   gpu.Texture
+	fxaaSource          gpu.Texture
+	fxaaPass            *postprocess.FullscreenPass
+
 	// Environment lighting: the sampler environments are read with — linear, mipmapped,
 	// wrapping around the vertical and clamped at the poles — the two passes that derive
 	// an environment's light, the BRDF table they share, computed once, and the pass
-	// that draws an environment behind the scene, built for the format last drawn into.
+	// that draws an environment behind the scene, built on first use for the scene's
+	// format and sample count, and again after configure changes either.
 	environmentSampler   gpu.Sampler
 	envPrefilterPipeline gpu.Pipeline
 	envBRDFPipeline      gpu.Pipeline
 	envBRDF              gpu.Texture
 	envBRDFComputed      bool
 	envBackgroundPass    *postprocess.FullscreenPass
-	envBackgroundFormat  gpu.Format
 
 	// Volumetric fog: how finely it is simulated; the medium volume the inject pass writes
 	// and the fog volume the integrate pass accumulates from it, created when a scene
 	// first asks for volumetric fog; the two passes' pipelines; and the pass that fogs
-	// the background, built for the format it was last drawn into.
+	// the background, built like the environment's.
 	volumetricFog        VolumetricFogSettings
 	fogMedium, fogVolume gpu.Texture
 	fogInjectPipeline    gpu.Pipeline
 	fogIntegratePipeline gpu.Pipeline
 	fogBackgroundPass    *postprocess.FullscreenPass
-	fogBackgroundFormat  gpu.Format
 
 	// frameSteps is the work added at each stage of the frame, in the order it runs; and
 	// stepFrame what the steps are told, rebuilt every frame (see frame_step.go).
@@ -322,6 +339,20 @@ func (r *Renderer) configure(w, h uint32, format gpu.Format) {
 		r.sceneColor = postprocess.CreateImage(r.backend, w, h, "scene-color")
 	}
 
+	r.releaseMultisampledImages()
+	if r.isMSAAEnabled() {
+		r.createMultisampledImages()
+	}
+	r.releaseFXAASource()
+	if r.isFXAAEnabled() {
+		r.fxaaSource = r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: w, Height: h,
+			Format: format, Usage: gpu.TextureRenderTarget | gpu.TextureSampled, Label: "fxaa-source"})
+	}
+
+	// The background passes draw into the scene's images, so they are built for its
+	// format and sample count, both of which may just have changed; each is rebuilt on
+	// its next use.
+	r.releaseBackgroundPasses()
 	r.buildPipelines()
 }
 
@@ -331,6 +362,82 @@ func (r *Renderer) sceneFormat() gpu.Format {
 		return postprocess.ImageFormat
 	}
 	return r.color
+}
+
+// createMultisampledImages creates the multisampled images the scene is drawn into with
+// MSAA. Neither is sampled — a pass resolves them into images that are — so on a GPU that
+// renders in tiles they need never leave the tile.
+func (r *Renderer) createMultisampledImages() {
+	r.multisampledColor = r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: r.width, Height: r.height,
+		Format: r.sceneFormat(), Usage: gpu.TextureRenderTarget, Samples: r.sceneSamples(), Label: "scene-color-multisampled"})
+	r.multisampledDepth = r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: r.width, Height: r.height,
+		Format: gpu.FormatDepth32F, Usage: gpu.TextureDepth, Samples: r.sceneSamples(), Label: "depth-multisampled"})
+}
+
+// sceneSamples is how many samples per pixel the scene is drawn with: more than one
+// only while anti-aliasing by MSAA.
+func (r *Renderer) sceneSamples() uint8 {
+	if !r.antiAliasingEnabled {
+		return 1
+	}
+	return r.antiAliasing.msaaSamples()
+}
+
+// isMSAAEnabled reports whether the scene is drawn with more than one sample per pixel.
+func (r *Renderer) isMSAAEnabled() bool {
+	return r.sceneSamples() > 1
+}
+
+// isFXAAEnabled reports whether the finished frame is smoothed by FXAA.
+func (r *Renderer) isFXAAEnabled() bool {
+	return r.antiAliasingEnabled && r.antiAliasing == AntiAliasingFXAA
+}
+
+// releaseFXAASource frees the image FXAA reads the finished frame from, if it exists.
+func (r *Renderer) releaseFXAASource() {
+	if r.fxaaSource.IsValid() {
+		r.backend.DestroyTexture(r.fxaaSource)
+	}
+	r.fxaaSource = gpu.Texture{}
+}
+
+// sceneColorAttachment is what the scene's passes draw colour into: the multisampled
+// image with MSAA, otherwise image — the scene image, or the target — itself.
+func (r *Renderer) sceneColorAttachment(image gpu.Texture) gpu.Texture {
+	if r.isMSAAEnabled() {
+		return r.multisampledColor
+	}
+	return image
+}
+
+// sceneDepthAttachment is the depth the scene's passes draw and test against: the
+// multisampled depth with MSAA, otherwise the depth everything after them samples.
+func (r *Renderer) sceneDepthAttachment() gpu.Texture {
+	if r.isMSAAEnabled() {
+		return r.multisampledDepth
+	}
+	return r.depth
+}
+
+// releaseMultisampledImages frees the multisampled scene images, if they exist.
+func (r *Renderer) releaseMultisampledImages() {
+	for _, image := range []*gpu.Texture{&r.multisampledColor, &r.multisampledDepth} {
+		if image.IsValid() {
+			r.backend.DestroyTexture(*image)
+		}
+		*image = gpu.Texture{}
+	}
+}
+
+// releaseBackgroundPasses frees the passes that draw the environment and the fog behind
+// the scene, if they exist, for their next use to build again.
+func (r *Renderer) releaseBackgroundPasses() {
+	for _, pass := range []**postprocess.FullscreenPass{&r.envBackgroundPass, &r.fogBackgroundPass} {
+		if *pass != nil {
+			(*pass).Release()
+		}
+		*pass = nil
+	}
 }
 
 // releaseHDRImages frees the scene image and the chain's second image, if they exist.
@@ -599,6 +706,52 @@ func (r *Renderer) EnableHDR(on bool) {
 		return
 	}
 	r.hdr = on
+	// Without a target yet, configuring one later builds for the new setting.
+	if r.width == 0 {
+		return
+	}
+	r.configure(r.width, r.height, r.color)
+}
+
+// AntiAliasingEnabled reports whether the renderer smooths edges (see
+// EnableAntiAliasing).
+func (r *Renderer) AntiAliasingEnabled() bool {
+	return r.antiAliasingEnabled
+}
+
+// EnableAntiAliasing smooths the stair-steps along edges, by the method SetAntiAliasing
+// chooses — AntiAliasingMSAA4x unless another was chosen. Off by default.
+//
+// It rebuilds the images and pipelines the method needs, so it is not something to
+// switch every frame.
+func (r *Renderer) EnableAntiAliasing(on bool) {
+	r.setAntiAliasing(on, r.antiAliasing)
+}
+
+// AntiAliasing is the method edges are smoothed by while anti-aliasing is enabled (see
+// SetAntiAliasing).
+func (r *Renderer) AntiAliasing() AntiAliasing {
+	return r.antiAliasing
+}
+
+// SetAntiAliasing chooses how edges are smoothed while anti-aliasing is enabled (see
+// AntiAliasing for the methods). It does not enable it.
+//
+// With an MSAA method, steps drawing into the scene build their pipelines for
+// Frame.SceneSamples. The debug views, post-processing and the overlay are never
+// multisampled, and FXAA runs before the overlay, so the HUD's text stays sharp.
+func (r *Renderer) SetAntiAliasing(method AntiAliasing) {
+	r.setAntiAliasing(r.antiAliasingEnabled, method)
+}
+
+// setAntiAliasing applies both settings at once, rebuilding the frame's images and
+// pipelines only when what is drawn changes.
+func (r *Renderer) setAntiAliasing(on bool, method AntiAliasing) {
+	samples, fxaa := r.sceneSamples(), r.isFXAAEnabled()
+	r.antiAliasingEnabled, r.antiAliasing = on, method
+	if r.sceneSamples() == samples && r.isFXAAEnabled() == fxaa {
+		return
+	}
 	// Without a target yet, configuring one later builds for the new setting.
 	if r.width == 0 {
 		return
@@ -1353,9 +1506,12 @@ func (r *Renderer) uploadSharedResources(cmd gpu.CommandBuffer) {
 func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture, cmd gpu.CommandBuffer) {
 	r.profiler.beginGPUFrame(cmd)
 
-	// 5a. The scene is shaded into the HDR scene image, or without HDR straight into the
-	// target. Tell the frame steps so, then run the ones that go before everything else.
-	sceneImage := target
+	// 5a. The frame is finished in the display image: the target, or with FXAA an image
+	// FXAA then smooths into it. The scene is shaded into the HDR scene image, or without
+	// HDR straight into the display image. Tell the frame steps so, then run the ones
+	// that go before everything else.
+	displayImage := r.displayImage(target)
+	sceneImage := displayImage
 	if r.hdr {
 		sceneImage = r.sceneColor
 	}
@@ -1393,20 +1549,24 @@ func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture,
 	depthFilled := r.encodeDepthPrepass(st, views.main, cmd)
 	r.encodeFrameSteps(FrameStageAfterDepth, cmd)
 
-	// 5h. Shade. Without HDR that is the finished image. With it, the post-processing
-	// chain samples the scene image, and may sample its depth.
+	// 5h. Shade. Without HDR that is the finished image.
 	r.encodeDrawingPass(st, views, depthFilled, sceneImage, cmd)
-	if !r.hdr {
-		return
-	}
-	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth, gpu.StageFragment, 0)
 
-	// 5i. Run the post-processing chain over the scene image, then tone-map the result
-	// into the target.
-	r.profiler.beginPass(GPUPassPostProcessing, cmd)
-	image := r.encodePostProcessing(cmd)
-	r.encodeToneMapping(image, target, cmd)
-	r.profiler.endPass(GPUPassPostProcessing, cmd)
+	// 5i. With HDR, run the post-processing chain over the scene image, then tone-map the
+	// result into the display image.
+	r.encodePostProcessingAndToneMapping(displayImage, cmd)
+
+	// 5j. With FXAA, smooth the display image into the target.
+	r.encodeFXAA(target, cmd)
+}
+
+// displayImage is the image the frame is finished in: target, or with FXAA the image
+// FXAA reads, to smooth it into target.
+func (r *Renderer) displayImage(target gpu.Texture) gpu.Texture {
+	if r.isFXAAEnabled() {
+		return r.fxaaSource
+	}
+	return target
 }
 
 // prepareStepFrame fills in what every stage of this frame tells its steps. image is
@@ -1424,9 +1584,10 @@ func (r *Renderer) prepareStepFrame(st *renderState, views frameViews, image gpu
 		DeltaTime:        deltaTime,
 		Width:            r.width,
 		Height:           r.height,
-		SceneDepth:       r.depth,
-		SceneColor:       image,
+		SceneDepth:       r.sceneDepthAttachment(),
+		SceneColor:       r.sceneColorAttachment(image),
 		SceneColorFormat: r.sceneFormat(),
+		SceneSamples:     r.sceneSamples(),
 		Backend:          r.backend,
 		LinearSampler:    r.ensureLinearSampler(),
 	}
@@ -1434,6 +1595,11 @@ func (r *Renderer) prepareStepFrame(st *renderState, views frameViews, image gpu
 		r.stepFrame.ViewProj = views.main.viewProj
 		r.stepFrame.InverseViewProj = views.main.viewProj.Inv()
 		r.stepFrame.Eye = views.eye
+		r.stepFrame.PreviousViewProj = views.main.viewProj
+		if st.hasPreviousView {
+			r.stepFrame.PreviousViewProj = st.previousViewProj
+		}
+		st.previousViewProj, st.hasPreviousView = views.main.viewProj, true
 	}
 }
 
@@ -1854,7 +2020,7 @@ func (r *Renderer) encodeDepthPrepass(st *renderState, main view, cmd gpu.Comman
 
 	r.profiler.beginPass(GPUPassPrepass, cmd)
 	cmd.BeginRenderPass(gpu.RenderTargets{
-		Depth: &gpu.DepthAttachment{Texture: r.depth, Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: 0.0},
+		Depth: &gpu.DepthAttachment{Texture: r.sceneDepthAttachment(), Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: 0.0},
 	})
 	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
 	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
@@ -1907,6 +2073,7 @@ func (r *Renderer) encodeDrawingPass(st *renderState, views frameViews, depthFil
 	r.encodeFogBackground(image, cmd)
 	r.encodeTransparentPass(transparent, st, views, image, cmd)
 	r.encodeFrameSteps(FrameStageAfterTransparent, cmd)
+	r.encodeSceneResolve(image, cmd)
 	r.profiler.endPass(GPUPassForward, cmd)
 }
 
@@ -1919,8 +2086,8 @@ func (r *Renderer) encodeOpaquePass(batches batchRange, st *renderState, views f
 	}
 
 	cmd.BeginRenderPass(gpu.RenderTargets{
-		Color: []gpu.ColorAttachment{{Texture: image, Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: [4]float32(r.clear)}},
-		Depth: &gpu.DepthAttachment{Texture: r.depth, Load: depthLoad, Store: gpu.StoreKeep, Clear: 0.0},
+		Color: []gpu.ColorAttachment{{Texture: r.sceneColorAttachment(image), Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: [4]float32(r.clear)}},
+		Depth: &gpu.DepthAttachment{Texture: r.sceneDepthAttachment(), Load: depthLoad, Store: gpu.StoreKeep, Clear: 0.0},
 	})
 	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
 	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
@@ -1950,7 +2117,7 @@ func (r *Renderer) encodeEnvironmentBackground(image gpu.Texture, cmd gpu.Comman
 		intensity:       environment.Intensity,
 		rotation:        environment.Rotation,
 	}
-	pass.DrawWithDepth(image, r.depth, r.width, r.height, gpu.LoadKeep, frame.Root(image, r.width, r.height).With(utils.ToBytes(&params)), cmd)
+	pass.DrawWithDepth(r.sceneColorAttachment(image), r.sceneDepthAttachment(), r.width, r.height, gpu.LoadKeep, frame.Root(image, r.width, r.height).With(utils.ToBytes(&params)), cmd)
 }
 
 // encodeFogBackground fogs the pixels no geometry covers, for a scene whose fog is
@@ -1974,7 +2141,7 @@ func (r *Renderer) encodeFogBackground(image gpu.Texture, cmd gpu.CommandBuffer)
 		volume:    r.fogVolume.Index,
 		lastSlice: 1 - 0.5/float32(r.volumetricFog.resolved().Depth),
 	}
-	pass.DrawWithDepth(image, r.depth, r.width, r.height, gpu.LoadKeep, frame.Root(image, r.width, r.height).With(utils.ToBytes(&params)), cmd)
+	pass.DrawWithDepth(r.sceneColorAttachment(image), r.sceneDepthAttachment(), r.width, r.height, gpu.LoadKeep, frame.Root(image, r.width, r.height).With(utils.ToBytes(&params)), cmd)
 }
 
 // encodeTransparentPass draws the blended batches, back to front, then the particles,
@@ -1989,8 +2156,8 @@ func (r *Renderer) encodeTransparentPass(batches batchRange, st *renderState, vi
 	// Blending reads what the opaque pass wrote, and the depth test its depth.
 	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth, gpu.StageColorOutput|gpu.StageDepth, 0)
 	cmd.BeginRenderPass(gpu.RenderTargets{
-		Color: []gpu.ColorAttachment{{Texture: image, Load: gpu.LoadKeep, Store: gpu.StoreKeep}},
-		Depth: &gpu.DepthAttachment{Texture: r.depth, Load: gpu.LoadKeep, Store: gpu.StoreKeep},
+		Color: []gpu.ColorAttachment{{Texture: r.sceneColorAttachment(image), Load: gpu.LoadKeep, Store: gpu.StoreKeep}},
+		Depth: &gpu.DepthAttachment{Texture: r.sceneDepthAttachment(), Load: gpu.LoadKeep, Store: gpu.StoreKeep},
 	})
 	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
 	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
@@ -1998,6 +2165,29 @@ func (r *Renderer) encodeTransparentPass(batches batchRange, st *renderState, vi
 	r.drawBackToFront(batches, st, views, cmd)
 	r.drawParticles(st, views, cmd)
 
+	cmd.EndRenderPass()
+}
+
+// encodeSceneResolve resolves the multisampled scene, once everything that draws into it
+// has: its colour averaged into image, which post-processing or the display reads, and
+// its depth into the depth post-processing samples. Without MSAA the scene was drawn
+// into both directly, and there is nothing to do.
+//
+// A pass of its own, with nothing drawn, because which pass draws last depends on the
+// frame — the transparent pass is skipped when it has nothing to draw, and frame steps
+// may come after it. And the only place either is resolved, because a resolve has to
+// be the samples' last use (see gpu.ColorAttachment.ResolveTexture): a pass that kept
+// the depth for the passes after it could not resolve it too.
+func (r *Renderer) encodeSceneResolve(image gpu.Texture, cmd gpu.CommandBuffer) {
+	if !r.isMSAAEnabled() {
+		return
+	}
+
+	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth, gpu.StageColorOutput|gpu.StageDepth, 0)
+	cmd.BeginRenderPass(gpu.RenderTargets{
+		Color: []gpu.ColorAttachment{{Texture: r.multisampledColor, Load: gpu.LoadKeep, Store: gpu.StoreDontCare, ResolveTexture: image}},
+		Depth: &gpu.DepthAttachment{Texture: r.multisampledDepth, Load: gpu.LoadKeep, Store: gpu.StoreDontCare, ResolveTexture: r.depth},
+	})
 	cmd.EndRenderPass()
 }
 
@@ -2075,6 +2265,21 @@ func (r *Renderer) drawParticles(st *renderState, views frameViews, cmd gpu.Comm
 	}
 }
 
+// encodePostProcessingAndToneMapping finishes an HDR frame in displayImage: it runs the
+// post-processing chain over the scene image, which samples it and may sample its depth,
+// then tone-maps the result. Without HDR the scene was shaded into displayImage already.
+func (r *Renderer) encodePostProcessingAndToneMapping(displayImage gpu.Texture, cmd gpu.CommandBuffer) {
+	if !r.hdr {
+		return
+	}
+
+	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth, gpu.StageFragment, 0)
+	r.profiler.beginPass(GPUPassPostProcessing, cmd)
+	image := r.encodePostProcessing(cmd)
+	r.encodeToneMapping(image, displayImage, cmd)
+	r.profiler.endPass(GPUPassPostProcessing, cmd)
+}
+
 // encodePostProcessing runs every step of the chain, in order, over the shaded scene,
 // and returns the image the last one wrote. With an empty chain that is the scene image
 // itself.
@@ -2115,6 +2320,22 @@ func (r *Renderer) encodeToneMapping(image, target gpu.Texture, cmd gpu.CommandB
 		exposure: r.frame.Views[0].Exposure,
 	}
 	r.toneMapPass.Draw(target, r.width, r.height, gpu.LoadClear, utils.ToBytes(&root), cmd)
+}
+
+// encodeFXAA smooths the finished frame, in the image FXAA reads, into target. It runs
+// on the frame as it will be displayed — after tone mapping, before the screenshot and
+// the overlay — since that is where a step in brightness is what the eye sees as an
+// edge, and the overlay's text has to stay sharp. Without FXAA the frame was finished in
+// target already.
+func (r *Renderer) encodeFXAA(target gpu.Texture, cmd gpu.CommandBuffer) {
+	if !r.isFXAAEnabled() {
+		return
+	}
+
+	cmd.Barrier(gpu.StageColorOutput, gpu.StageFragment, 0)
+	frame := r.postProcessingFrame(r.fxaaSource, target)
+	root := frame.Root(r.fxaaSource, r.width, r.height)
+	r.fxaaPass.Draw(target, r.width, r.height, gpu.LoadDontCare, utils.ToBytes(&root), cmd)
 }
 
 // postProcessingFrame is what a post-processing pass reading source and writing target
@@ -2399,24 +2620,20 @@ func (r *Renderer) ensureEnvironmentBRDF() gpu.Texture {
 }
 
 // ensureEnvironmentBackgroundPass builds the pass that draws an environment behind the
-// scene, for the format the scene is shaded into, on first use and whenever that format
-// changes. Like the fog's background, its depth test confines it to where no geometry is.
+// scene, for the format and sample count the scene is shaded with, on first use after
+// configure. Like the fog's background, its depth test confines it to where no geometry is.
 func (r *Renderer) ensureEnvironmentBackgroundPass() *postprocess.FullscreenPass {
-	format := r.sceneFormat()
-	if r.envBackgroundPass != nil && r.envBackgroundFormat == format {
-		return r.envBackgroundPass
-	}
 	if r.envBackgroundPass != nil {
-		r.envBackgroundPass.Release()
+		return r.envBackgroundPass
 	}
 	r.envBackgroundPass = postprocess.NewFullscreenPass(r.backend, postprocess.FullscreenPassDescriptor{
 		Fragment:     shaders.ForBackend(r.backend, shaders.EnvBackground),
-		Format:       format,
+		Format:       r.sceneFormat(),
+		Samples:      r.sceneSamples(),
 		DepthFormat:  gpu.FormatDepth32F,
 		DepthCompare: gpu.CompareGreaterEqual,
 		Label:        "environment-background",
 	})
-	r.envBackgroundFormat = format
 	return r.envBackgroundPass
 }
 
@@ -2450,30 +2667,26 @@ func (r *Renderer) releaseFogVolumes() {
 	}
 }
 
-// ensureFogBackgroundPass builds the pass that fogs the background, for the format the
-// scene is shaded into, on first use and again whenever that format changes. Its depth
+// ensureFogBackgroundPass builds the pass that fogs the background, for the format and
+// sample count the scene is shaded with, on first use after configure. Its depth
 // test is what confines it to the background: the triangle lies on the far plane, so
 // it passes only where depth still holds the far plane's clear value, and pixels with
 // geometry are rejected before the shader runs. It composites through "over" blending,
 // which every backend has (see fog_background.frag.glsl for how that comes out as the
 // fog).
 func (r *Renderer) ensureFogBackgroundPass() *postprocess.FullscreenPass {
-	format := r.sceneFormat()
-	if r.fogBackgroundPass != nil && r.fogBackgroundFormat == format {
-		return r.fogBackgroundPass
-	}
 	if r.fogBackgroundPass != nil {
-		r.fogBackgroundPass.Release()
+		return r.fogBackgroundPass
 	}
 	r.fogBackgroundPass = postprocess.NewFullscreenPass(r.backend, postprocess.FullscreenPassDescriptor{
 		Fragment:     shaders.ForBackend(r.backend, shaders.FogBackground),
-		Format:       format,
+		Format:       r.sceneFormat(),
+		Samples:      r.sceneSamples(),
 		Blend:        []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}}},
 		DepthFormat:  gpu.FormatDepth32F,
 		DepthCompare: gpu.CompareGreaterEqual,
 		Label:        "fog-background",
 	})
-	r.fogBackgroundFormat = format
 	return r.fogBackgroundPass
 }
 
@@ -2964,18 +3177,18 @@ func (r *Renderer) buildPipelines() {
 	// No fragment shader at all: a stage that outputs nothing is not free — it still
 	// runs per fragment — and leaving it out is what lets the driver take its
 	// depth-only path.
-	depthOnly := func(cull gpu.CullMode, label string) gpu.Pipeline {
+	depthOnly := func(cull gpu.CullMode, samples uint8, label string) gpu.Pipeline {
 		return r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
 			VertexShader: shaders.ForBackend(r.backend, shaders.SceneShadowVert),
 			Topology:     gpu.TopologyTriangles, DepthFormat: gpu.FormatDepth32F,
 			DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareGreater,
-			CullMode: cull, FrontFaceCW: true, Label: label,
+			Samples: samples, CullMode: cull, FrontFaceCW: true, Label: label,
 		})
 	}
 	// Culling is off for the shadow pass: it only decides which of a surface's two
 	// faces writes the depth they share, and thin geometry must still occlude from the
 	// light's view.
-	r.shadowPipeline = depthOnly(gpu.CullNone, "scene-shadow")
+	r.shadowPipeline = depthOnly(gpu.CullNone, 1, "scene-shadow")
 
 	// The depth prepass is the same pass pointed at the view camera, but one pipeline
 	// per cull mode: a prepass must cull exactly as the shading pass will. Sharing a
@@ -2983,13 +3196,14 @@ func (r *Renderer) buildPipelines() {
 	// and a surface the viewer was never meant to see then occludes everything behind
 	// it — a far wall hiding the room, terrain hiding what is under it.
 	for i := range r.prepassPipelines {
-		r.prepassPipelines[i] = depthOnly(gpu.CullMode(i), "scene-depth-prepass")
+		r.prepassPipelines[i] = depthOnly(gpu.CullMode(i), r.sceneSamples(), "scene-depth-prepass")
 	}
 
 	for i, k := range r.drawPipelineKeys {
 		r.drawPipelines[i] = r.buildDrawPipe(k)
 	}
 	r.buildToneMapPass()
+	r.buildFXAAPass()
 	r.pipelinesReady = true
 	if r.overlay != nil {
 		r.overlay.destroy()
@@ -3033,6 +3247,7 @@ func (r *Renderer) buildDrawPipe(k materialPipeline) gpu.Pipeline {
 		// difference is which of two exactly-coplanar surfaces wins, where nothing was
 		// well defined to begin with.
 		DepthFormat: gpu.FormatDepth32F, DepthTest: true, DepthWrite: depthWrite, DepthCompare: gpu.CompareGreaterEqual,
+		Samples: r.sceneSamples(),
 		// The renderer flips clip-space Y (Vulkan NDC is Y-down), which reverses
 		// triangle winding, so front faces are clockwise on screen.
 		CullMode: gpu.CullMode(k.cull), FrontFaceCW: true, Blend: blend,
@@ -3051,6 +3266,22 @@ func (r *Renderer) buildToneMapPass() {
 			Fragment: shaders.ToneMap,
 			Format:   r.color,
 			Label:    "tone-map",
+		})
+	}
+}
+
+// buildFXAAPass (re)creates the pass that smooths the finished frame into the target,
+// which depends on the target's format. Without FXAA there is none.
+func (r *Renderer) buildFXAAPass() {
+	if r.fxaaPass != nil {
+		r.fxaaPass.Release()
+		r.fxaaPass = nil
+	}
+	if r.isFXAAEnabled() {
+		r.fxaaPass = postprocess.NewFullscreenPass(r.backend, postprocess.FullscreenPassDescriptor{
+			Fragment: shaders.FXAA,
+			Format:   r.color,
+			Label:    "fxaa",
 		})
 	}
 }
@@ -3301,6 +3532,22 @@ func (r *Renderer) registerBuiltins(c *console.Console) {
 		},
 		"render in HDR: offscreen scene image, post-processing, tone mapping")
 
+	console.BindFunc(c, "antialiasing", r.AntiAliasingEnabled,
+		func(v bool) error { r.EnableAntiAliasing(v); return nil },
+		"smooth edges, by antialiasing.method")
+
+	c.Register("antialiasing.method",
+		"how edges are smoothed: "+strings.Join(AntiAliasingNames(), "/"),
+		func() string { return r.AntiAliasing().String() },
+		func(v string) error {
+			method, ok := ParseAntiAliasing(v)
+			if !ok {
+				return fmt.Errorf("unknown method %q; want one of %s", v, strings.Join(AntiAliasingNames(), ", "))
+			}
+			r.SetAntiAliasing(method)
+			return nil
+		})
+
 	console.BindFunc(c, "stats", r.StatsVisible,
 		func(v bool) error { r.ShowFPS(v); return nil },
 		"show the FPS / CPU / GPU HUD")
@@ -3434,6 +3681,10 @@ func (r *Renderer) Destroy() {
 		r.toneMapPass.Release()
 		r.toneMapPass = nil
 	}
+	if r.fxaaPass != nil {
+		r.fxaaPass.Release()
+		r.fxaaPass = nil
+	}
 	for _, p := range r.debugPipelines {
 		if p.H != 0 {
 			r.backend.DestroyPipeline(p)
@@ -3462,6 +3713,8 @@ func (r *Renderer) Destroy() {
 	if r.fogBackgroundPass != nil {
 		r.fogBackgroundPass.Release()
 	}
+	r.releaseMultisampledImages()
+	r.releaseFXAASource()
 	for _, t := range []gpu.Texture{r.depth, r.sceneColor, r.postColor} {
 		if t.IsValid() {
 			r.backend.DestroyTexture(t)
