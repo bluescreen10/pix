@@ -16,8 +16,8 @@ import (
 
 	"github.com/bluescreen10/pix/postprocess"
 
-	"github.com/bluescreen10/gamekit"
 	"github.com/bluescreen10/gamekit/gpu"
+	"github.com/bluescreen10/gamekit/ui"
 	"github.com/bluescreen10/gamekit/utils"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/console"
@@ -32,8 +32,8 @@ import (
 // Renderer is the single entry point. It obtains a gpu backend from the registry
 // (so it never imports a concrete backend), owns the shared resources (geometry /
 // materials / textures as ref-counted handles) and the GPU-driven pipelines, and
-// renders a Scene from the cameras in it. It renders either to a window swapchain (see the
-// platform-specific SetSurface) or, for headless use, to a render target texture
+// renders a Scene from the cameras in it. It renders either to a drawable's swapchain (see
+// RendererConfig.Drawable) or, for headless use, to a render target texture
 // (SetRenderTarget). There is a single Renderer type for both.
 type Renderer struct {
 	backend       gpu.Backend
@@ -44,7 +44,11 @@ type Renderer struct {
 	depth         gpu.Texture
 
 	// Presentation target: a swapchain (windowed) or a render-target texture (headless).
-	swapchain  gpu.Swapchain
+	// The swapchain presents to drawable, and was last sized for drawableSize — what was
+	// asked for, which the swapchain may have rounded.
+	drawable     ui.Drawable
+	drawableSize ui.Size
+	swapchain    gpu.Swapchain
 	target     gpu.Texture
 	hasTarget  bool
 	ownsTarget bool // renderer created the target (via NewOffscreenRenderer)
@@ -197,8 +201,8 @@ type Renderer struct {
 }
 
 // NewRenderer creates a renderer from cfg: it selects and initializes a registered
-// backend, then configures the presentation target — a window swapchain (cfg.Window)
-// or an internal offscreen target (cfg.Width/Height when Window is nil). If neither
+// backend, then configures the presentation target — a swapchain presenting to
+// cfg.Drawable, or an internal offscreen target (cfg.Width/Height when Drawable is nil). If neither
 // is set, configure one later (SetRenderTarget) before rendering. A nil cfg is the
 // zero config.
 func NewRenderer(cfg *RendererConfig) (*Renderer, error) {
@@ -240,10 +244,10 @@ func NewRenderer(cfg *RendererConfig) (*Renderer, error) {
 	}
 
 	switch {
-	case cfg.Window != nil:
-		if err := r.attachWindow(cfg.Window, cfg.Width, cfg.Height); err != nil {
+	case cfg.Drawable != nil:
+		if err := r.attachDrawable(cfg.Drawable); err != nil {
 			r.Destroy()
-			return nil, fmt.Errorf("render: attach window: %w", err)
+			return nil, fmt.Errorf("render: attach drawable: %w", err)
 		}
 	case cfg.Width > 0 && cfg.Height > 0:
 		r.attachTexture(cfg.Width, cfg.Height)
@@ -258,10 +262,17 @@ func NewOffscreenRenderer(w, h uint32) (*Renderer, error) {
 	return NewRenderer(&RendererConfig{Width: w, Height: h})
 }
 
-// attachWindow lets the windowing package own platform handles and surface
-// creation. Pix only needs the resulting opaque surface and swapchain extent.
-func (r *Renderer) attachWindow(w *gamekit.Window, width, height uint32) error {
-	surface, err := w.CreateSurface(r.backend)
+// attachDrawable creates a swapchain presenting to drawable, sized to its framebuffer.
+// The drawable must already have a size: a canvas gets one when its window lays it out.
+func (r *Renderer) attachDrawable(drawable ui.Drawable) error {
+	if _, ok := r.backend.(swapchainSizer); !ok {
+		return fmt.Errorf("backend does not expose swapchain size")
+	}
+	size := drawable.FramebufferSize()
+	if !size.IsValid() {
+		return fmt.Errorf("drawable has no framebuffer yet (%dx%d); lay it out first", size.Width, size.Height)
+	}
+	surface, err := r.backend.CreateSurface(drawable)
 	if err != nil {
 		return err
 	}
@@ -269,19 +280,27 @@ func (r *Renderer) attachWindow(w *gamekit.Window, width, height uint32) error {
 	if err != nil {
 		return err
 	}
-	r.swapchain, err = r.backend.CreateSwapchain(surface, gpu.SwapchainDescriptor{Width: width, Height: height, Format: format})
+	r.swapchain, err = r.backend.CreateSwapchain(surface, gpu.SwapchainDescriptor{
+		Width:  uint32(size.Width),
+		Height: uint32(size.Height),
+		Format: format,
+	})
 	if err != nil {
 		return err
 	}
-	sizer, ok := r.backend.(swapchainSizer)
-	if !ok {
-		return fmt.Errorf("backend does not expose swapchain size")
-	}
-	sw, sh := sizer.SwapchainSize(r.swapchain)
+	r.drawable = drawable
+	r.drawableSize = size
 	r.hasTarget = false
 	r.clear = colors.RGBA32F{}
-	r.configure(sw, sh, r.backend.SwapchainFormat(r.swapchain))
+	r.configureForSwapchain()
 	return nil
+}
+
+// configureForSwapchain sizes the frame's images to the swapchain's backbuffers, which
+// may differ from the size asked for: a surface can round it.
+func (r *Renderer) configureForSwapchain() {
+	width, height := r.backend.(swapchainSizer).SwapchainSize(r.swapchain)
+	r.configure(width, height, r.backend.SwapchainFormat(r.swapchain))
 }
 
 // sRGBSwapchainFormat picks the backbuffer format for a window: an 8-bit sRGB one, in
@@ -1059,10 +1078,12 @@ func (r *Renderer) Render(scene scenes.Producer) {
 		panic("renderer has no target")
 	}
 
-	// 1. Run the console before anything of the frame exists. Its commands change the
-	// renderer's settings, and some — switching HDR, say — rebuild resources the frame
+	// 1. Follow the drawable's size and run the console before anything of the frame
+	// exists. A resize rebuilds the frame's images, and the console's commands change the
+	// renderer's settings, some — switching HDR, say — rebuilding resources the frame
 	// would be recording against, uploading some of them with a command buffer of their
 	// own. They have to land between frames, not in the middle of one.
+	r.resizeToDrawable()
 	r.updateConsole()
 
 	// 2. Begin the frame. One command buffer holds all of it: the shared uploads record
@@ -1105,6 +1126,22 @@ func (r *Renderer) Render(scene scenes.Producer) {
 // ---------------------------------------------------------------------------------------
 // 3. Extract
 // ---------------------------------------------------------------------------------------
+
+// resizeToDrawable resizes the swapchain and the frame's images to the drawable's
+// framebuffer, when it has changed since the last frame. A drawable with no area — a
+// minimized window, a collapsed canvas — keeps the size it had.
+func (r *Renderer) resizeToDrawable() {
+	if r.drawable == nil || r.hasTarget {
+		return
+	}
+	size := r.drawable.FramebufferSize()
+	if !size.IsValid() || size == r.drawableSize {
+		return
+	}
+	r.drawableSize = size
+	r.backend.ResizeSwapchain(r.swapchain, uint32(size.Width), uint32(size.Height))
+	r.configureForSwapchain()
+}
 
 // updateConsole lets the console read this frame's input and run what it was given. It
 // reads input every frame, open or not: the key that opens it arrives while it is
@@ -3575,7 +3612,7 @@ func (r *Renderer) registerBuiltins(c *console.Console) {
 		})
 
 	// Read-only: no setter, so the console reports them rather than pretending they
-	// can be assigned. Resizing is driven by the window, not by a variable.
+	// can be assigned. Resizing follows the drawable, not a variable.
 	c.Register("size", "framebuffer size in pixels",
 		func() string { w, h := r.Size(); return fmt.Sprintf("%dx%d", w, h) }, nil)
 	c.Register("aspect", "framebuffer aspect ratio",

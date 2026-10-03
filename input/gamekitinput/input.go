@@ -1,10 +1,11 @@
-// Package gamekitinput adapts a GameKit window to Pix's input interfaces.
+// Package gamekitinput adapts GameKit's ui.Input — a window from any ui backend — to
+// Pix's input interfaces.
 package gamekitinput
 
 import (
-	"github.com/bluescreen10/gamekit"
 	"github.com/bluescreen10/gamekit/keyboard"
 	"github.com/bluescreen10/gamekit/pointer"
+	"github.com/bluescreen10/gamekit/ui"
 	"github.com/bluescreen10/pix/input"
 )
 
@@ -14,47 +15,58 @@ var _ input.TextInput = (*Input)(nil)
 var _ input.KeyEvents = (*Input)(nil)
 
 type Input struct {
-	window *gamekit.Window
+	source ui.Input
 
-	// Buffered by GameKit callbacks and drained by Chars/Keys. No mutex: GameKit invokes
-	// callbacks on the thread calling PollEvents, which is the same thread that
-	// drains them.
+	// Buffered by the source's handlers and drained by Chars/Keys. No mutex: a ui
+	// backend dispatches events on the thread calling PollEvents, which is the same
+	// thread that drains them.
 	chars []rune
 	keys  []input.KeyEvent
+
+	unsubscribeText ui.Unsubscribe
+	unsubscribeKey  ui.Unsubscribe
 }
 
-func New(window *gamekit.Window) *Input {
+// New reads input from source, usually a ui.Window. Close stops it listening.
+func New(source ui.Input) *Input {
 	in := &Input{
-		window: window,
+		source: source,
 	}
-
-	window.SetCharCallback(in.charCallback)
-	window.SetKeyCallback(in.keyCallback)
+	in.unsubscribeText = source.OnText(in.bufferChar)
+	in.unsubscribeKey = source.OnKey(in.bufferKey)
 	return in
 }
 
+// Close stops buffering the source's text and key events.
+func (i *Input) Close() {
+	i.unsubscribeText()
+	i.unsubscribeKey()
+}
+
 func (i *Input) Pos() (x, y float64) {
-	return i.window.GetPointerPos()
+	return i.source.PointerPosition()
 }
 
 func (i *Input) Scroll() (x, y float64) {
-	return i.window.GetScroll()
+	return i.source.ScrollOffset()
 }
 
 func (i *Input) Button(button input.MouseButton) input.MouseButtonAction {
-	return input.MouseButtonAction(i.window.GetPointerButton(pointer.Button(button)))
+	return input.MouseButtonAction(i.source.PointerButtonState(pointer.Button(button)))
 }
 
 func (i *Input) Key(key input.Key) input.KeyAction {
-	return input.KeyAction(i.window.GetKey(keyboard.Key(key)))
+	return input.KeyAction(i.source.KeyState(keyboard.Key(key)))
 }
 
+// DisablePointer hides the pointer and locks it to the window, for mouse-look.
 func (i *Input) DisablePointer() {
-	i.window.DisablePointer()
+	i.source.SetPointerMode(pointer.Disabled)
 }
 
+// EnablePointer shows the pointer again and lets it leave the window.
 func (i *Input) EnablePointer() {
-	i.window.EnablePointer()
+	i.source.SetPointerMode(pointer.Normal)
 }
 
 // Chars drains the characters typed since the last call.
@@ -79,14 +91,14 @@ func (i *Input) Keys() []input.KeyEvent {
 	return out
 }
 
-func (i *Input) charCallback(_ *gamekit.Window, char rune) {
+func (i *Input) bufferChar(char rune) {
 	i.chars = append(i.chars, char)
 }
 
-func (i *Input) keyCallback(_ *gamekit.Window, key keyboard.Key, _ int, action keyboard.KeyAction, mods keyboard.ModifierKey) {
+func (i *Input) bufferKey(event ui.KeyEvent) {
 	i.keys = append(i.keys, input.KeyEvent{
-		Key:    input.Key(key),
-		Action: input.KeyAction(action),
-		Mods:   input.ModifierKey(mods),
+		Key:    input.Key(event.Key),
+		Action: input.KeyAction(event.Action),
+		Mods:   input.ModifierKey(event.Modifiers),
 	})
 }

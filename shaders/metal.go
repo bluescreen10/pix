@@ -5,6 +5,16 @@ import (
 	_ "embed"
 )
 
+// Select returns the variant of a shader that backend runs: metallib on Metal, spirv on
+// everything else. It is for shaders compiled outside this package — by a package of
+// effects built on pix, say, with cmd/shadercompile — which ForBackend does not know.
+func Select(backend any, spirv, metallib []byte) []byte {
+	if format, ok := backend.(interface{ ShaderFormat() string }); ok && format.ShaderFormat() == "metal" {
+		return metallib
+	}
+	return spirv
+}
+
 // ForBackend selects a precompiled native variant of a built-in shader. Unknown
 // shader bytes pass through unchanged: custom materials must provide shaders in
 // their backend's format. No shader tools run when an application starts.

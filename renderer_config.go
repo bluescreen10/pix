@@ -1,6 +1,6 @@
 package pix
 
-import "github.com/bluescreen10/gamekit"
+import "github.com/bluescreen10/gamekit/ui"
 
 // PowerPreference hints which GPU to select when the backend/system exposes a
 // choice (e.g. integrated vs discrete). Honored only when the backend supports it.
@@ -17,11 +17,13 @@ const (
 // (SetClearColor). The zero value is a headless renderer with no target yet — set
 // one via SetRenderTarget, or provide Width/Height for an internally-owned one.
 type RendererConfig struct {
-	// Window is the GameKit window to present to; nil for headless rendering.
-	Window *gamekit.Window
+	// Drawable is what the renderer presents to — a ui.Window, or a ui.Canvas placed
+	// among native controls; nil for headless rendering. The renderer follows its
+	// framebuffer size, resizing its images when the drawable is resized.
+	Drawable ui.Drawable
 
-	// Width, Height size the internal offscreen target when Window is nil, and act
-	// as a swapchain extent hint when a Window is set.
+	// Width, Height size the internal offscreen target when Drawable is nil. With a
+	// Drawable they are ignored: its framebuffer size is used.
 	Width, Height uint32
 
 	// Backend selects a registered backend ("vulkan" or "metal"). Empty uses
@@ -35,8 +37,8 @@ type RendererConfig struct {
 	// 1 elsewhere. Width/Height are in framebuffer pixels, so without this the
 	// renderer cannot tell a 2400px-wide Retina window from a 2400px 1x one, and
 	// everything it sizes for a human to read (the debug HUD, the console) comes out
-	// half as large as intended. Derive it from the GameKit window's framebuffer and
-	// logical sizes.
+	// half as large as intended. Derive it from the drawable's framebuffer and logical
+	// sizes.
 	//
 	// 0 means 1: correct for a plain 1x display, and a safe default everywhere else.
 	Scale float32
