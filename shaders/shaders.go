@@ -63,6 +63,7 @@ import _ "embed"
 //go:generate go run ../cmd/shadercompile -i src/env_prefilter.comp.glsl -o spv:build/env_prefilter.comp.spv -o metallib:build/env_prefilter.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/env_brdf.comp.glsl -o spv:build/env_brdf.comp.spv -o metallib:build/env_brdf.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/env_background.frag.glsl -o spv:build/env_background.frag.spv -o metallib:build/env_background.frag.metalbin
+//go:generate go run ../cmd/shadercompile -i src/light_clusters.comp.glsl -o spv:build/light_clusters.comp.spv -o metallib:build/light_clusters.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/fog_inject.comp.glsl -o spv:build/fog_inject.comp.spv -o metallib:build/fog_inject.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/fog_integrate.comp.glsl -o spv:build/fog_integrate.comp.spv -o metallib:build/fog_integrate.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/fog_background.frag.glsl -o spv:build/fog_background.frag.spv -o metallib:build/fog_background.frag.metalbin
@@ -174,6 +175,14 @@ var EnvBRDF []byte
 
 //go:embed build/env_background.frag.spv
 var EnvBackground []byte
+
+// --- light clusters ---
+
+// LightClusters lists, for every cell of the main view's light cluster grid, the point
+// and spot lights that reach into it; lit shaders read only their cell's lights.
+//
+//go:embed build/light_clusters.comp.spv
+var LightClusters []byte
 
 // --- volumetric fog (see Renderer.SetVolumetricFog) ---
 //

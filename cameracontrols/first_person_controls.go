@@ -47,6 +47,8 @@ type FirstPersonControls struct {
 	moveSpeed float32 // units/second
 	lookSpeed float32 // radians/pixel
 
+	isMouseLookEnabled bool
+
 	keyMapping KeyMapping
 
 	mousePos   glm.Vec2f
@@ -68,6 +70,8 @@ func NewFirstPerson(camera camera, in fpsInput) *FirstPersonControls {
 
 		moveSpeed: 5,
 		lookSpeed: 0.0025,
+
+		isMouseLookEnabled: true,
 
 		keyMapping: DefaultKeyMapping,
 
@@ -97,6 +101,20 @@ func (c *FirstPersonControls) SetLookSpeed(speed float32) {
 	c.lookSpeed = speed
 }
 
+// IsMouseLookEnabled reports whether moving the mouse steers the camera (see
+// EnableMouseLook).
+func (c *FirstPersonControls) IsMouseLookEnabled() bool {
+	return c.isMouseLookEnabled
+}
+
+// EnableMouseLook sets whether moving the mouse steers the camera. On by default. Turn
+// it off while the cursor is free to use other UI: the keys still fly the camera, and
+// the mouse's travel meanwhile is ignored, so the view does not jump when it comes back
+// on.
+func (c *FirstPersonControls) EnableMouseLook(on bool) {
+	c.isMouseLookEnabled = on
+}
+
 // SetKeyMapping replaces the fly-movement key bindings.
 func (c *FirstPersonControls) SetKeyMapping(mapping KeyMapping) {
 	c.keyMapping = mapping
@@ -111,6 +129,9 @@ func (c *FirstPersonControls) Update() {
 	newPos := glm.Vec2f{float32(x), float32(y)}
 	deltaMouse := newPos.Sub(c.mousePos)
 	c.mousePos = newPos
+	if !c.isMouseLookEnabled {
+		deltaMouse = glm.Vec2f{}
+	}
 
 	// Mouse-look: yaw increases turning right, pitch increases looking up. Screen Y
 	// grows downward, so a downward mouse move (positive deltaY) should pitch down.

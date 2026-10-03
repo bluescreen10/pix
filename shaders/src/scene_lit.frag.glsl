@@ -66,24 +66,29 @@ void main() {
         vec3 radiance = L.dirs[i].color.rgb * L.dirs[i].color.w * dirMask(L, i, vWorldPos);
         lit += sh * blinnPhong(N, V, Ldir, radiance, albedo, m.specular, m.shininess);
     }
-    for (uint i = 0u; i < L.numPoint; i++) {
-        PointLight pl = L.points[i];
+    // Point and spot lights: only those the fragment's cluster lists.
+    uint cluster = lightCluster(L, vWorldPos);
+    uint pointCount = clusterPointCount(L, cluster);
+    uint spotCount = clusterSpotCount(L, cluster);
+    for (uint i = 0u; i < pointCount; i++) {
+        uint li = clusterLight(L, cluster, i);
+        PointLight pl = L.points.v[li];
         vec3 d = pl.pos.xyz - vWorldPos;
         float dist = length(d);
-        float range = max(pl.pos.w, 0.0001);
-        float atten = clamp(1.0 - dist / range, 0.0, 1.0);
-        atten *= atten;
-        float sh = receives ? pointShadowFactor(pl, vWorldPos, shadowSamp) : 1.0;
+        float atten = pointAttenuation(pl, dist);
+        if (atten <= 0.0) continue;
+        float sh = receives ? pointShadowFactor(L, li, vWorldPos, shadowSamp) : 1.0;
         lit += sh * blinnPhong(N, V, d / max(dist, 0.0001), pl.color.rgb * pl.color.w * atten, albedo, m.specular, m.shininess);
     }
-    for (uint i = 0u; i < L.numSpot; i++) {
-        SpotLight sl = L.spots[i];
+    for (uint i = 0u; i < spotCount; i++) {
+        uint li = clusterLight(L, cluster, pointCount + i);
+        SpotLight sl = L.spots.v[li];
         vec3 d = sl.pos.xyz - vWorldPos;
         float dist = length(d);
         vec3 Ldir = d / max(dist, 1e-4);
         float atten = spotAttenuation(sl, vWorldPos, Ldir, dist);
         if (atten <= 0.0) continue;
-        float sh = receives ? shadowFactor(sl.shadowVP, sl.shadowMap, vWorldPos, shadowSamp, sl.shadowBias, 0u, 1u, 1u, SHADOW_FILTER_HARD) : 1.0;
+        float sh = receives ? spotShadowFactor(L, li, vWorldPos, shadowSamp) : 1.0;
         lit += sh * blinnPhong(N, V, Ldir, sl.color.rgb * sl.color.w * atten, albedo, m.specular, m.shininess);
     }
 

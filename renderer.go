@@ -49,11 +49,11 @@ type Renderer struct {
 	drawable     ui.Drawable
 	drawableSize ui.Size
 	swapchain    gpu.Swapchain
-	target     gpu.Texture
-	hasTarget  bool
-	ownsTarget bool // renderer created the target (via NewOffscreenRenderer)
-	readback   gpu.Buffer
-	pixels     []byte
+	target       gpu.Texture
+	hasTarget    bool
+	ownsTarget   bool // renderer created the target (via NewOffscreenRenderer)
+	readback     gpu.Buffer
+	pixels       []byte
 
 	// Renderer-owned shared resources + GPU-driven pipelines. All three stores are
 	// exported: callers create resources on them directly (GeometryStore.Create,
@@ -158,6 +158,9 @@ type Renderer struct {
 	fogInjectPipeline    gpu.Pipeline
 	fogIntegratePipeline gpu.Pipeline
 	fogBackgroundPass    *postprocess.FullscreenPass
+
+	// lightClustersPipeline lists every light cluster's lights (see light_clusters.go).
+	lightClustersPipeline gpu.Pipeline
 
 	// frameSteps is the work added at each stage of the frame, in the order it runs; and
 	// stepFrame what the steps are told, rebuilt every frame (see frame_step.go).
@@ -1362,10 +1365,24 @@ func shadowView(cam Camera, shadowMap textures.Texture, x int32, width, height u
 func (r *Renderer) extractLights(p *scenes.FramePacket, st *renderState) {
 	r.prepareEnvironment(p.Environment.Map, &st.environment)
 	r.prepareVolumetricFog(p.Environment.Fog)
+	r.prepareLightClusters(p, st)
 	st.lights.rebuild(p.Environment, p.Lights.Data, st.shadows, r.shadowsEnabled, r.shadowFilter, r.TextureStore.DefaultSampler(),
 		&st.environment, r.environmentSampler, r.envBRDF,
-		r.fogVolume, r.linearSampler, r.volumetricFog.resolved(), r.width, r.height)
+		r.fogVolume, r.linearSampler, r.volumetricFog.resolved(), r.width, r.height, st.clusters)
 	st.lights.Sync()
+}
+
+// prepareLightClusters lays the cluster grid over the main view. The cells are made
+// here, before the build pass that fills them, because the light table written next
+// carries their address.
+func (r *Renderer) prepareLightClusters(p *scenes.FramePacket, st *renderState) {
+	if len(p.Views) == 0 {
+		return
+	}
+	if !st.clusters.cells.IsValid() {
+		st.clusters.cells = r.backend.Alloc(clusterCellsSize, gpu.MemoryDevice, "light clusters")
+	}
+	st.clusters = newClusterGrid(p.Views[0], st.clusters.cells)
 }
 
 // prepareEnvironment creates a scene's environment-light resources on its behalf, the
@@ -1578,8 +1595,11 @@ func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture,
 		return
 	}
 
-	// 5f. Fill the volumetric fog's volume, which shading reads, from the lights and the
-	// shadow maps just filled.
+	// 5f. List each light cluster's lights, then fill the volumetric fog's volume from
+	// them and the shadow maps just filled. Shading reads both.
+	r.profiler.beginPass(GPUPassLightClusters, cmd)
+	r.encodeLightClusters(st, cmd)
+	r.profiler.endPass(GPUPassLightClusters, cmd)
 	r.encodeVolumetricFog(st, views, cmd)
 
 	// 5g. Fill depth first, if enabled, so shading runs once per pixel.
@@ -1988,6 +2008,20 @@ func (r *Renderer) encodeDebugView(st *renderState, views frameViews, target gpu
 	}
 
 	cmd.EndRenderPass()
+}
+
+// encodeLightClusters lists every cell's lights. It runs after the light table is
+// written and before anything reads the cells: the volumetric fog and the lit passes.
+func (r *Renderer) encodeLightClusters(st *renderState, cmd gpu.CommandBuffer) {
+	root := lightClustersRoot{
+		view:              st.clusters.view,
+		inverseProjection: st.clusters.inverseProjection,
+		lights:            st.lights.Addr(),
+		cells:             st.clusters.cells.Addr,
+	}
+	cmd.SetPipeline(r.lightClustersPipeline)
+	cmd.Dispatch(utils.ToBytes(&root), (clusterX*clusterY*clusterZ+clusterBuildGroupSize-1)/clusterBuildGroupSize, 1, 1)
+	cmd.Barrier(gpu.StageCompute, gpu.StageCompute|gpu.StageFragment, 0)
 }
 
 // encodeVolumetricFog fills the fog volume for a scene whose fog is volumetric, in two
@@ -3192,6 +3226,7 @@ func (r *Renderer) buildPipelines() {
 		r.backend.DestroyPipeline(r.envBRDFPipeline)
 		r.backend.DestroyPipeline(r.fogInjectPipeline)
 		r.backend.DestroyPipeline(r.fogIntegratePipeline)
+		r.backend.DestroyPipeline(r.lightClustersPipeline)
 		r.backend.DestroyPipeline(r.shadowPipeline)
 		for _, p := range r.prepassPipelines {
 			r.backend.DestroyPipeline(p)
@@ -3209,6 +3244,7 @@ func (r *Renderer) buildPipelines() {
 	r.envBRDFPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.EnvBRDF), Entry: "main", Label: "env-brdf"})
 	r.fogInjectPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.FogInject), Entry: "main", Label: "fog-inject"})
 	r.fogIntegratePipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.FogIntegrate), Entry: "main", Label: "fog-integrate"})
+	r.lightClustersPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.LightClusters), Entry: "main", Label: "light-clusters"})
 	// Depth-only passes: position-only vertex-pull, no colour attachment, writes depth.
 	//
 	// No fragment shader at all: a stage that outputs nothing is not free — it still
@@ -3678,6 +3714,9 @@ func (r *Renderer) releaseState(st *renderState) {
 	}
 
 	st.lights.Destroy()
+	if st.clusters.cells.IsValid() {
+		r.backend.Free(st.clusters.cells)
+	}
 	for _, sh := range st.shadows {
 		sh.destroy()
 	}

@@ -18,6 +18,9 @@ const (
 	// GPUPassShadow is the depth passes that fill the shadow maps, all lights and all
 	// cascades together.
 	GPUPassShadow
+	// GPUPassLightClusters is the compute pass that lists each light cluster's point and
+	// spot lights.
+	GPUPassLightClusters
 	// GPUPassPrepass is the depth-only pass that precedes forward shading, and does not
 	// run unless Renderer.EnableDepthPrepass turned it on.
 	GPUPassPrepass
@@ -32,7 +35,7 @@ const (
 )
 
 // gpuPassNames is each pass's label, in enum order.
-var gpuPassNames = [gpuPassCount]string{"cull", "shadow", "prepass", "forward", "post"}
+var gpuPassNames = [gpuPassCount]string{"cull", "shadow", "clusters", "prepass", "forward", "post"}
 
 // String returns the pass's label.
 func (p GPUPass) String() string {

@@ -67,6 +67,8 @@ func run(args []string) error {
 	stage := flags.String("stage", "", "shader stage (inferred from the input filename by default)")
 	var defines stringsFlag
 	flags.Var(&defines, "D", "preprocessor definition (repeatable)")
+	var includes stringsFlag
+	flags.Var(&includes, "I", "directory to search for #include files, after the shader's own (repeatable)")
 	var outputs outputs
 	flags.Var(&outputs, "o", "output as format:path; format is spv or metallib (repeatable)")
 	if err := flags.Parse(args); err != nil {
@@ -87,7 +89,7 @@ func run(args []string) error {
 	if *stage != "vertex" && *stage != "fragment" && *stage != "compute" {
 		return fmt.Errorf("cannot infer shader stage from %q; use -stage", *input)
 	}
-	return compile(*input, *entry, *stage, defines, outputs)
+	return compile(*input, *entry, *stage, defines, includes, outputs)
 }
 
 func shaderStage(path string) string {
@@ -104,7 +106,7 @@ func shaderStage(path string) string {
 	}
 }
 
-func compile(input, entry, stage string, defines []string, outputs []output) error {
+func compile(input, entry, stage string, defines, includes []string, outputs []output) error {
 	dir, err := os.MkdirTemp("", "pix-shadercompile-")
 	if err != nil {
 		return err
@@ -115,6 +117,9 @@ func compile(input, entry, stage string, defines []string, outputs []output) err
 	args := []string{"-fshader-stage=" + stage, "--target-env=vulkan1.4", "-O"}
 	for _, define := range defines {
 		args = append(args, "-D"+define)
+	}
+	for _, include := range includes {
+		args = append(args, "-I", include)
 	}
 	args = append(args, input, "-o", spvPath)
 	if err := command("glslc", args...); err != nil {

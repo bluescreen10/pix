@@ -1,5 +1,6 @@
-// The GPU light table: the flat, fixed-size buffer the lit shaders read, packed each
-// frame from a packet's light values and this renderer's own shadow resources. The
+// The GPU light table: the buffer the lit shaders read, packed each frame from a
+// packet's light values, this renderer's own shadow resources and the main view's light
+// clusters. The
 // light objects a caller configures live in the scenes package; nothing here is
 // visible to a producer.
 package pix
@@ -15,16 +16,18 @@ import (
 	"github.com/chewxy/math32"
 )
 
-// Light-count limits (mirror scene_lit.frag).
-const (
-	MaxDirLights   = 4
-	MaxPointLights = 16
-	MaxSpotLights  = 8
-)
+// MaxDirLights is how many directional lights a scene is lit by; the rest are dropped.
+// Point and spot lights have no limit: each pixel is shaded only by those its light
+// cluster lists (see light_clusters.go).
+const MaxDirLights = 4
 
 // noShadowMap is the shadowMap sentinel: a directional light that casts no shadow
 // (or whose map isn't allocated) stores this, and the lit shaders skip sampling.
 const noShadowMap uint32 = 0xFFFFFFFF
+
+// noShadow is the sentinel a point or spot light without a shadow stores in place of
+// the index of its shadow record.
+const noShadow uint32 = 0xFFFFFFFF
 
 // noLightMask is the mask sentinel: a directional light with no mask (see
 // scenes.LightMask), which lets all of its light through.
@@ -73,27 +76,43 @@ func maskProjection(dir glm.Vec3f, size float32, offset glm.Vec3f) (u, v glm.Vec
 	return u, v
 }
 
+// gpuPointLight is one point light as the shading loops read it: small, because a
+// pixel reads every light its cluster lists. The few that cast shadows point at a
+// gpuPointShadow.
 type gpuPointLight struct {
-	pos        glm.Vec4f      // xyz world; w = range
-	color      colors.RGBA32F // rgb; w = intensity
-	shadowVP   [6]glm.Mat4f   // per cube face: world → face clip
-	shadowMap  [6]uint32      // per cube face: depth map heap index, or noShadowMap
-	shadowBias float32        // depth-compare bias, in the face cameras' normalized depth units
-	pad0       uint32
+	pos    glm.Vec4f      // xyz world; w = range
+	color  colors.RGBA32F // rgb; w = intensity
+	shadow uint32         // index into the point shadows, or noShadow
+	_      [3]uint32
 }
 
+type gpuPointShadow struct {
+	shadowVP   [6]glm.Mat4f // per cube face: world → face clip
+	shadowMap  [6]uint32    // per cube face: depth map heap index, or noShadowMap
+	shadowBias float32      // depth-compare bias, in the face cameras' normalized depth units
+	_          uint32
+}
+
+// gpuSpotLight is one spot light as the shading loops read it; see gpuPointLight.
 type gpuSpotLight struct {
-	pos        glm.Vec4f      // xyz world; w = range
-	dir        glm.Vec4f      // xyz cone axis (travel); w = cosOuter (outer cutoff)
-	color      colors.RGBA32F // rgb; w = intensity
-	shadowVP   glm.Mat4f      // world → light clip (same matrix the depth pass rendered with)
-	cosInner   float32        // inner cutoff cos (smooth edge between inner and outer)
-	shadowMap  uint32         // bindless heap index of the depth map, or noShadowMap
-	shadowBias float32        // depth-compare bias, in this camera's normalized depth units
-	pad0       uint32
+	pos      glm.Vec4f      // xyz world; w = range
+	dir      glm.Vec4f      // xyz cone axis (travel); w = cosOuter (outer cutoff)
+	color    colors.RGBA32F // rgb; w = intensity
+	cosInner float32        // inner cutoff cos (smooth edge between inner and outer)
+	shadow   uint32         // index into the spot shadows, or noShadow
+	_        [2]uint32
 }
 
-// gpuLights is the whole light table (scalar; matches LightBuf in scene_lit.frag).
+type gpuSpotShadow struct {
+	shadowVP   glm.Mat4f // world → light clip (same matrix the depth pass rendered with)
+	shadowMap  uint32    // bindless heap index of the depth map, or noShadowMap
+	shadowBias float32   // depth-compare bias, in this camera's normalized depth units
+	_          [2]uint32
+}
+
+// gpuLights is the head of the light table (scalar; matches LightBuf in lighting.glsl).
+// The point and spot lights and their shadows follow it in the same buffer, and it
+// carries their addresses.
 type gpuLights struct {
 	ambient colors.RGBA32F
 	// fogColor is rgb + the fog mode in w; fogParams is (near, far, density, _).
@@ -114,45 +133,62 @@ type gpuLights struct {
 	envBRDF      uint32
 	envIntensity float32
 	envRotation  float32
-	dirs         [MaxDirLights]gpuDirLight
-	points       [MaxPointLights]gpuPointLight
-	spots        [MaxSpotLights]gpuSpotLight
+	points       uint64
+	spots        uint64
+	pointShadows uint64
+	spotShadows  uint64
+	// clusters is the main view's light clusters: where its cells are and how a world
+	// position finds its own (see clusterGrid).
+	clusters          uint64
+	clusterViewProj   glm.Mat4f
+	clusterDepth      glm.Vec4f
+	clusterSliceScale float32
+	clusterSliceBias  float32
+	dirs              [MaxDirLights]gpuDirLight
 }
 
-var lightsSize = uint64(unsafe.Sizeof(gpuLights{}))
+var (
+	lightsSize      = uint64(unsafe.Sizeof(gpuLights{}))
+	pointLightSize  = uint64(unsafe.Sizeof(gpuPointLight{}))
+	pointShadowSize = uint64(unsafe.Sizeof(gpuPointShadow{}))
+	spotLightSize   = uint64(unsafe.Sizeof(gpuSpotLight{}))
+	spotShadowSize  = uint64(unsafe.Sizeof(gpuSpotShadow{}))
+)
 
-// Lights is the scene light table: ambient + directional + point lights in one
-// fixed-size BDA buffer the lit fragment shader reads through the draw root.
+// Lights is the scene light table: ambient, directional lights and the cluster grid in
+// a fixed-size head, followed by the point and spot lights and their shadows, all in
+// one host buffer the lit shaders read through the draw root.
 type Lights struct {
 	backend gpu.Backend
 	data    gpuLights
-	buf     gpu.Buffer
-	dirty   bool
+
+	points       []gpuPointLight
+	pointShadows []gpuPointShadow
+	spots        []gpuSpotLight
+	spotShadows  []gpuSpotShadow
+
+	buf gpu.Buffer
 }
 
 // NewLights creates the table. ambient defaults to a low neutral fill so an
 // unlit-looking scene still shows geometry; call SetAmbient to change it.
 //
-// MemoryHost (not Device): a shadow-casting light's shadowVP is refit from the
-// current scene bounds every frame (see Renderer.fitShadows), so any moving
-// or animated geometry — a SkinnedMesh, say — makes the table "dirty" essentially
-// every frame, not just on user edits. Staging that through the shared uploader
-// would force a real GPU submit+wait every frame just for a few KB of light data;
-// a direct host write (like worldBuf/drawableBuf already do for the same reason)
-// costs a memcpy instead.
+// MemoryHost (not Device): the table is rewritten every frame — the cluster grid
+// follows the camera, and a shadow-casting light's shadowVP is refit from the view —
+// and staging that through the shared uploader would force a real GPU submit+wait
+// every frame just for a few KB of light data; a direct host write (like
+// worldBuf/drawableBuf already do for the same reason) costs a memcpy instead.
 func NewLights(b gpu.Backend) *Lights {
 	l := &Lights{backend: b}
 	l.data.ambient = [4]float32{0.08, 0.08, 0.08, 0}
-	l.buf = b.Alloc(lightsSize, gpu.MemoryHost, "Lights")
-	l.dirty = true
 	return l
 }
 
-// rebuild derives the flat GPU light table from a packet's lights and environment,
-// plus the renderer's own shadow resources for those lights. Called every frame (the
-// values are mutable, and a casting light's fitted shadow camera moves with the view),
-// but it only marks the buffer dirty when the derived table actually changed, so a
-// static scene re-uploads nothing. Lights past the fixed caps are dropped.
+// rebuild derives the GPU light table from a packet's lights and environment, plus the
+// renderer's own shadow resources for those lights and the main view's light clusters.
+// Called every frame: the values are mutable, a casting light's fitted shadow camera
+// moves with the view, and so does the cluster grid. Directional lights past
+// MaxDirLights are dropped.
 //
 // filter is the kernel directional lookups use, which the shader reads per light.
 //
@@ -168,13 +204,26 @@ func NewLights(b gpu.Backend) *Lights {
 // carries them in place of the colour and distances the other fog models put there.
 // They are read only when the scene's fog is volumetric.
 //
+// clusters is the main view's cluster grid, which the table carries for the lit
+// shaders to find a position's lights with.
+//
 // shadows reports whether shadow maps may be advertised to the shader at all — the
 // renderer's global toggle. A light whose map is still allocated but no longer being
 // re-rendered must publish noShadowMap, or the shader keeps sampling a frozen map and
 // the shadow stays on screen after it was turned off.
 func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPacket, res map[scenes.LightID]*shadowResource, shadows bool, filter ShadowFilter, maskSampler uint32, environment *environmentState, environmentSampler gpu.Sampler, environmentBRDF gpu.Texture,
-	fogVolume gpu.Texture, fogSampler gpu.Sampler, fogSize VolumetricFogSettings, screenWidth, screenHeight uint32) {
+	fogVolume gpu.Texture, fogSampler gpu.Sampler, fogSize VolumetricFogSettings, screenWidth, screenHeight uint32, clusters clusterGrid) {
+	l.points = l.points[:0]
+	l.pointShadows = l.pointShadows[:0]
+	l.spots = l.spots[:0]
+	l.spotShadows = l.spotShadows[:0]
+
 	var next gpuLights
+	next.clusters = clusters.cells.Addr
+	next.clusterViewProj = clusters.viewProj
+	next.clusterDepth = clusters.depthPlane
+	next.clusterSliceScale = clusters.sliceScale
+	next.clusterSliceBias = clusters.sliceBias
 	next.ambient = env.Ambient.RGBA(1)
 	next.envRadiance = noEnvironment
 	if environment.radiance.IsValid() {
@@ -249,56 +298,48 @@ func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPack
 			next.numDir++
 
 		case scenes.LightPoint:
-			if next.numPoint >= MaxPointLights {
-				continue
-			}
 			gp := gpuPointLight{
-				pos:   lp.Position.Vec4(lp.Range),
-				color: lp.Color.RGBA(lp.Intensity),
-			}
-			for f := range gp.shadowMap {
-				gp.shadowMap[f] = noShadowMap
+				pos:    lp.Position.Vec4(lp.Range),
+				color:  lp.Color.RGBA(lp.Intensity),
+				shadow: noShadow,
 			}
 			if s := shadowOf(lp); s != nil {
-				gp.shadowBias = s.ndcBias
-				for f := range s.faces {
+				shadow := gpuPointShadow{shadowBias: s.ndcBias}
+				for f := range shadow.shadowMap {
+					shadow.shadowMap[f] = noShadowMap
 					if s.faces[f].m.IsValid() {
-						gp.shadowVP[f] = s.faces[f].cam.ViewProjection()
-						gp.shadowMap[f] = s.faces[f].m.Index()
+						shadow.shadowVP[f] = s.faces[f].cam.ViewProjection()
+						shadow.shadowMap[f] = s.faces[f].m.Index()
 					}
 				}
+				gp.shadow = uint32(len(l.pointShadows))
+				l.pointShadows = append(l.pointShadows, shadow)
 			}
-			next.points[next.numPoint] = gp
-			next.numPoint++
+			l.points = append(l.points, gp)
 
 		case scenes.LightSpot:
-			if next.numSpot >= MaxSpotLights {
-				continue
-			}
 			dir := lp.Direction.Normalize()
 			gs := gpuSpotLight{
-				pos:       glm.Vec4f{lp.Position[0], lp.Position[1], lp.Position[2], lp.Range},
-				dir:       glm.Vec4f{dir[0], dir[1], dir[2], math32.Cos(lp.Angle)},
-				color:     colors.RGBA32F{lp.Color[0], lp.Color[1], lp.Color[2], lp.Intensity},
-				cosInner:  math32.Cos(lp.Angle * (1 - glm.Clamp(lp.Penumbra, 0, 1))),
-				shadowMap: noShadowMap,
+				pos:      lp.Position.Vec4(lp.Range),
+				dir:      dir.Vec4(math32.Cos(lp.Angle)),
+				color:    lp.Color.RGBA(lp.Intensity),
+				cosInner: math32.Cos(lp.Angle * (1 - glm.Clamp(lp.Penumbra, 0, 1))),
+				shadow:   noShadow,
 			}
 			if s := shadowOf(lp); s != nil && s.m.IsValid() {
-				gs.shadowVP = s.cam.ViewProjection()
-				gs.shadowMap = s.m.Index()
-				gs.shadowBias = s.ndcBias
+				gs.shadow = uint32(len(l.spotShadows))
+				l.spotShadows = append(l.spotShadows, gpuSpotShadow{
+					shadowVP:   s.cam.ViewProjection(),
+					shadowMap:  s.m.Index(),
+					shadowBias: s.ndcBias,
+				})
 			}
-			next.spots[next.numSpot] = gs
-			next.numSpot++
+			l.spots = append(l.spots, gs)
 		}
 	}
-
-	// gpuLights is comparable (only fixed arrays of floats/uints), so a value compare
-	// detects any change — light edits, added/removed lights, or a moved shadow camera.
-	if next != l.data {
-		l.data = next
-		l.dirty = true
-	}
+	next.numPoint = uint32(len(l.points))
+	next.numSpot = uint32(len(l.spots))
+	l.data = next
 }
 
 // Addr returns the table's device address.
@@ -306,14 +347,40 @@ func (l *Lights) Addr() uint64 {
 	return l.buf.Addr
 }
 
-// Sync writes the table directly (MemoryHost, no staging/uploader) when it
-// changed since the last call.
+// Sync writes the table: its head, then the point and spot lights and their shadows,
+// whose addresses the head carries. The buffer grows to fit, at least doubling, so a
+// scene adding lights a few at a time does not reallocate every frame.
 func (l *Lights) Sync() {
-	if !l.dirty {
-		return
+	pointsAt := lightsSize
+	pointShadowsAt := pointsAt + uint64(len(l.points))*pointLightSize
+	spotsAt := pointShadowsAt + uint64(len(l.pointShadows))*pointShadowSize
+	spotShadowsAt := spotsAt + uint64(len(l.spots))*spotLightSize
+	size := spotShadowsAt + uint64(len(l.spotShadows))*spotShadowSize
+	if !l.buf.IsValid() || l.buf.Size < size {
+		if l.buf.IsValid() {
+			size = max(size, l.buf.Size*2)
+			l.backend.Free(l.buf)
+		}
+		l.buf = l.backend.Alloc(size, gpu.MemoryHost, "Lights")
 	}
+
+	l.data.points = l.buf.Addr + pointsAt
+	l.data.pointShadows = l.buf.Addr + pointShadowsAt
+	l.data.spots = l.buf.Addr + spotsAt
+	l.data.spotShadows = l.buf.Addr + spotShadowsAt
 	l.buf.Write(utils.ToBytes(&l.data), 0)
-	l.dirty = false
+	if len(l.points) > 0 {
+		l.buf.Write(utils.ToBytesSlice(l.points), pointsAt)
+	}
+	if len(l.pointShadows) > 0 {
+		l.buf.Write(utils.ToBytesSlice(l.pointShadows), pointShadowsAt)
+	}
+	if len(l.spots) > 0 {
+		l.buf.Write(utils.ToBytesSlice(l.spots), spotsAt)
+	}
+	if len(l.spotShadows) > 0 {
+		l.buf.Write(utils.ToBytesSlice(l.spotShadows), spotShadowsAt)
+	}
 }
 
 // Destroy releases the table buffer.

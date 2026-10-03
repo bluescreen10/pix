@@ -94,21 +94,28 @@ void main() {
         vec3 radiance = L.dirs[i].color.rgb * L.dirs[i].color.w * dirMask(L, i, p);
         inscattered += radiance * phase(dot(travel, -ray), pc.anisotropy) * dirShadow(L, i, p, d, pc.shadowSampler);
     }
-    for (uint i = 0u; i < L.numPoint; i++) {
-        PointLight pl = L.points[i];
+    // Point and spot lights: only those the froxel's light cluster lists. The cluster
+    // grid and the fog volume both lie over the main view, so a froxel finds its cell as
+    // a surface does.
+    uint cluster = lightCluster(L, p);
+    uint pointCount = clusterPointCount(L, cluster);
+    uint spotCount = clusterSpotCount(L, cluster);
+    for (uint i = 0u; i < pointCount; i++) {
+        uint li = clusterLight(L, cluster, i);
+        PointLight pl = L.points.v[li];
         vec3 fromLight = p - pl.pos.xyz;
         float dist = length(fromLight);
-        float atten = clamp(1.0 - dist / max(pl.pos.w, 0.0001), 0.0, 1.0);
-        atten *= atten;
+        float atten = pointAttenuation(pl, dist);
         if (atten <= 0.0) {
             continue;
         }
         vec3 travel = fromLight / max(dist, 1e-4);
         vec3 radiance = pl.color.rgb * pl.color.w * atten;
-        inscattered += radiance * phase(dot(travel, -ray), pc.anisotropy) * pointShadowFactor(pl, p, pc.shadowSampler);
+        inscattered += radiance * phase(dot(travel, -ray), pc.anisotropy) * pointShadowFactor(L, li, p, pc.shadowSampler);
     }
-    for (uint i = 0u; i < L.numSpot; i++) {
-        SpotLight sl = L.spots[i];
+    for (uint i = 0u; i < spotCount; i++) {
+        uint li = clusterLight(L, cluster, pointCount + i);
+        SpotLight sl = L.spots.v[li];
         vec3 toLight = sl.pos.xyz - p;
         float dist = length(toLight);
         vec3 Ldir = toLight / max(dist, 1e-4);
@@ -117,7 +124,7 @@ void main() {
             continue;
         }
         vec3 radiance = sl.color.rgb * sl.color.w * atten;
-        float sh = shadowFactor(sl.shadowVP, sl.shadowMap, p, pc.shadowSampler, sl.shadowBias, 0u, 1u, 1u, SHADOW_FILTER_HARD);
+        float sh = spotShadowFactor(L, li, p, pc.shadowSampler);
         inscattered += radiance * phase(dot(-Ldir, -ray), pc.anisotropy) * sh;
     }
 

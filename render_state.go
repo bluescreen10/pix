@@ -40,6 +40,9 @@ type renderState struct {
 	// lights, keyed by light identity.
 	lights  *Lights
 	shadows map[scenes.LightID]*shadowResource
+	// clusters is the main view's light cluster grid, which the lit passes find their
+	// point and spot lights through.
+	clusters clusterGrid
 
 	// particles is each particle system's simulation, keyed by its stable id.
 	particles map[scenes.ParticleID]*particleState

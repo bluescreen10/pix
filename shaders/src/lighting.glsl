@@ -7,8 +7,6 @@
 #include "environment.glsl"
 
 const uint MAX_DIR = 4u;
-const uint MAX_POINT = 16u;
-const uint MAX_SPOT = 8u;
 // Fog modes, mirroring scenes.FogNone/FogLinear/FogExp2/FogVolumetric.
 const uint FOG_NONE = 0u;
 const uint FOG_LINEAR = 1u;
@@ -41,8 +39,49 @@ struct DirLight {
     uint mask;
     uint maskSampler;
 };
-struct PointLight { vec4 pos; vec4 color; mat4 shadowVP[6]; uint shadowMap[6]; float shadowBias; uint pad0; };
-struct SpotLight { vec4 pos; vec4 dir; vec4 color; mat4 shadowVP; float cosInner; uint shadowMap; float shadowBias; uint pad0; };
+// Point and spot lights are unbounded lists, each light a small record a shading loop
+// reads in full; the few that cast shadows point at their shadow's own record, which
+// is too large to be worth reading for the many that do not.
+struct PointLight {
+    vec4 pos;   // xyz world; w = range
+    vec4 color; // rgb; w = intensity
+    uint shadow; // index into LightBuf.pointShadows, or NO_SHADOW
+    uint pad0;
+    uint pad1;
+    uint pad2;
+};
+struct PointShadow { mat4 shadowVP[6]; uint shadowMap[6]; float shadowBias; uint pad0; };
+struct SpotLight {
+    vec4 pos;   // xyz world; w = range
+    vec4 dir;   // xyz cone axis (travel); w = cos of the outer cutoff
+    vec4 color; // rgb; w = intensity
+    float cosInner;
+    uint shadow; // index into LightBuf.spotShadows, or NO_SHADOW
+    uint pad0;
+    uint pad1;
+};
+struct SpotShadow { mat4 shadowVP; uint shadowMap; float shadowBias; uint pad0; uint pad1; };
+layout(buffer_reference, scalar) readonly buffer PointLights { PointLight v[]; };
+layout(buffer_reference, scalar) readonly buffer PointShadows { PointShadow v[]; };
+layout(buffer_reference, scalar) readonly buffer SpotLights { SpotLight v[]; };
+layout(buffer_reference, scalar) readonly buffer SpotShadows { SpotShadow v[]; };
+
+// Light clusters: the main view is cut into CLUSTER_X x CLUSTER_Y tiles across the
+// screen and CLUSTER_Z slices in depth, and each of those cells lists the point and
+// spot lights whose range reaches into it (see light_clusters.comp.glsl). A surface
+// shades only with its own cell's lights, so the cost of a light is paid only where it
+// lands. They mirror pix's clusterX, clusterY, clusterZ and clusterCapacity.
+//
+// A cell is CLUSTER_STRIDE uints: a count of its point lights in the low 16 bits and of
+// its spot lights in the high 16, then the point lights' indices, then the spot
+// lights'. A cell lists at most CLUSTER_CAPACITY lights, and drops the rest.
+const uint CLUSTER_X = 16u;
+const uint CLUSTER_Y = 9u;
+const uint CLUSTER_Z = 24u;
+const uint CLUSTER_CAPACITY = 255u;
+const uint CLUSTER_STRIDE = CLUSTER_CAPACITY + 1u;
+layout(buffer_reference, scalar) readonly buffer LightClusters { uint v[]; };
+
 layout(buffer_reference, scalar) readonly buffer LightBuf {
     vec4 ambient;
     vec4 fogColor;  // rgb = fog colour, w = FOG_* mode
@@ -61,10 +100,51 @@ layout(buffer_reference, scalar) readonly buffer LightBuf {
     uint envBRDF;
     float envIntensity;
     float envRotation;
+    PointLights points;
+    SpotLights spots;
+    PointShadows pointShadows;
+    SpotShadows spotShadows;
+    // clusters is the main view's cells; clusterViewProj and clusterDepth find the cell
+    // a world position falls in — its tile through the view's projection, its slice
+    // from its depth along the view, sliced as log(depth) * clusterSliceScale +
+    // clusterSliceBias (see lightCluster).
+    LightClusters clusters;
+    mat4 clusterViewProj;
+    vec4 clusterDepth;
+    float clusterSliceScale;
+    float clusterSliceBias;
     DirLight dirs[MAX_DIR];
-    PointLight points[MAX_POINT];
-    SpotLight spots[MAX_SPOT];
 };
+
+// lightCluster returns the cluster worldPos falls in: where its cell starts in
+// LightBuf.clusters. Positions off the
+// view, nearer than its near plane or beyond its far plane, are clamped to the nearest
+// cell, which is what lets a compute pass marching past the far plane look lights up
+// too.
+uint lightCluster(LightBuf L, vec3 worldPos) {
+    vec4 clip = L.clusterViewProj * vec4(worldPos, 1.0);
+    vec2 uv = clip.xy / max(clip.w, 1e-6) * 0.5 + 0.5;
+    uvec2 tile = uvec2(clamp(uv, vec2(0.0), vec2(1.0)) * vec2(CLUSTER_X, CLUSTER_Y));
+    tile = min(tile, uvec2(CLUSTER_X - 1u, CLUSTER_Y - 1u));
+    float depth = dot(L.clusterDepth.xyz, worldPos) + L.clusterDepth.w;
+    float slice = log(max(depth, 1e-6)) * L.clusterSliceScale + L.clusterSliceBias;
+    uint z = uint(clamp(slice, 0.0, float(CLUSTER_Z - 1u)));
+    return ((z * CLUSTER_Y + tile.y) * CLUSTER_X + tile.x) * CLUSTER_STRIDE;
+}
+
+// clusterPointCount and clusterSpotCount read how many lights of each kind a cluster
+// lists; clusterLight reads its i-th light's index, counting its point lights first.
+uint clusterPointCount(LightBuf L, uint cluster) {
+    return L.clusters.v[cluster] & 0xFFFFu;
+}
+
+uint clusterSpotCount(LightBuf L, uint cluster) {
+    return L.clusters.v[cluster] >> 16;
+}
+
+uint clusterLight(LightBuf L, uint cluster, uint i) {
+    return L.clusters.v[cluster + 1u + i];
+}
 
 // SHADOW_FILTER_* select how wide a kernel a shadow lookup uses. They match
 // pix.ShadowFilter.
@@ -348,9 +428,12 @@ vec2 environmentBRDF(LightBuf L, float NdotV, float roughness) {
 }
 
 // pointShadowFactor picks the cube face for the light→fragment direction (dominant
-// axis, matching pix's cubeFaceDirs order +X,-X,+Y,-Y,+Z,-Z) and samples that face.
-float pointShadowFactor(PointLight pl, vec3 worldPos, uint shadowSamp) {
-    vec3 v = worldPos - pl.pos.xyz;
+// axis, matching pix's cubeFaceDirs order +X,-X,+Y,-Y,+Z,-Z) and samples that face of
+// point light li's shadow.
+float pointShadowFactor(LightBuf L, uint li, vec3 worldPos, uint shadowSamp) {
+    uint si = L.points.v[li].shadow;
+    if (si == NO_SHADOW) return 1.0;
+    vec3 v = worldPos - L.points.v[li].pos.xyz;
     vec3 a = abs(v);
     uint face;
     if (a.x >= a.y && a.x >= a.z) {
@@ -360,8 +443,22 @@ float pointShadowFactor(PointLight pl, vec3 worldPos, uint shadowSamp) {
     } else {
         face = v.z > 0.0 ? 4u : 5u;
     }
-    return shadowFactor(pl.shadowVP[face], pl.shadowMap[face], worldPos, shadowSamp, pl.shadowBias,
-                        0u, 1u, 1u, SHADOW_FILTER_HARD);
+    return shadowFactor(L.pointShadows.v[si].shadowVP[face], L.pointShadows.v[si].shadowMap[face], worldPos, shadowSamp,
+                        L.pointShadows.v[si].shadowBias, 0u, 1u, 1u, SHADOW_FILTER_HARD);
+}
+
+// spotShadowFactor samples spot light li's shadow.
+float spotShadowFactor(LightBuf L, uint li, vec3 worldPos, uint shadowSamp) {
+    uint si = L.spots.v[li].shadow;
+    if (si == NO_SHADOW) return 1.0;
+    return shadowFactor(L.spotShadows.v[si].shadowVP, L.spotShadows.v[si].shadowMap, worldPos, shadowSamp,
+                        L.spotShadows.v[si].shadowBias, 0u, 1u, 1u, SHADOW_FILTER_HARD);
+}
+
+// pointAttenuation is a point light's distance falloff: 1 at the light, 0 at its range.
+float pointAttenuation(PointLight pl, float dist) {
+    float atten = clamp(1.0 - dist / max(pl.pos.w, 1e-4), 0.0, 1.0);
+    return atten * atten;
 }
 
 // spotAttenuation is a spot light's distance × cone falloff for a world position.
