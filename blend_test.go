@@ -1,6 +1,7 @@
 package pix_test
 
 import (
+	"image"
 	"testing"
 
 	"github.com/bluescreen10/pix"
@@ -9,6 +10,7 @@ import (
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/materials"
 	"github.com/bluescreen10/pix/scenes"
+	"github.com/bluescreen10/pix/textures"
 )
 
 // TestTransparency renders an opaque red quad behind a 50%-alpha blue quad in front.
@@ -293,5 +295,105 @@ func TestGlassReflectsInFull(t *testing.T) {
 	}
 	if got[0] < 200 {
 		t.Errorf("glass red = %d, want the red backdrop showing through (>= 200)", got[0])
+	}
+}
+
+// glassShadowScene is a white floor under a sun straight above, and a camera low
+// enough to look at the floor where a plate would be held over it without seeing the
+// plate.
+type glassShadowScene struct {
+	r     *pix.Renderer
+	scene *scenes.Scene
+}
+
+func newGlassShadowScene(t *testing.T) glassShadowScene {
+	t.Helper()
+	r, err := pix.NewOffscreenRenderer(32, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.Destroy)
+	r.EnableShadows(true)
+	scene := scenes.New()
+	t.Cleanup(scene.Destroy)
+	scene.SetAmbient(colors.RGB32F{}, 0)
+	sun := scene.AddDirectionalLight(glm.Vec3f{0, -1, 0}, colors.RGB32F{1, 1, 1}, 2)
+	sun.SetCastShadow(true)
+
+	floor := r.NewPBRMaterial()
+	floor.SetMetallic(0)
+	floor.SetRoughness(1)
+	scene.Add(scene.NewMesh(r.NewPlaneGeometry(20, 20, 1, 1), floor))
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
+	cam.SetPosition(glm.Vec3f{0, 0.5, 3})
+	cam.LookAt(glm.Vec3f{0, 0, 0})
+	return glassShadowScene{r: r, scene: scene}
+}
+
+// addPlate holds a thin plate of material over the floor.
+func (g glassShadowScene) addPlate(material materials.Material) {
+	plate := g.scene.NewMesh(g.r.NewBoxGeometry(4, 0.05, 4), material)
+	plate.SetPosition(glm.Vec3f{0, 1, 0})
+	g.scene.Add(plate)
+}
+
+// floorUnderPlate renders and returns the red of the floor under the plate.
+func (g glassShadowScene) floorUnderPlate() int {
+	for range 3 {
+		g.r.Render(g.scene)
+	}
+	return int(g.r.Pixels()[(16*32+16)*4])
+}
+
+// newGlass is a clear pane: transmission 1, smooth, not metal.
+func newGlass(r *pix.Renderer) *materials.PBRMaterial {
+	glass := r.NewPBRMaterial()
+	glass.SetColor(colors.RGBA32F{1, 1, 1, 1})
+	glass.SetMetallic(0)
+	glass.SetRoughness(0)
+	glass.SetTransmission(1)
+	return glass
+}
+
+// TestGlassCastsNoShadow holds a pane of glass over a floor in the sun: the floor under
+// it is as bright as with nothing there, where an opaque plate shadows it.
+func TestGlassCastsNoShadow(t *testing.T) {
+	open := newGlassShadowScene(t).floorUnderPlate()
+
+	opaque := newGlassShadowScene(t)
+	plate := opaque.r.NewPBRMaterial()
+	plate.SetMetallic(0)
+	opaque.addPlate(plate)
+	shadowed := opaque.floorUnderPlate()
+	if shadowed > open-40 {
+		t.Fatalf("floor under an opaque plate = %d, open floor = %d: no shadow to compare against", shadowed, open)
+	}
+
+	glassy := newGlassShadowScene(t)
+	glassy.addPlate(newGlass(glassy.r))
+	if got := glassy.floorUnderPlate(); absDiff(got, open) > 3 {
+		t.Errorf("floor under glass = %d, want %d, as with nothing over it (an opaque plate leaves %d)", got, open, shadowed)
+	}
+}
+
+// TestGlassShadowFollowsItsTransmissionMap: a pane whose transmission map says it lets
+// no light through casts a shadow like any opaque plate, and one whose map says it lets
+// it all through casts none — a cabinet with glass panes shadows the floor under its
+// wood and not under its glass.
+func TestGlassShadowFollowsItsTransmissionMap(t *testing.T) {
+	floorUnder := func(mapValue byte) int {
+		g := newGlassShadowScene(t)
+		glass := newGlass(g.r)
+		transmissionMap := g.r.TextureStore.Create(&image.Gray{Pix: []byte{mapValue}, Stride: 1, Rect: image.Rect(0, 0, 1, 1)}, textures.Grayscale)
+		defer transmissionMap.Release()
+		glass.SetTransmissionMap(transmissionMap)
+		glass.SetTransmissionMapSampler(g.r.TextureStore.DefaultSampler())
+		g.addPlate(glass)
+		return g.floorUnderPlate()
+	}
+	clear, opaque := floorUnder(255), floorUnder(0)
+	if clear <= opaque+40 {
+		t.Errorf("floor under glass mapped clear = %d, mapped opaque = %d; want it lit under the clear one, shadowed under the other", clear, opaque)
 	}
 }

@@ -2091,10 +2091,12 @@ func (r *Renderer) encodeShadowMap(group []view, st *renderState, cmd gpu.Comman
 
 // drawShadowCasters draws every batch into the shadow map v renders: each run of
 // unmasked batches with one call through the vertex-only pipeline, and each pool's
-// masked ones through the masked pipeline, with that pool's mask table.
+// masked ones through the masked pipeline, with that pool's mask table — which leaves
+// out, besides what has no surface, what lets light through.
 func (r *Renderer) drawShadowCasters(v view, st *renderState, cmd gpu.CommandBuffer) {
 	root := r.positionRoot(v, st)
 	maskedRoot := r.maskedDepthRoot(v, st)
+	maskedRoot.isShadowPass = 1
 	for first, count := range maskSpans(st.layout.batches) {
 		b := &st.layout.batches[first]
 		offset := uint64(first) * uint64(indirectSize)

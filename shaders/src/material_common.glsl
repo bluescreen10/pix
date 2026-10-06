@@ -75,7 +75,7 @@ void discardCutOut() {
     if (pc.masks == 0ul) {
         return;
     }
-    if (isCutOut(AlphaMaskBuf(pc.masks).v[vMat], vUV)) {
+    if (isCutOut(MaskBuf(pc.masks).v[vMat].alpha, vUV)) {
         discard;
     }
 }

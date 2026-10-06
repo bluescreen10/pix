@@ -90,7 +90,7 @@ type Masked interface {
 	AlphaMask() (AlphaMask, bool)
 }
 
-// ToBytes is the mask as an entry of a pool's mask table: AlphaMask in
+// ToBytes is the mask as the first half of an entry of a pool's mask table: AlphaMask in
 // shaders/src/alpha_mask.glsl.
 func (m AlphaMask) ToBytes() []byte {
 	entry := struct {
@@ -107,8 +107,47 @@ func (m AlphaMask) ToBytes() []byte {
 	return unsafe.Slice((*byte)(unsafe.Pointer(&entry)), unsafe.Sizeof(entry))
 }
 
-// alphaMaskSize is the size of one entry of a pool's mask table (see AlphaMask.ToBytes).
-const alphaMaskSize = 16
+// TransmissionMask is how much light a surface lets through, texel by texel: Factor,
+// times the red channel of Map where one is bound — where KHR_materials_transmission
+// keeps it. Map is a zero Texture for none.
+type TransmissionMask struct {
+	Map     textures.Texture
+	Sampler uint32
+	Factor  float32
+}
+
+// Transmissive is implemented by materials that can let light through — glass. The
+// shadow passes leave out every texel of a transmissive material that lets through at
+// least half the light, so a pane casts no shadow while the frame around it does;
+// shading and the depth prepass draw it whole. A material that implements it reports
+// whether it lets light through now, and calls its pool's MarkDirty whenever that or
+// its mask changes, as for Masked.
+type Transmissive interface {
+	TransmissionMask() (TransmissionMask, bool)
+}
+
+// ToBytes is the mask as the second half of an entry of a pool's mask table:
+// TransmissionMask in shaders/src/alpha_mask.glsl.
+func (m TransmissionMask) ToBytes() []byte {
+	entry := struct {
+		mapIndex uint32
+		sampler  uint32
+		factor   float32
+		_        uint32
+	}{
+		mapIndex: MapIndex(m.Map),
+		sampler:  m.Sampler,
+		factor:   m.Factor,
+	}
+	return unsafe.Slice((*byte)(unsafe.Pointer(&entry)), unsafe.Sizeof(entry))
+}
+
+// maskHalfSize is the size of each half of an entry of a pool's mask table: an
+// AlphaMask, then a TransmissionMask.
+const maskHalfSize = 16
+
+// maskEntrySize is the size of one entry of a pool's mask table.
+const maskEntrySize = 2 * maskHalfSize
 
 // ID names one material by value: which pool holds its record, its slot in that pool,
 // and the slot's generation. It is the whole of what a renderer needs to find a

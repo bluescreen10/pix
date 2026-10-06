@@ -362,6 +362,13 @@ func (m *PBRMaterial) AlphaMask() (AlphaMask, bool) {
 	return mask, m.alphaCutoff > 0
 }
 
+// TransmissionMask implements Transmissive: the surface lets light through wherever its
+// transmission, times its transmission map, reaches half, and casts no shadow there.
+func (m *PBRMaterial) TransmissionMask() (TransmissionMask, bool) {
+	mask := TransmissionMask{Map: m.transmissionMap, Sampler: m.transmissionSampler, Factor: m.transmission}
+	return mask, m.transmission > 0
+}
+
 // --- Material ---
 //
 // PBRMaterial supplies all three passes, so it renders through the G-buffer

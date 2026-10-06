@@ -29,8 +29,9 @@ type entry struct {
 	inst  Instance
 	cull  CullMode
 	blend BlendMode
-	// isMasked is whether the instance cuts its surface out (see Masked), as last
-	// marked dirty.
+	// isMasked is whether the instance cuts anything out of the depth-only passes — its
+	// surface by alpha (see Masked), or its texels that let light through out of the
+	// shadows (see Transmissive) — as last marked dirty.
 	isMasked bool
 }
 
@@ -123,7 +124,7 @@ func (s *Pool) ensureCap(n uint32) {
 	}
 	s.cap = newCap
 	s.buf = s.backend.Alloc(uint64(newCap)*uint64(s.stride), gpu.MemoryDevice, s.label)
-	s.masks = s.backend.Alloc(uint64(newCap)*alphaMaskSize, gpu.MemoryDevice, s.label+" masks")
+	s.masks = s.backend.Alloc(uint64(newCap)*maskEntrySize, gpu.MemoryDevice, s.label+" masks")
 	s.markAllDirty()
 }
 
@@ -167,7 +168,7 @@ func (s *Pool) Sync(u Uploader) {
 	if len(s.dirty) == 0 {
 		return
 	}
-	need := len(s.dirty) * (int(s.stride) + alphaMaskSize)
+	need := len(s.dirty) * (int(s.stride) + maskEntrySize)
 	if cap(s.scratch) < need {
 		s.scratch = make([]byte, need)
 	}
@@ -179,7 +180,7 @@ func (s *Pool) Sync(u Uploader) {
 		if s.entries.IsAlive(id) {
 			inst := s.entries.Value(id).inst
 			scratch = append(scratch, inst.Bytes()...)
-			mask = s.alphaMaskOf(inst)
+			mask = s.maskEntryOf(inst)
 		} else {
 			// A freed slot still gets one last write, of zeros: a draw issued in the
 			// same frame the material was released must not read its old record.
@@ -188,12 +189,13 @@ func (s *Pool) Sync(u Uploader) {
 		}
 		parts = append(parts, scatterPart{buffer: s.buf, dstOffset: id * s.stride, data: scratch[lo:]})
 		// An instance that is not masked, or no longer alive, gets zeros: a cut-off of
-		// 0, which keeps every texel.
+		// 0, which keeps every texel, and a transmission of 0, which lets no light
+		// through.
 		lo = len(scratch)
-		scratch = scratch[:lo+alphaMaskSize]
+		scratch = scratch[:lo+maskEntrySize]
 		clear(scratch[lo:])
 		copy(scratch[lo:], mask)
-		parts = append(parts, scatterPart{buffer: s.masks, dstOffset: id * alphaMaskSize, data: scratch[lo:]})
+		parts = append(parts, scatterPart{buffer: s.masks, dstOffset: id * maskEntrySize, data: scratch[lo:]})
 	}
 	for _, p := range parts {
 		u.Copy(p.buffer, p.dstOffset, p.data)
@@ -208,8 +210,9 @@ func (s *Pool) RecordsAddr() uint64 {
 	return s.buf.Addr
 }
 
-// MasksAddr is the device address of the pool's mask table — one AlphaMask entry per
-// record slot (see Masked) — resolved at draw time because it moves when the pool grows.
+// MasksAddr is the device address of the pool's mask table — per record slot, an
+// AlphaMask and a TransmissionMask (see Masked and Transmissive) — resolved at draw
+// time because it moves when the pool grows.
 func (s *Pool) MasksAddr() uint64 {
 	return s.masks.Addr
 }
@@ -248,13 +251,13 @@ func (s *Pool) Live(id, gen uint32) bool {
 // implementation must call it from every setter, or the GPU keeps rendering the
 // previous value indefinitely.
 //
-// It also notes whether the instance is masked now (see Masked): that decides which
+// It also notes whether the instance is masked now (see IsMaskedAt): that decides which
 // pipeline the depth-only passes draw it with, so a change counts as a change of
 // rasterization state (see RasterRevision), noticed before the next frame is laid out
 // rather than once its records are uploaded.
 func (s *Pool) MarkDirty(id uint32) {
 	e := s.entries.Value(id)
-	isMasked := s.alphaMaskOf(e.inst) != nil
+	isMasked := s.maskEntryOf(e.inst) != nil
 	if isMasked != e.isMasked {
 		e.isMasked = isMasked
 		s.rasterRevision++
@@ -262,22 +265,32 @@ func (s *Pool) MarkDirty(id uint32) {
 	s.markDirty(id)
 }
 
-// alphaMaskOf is inst's entry in the mask table (see AlphaMask.ToBytes), or nil when it
-// is not masked now.
-func (s *Pool) alphaMaskOf(inst Instance) []byte {
-	masked, ok := inst.(Masked)
-	if !ok {
+// maskEntryOf is inst's entry in the mask table — its AlphaMask, then its
+// TransmissionMask, each zeros when it has none — or nil when it has neither now.
+func (s *Pool) maskEntryOf(inst Instance) []byte {
+	var alpha, transmission []byte
+	if masked, ok := inst.(Masked); ok {
+		if mask, isMasked := masked.AlphaMask(); isMasked {
+			alpha = mask.ToBytes()
+		}
+	}
+	if transmissive, ok := inst.(Transmissive); ok {
+		if mask, letsLightThrough := transmissive.TransmissionMask(); letsLightThrough {
+			transmission = mask.ToBytes()
+		}
+	}
+	if alpha == nil && transmission == nil {
 		return nil
 	}
-	mask, isMasked := masked.AlphaMask()
-	if !isMasked {
-		return nil
-	}
-	return mask.ToBytes()
+	entry := make([]byte, maskEntrySize)
+	copy(entry, alpha)
+	copy(entry[maskHalfSize:], transmission)
+	return entry
 }
 
-// IsMaskedAt reports whether the instance in slot id cuts its surface out by alpha (see
-// Masked).
+// IsMaskedAt reports whether the instance in slot id cuts anything out of the
+// depth-only passes: its surface by alpha (see Masked), or out of the shadows, the
+// texels that let light through (see Transmissive).
 func (s *Pool) IsMaskedAt(id uint32) bool {
 	return s.entries.Value(id).isMasked
 }

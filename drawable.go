@@ -156,7 +156,11 @@ type maskedDepthRoot struct {
 	drawables uint64
 	visible   uint64
 	masks     uint64
-	_         [2]uint32
+	// isShadowPass leaves out of the depth the texels that let light through (see
+	// materials.Transmissive): set for a shadow map, whose glass casts no shadow, and
+	// not for the prepass, which glass must still occlude.
+	isShadowPass uint32
+	_            uint32
 }
 
 // skinCmd is one SkinnedMesh's compute-skinning dispatch, built by
