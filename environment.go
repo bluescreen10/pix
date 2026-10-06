@@ -65,8 +65,7 @@ type envPrefilterRoot struct {
 	source, target, sampler uint32
 	blurRoughness           float32
 	size                    [2]uint32
-	sourceLod               float32
-	_                       uint32
+	_                       [2]uint32
 }
 
 // envBRDFRoot matches PC in env_brdf.comp.glsl.

@@ -12,7 +12,7 @@ func TestSharedTextureOwnership(t *testing.T) {
 	r, _ := pix.NewOffscreenRenderer(16, 16)
 	defer r.Destroy()
 
-	tex := r.TextureStore.Create([]byte{255, 255, 255, 255}, 1, 1, textures.Linear)
+	tex := r.TextureStore.Create(nrgbaImage([]byte{255, 255, 255, 255}, 1, 1), textures.Linear)
 	m := r.NewPBRMaterial()
 	m.SetMetallicMap(tex)
 	m.SetRoughnessMap(tex) // same handle into a second slot
@@ -38,7 +38,7 @@ func TestSetMapSelfRebind(t *testing.T) {
 	}
 	defer r.Destroy()
 
-	tex := r.TextureStore.Create([]byte{255, 255, 255, 255}, 1, 1, textures.Linear)
+	tex := r.TextureStore.Create(nrgbaImage([]byte{255, 255, 255, 255}, 1, 1), textures.Linear)
 	m := r.NewBasicMaterial()
 	m.SetColorMap(tex)
 	tex.Release() // the material should hold the only remaining reference
@@ -62,13 +62,13 @@ func TestSetMapSelfRebindThenReleaseIsSafe(t *testing.T) {
 	}
 	defer r.Destroy()
 
-	tex := r.TextureStore.Create([]byte{255, 255, 255, 255}, 1, 1, textures.Linear)
+	tex := r.TextureStore.Create(nrgbaImage([]byte{255, 255, 255, 255}, 1, 1), textures.Linear)
 	m := r.NewBasicMaterial()
 	m.SetColorMap(tex)
 	tex.Release()
 	m.SetColorMap(m.ColorMap())
 
-	other := r.TextureStore.Create([]byte{0, 0, 0, 255}, 1, 1, textures.Linear)
+	other := r.TextureStore.Create(nrgbaImage([]byte{0, 0, 0, 255}, 1, 1), textures.Linear)
 	defer other.Release()
 
 	m.Release()

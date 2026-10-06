@@ -35,7 +35,7 @@ func newMaskedPlate(t *testing.T) maskedPlate {
 	plate.SetColor(colors.RGBA32F{1, 0, 0, 1})
 	plate.SetRoughness(1)
 	plate.SetMetallic(0)
-	faint := r.TextureStore.Create([]byte{255, 255, 255, 51}, 1, 1, textures.SRGB)
+	faint := r.TextureStore.Create(nrgbaImage([]byte{255, 255, 255, 51}, 1, 1), textures.SRGB)
 	t.Cleanup(faint.Release)
 	plate.SetColorMap(faint)
 

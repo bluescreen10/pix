@@ -21,14 +21,26 @@ layout(push_constant, scalar) uniform PC {
     uint samp;
     float blurRoughness; // the GGX roughness this mip blurs the one before it by
     uvec2 size;     // the mip's size in texels
-    float sourceLod;
     uint pad0;
+    uint pad1;
 } pc;
 
 const uint SAMPLES = 64u;
 
-vec3 sourceAt(vec3 dir) {
-    return textureLod(sampler2D(gTextures[nonuniformEXT(pc.source)], gSamplers[nonuniformEXT(pc.samp)]), equirectUV(dir), pc.sourceLod).rgb;
+// sourceLod is the level of the source twice as wide as this mip: the mip before it,
+// for a blurred mip; for mip 0, whichever level of the environment that is. A bilinear
+// tap there, at this mip's texel centre, averages the 2x2 texels it covers exactly. A
+// tap at the environment's full size would read two of the dozens of texels a mip-0
+// texel covers in a large panorama, and keep or lose a small bright sun by where it
+// fell. A source with fewer levels — a sky drawn into a single-level image — clamps to
+// its last.
+float sourceLod() {
+    float width = float(textureSize(sampler2D(gTextures[nonuniformEXT(pc.source)], gSamplers[nonuniformEXT(pc.samp)]), 0).x);
+    return max(log2(width / float(pc.size.x)) - 1.0, 0.0);
+}
+
+vec3 sourceAt(vec3 dir, float lod) {
+    return textureLod(sampler2D(gTextures[nonuniformEXT(pc.source)], gSamplers[nonuniformEXT(pc.samp)]), equirectUV(dir), lod).rgb;
 }
 
 void main() {
@@ -38,7 +50,8 @@ void main() {
     }
     vec3 N = equirectDirection((vec2(id) + 0.5) / vec2(pc.size));
 
-    vec3 color = sourceAt(N);
+    float lod = sourceLod();
+    vec3 color = sourceAt(N, lod);
     if (pc.blurRoughness > 0.0) {
         // The usual assumption of split-sum prefiltering: the viewer looks along the
         // normal, so the reflection direction is the normal too.
@@ -49,7 +62,7 @@ void main() {
             vec3 L = 2.0 * dot(N, H) * H - N;
             float NdotL = dot(N, L);
             if (NdotL > 0.0) {
-                color += sourceAt(L) * NdotL;
+                color += sourceAt(L, lod) * NdotL;
                 weight += NdotL;
             }
         }

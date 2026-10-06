@@ -104,7 +104,7 @@ func TestMaterialTextureRefsAreHeldByTheHandle(t *testing.T) {
 	}
 	defer r.Destroy()
 
-	tex := r.TextureStore.Create([]byte{255, 255, 255, 255}, 1, 1, textures.Linear)
+	tex := r.TextureStore.Create(nrgbaImage([]byte{255, 255, 255, 255}, 1, 1), textures.Linear)
 	mat := r.NewPBRMaterial()
 	mat.SetColorMap(tex)
 	tex.Release() // the material holds the only remaining reference

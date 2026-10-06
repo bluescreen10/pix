@@ -5,6 +5,7 @@
 package textures
 
 import (
+	"image"
 	"unsafe"
 
 	"github.com/bluescreen10/gamekit/gpu"
@@ -66,12 +67,12 @@ func (t *Store) CreateSampler(d gpu.SamplerDescriptor) uint32 {
 	return s.Index
 }
 
-// Create builds a mipmapped heap texture from RGBA8 pixels (w*h*4, row-major),
-// repacked and filtered according to format, and returns a fresh single-ref handle.
-// Submitted + waited immediately. It is Prepare and Upload; a loader with many textures
-// to make prepares them in parallel and uploads them as they are ready.
-func (t *Store) Create(rgba []byte, w, h int, format Format) Texture {
-	return t.Upload(Prepare(rgba, w, h, format, FullMipChain))
+// Create makes a mipmapped heap texture of format from img (see Prepare for how each
+// format reads it) and returns a fresh single-ref handle. Submitted + waited
+// immediately. It is Prepare and Upload; a loader with many textures to make prepares
+// them in parallel and uploads them as they are ready.
+func (t *Store) Create(img image.Image, format Format) Texture {
+	return t.Upload(Prepare(img, format, FullMipChain))
 }
 
 // Upload makes a heap texture of img and returns a fresh single-ref handle, its levels

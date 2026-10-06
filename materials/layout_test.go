@@ -46,7 +46,7 @@ func TestMaterialRecordLayouts(t *testing.T) {
 	texStore := textures.NewStore(backend)
 	defer texStore.Destroy()
 
-	tex := texStore.Create([]byte{255, 255, 255, 255}, 1, 1, textures.Linear)
+	tex := texStore.Create(nrgbaImage([]byte{255, 255, 255, 255}, 1, 1), textures.Linear)
 	defer tex.Release()
 
 	t.Run("PBR", func(t *testing.T) {
@@ -262,7 +262,7 @@ func TestAlphaCutoffMakesAMaterialMasked(t *testing.T) {
 	store, backend := testStore(t)
 	texStore := textures.NewStore(backend)
 	defer texStore.Destroy()
-	tex := texStore.Create([]byte{255, 255, 255, 128}, 1, 1, textures.SRGB)
+	tex := texStore.Create(nrgbaImage([]byte{255, 255, 255, 128}, 1, 1), textures.SRGB)
 	defer tex.Release()
 
 	m := materials.NewPBRMaterial(store)

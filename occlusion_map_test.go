@@ -30,7 +30,7 @@ func TestOcclusionMapDarkensOnlyIndirectLight(t *testing.T) {
 	camera.SetPosition(glm.Vec3f{0, 0, 3})
 	camera.LookAt(glm.Vec3f{})
 	// A quarter of the light around it reaches the surface: red 64 of 255.
-	occlusion := r.TextureStore.Create([]byte{64, 255, 255, 255}, 1, 1, textures.Linear)
+	occlusion := r.TextureStore.Create(nrgbaImage([]byte{64, 255, 255, 255}, 1, 1), textures.Linear)
 	defer occlusion.Release()
 
 	center := func() float64 {

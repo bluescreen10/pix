@@ -1844,7 +1844,7 @@ func (r *Renderer) encodeEnvironment(st *renderState, cmd gpu.CommandBuffer) {
 		if mip > 0 {
 			// Each blurred mip reads the one before it, written by the dispatch before.
 			cmd.Barrier(gpu.StageCompute, gpu.StageCompute, 0)
-			prefilter.source, prefilter.sourceLod = st.environment.radiance.Index, float32(mip-1)
+			prefilter.source = st.environment.radiance.Index
 		}
 		cmd.Dispatch(utils.ToBytes(&prefilter), (width+7)/8, (height+7)/8, 1)
 	}

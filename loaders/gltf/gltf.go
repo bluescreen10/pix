@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
-	"image/draw"
 	_ "image/jpeg"
 	_ "image/png"
 	"math"
@@ -775,11 +774,11 @@ func (l *loader) prepareTexture(key texKey) (textures.Image, error) {
 	if gt.Source == nil {
 		return textures.Image{}, fmt.Errorf("texture %d has no image", key.index)
 	}
-	pixels, w, h, err := l.decodeImage(*gt.Source)
+	img, err := l.decodeImage(*gt.Source)
 	if err != nil {
 		return textures.Image{}, err
 	}
-	return textures.Prepare(pixels, w, h, key.usage, l.options.MipChain), nil
+	return textures.Prepare(img, key.usage, l.options.MipChain), nil
 }
 
 // uploadTexture uploads img for key, or with err records that key has no texture, so
@@ -897,9 +896,9 @@ func (l *loader) materialFor(ptr *int) materials.Material {
 	return l.materials[*ptr+1]
 }
 
-func (l *loader) decodeImage(idx int) (pixels []byte, w, h int, err error) {
+func (l *loader) decodeImage(idx int) (img image.Image, err error) {
 	if idx >= len(l.doc.Images) {
-		return nil, 0, 0, fmt.Errorf("image %d out of range", idx)
+		return nil, fmt.Errorf("image %d out of range", idx)
 	}
 	gi := l.doc.Images[idx]
 	var raw []byte
@@ -908,50 +907,11 @@ func (l *loader) decodeImage(idx int) (pixels []byte, w, h int, err error) {
 		raw = l.buffers[bv.Buffer][bv.ByteOffset : bv.ByteOffset+bv.ByteLength]
 	} else {
 		if raw, err = l.resolveURI(gi.URI); err != nil {
-			return nil, 0, 0, err
+			return nil, err
 		}
 	}
-	img, _, err := image.Decode(bytes.NewReader(raw))
-	if err != nil {
-		return nil, 0, 0, err
-	}
-	bnd := img.Bounds()
-	w, h = bnd.Dx(), bnd.Dy()
-	return nrgbaPixels(img), w, h, nil
-}
-
-// nrgbaPixels is img as tightly packed, non-premultiplied RGBA bytes. PNGs with alpha
-// decode as NRGBA, which is that already, row for row. Opaque images — JPEG's YCbCr,
-// opaque PNGs' RGBA and Gray — go through image/draw into RGBA, which it converts them
-// to on fast paths; with alpha 1 everywhere, premultiplied is the same as not. Anything
-// else takes image/draw's general path. Asking each pixel for its colour instead cost a
-// conversion and an allocation apiece.
-func nrgbaPixels(img image.Image) []byte {
-	bnd := img.Bounds()
-	w, h := bnd.Dx(), bnd.Dy()
-	if nrgba, ok := img.(*image.NRGBA); ok && nrgba.Stride == w*4 && bnd.Min == (image.Point{}) {
-		return nrgba.Pix[:w*h*4]
-	}
-	if isOpaque(img) {
-		dst := image.NewRGBA(image.Rect(0, 0, w, h))
-		draw.Draw(dst, dst.Bounds(), img, bnd.Min, draw.Src)
-		return dst.Pix
-	}
-	dst := image.NewNRGBA(image.Rect(0, 0, w, h))
-	draw.Draw(dst, dst.Bounds(), img, bnd.Min, draw.Src)
-	return dst.Pix
-}
-
-// isOpaque reports whether img has no alpha below 1: always, for the types that hold
-// none, and by looking, for RGBA.
-func isOpaque(img image.Image) bool {
-	switch img := img.(type) {
-	case *image.YCbCr, *image.Gray:
-		return true
-	case *image.RGBA:
-		return img.Opaque()
-	}
-	return false
+	img, _, err = image.Decode(bytes.NewReader(raw))
+	return img, err
 }
 
 // ---- node transforms ----

@@ -1,6 +1,10 @@
 package textures
 
-import "github.com/chewxy/math32"
+import (
+	"image"
+
+	"github.com/chewxy/math32"
+)
 
 // Mip chain generation. Downsampling looks trivial — average four texels — and is
 // wrong in two ways that both fail silently, so both are handled here rather than
@@ -49,30 +53,43 @@ func (img Image) Levels() int {
 	return len(img.levels)
 }
 
-// Prepare repacks RGBA8 pixels (w*h*4, row-major) for format and builds the levels mips
-// asks for. It is the CPU half of making a texture, and touches nothing shared, so a
+// Prepare makes img a texture of format, with the levels mips asks for, ready to
+// Upload. It is the CPU half of making a texture, and touches nothing shared, so a
 // loader runs it for many textures at once.
-func Prepare(rgba []byte, w, h int, format Format, mips MipChain) Image {
-	base := format.repack(rgba, w, h)
-	img := Image{format: format, width: w, height: h, levels: [][]byte{base}}
-	if mips == FullMipChain {
-		levels, _ := mipChain(base, w, h, format.channels(), format == SRGB, format == Normal)
-		img.levels = append(img.levels, levels...)
+//
+// The 8-bit formats take img's colour as stored — sRGB-encoded for SRGB, plain data for
+// the others — with alpha not premultiplied. An *image.NRGBA, and an opaque
+// *image.RGBA, *image.YCbCr or *image.Gray, as the standard decoders return them, are
+// read without converting pixel by pixel. For Grayscale, an *image.Gray's bytes are the
+// texture's as they are: one-channel data — a mask, noise, a glyph atlas — goes in at
+// one byte a texel, wrapped in an image.Gray. HDR takes an *hdr.RGB's light as it is, and
+// any other image's colour as sRGB-encoded light, none of it brighter than white.
+func Prepare(img image.Image, format Format, mips MipChain) Image {
+	w, h := img.Bounds().Dx(), img.Bounds().Dy()
+	if format == HDR {
+		return prepareHDR(linearRGB(img), w, h, mips)
 	}
-	return img
+
+	base := basePixels(img, format)
+	prepared := Image{format: format, width: w, height: h, levels: [][]byte{base}}
+	if mips == FullMipChain {
+		prepared.levels = append(prepared.levels, mipChain(base, w, h, format.channels(), format == SRGB, format == Normal)...)
+	}
+	return prepared
 }
 
-// GenerateMipChain builds a full mip chain for format from RGBA8 source pixels
-// (w*h*4, row-major), applying the same repacking and filtering Store.Create uses
-// internally. It has no GPU dependency, so offline tools that bake or cache textures
-// (or tests) can call it directly. Returns the repacked base level, every level below
-// it largest-first, and each returned level's pixel dimensions (not including the
-// base, which is always w×h).
-func GenerateMipChain(rgba []byte, w, h int, format Format) (base []byte, levels [][]byte, sizes [][2]int) {
-	channels := format.channels()
-	base = format.repack(rgba, w, h)
-	levels, sizes = mipChain(base, w, h, channels, format == SRGB, format == Normal)
-	return base, levels, sizes
+// GenerateMipChain makes img a texture of format with every level, as Store.Create
+// does, without a GPU, for offline tools that bake or cache textures (and for tests).
+// It returns the base level, every level below it largest-first, and each of those
+// levels' sizes in texels (the base's is img's).
+func GenerateMipChain(img image.Image, format Format) (base []byte, levels [][]byte, sizes [][2]int) {
+	prepared := Prepare(img, format, FullMipChain)
+	w, h := prepared.width, prepared.height
+	for range prepared.levels[1:] {
+		w, h = max(w/2, 1), max(h/2, 1)
+		sizes = append(sizes, [2]int{w, h})
+	}
+	return prepared.levels[0], prepared.levels[1:], sizes
 }
 
 // mipChain builds every level below the base for a `channels`-per-texel image,
@@ -82,16 +99,15 @@ func GenerateMipChain(rgba []byte, w, h int, format Format) (base []byte, levels
 // Each level is filtered from the level above, not from the base: the error of a
 // repeated 2×2 box filter is what every offline tool produces too, and filtering
 // from the base each time would cost far more for no visible gain at these sizes.
-func mipChain(base []byte, w, h, channels int, srgb, normalMap bool) (levels [][]byte, sizes [][2]int) {
+func mipChain(base []byte, w, h, channels int, srgb, normalMap bool) (levels [][]byte) {
 	src, sw, sh := base, w, h
 	for sw > 1 || sh > 1 {
 		dw, dh := max(sw/2, 1), max(sh/2, 1)
 		dst := downsample(src, sw, sh, dw, dh, channels, srgb, normalMap)
 		levels = append(levels, dst)
-		sizes = append(sizes, [2]int{dw, dh})
 		src, sw, sh = dst, dw, dh
 	}
-	return levels, sizes
+	return levels
 }
 
 // downsample box-filters src (sw×sh) into a new dw×dh image. When an axis doesn't

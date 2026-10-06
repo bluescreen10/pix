@@ -1,6 +1,7 @@
 package pix
 
 import (
+	"image"
 	"sort"
 
 	"github.com/bluescreen10/gamekit/gpu"
@@ -64,12 +65,12 @@ func buildFontAtlas(store *textures.Store) *fontAtlas {
 	rows := (cells + atlasCols - 1) / atlasCols
 	w, h := atlasCols*cell, rows*cell
 
-	// RGBA8 in, R8 out: textures.Grayscale keeps the red channel and box-filters the
-	// mip chain, which is exactly the minification this needs.
-	px := make([]byte, w*h*4)
+	// One byte a texel, as the R8 texture holds it: textures.Grayscale takes an
+	// image.Gray's bytes as they are and box-filters the mip chain, which is exactly
+	// the minification this needs.
+	atlas := image.NewGray(image.Rect(0, 0, w, h))
 	set := func(x, y int, v byte) {
-		i := (y*w + x) * 4
-		px[i], px[i+1], px[i+2], px[i+3] = v, v, v, 255
+		atlas.Pix[y*w+x] = v
 	}
 
 	a := &fontAtlas{entries: make(map[rune]atlasEntry, len(codes))}
@@ -112,7 +113,7 @@ func buildFontAtlas(store *textures.Store) *fontAtlas {
 	a.solidU = (float32(sx) + glyphCell/2) / fw
 	a.solidV = (float32(sy) + glyphCell/2) / fh
 
-	a.tex = store.Create(px, w, h, textures.Grayscale)
+	a.tex = store.Create(atlas, textures.Grayscale)
 	a.sampler = store.CreateSampler(gpuAtlasSampler())
 	return a
 }

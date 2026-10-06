@@ -6,8 +6,8 @@ import "github.com/bluescreen10/gamekit/gpu"
 // how its mips must be filtered. It is not a raw format enum: callers know they have
 // a normal map, not that they want two unorm channels.
 //
-// Source pixels are always handed in as RGBA8; Store.Create repacks to the narrower
-// formats, so callers never have to pre-swizzle.
+// Source pixels come as an image.Image, which Prepare repacks to the format's layout,
+// so callers never have to pre-swizzle.
 type Format uint8
 
 const (
@@ -25,6 +25,10 @@ const (
 	// Grayscale is a single-channel 8-bit map (occlusion, a standalone
 	// roughness mask) — the red channel of the source is kept.
 	Grayscale
+	// HDR is linear light that goes beyond white — an environment's sky and sun, from
+	// an *hdr.RGB — stored as three floats sharing an exponent (RGB9E5): four bytes a
+	// texel, with no alpha.
+	HDR
 )
 
 func (f Format) gpuFormat() gpu.Format {
@@ -35,6 +39,8 @@ func (f Format) gpuFormat() gpu.Format {
 		return gpu.FormatRG8Unorm
 	case Grayscale:
 		return gpu.FormatR8Unorm
+	case HDR:
+		return gpu.FormatRGB9E5F
 	default:
 		return gpu.FormatRGBA8Srgb
 	}

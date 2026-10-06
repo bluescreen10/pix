@@ -18,7 +18,7 @@ func maskTexture(r *pix.Renderer, fractions ...byte) textures.Texture {
 	for _, f := range fractions {
 		rgba = append(rgba, f, f, f, 255)
 	}
-	return r.TextureStore.Create(rgba, len(fractions), 1, textures.Linear)
+	return r.TextureStore.Create(nrgbaImage(rgba, len(fractions), 1), textures.Linear)
 }
 
 // groundScene is a white ground at y = 0, lit through the given material type, under a

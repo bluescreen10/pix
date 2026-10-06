@@ -1,6 +1,7 @@
 package pix_test
 
 import (
+	"image"
 	"math"
 	"testing"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/image/hdr"
 	"github.com/bluescreen10/pix/materials"
 	"github.com/bluescreen10/pix/scenes"
 	"github.com/bluescreen10/pix/textures"
@@ -26,7 +28,7 @@ func environmentImage(r *pix.Renderer, width, height int, color func(u, v float6
 			rgba = append(rgba, c[0], c[1], c[2], 255)
 		}
 	}
-	return r.TextureStore.Create(rgba, width, height, textures.Linear)
+	return r.TextureStore.Create(nrgbaImage(rgba, width, height), textures.Linear)
 }
 
 // environmentScene is a sphere of the given material, 3 units down -z from a camera at
@@ -306,4 +308,70 @@ func TestEnvironmentRemovedAndSetAgain(t *testing.T) {
 	if got := centre(); got < 251 {
 		t.Errorf("with the environment set again, sphere centre = %d, want 255: its light derived anew", got)
 	}
+}
+
+// TestEnvironmentKeepsLightBeyondWhite lights a white metal sphere from an HDR image of
+// light 4, at intensity 1/8, and again from an 8-bit white image at intensity 1/2: both
+// are light 0.5, and must reflect the same. An 8-bit image would have clipped the light
+// to 1 and left 1/8.
+func TestEnvironmentKeepsLightBeyondWhite(t *testing.T) {
+	r, scene := environmentScene(t, nil, metal(0))
+	renderCenter := func(image textures.Texture, intensity float32) [3]byte {
+		environment := scenes.NewEnvironment(image)
+		image.Release()
+		defer environment.Release()
+		environment.Intensity = intensity
+		scene.SetEnvironment(environment)
+		r.Render(scene)
+		return pixelAt(r, postSize/2, postSize/2)
+	}
+
+	const width, height = 8, 4
+	light := hdr.NewRGB(image.Rect(0, 0, width, height))
+	for i := range light.Pix {
+		light.Pix[i] = 4
+	}
+	got := renderCenter(r.TextureStore.Create(light, textures.HDR), 1.0/8)
+	want := renderCenter(environmentImage(r, width, height, uniform([3]byte{255, 255, 255})), 1.0/2)
+	if want[0] < 150 {
+		t.Fatalf("8-bit reference = %v, too dark to compare against", want)
+	}
+	if absDiff(int(got[0]), int(want[0])) > 2 || got[0] != got[1] || got[1] != got[2] {
+		t.Errorf("sphere centre = %v, want %v: light 4 at intensity 1/8, as white at 1/2", got, want)
+	}
+}
+
+// TestEnvironmentReflectionsAverageFineDetail lights a mirror sphere from an image
+// four times wider than the sharpest reflections, in which one column in every four is
+// white: reflected, it must average to 0.25 grey. Read one texel a reflection texel,
+// at the image's full size, it comes out black — every reflection texel lands between
+// two of the black columns — or, shifted a little, white: the image's detail aliases,
+// and a small bright sun in a panorama is lost or kept by where it happens to fall.
+func TestEnvironmentReflectionsAverageFineDetail(t *testing.T) {
+	r, scene := environmentScene(t, nil, metal(0))
+	stripes := environmentImage(r, 1024, 512, func(u, v float64) [3]byte {
+		if int(u*1024)%4 == 3 {
+			return [3]byte{255, 255, 255}
+		}
+		return [3]byte{}
+	})
+	environment := scenes.NewEnvironment(stripes)
+	stripes.Release()
+	defer environment.Release()
+	scene.SetEnvironment(environment)
+
+	r.Render(scene)
+
+	want := srgbByte(0.25)
+	if got := pixelAt(r, postSize/2, postSize/2); absDiff(int(got[0]), want) > 3 {
+		t.Errorf("sphere centre = %v, want grey %d: a quarter of the image is white", got, want)
+	}
+}
+
+// absDiff is |a - b|.
+func absDiff(a, b int) int {
+	if a > b {
+		return a - b
+	}
+	return b - a
 }
