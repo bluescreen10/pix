@@ -818,8 +818,9 @@ func (l *loader) loadMaterials() {
 			}
 			m.SetAlphaCutoff(cutoff)
 		}
-		// KHR_materials_transmission (glass): approximate as alpha-blended, diffuse
-		// suppressed. A transmission factor > 0 makes the surface see-through.
+		// KHR_materials_transmission (glass): diffuse suppressed, blended over the
+		// scene behind it (SetTransmission picks the blend mode). A transmission
+		// factor > 0 makes the surface see-through.
 		if ext := gm.Extensions; ext != nil && ext.Transmission != nil {
 			tf := float32(1)
 			if ext.Transmission.TransmissionFactor != nil {
@@ -827,7 +828,6 @@ func (l *loader) loadMaterials() {
 			}
 			if tf > 0 {
 				m.SetTransmission(tf)
-				m.SetBlend(materials.BlendAlpha)
 				// The mask matters more than the factor for most assets: these
 				// materials are usually declared OPAQUE with a factor of 1 and a
 				// texture that is glass in only a few places. Loading the factor

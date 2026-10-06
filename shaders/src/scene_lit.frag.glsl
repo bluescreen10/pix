@@ -45,7 +45,9 @@ void main() {
     vec3 albedo = base.rgb;
 
     LightBuf L = pc.lights;
-    vec3 N = normalize(vNormal);
+    // A back face is drawn only for a double-sided surface, which is lit on the side
+    // it is seen from.
+    vec3 N = gl_FrontFacing ? normalize(vNormal) : -normalize(vNormal);
     vec3 V = normalize(pc.eye.xyz - vWorldPos);
 
     uint shadowSamp = pc.shadowSampler;

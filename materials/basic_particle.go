@@ -160,7 +160,7 @@ func (m *BasicParticleMaterial) Blend() BlendMode {
 	return m.pool.BlendAt(m.ref.ID())
 }
 
-// SetBlend sets the material's blend mode (Opaque/Alpha/Additive) — most particle
+// SetBlend sets the material's blend mode (Opaque/Alpha/Additive/Premultiplied) — most particle
 // effects (smoke, fire, sparks) want BlendAlpha or BlendAdditive; the default
 // constructed value is BlendOpaque, matching every other material type's default.
 func (m *BasicParticleMaterial) SetBlend(mode BlendMode) {

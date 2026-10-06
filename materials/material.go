@@ -38,6 +38,11 @@ const (
 	BlendOpaque   BlendMode = iota // no blending (writes replace)
 	BlendAlpha                     // src-alpha over
 	BlendAdditive                  // add
+	// BlendPremultiplied adds the colour in full and dims what is behind by alpha: the
+	// colour is already weighted by its coverage. Glass needs it: the light it
+	// reflects must not be scaled by how little of the scene behind it the glass
+	// keeps out, as BlendAlpha would scale it.
+	BlendPremultiplied
 )
 
 // Shader is a material type's GPU programs: a vertex stage and a fragment stage, and

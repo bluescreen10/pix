@@ -165,17 +165,17 @@ func (m *PBRMaterial) Transmission() float32 {
 	return m.transmission
 }
 
-// SetTransmission sets how much light passes through the surface [0,1]. A value > 0
-// makes the material transparent (approximate glass) and switches it to alpha
-// blending, which also keeps it on the forward path — the G-buffer has nowhere to
-// store transmission, so a transmissive material left opaque would render as solid
-// once deferred rendering is enabled. Never switches back to opaque on its own; call
-// SetBlend(BlendOpaque) explicitly if you clear transmission.
+// SetTransmission sets how much light passes through the surface [0,1] — glass. A
+// value > 0 switches an opaque or alpha-blended material to BlendPremultiplied, which
+// glass needs: the shader writes the light the surface reflects as it is, and alpha as
+// how much of the scene behind the surface it keeps out. Under BlendAlpha that alpha
+// would scale the reflection too, and a clear pane would all but vanish. Never switches
+// back on its own; call SetBlend explicitly if you clear transmission.
 func (m *PBRMaterial) SetTransmission(transmission float32) {
 	m.transmission = transmission
 	m.dirty()
-	if transmission > 0 && m.Blend() == BlendOpaque {
-		m.SetBlend(BlendAlpha)
+	if transmission > 0 && (m.Blend() == BlendOpaque || m.Blend() == BlendAlpha) {
+		m.SetBlend(BlendPremultiplied)
 	}
 }
 
@@ -414,7 +414,7 @@ func (m *PBRMaterial) Blend() BlendMode {
 	return m.pool.BlendAt(m.ref.ID())
 }
 
-// SetBlend sets the material's blend mode (Opaque/Alpha/Additive).
+// SetBlend sets the material's blend mode (Opaque/Alpha/Additive/Premultiplied).
 func (m *PBRMaterial) SetBlend(mode BlendMode) {
 	m.pool.SetBlendAt(m.ref.ID(), mode)
 }

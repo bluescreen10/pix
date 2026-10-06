@@ -217,3 +217,81 @@ func TestBlendedMeshesDrawBackToFront(t *testing.T) {
 		}
 	}
 }
+
+// TestGlassReflectsInFull renders a highlight on a pane of glass over a red backdrop,
+// and the same highlight on an opaque surface of the same finish with nothing to
+// show but it. Glass lets almost everything behind it through face-on, but that does
+// not dim what it reflects: the highlight must come out as bright as on the opaque
+// surface, with the red behind showing through it.
+//
+// Under plain alpha blending it does not. The glass's alpha is how much of the
+// backdrop it keeps out, about 0.04 face-on, and that same alpha scales the colour it
+// reflects, so the highlight all but disappears.
+func TestGlassReflectsInFull(t *testing.T) {
+	const size = 96
+	r, err := pix.NewOffscreenRenderer(size, size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	r.SetClearColor([4]float32{0, 0, 0, 1})
+
+	quad := func(z float32) geometries.Geometry {
+		return r.GeometryStore.Create(geometries.GeometryConfig{
+			Attributes: []geometries.Attribute{
+				geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, []glm.Vec3f{{-0.8, -0.8, z}, {0.8, -0.8, z}, {0.8, 0.8, z}, {-0.8, 0.8, z}}),
+				geometries.NewAttribute(geometries.AttributeNormal, geometries.Float32x3, []glm.Vec3f{{0, 0, 1}, {0, 0, 1}, {0, 0, 1}, {0, 0, 1}}),
+			},
+			Indices: []uint32{0, 1, 2, 0, 2, 3},
+		})
+	}
+	// renderCenter draws surface in front of the camera, lit head-on so that its
+	// highlight lands on the centre of the frame, and returns the centre pixel.
+	renderCenter := func(surface, backdrop materials.Material) [3]uint8 {
+		scene := scenes.New()
+		defer scene.Destroy()
+		scene.AddDirectionalLight(glm.Vec3f{0, 0, -1}, colors.RGB32F{1, 1, 1}, 3)
+		scene.Add(scene.NewMesh(quad(0), surface))
+		if backdrop != nil {
+			scene.Add(scene.NewMesh(quad(-0.5), backdrop))
+		}
+		cam := scene.NewPerspectiveCamera(45, 1, 0.1, 1000)
+		scene.Add(cam)
+		cam.SetPosition(glm.Vec3f{0, 0, 2})
+		r.Render(scene)
+		px := r.Pixels()
+		i := (size/2*size + size/2) * 4
+		return [3]uint8{px[i], px[i+1], px[i+2]}
+	}
+
+	// A black dielectric reflects its highlight and nothing else.
+	opaque := r.NewPBRMaterial()
+	opaque.SetColor(colors.RGBA32F{0, 0, 0, 1})
+	opaque.SetMetallic(0)
+	opaque.SetRoughness(0.4)
+	highlight := renderCenter(opaque, nil)
+	if highlight[1] < 40 {
+		t.Fatalf("opaque highlight = %v, too dim to compare against", highlight)
+	}
+
+	glass := r.NewPBRMaterial()
+	glass.SetColor(colors.RGBA32F{1, 1, 1, 1})
+	glass.SetMetallic(0)
+	glass.SetRoughness(0.4)
+	glass.SetTransmission(1)
+	// Unlit, so that the backdrop has no highlight of its own to show through.
+	red := r.NewBasicMaterial()
+	red.SetColor(colors.RGBA32F{1, 0, 0, 1})
+	got := renderCenter(glass, red)
+
+	// The backdrop has no green or blue, so those channels are the highlight alone.
+	if diff := int(got[1]) - int(highlight[1]); diff < -3 || diff > 3 {
+		t.Errorf("glass highlight green = %d, want %d (the opaque surface's)", got[1], highlight[1])
+	}
+	if diff := int(got[2]) - int(highlight[2]); diff < -3 || diff > 3 {
+		t.Errorf("glass highlight blue = %d, want %d (the opaque surface's)", got[2], highlight[2])
+	}
+	if got[0] < 200 {
+		t.Errorf("glass red = %d, want the red backdrop showing through (>= 200)", got[0])
+	}
+}

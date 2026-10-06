@@ -3987,7 +3987,7 @@ func (r *Renderer) buildPipelines() {
 			VertexShader: shaders.ForBackend(r.backend, shaders.SceneDepthVert),
 			Topology:     gpu.TopologyTriangles, DepthFormat: gpu.FormatDepth32F,
 			DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareGreater,
-			Samples: samples, CullMode: cull, FrontFaceCW: true, Label: label,
+			Samples: samples, CullMode: cull, Label: label,
 		})
 	}
 	// Culling is off for the shadow pass: it only decides which of a surface's two
@@ -4013,7 +4013,7 @@ func (r *Renderer) buildPipelines() {
 			FragmentShader: shaders.ForBackend(r.backend, shaders.SceneDepthMaskedFrag),
 			Topology:       gpu.TopologyTriangles, DepthFormat: gpu.FormatDepth32F,
 			DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareGreater,
-			Samples: samples, CullMode: cull, FrontFaceCW: true, Label: label,
+			Samples: samples, CullMode: cull, Label: label,
 		})
 	}
 	r.maskedShadowPipeline = maskedDepth(gpu.CullNone, 1, "scene-shadow-masked")
@@ -4057,6 +4057,8 @@ func (r *Renderer) buildDrawPipe(k materialPipeline) gpu.Pipeline {
 		blend = []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}, AlphaOp: gpu.BlendFactorOp{Src: gpu.BlendOne, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}}}
 	case materials.BlendAdditive:
 		blend = []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOne, Op: gpu.BlendAdd}, AlphaOp: gpu.BlendFactorOp{Src: gpu.BlendOne, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}}}
+	case materials.BlendPremultiplied:
+		blend = []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendOne, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}, AlphaOp: gpu.BlendFactorOp{Src: gpu.BlendOne, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}}}
 	}
 	// Transparent (blended) materials test depth against opaque geometry but do NOT
 	// write depth, so they don't occlude each other and blend correctly.
@@ -4070,9 +4072,12 @@ func (r *Renderer) buildDrawPipe(k materialPipeline) gpu.Pipeline {
 		// well defined to begin with.
 		DepthFormat: gpu.FormatDepth32F, DepthTest: true, DepthWrite: depthWrite, DepthCompare: gpu.CompareGreaterEqual,
 		Samples: r.sceneSamples(),
-		// The renderer flips clip-space Y (Vulkan NDC is Y-down), which reverses
-		// triangle winding, so front faces are clockwise on screen.
-		CullMode: gpu.CullMode(k.cull), FrontFaceCW: true, Blend: blend,
+		// Front faces are counter-clockwise, as glTF and the primitives wind them, for
+		// all the clip-space Y flip (see flipClipY). Measured, not reasoned: with
+		// FrontFaceCW set, CullBack culled a plane seen from above and drew it from
+		// below, on Vulkan and Metal alike, and gl_FrontFacing was false on the faces
+		// the camera faced.
+		CullMode: gpu.CullMode(k.cull), Blend: blend,
 	})
 }
 
@@ -4133,7 +4138,7 @@ const pipelineUnresolved uint32 = 0xFFFFFFFF
 // values each, so the entire space is a fixed table indexed directly — no hashing, no
 // scan, no map — filled lazily because most pools use one or two of the cells.
 type poolPipelines struct {
-	table [3][3]uint32 // [cull][blend]
+	table [3][4]uint32 // [cull][blend]
 }
 
 func newPoolPipelines() poolPipelines {
@@ -4205,7 +4210,7 @@ func (r *Renderer) debugPipelineFor(v DebugView) gpu.Pipeline {
 		FragmentShader: shaders.ForBackend(r.backend, debugFragment(v)),
 		Topology:       gpu.TopologyTriangles, ColorFormats: []gpu.Format{r.color},
 		DepthFormat: gpu.FormatDepth32F, DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareGreater,
-		CullMode: gpu.CullNone, FrontFaceCW: true, Label: "debug-" + v.String(),
+		CullMode: gpu.CullNone, Label: "debug-" + v.String(),
 	})
 	r.debugPipelines[v] = p
 	return p

@@ -135,7 +135,10 @@ Surface materialSurface(Material m, out float baseAlpha) {
     }
     s.material = pbrPack(metallic, roughness, occlusion);
 
-    s.normal = normalize(vNormal);
+    // A back face is drawn only for a double-sided surface, which is lit on the side
+    // it is seen from. perturbNormal builds its frame around this normal, so the
+    // normal map turns over with it.
+    s.normal = gl_FrontFacing ? normalize(vNormal) : -normalize(vNormal);
     if ((m.flags & MAT_NORMAL_MAP) != 0u) {
         // Z is reconstructed rather than sampled: a tangent-space normal is a unit
         // vector, so the third component carries no independent information. This
@@ -271,6 +274,17 @@ vec3 shadeSurface(Surface s, vec3 worldPos, vec3 V, uint shadowSamp, float diffu
     return ambient + lo + s.emissive;
 }
 
+// fresnelReflectance is the share of the light meeting the surface from V that it
+// reflects rather than lets through: Schlick's approximation, as one number.
+//
+// abs() because glass is double-sided: a back face has the normal pointing away, and
+// a signed dot would read every one of them as pure grazing.
+float fresnelReflectance(Surface s, vec3 V) {
+    float f0 = mix(0.04, dot(s.albedo, vec3(0.2126, 0.7152, 0.0722)), pbrMetallic(s));
+    float ndv = abs(dot(s.normal, V));
+    return f0 + (1.0 - f0) * pow(1.0 - ndv, 5.0);
+}
+
 // ---------------------------------------------------------------------------
 void main() {
     discardCutOut();
@@ -278,50 +292,46 @@ void main() {
     float baseAlpha;
     Surface s = materialSurface(m, baseAlpha);
 
-    // Transmission (glass): suppress the diffuse (transmitted) term, keep specular,
-    // and make the surface see-through via alpha. Not a true refraction — a cheap
-    // approximation of KHR_materials_transmission.
+    // Transmission (glass): the transmitted share of the light takes the place of the
+    // diffuse term, and the scene behind shows through instead. Not a true refraction —
+    // what is behind is neither bent nor tinted — but a thin-surface approximation of
+    // KHR_materials_transmission.
     //
     // The map (red channel, per the extension) is what keeps a partly-glass object
     // from going uniformly transparent: without it a cabinet with glass panes turns
     // the whole cabinet into a ghost.
     float transmission = m.transmission;
     if ((m.flags & MAT_TRANS_MAP) != 0u) transmission *= tex(m.transMap, m.transSampler).r;
-    float diffuseScale = 1.0 - transmission;
     vec3 V = normalize(pc.eye.xyz - vWorldPos);
     bool receives = (vFlags & FLAG_RECEIVES_SHADOW) != 0u;
 
     vec3 indirect;
-    vec3 unfogged = shadeSurface(s, vWorldPos, V, pc.shadowSampler, diffuseScale, receives, indirect);
-    // Fogged before the alpha below reads its luminance: a distant window should
-    // derive its coverage from what it actually contributes to the frame, not from
-    // an unfogged highlight it never shows.
-    vec3 lit = applyFog(unfogged, vWorldPos, pc.eye.xyz, pc.lights.fogColor, pc.lights.fogParams);
-
+    vec3 unfogged = shadeSurface(s, vWorldPos, V, pc.shadowSampler, 1.0 - transmission, receives, indirect);
     float alpha = baseAlpha;
     if (transmission > 0.0) {
-        // Glass is legible through what it reflects, not through how transparent it
-        // is. A flat alpha of 1 - transmission scales the specular highlight away
-        // with the body, leaving a uniform grey wash with no silhouette. Drive
-        // coverage from reflectance instead, so highlights and the grazing-angle rim
-        // keep their shape while the face-on centre stays clear.
-        //
-        // abs() because glass is double-sided: a back face has the normal pointing
-        // away, and a signed dot would read every one of them as pure grazing.
-        float ndv = abs(dot(s.normal, V));
-        float fres = 0.04 + 0.96 * pow(1.0 - ndv, 5.0);
-        // The rim reflects the surroundings: the environment, where the scene has
-        // one. Without one, Fresnel alone would turn the silhouette opaque black, so
-        // the ambient colour stands in for the surroundings and keeps the rim
-        // additive rather than a dark outline.
-        vec3 surroundings = pc.lights.ambient.rgb;
-        if (hasEnvironment(pc.lights)) {
-            surroundings = environmentSpecular(pc.lights, reflect(-V, s.normal), pbrRoughness(s));
+        // Glass is drawn premultiplied (materials.BlendPremultiplied, which
+        // SetTransmission selects): its colour is the light it reflects, added in full,
+        // and its alpha the share of the scene behind that it keeps out — the share
+        // it reflects instead of passing through.
+        float reflectance = fresnelReflectance(s, V);
+        // shadeSurface reflects the environment where the scene has one. Without one
+        // the surroundings are the ambient colour; leaving them out would turn the
+        // grazing rim, which passes almost nothing through, black.
+        if (!hasEnvironment(pc.lights)) {
+            vec3 rim = reflectance * transmission * pc.lights.ambient.rgb;
+            unfogged += rim;
+            indirect += rim;
         }
-        lit += fres * transmission * surroundings;
-        float refl = max(fres * fres, dot(lit, vec3(0.2126, 0.7152, 0.0722)));
-        alpha = clamp(baseAlpha * mix(1.0, refl, transmission), 0.04, 1.0);
+        alpha = baseAlpha * (1.0 - transmission * (1.0 - reflectance));
+    }
+
+    vec3 lit = applyFog(unfogged, vWorldPos, pc.eye.xyz, pc.lights.fogColor, pc.lights.fogParams);
+    if (transmission > 0.0) {
+        // Fog scales what it covers and adds its own light; the scene behind already
+        // carries the fog in front of it, so the glass adds the fog's light only for
+        // the share it keeps out — premultiplied, like its colour.
+        vec3 fogLight = applyFog(vec3(0.0), vWorldPos, pc.eye.xyz, pc.lights.fogColor, pc.lights.fogParams);
+        lit -= fogLight * (1.0 - alpha);
     }
     outColor = vec4(lit, outputAlpha(lit, unfogged, indirect, alpha)); // linear: the target encodes it for display
-
 }

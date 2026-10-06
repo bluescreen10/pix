@@ -194,7 +194,7 @@ func (m *BlinnPhongMaterial) Blend() BlendMode {
 	return m.pool.BlendAt(m.ref.ID())
 }
 
-// SetBlend sets the material's blend mode (Opaque/Alpha/Additive).
+// SetBlend sets the material's blend mode (Opaque/Alpha/Additive/Premultiplied).
 func (m *BlinnPhongMaterial) SetBlend(mode BlendMode) {
 	m.pool.SetBlendAt(m.ref.ID(), mode)
 }
