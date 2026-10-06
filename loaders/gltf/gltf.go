@@ -2,7 +2,7 @@
 // the renderer (pix) and math (glm) — never the gpu backend — so the same
 // loader works against any backend the renderer runs on. Skinning and animation
 // are supported: a glTF skin becomes a scenes.Skeleton (its joint nodes become
-// scenes.Bone nodes, not plain groups — see LoadFull), a mesh referencing that skin
+// scenes.Bone nodes, not plain groups — see Load), a mesh referencing that skin
 // becomes a scenes.SkinnedMesh, and glTF animations come back as pix.AnimationClips
 // ready for a scenes.AnimationMixer. CUBICSPLINE interpolation and morph-target
 // ("weights") channels are not supported (channels using either are skipped).
@@ -15,12 +15,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
+	"image/draw"
 	_ "image/jpeg"
 	_ "image/png"
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"github.com/bluescreen10/pix"
@@ -32,35 +35,37 @@ import (
 	"github.com/bluescreen10/pix/textures"
 )
 
-// Load reads a .gltf or .glb file, creates its geometries/materials/textures on the
-// renderer, and builds its node hierarchy (with Mesh/SkinnedMesh nodes) into the
-// scene. Returns the number of mesh nodes added. A thin wrapper over LoadFull for
-// callers that don't need its skeletons/animation clips.
-func Load(r *pix.Renderer, scene *scenes.Scene, path string) (int, error) {
-	res, err := LoadFull(r, scene, path)
-	return res.Added, err
-}
-
-// LoadResult is everything LoadFull produced beyond the mesh nodes it added
-// directly to the scene: the skeletons built from the asset's skins (a
-// SkinnedMesh already references its own — this is for e.g. Skeleton.Pose or
-// attaching props to a named bone) and its animation clips, each ready to hand to
-// an AnimationMixer via mixer.Action(clip).
+// LoadResult is what Load made: how many mesh nodes it added to the scene, the
+// skeletons built from the asset's skins (a SkinnedMesh already references its own —
+// this is for e.g. Skeleton.Pose or attaching props to a named bone), and its animation
+// clips, each ready to hand to an AnimationMixer via mixer.Action(clip).
 type LoadResult struct {
 	Added     int
 	Skeletons []scenes.Skeleton
 	Clips     []*scenes.AnimationClip
 }
 
-// LoadFull is Load plus skins and animations: a glTF skin becomes a scenes.Skeleton
-// (see package doc), and every scenes.AnimationClip in the file comes back ready to
-// play.
-func LoadFull(r *pix.Renderer, scene *scenes.Scene, path string) (LoadResult, error) {
+// Options is how Load loads a scene; a nil *Options is the zero value: the defaults.
+type Options struct {
+	// MipChain is which levels the scene's textures get: all of them, by default, or
+	// with textures.BaseLevelOnly the image alone — which loads a large scene faster,
+	// at the cost of textures that shimmer with distance.
+	MipChain textures.MipChain
+}
+
+// Load adds the asset at path to scene: its meshes, its skins and animations. A glTF
+// skin becomes a scenes.Skeleton (see the package doc), and every scenes.AnimationClip
+// in the file comes back in the result, ready to play. options says how; nil loads with
+// the defaults.
+func Load(r *pix.Renderer, scene *scenes.Scene, path string, options *Options) (LoadResult, error) {
+	if options == nil {
+		options = &Options{}
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return LoadResult{}, fmt.Errorf("gltf: read %q: %w", path, err)
 	}
-	l := &loader{renderer: r, scene: scene}
+	l := &loader{renderer: r, scene: scene, options: *options}
 	if strings.ToLower(filepath.Ext(path)) == ".glb" {
 		jsonData, binData, err := splitGLB(data)
 		if err != nil {
@@ -99,6 +104,7 @@ type texKey struct {
 type loader struct {
 	renderer *pix.Renderer
 	scene    *scenes.Scene
+	options  Options
 	doc      doc
 	buffers  [][]byte
 	baseDir  string
@@ -126,6 +132,7 @@ type loader struct {
 
 func (l *loader) build() (int, error) {
 	l.texCache = map[texKey]textures.Texture{}
+	l.prepareTextures(l.materialTextures())
 	l.loadMaterials()
 	l.loadSkins()
 
@@ -687,20 +694,104 @@ func (l *loader) texture(idx int, usage textures.Format) textures.Texture {
 	if t, ok := l.texCache[key]; ok {
 		return t
 	}
-	gt := l.doc.Textures[idx]
+	img, err := l.prepareTexture(key)
+	l.uploadTexture(key, img, err)
+	return l.texCache[key]
+}
+
+// materialTextures is every texture the document's materials use, each with the usage
+// it is uploaded for, once each.
+func (l *loader) materialTextures() []texKey {
+	var keys []texKey
+	seen := map[texKey]bool{}
+	add := func(ref *textureRef, usage textures.Format) {
+		if ref == nil {
+			return
+		}
+		key := texKey{ref.Index, usage}
+		if !seen[key] && key.index >= 0 && key.index < len(l.doc.Textures) {
+			seen[key] = true
+			keys = append(keys, key)
+		}
+	}
+	for _, gm := range l.doc.Materials {
+		if gm.Extensions != nil && gm.Extensions.Transmission != nil {
+			add(gm.Extensions.Transmission.TransmissionTexture, textures.Grayscale)
+		}
+		add(gm.NormalTexture, textures.Normal)
+		if gm.OcclusionTexture != nil {
+			add(&gm.OcclusionTexture.textureRef, textures.Linear)
+		}
+		if pbr := gm.PbrMetallicRoughness; pbr != nil {
+			add(pbr.BaseColorTexture, textures.SRGB)
+			add(pbr.MetallicRoughnessTexture, textures.Linear)
+		}
+	}
+	return keys
+}
+
+// prepareTextures decodes and prepares every one of keys on all the CPU's cores, and
+// uploads each as it is ready — on this goroutine, which is the renderer's. Decoding and
+// building mip chains is most of what loading a large scene costs, and none of it needs
+// the others; uploading as they come keeps no more than a few prepared at a time in
+// memory, where a scene's worth of mip chains would run to gigabytes.
+func (l *loader) prepareTextures(keys []texKey) {
+	type prepared struct {
+		key texKey
+		img textures.Image
+		err error
+	}
+	workers := runtime.NumCPU()
+	jobs := make(chan texKey)
+	results := make(chan prepared, workers)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for key := range jobs {
+				img, err := l.prepareTexture(key)
+				results <- prepared{key: key, img: img, err: err}
+			}
+		}()
+	}
+	go func() {
+		for _, key := range keys {
+			jobs <- key
+		}
+		close(jobs)
+		wg.Wait()
+		close(results)
+	}()
+	for p := range results {
+		l.uploadTexture(p.key, p.img, p.err)
+	}
+}
+
+// prepareTexture decodes the image key names and prepares it for its usage. It reads
+// only the document and its buffers, so it runs on any goroutine.
+func (l *loader) prepareTexture(key texKey) (textures.Image, error) {
+	gt := l.doc.Textures[key.index]
 	if gt.Source == nil {
-		l.texCache[key] = textures.Texture{}
-		return textures.Texture{}
+		return textures.Image{}, fmt.Errorf("texture %d has no image", key.index)
 	}
 	pixels, w, h, err := l.decodeImage(*gt.Source)
 	if err != nil {
-		l.texCache[key] = textures.Texture{}
-		return textures.Texture{}
+		return textures.Image{}, err
 	}
-	t := l.renderer.TextureStore.Create(pixels, w, h, usage)
+	return textures.Prepare(pixels, w, h, key.usage, l.options.MipChain), nil
+}
+
+// uploadTexture uploads img for key, or with err records that key has no texture, so
+// it is not tried again.
+func (l *loader) uploadTexture(key texKey, img textures.Image, err error) {
+	if err != nil {
+		l.texCache[key] = textures.Texture{}
+		return
+	}
+	t := l.renderer.TextureStore.Upload(img)
 	l.texCache[key] = t
 	l.allTex = append(l.allTex, t)
-	return t
 }
 
 func (l *loader) loadMaterials() {
@@ -715,9 +806,17 @@ func (l *loader) loadMaterials() {
 		m := l.renderer.NewPBRMaterial()
 		m.SetMetallic(1)
 		m.SetRoughness(1)
-		// alphaMode BLEND → transparent (src-alpha over); OPAQUE/MASK stay opaque.
-		if gm.AlphaMode == "BLEND" {
+		// alphaMode BLEND → transparent (src-alpha over); MASK → opaque where alpha
+		// reaches alphaCutoff, and no surface elsewhere.
+		switch gm.AlphaMode {
+		case "BLEND":
 			m.SetBlend(materials.BlendAlpha)
+		case "MASK":
+			cutoff := float32(0.5)
+			if gm.AlphaCutoff != nil {
+				cutoff = *gm.AlphaCutoff
+			}
+			m.SetAlphaCutoff(cutoff)
 		}
 		// KHR_materials_transmission (glass): approximate as alpha-blended, diffuse
 		// suppressed. A transmission factor > 0 makes the surface see-through.
@@ -747,6 +846,15 @@ func (l *loader) loadMaterials() {
 			if t := l.texture(gm.NormalTexture.Index, textures.Normal); t.IsValid() {
 				m.SetNormalMap(t)
 				m.SetNormalMapSampler(samp)
+			}
+		}
+		if gm.OcclusionTexture != nil {
+			if t := l.texture(gm.OcclusionTexture.Index, textures.Linear); t.IsValid() {
+				m.SetOcclusionMap(t)
+				m.SetOcclusionMapSampler(samp)
+			}
+			if gm.OcclusionTexture.Strength != nil {
+				m.SetOcclusionStrength(*gm.OcclusionTexture.Strength)
 			}
 		}
 		if pbr := gm.PbrMetallicRoughness; pbr != nil {
@@ -809,15 +917,41 @@ func (l *loader) decodeImage(idx int) (pixels []byte, w, h int, err error) {
 	}
 	bnd := img.Bounds()
 	w, h = bnd.Dx(), bnd.Dy()
-	pixels = make([]byte, w*h*4)
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			r, g, b, a := img.At(x, y).RGBA()
-			i := (y*w + x) * 4
-			pixels[i], pixels[i+1], pixels[i+2], pixels[i+3] = byte(r>>8), byte(g>>8), byte(b>>8), byte(a>>8)
-		}
+	return nrgbaPixels(img), w, h, nil
+}
+
+// nrgbaPixels is img as tightly packed, non-premultiplied RGBA bytes. PNGs with alpha
+// decode as NRGBA, which is that already, row for row. Opaque images — JPEG's YCbCr,
+// opaque PNGs' RGBA and Gray — go through image/draw into RGBA, which it converts them
+// to on fast paths; with alpha 1 everywhere, premultiplied is the same as not. Anything
+// else takes image/draw's general path. Asking each pixel for its colour instead cost a
+// conversion and an allocation apiece.
+func nrgbaPixels(img image.Image) []byte {
+	bnd := img.Bounds()
+	w, h := bnd.Dx(), bnd.Dy()
+	if nrgba, ok := img.(*image.NRGBA); ok && nrgba.Stride == w*4 && bnd.Min == (image.Point{}) {
+		return nrgba.Pix[:w*h*4]
 	}
-	return pixels, w, h, nil
+	if isOpaque(img) {
+		dst := image.NewRGBA(image.Rect(0, 0, w, h))
+		draw.Draw(dst, dst.Bounds(), img, bnd.Min, draw.Src)
+		return dst.Pix
+	}
+	dst := image.NewNRGBA(image.Rect(0, 0, w, h))
+	draw.Draw(dst, dst.Bounds(), img, bnd.Min, draw.Src)
+	return dst.Pix
+}
+
+// isOpaque reports whether img has no alpha below 1: always, for the types that hold
+// none, and by looking, for RGBA.
+func isOpaque(img image.Image) bool {
+	switch img := img.(type) {
+	case *image.YCbCr, *image.Gray:
+		return true
+	case *image.RGBA:
+		return img.Opaque()
+	}
+	return false
 }
 
 // ---- node transforms ----

@@ -29,7 +29,7 @@ func TestMaterialTableDedupsAcrossInstances(t *testing.T) {
 	defer r.Destroy()
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{1, 1, 1})
+	scene.SetAmbient(colors.RGB32F{1, 1, 1}, 1)
 
 	geo := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	defer geo.Release()
@@ -88,7 +88,7 @@ func TestMaterialTableKeepsDistinctMaterialsApart(t *testing.T) {
 	defer r.Destroy()
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{1, 1, 1})
+	scene.SetAmbient(colors.RGB32F{1, 1, 1}, 1)
 
 	geo := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	defer geo.Release()

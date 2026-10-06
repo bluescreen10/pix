@@ -23,6 +23,45 @@ func mipLevels(w, h int) int {
 	return n
 }
 
+// MipChain is which levels a prepared texture has.
+type MipChain uint8
+
+const (
+	// FullMipChain is every level, down to 1x1: what a texture seen at a distance or a
+	// slant needs, or it shimmers.
+	FullMipChain MipChain = iota
+	// BaseLevelOnly is the image alone, with no smaller levels: quicker to make and
+	// smaller, for textures always seen close to their own size — and for loading a
+	// scene fast while working on it.
+	BaseLevelOnly
+)
+
+// Image is a texture ready to upload (see Store.Upload): its levels, largest first,
+// repacked for its format.
+type Image struct {
+	format        Format
+	width, height int
+	levels        [][]byte
+}
+
+// Levels is how many levels the image has, the base included.
+func (img Image) Levels() int {
+	return len(img.levels)
+}
+
+// Prepare repacks RGBA8 pixels (w*h*4, row-major) for format and builds the levels mips
+// asks for. It is the CPU half of making a texture, and touches nothing shared, so a
+// loader runs it for many textures at once.
+func Prepare(rgba []byte, w, h int, format Format, mips MipChain) Image {
+	base := format.repack(rgba, w, h)
+	img := Image{format: format, width: w, height: h, levels: [][]byte{base}}
+	if mips == FullMipChain {
+		levels, _ := mipChain(base, w, h, format.channels(), format == SRGB, format == Normal)
+		img.levels = append(img.levels, levels...)
+	}
+	return img
+}
+
 // GenerateMipChain builds a full mip chain for format from RGBA8 source pixels
 // (w*h*4, row-major), applying the same repacking and filtering Store.Create uses
 // internally. It has no GPU dependency, so offline tools that bake or cache textures
@@ -78,12 +117,12 @@ func downsample(src []byte, sw, sh, dw, dh, channels int, srgb, normalMap bool) 
 					sx := min(x*xStep+dx, sw-1)
 					i := (sy*sw + sx) * channels
 					for c := range channels {
-						v := float32(src[i+c]) / 255
 						// Alpha is never sRGB-encoded, even in an sRGB image.
 						if srgb && c < 3 {
-							v = srgbToLinear(v)
+							acc[c] += srgbByteToLinear[src[i+c]]
+						} else {
+							acc[c] += float32(src[i+c]) / 255
 						}
-						acc[c] += v
 					}
 					n++
 				}
@@ -117,13 +156,42 @@ func downsample(src []byte, sw, sh, dw, dh, channels int, srgb, normalMap bool) 
 			for c := range channels {
 				v := acc[c] / n
 				if srgb && c < 3 {
-					v = linearToSRGB(v)
+					dst[o+c] = linearToSRGBByte(v)
+					continue
 				}
 				dst[o+c] = encodeUnorm8(v)
 			}
 		}
 	}
 	return dst
+}
+
+// srgbByteToLinear is srgbToLinear of each of the 256 values an sRGB byte can hold.
+// Mipmapping decodes every texel of every level, and computing the power for each was
+// most of the time a large scene took to load (50 of Bistro's 126 seconds).
+var srgbByteToLinear = func() (table [256]float32) {
+	for i := range table {
+		table[i] = srgbToLinear(float32(i) / 255)
+	}
+	return table
+}()
+
+// linearToSRGBSteps is how finely linearToSRGBByte's table divides [0, 1]: fine enough
+// that in the darkest texels, where sRGB changes fastest, a step moves the byte by well
+// under one.
+const linearToSRGBSteps = 16384
+
+// linearToSRGBTable is linearToSRGB, encoded to a byte, at each step of [0, 1].
+var linearToSRGBTable = func() (table [linearToSRGBSteps]byte) {
+	for i := range table {
+		table[i] = encodeUnorm8(linearToSRGB(float32(i) / (linearToSRGBSteps - 1)))
+	}
+	return table
+}()
+
+// linearToSRGBByte encodes linear v as an sRGB byte, by linearToSRGBTable.
+func linearToSRGBByte(v float32) byte {
+	return linearToSRGBTable[int(min(max(v, 0), 1)*(linearToSRGBSteps-1)+0.5)]
 }
 
 func encodeUnorm8(v float32) byte {

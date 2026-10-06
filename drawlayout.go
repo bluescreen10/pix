@@ -49,9 +49,12 @@ type drawLayout struct {
 // pipeline — so every material in a batch draws through the same one. The material
 // itself is not part of the key: each drawable carries its own record slot.
 type batch struct {
-	pool       *materials.Pool
-	cull       materials.CullMode
-	blend      materials.BlendMode
+	pool  *materials.Pool
+	cull  materials.CullMode
+	blend materials.BlendMode
+	// isMasked is whether the batch's material cuts its surface out by alpha (see
+	// materials.Masked): the depth-only passes draw it with a fragment stage that does.
+	isMasked   bool
 	geometryID uint32
 	// mesh is, for a blended batch, the index in the packet's mesh table of the one mesh
 	// it draws: each blended mesh gets batches of its own, so it can take its place in
@@ -72,7 +75,7 @@ type batch struct {
 // hasRasterOf reports whether two batches share raster state, and so draw through the
 // same pipeline.
 func (b *batch) hasRasterOf(other *batch) bool {
-	return b.pool == other.pool && b.cull == other.cull && b.blend == other.blend
+	return b.pool == other.pool && b.cull == other.cull && b.blend == other.blend && b.isMasked == other.isMasked
 }
 
 // rasterSpans yields each span of adjacent batches sharing raster state, as its first
@@ -84,6 +87,26 @@ func rasterSpans(batches []batch) iter.Seq2[int, int] {
 		for first := 0; first < len(batches); {
 			end := first + 1
 			for end < len(batches) && batches[end].hasRasterOf(&batches[first]) {
+				end++
+			}
+			if !yield(first, end-first) {
+				return
+			}
+			first = end
+		}
+	}
+}
+
+// maskSpans yields each span of adjacent batches the depth-only passes can draw with one
+// call, as its first batch and its length: a run of unmasked batches, whatever their
+// pools, as they draw through one vertex-only pipeline; or a run of one pool's masked
+// batches, which share its mask table.
+func maskSpans(batches []batch) iter.Seq2[int, int] {
+	return func(yield func(first, count int) bool) {
+		for first := 0; first < len(batches); {
+			end := first + 1
+			for end < len(batches) && batches[end].isMasked == batches[first].isMasked &&
+				(!batches[first].isMasked || batches[end].pool == batches[first].pool) {
 				end++
 			}
 			if !yield(first, end-first) {
@@ -198,6 +221,7 @@ func buildDrawables(p *scenes.FramePacket, layout *drawLayout, materialStore *ma
 		pool     *materials.Pool
 		cull     materials.CullMode
 		blend    materials.BlendMode
+		isMasked bool
 		geometry uint32
 		mesh     uint32
 	}
@@ -231,6 +255,7 @@ func buildDrawables(p *scenes.FramePacket, layout *drawLayout, materialStore *ma
 					pool:     pool,
 					cull:     pool.CullAt(material.Slot),
 					blend:    pool.BlendAt(material.Slot),
+					isMasked: pool.IsMaskedAt(material.Slot),
 					geometry: geometry.Slot,
 				}
 				// A blended mesh is drawn on its own, so that it can be drawn in its
@@ -246,6 +271,7 @@ func buildDrawables(p *scenes.FramePacket, layout *drawLayout, materialStore *ma
 						pool:         k.pool,
 						cull:         k.cull,
 						blend:        k.blend,
+						isMasked:     k.isMasked,
 						geometryID:   k.geometry,
 						mesh:         k.mesh,
 						poolRevision: pool.RasterRevision(),
@@ -283,8 +309,10 @@ func lodConfig(mesh scenes.MeshPacket, levels []scenes.LODLevel) gpuLOD {
 // order: each batch's region in the visible buffer, and the indirect template.
 //
 // Opaque batches come before blended ones, so blending composites over the opaque
-// scene; within each group, batches sharing raster state are kept together, so they draw
-// as a single multi-draw-indirect call.
+// scene; within each group, unmasked batches come before masked ones, so the depth-only
+// passes draw every unmasked one with a single call (see drawShadowCasters); and
+// batches sharing raster state are kept together, so they draw as a single
+// multi-draw-indirect call.
 func orderBatches(layout *drawLayout, geometryStore *geometries.Store) {
 	// Sorted in place. Each batch first records the id its drawables were tagged with,
 	// so the permutation can be inverted afterwards without sorting a separate index
@@ -297,6 +325,9 @@ func orderBatches(layout *drawLayout, geometryStore *geometries.Store) {
 		xOpaque, yOpaque := x.blend == materials.BlendOpaque, y.blend == materials.BlendOpaque
 		if xOpaque != yOpaque {
 			return xOpaque
+		}
+		if x.isMasked != y.isMasked {
+			return !x.isMasked
 		}
 		if x.pool != y.pool {
 			return x.pool.Index() < y.pool.Index()

@@ -43,9 +43,9 @@ func TestMSFTLod(t *testing.T) {
 	defer r.Destroy()
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
+	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9}, 1)
 
-	if _, err := gltf.Load(r, scene, "testdata/msft_lod_cube.gltf"); err != nil {
+	if _, err := gltf.Load(r, scene, "testdata/msft_lod_cube.gltf", nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := scene.MeshCount(); got != 1 {

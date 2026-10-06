@@ -1,18 +1,28 @@
 #version 460
 #extension GL_EXT_nonuniform_qualifier : require
 #extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_samplerless_texture_functions : require
 #extension GL_GOOGLE_include_directive : require
 
 // The HDR frame's last pass: expose the linear scene image and map its unbounded light
 // into the 0..1 a display can show, compressing highlights instead of clipping them. It
 // writes linear light; the target is sRGB and encodes it for display.
+//
+// It can also darken the scene by its ambient occlusion first, when nothing drew over
+// the opaque scene since (see darkeningInToneMapping in ambient_occlusion.go): the same
+// sum the darkening draws make with blending, but in the read this pass makes anyway.
 #include "postfx.glsl"
+#include "occlusion_openness.glsl"
 
 layout(push_constant, scalar) uniform PC {
     POSTFX_ROOT
     uint toneMapOperator; // mirrors pix.ToneMapOperator
     float exposure;       // in stops: each +1 doubles the light before mapping
+    // appliesOcclusion is 1 when the source is the opaque scene with its direct share in
+    // alpha, to be darkened by the openness occlusion reads from.
+    uint appliesOcclusion;
     float pad0;
+    OpennessSource occlusion;
     float pad1;
 } pc;
 
@@ -62,7 +72,15 @@ vec3 acesFitted(vec3 c) {
 }
 
 void main() {
-    vec3 c = sampleImage(pc.source, pc.linearSampler, vUV).rgb * exp2(pc.exposure);
+    vec4 scene = sampleImage(pc.source, pc.linearSampler, vUV);
+    vec3 c = scene.rgb;
+    if (pc.appliesOcclusion != 0u) {
+        // The occluded share of the indirect light, which is all of the colour but its
+        // direct share (see outputAlpha in material_common.glsl).
+        float occludedShare = 1.0 - opennessAt(pc.occlusion, ivec2(gl_FragCoord.xy));
+        c *= 1.0 - occludedShare * (1.0 - scene.a);
+    }
+    c *= exp2(pc.exposure);
     if (pc.toneMapOperator == TONEMAP_ACES_FITTED) {
         c = acesFitted(c);
     } else if (pc.toneMapOperator == TONEMAP_REINHARD) {

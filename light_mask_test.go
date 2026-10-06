@@ -33,7 +33,7 @@ func groundScene(t *testing.T, newMaterial func(*pix.Renderer) materials.Materia
 	t.Cleanup(r.Destroy)
 	scene := scenes.New()
 	t.Cleanup(scene.Destroy)
-	scene.SetAmbient(colors.RGB32F{0.1, 0.1, 0.1})
+	scene.SetAmbient(colors.RGB32F{0.1, 0.1, 0.1}, 1)
 	sun := scene.AddDirectionalLight(glm.Vec3f{0, -1, 0}, colors.RGB32F{1, 1, 1}, 1)
 
 	scene.Add(scene.NewMesh(r.NewPlaneGeometry(40, 40, 1, 1), newMaterial(r)))

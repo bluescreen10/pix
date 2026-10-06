@@ -400,10 +400,10 @@ bool hasEnvironment(LightBuf L) {
 // environmentDiffuse is the light a white diffuse surface facing N takes from the
 // environment: the same kind of value as the ambient colour it replaces, so a uniform
 // white environment lights such a surface to exactly 1. It is the roughest mip of the
-// prefiltered reflections, looked up along the normal — what three.js and Godot take
-// for a sky's diffuse light too. That mip is the environment blurred by a GGX lobe of
-// roughness 1, a little narrower than the cosine lobe diffuse light is, which is close
-// enough for light that changes this slowly across normals.
+// prefiltered reflections, looked up along the normal for a sky's diffuse light too. 
+// That mip is the environment blurred by a GGX lobe of roughness 1, a little narrower
+// than the cosine lobe diffuse light is, which is close enough for light that changes 
+// this slowly across normals.
 vec3 environmentDiffuse(LightBuf L, vec3 N) {
     vec2 uv = equirectUV(environmentFrame(L, N));
     return textureLod(sampler2D(gTextures[nonuniformEXT(L.envRadiance)], gSamplers[nonuniformEXT(L.envSampler)]), uv, float(L.envMips - 1u)).rgb * L.envIntensity;

@@ -16,7 +16,7 @@
 // The shaders fall into three groups:
 //
 //   - Scene pipeline: scene_cull (GPU frustum cull + batch compaction), scene_draw
-//     (vertex-pull), scene_shadow (depth-only shadow pass) and fullscreen (the
+//     (vertex-pull), scene_depth (the depth-only passes: shadows and the prepass) and fullscreen (the
 //     deferred lighting pass's fullscreen triangle).
 //
 //   - Overlay: overlay.vert/.frag (the debug HUD).
@@ -37,7 +37,9 @@ import _ "embed"
 //go:generate go run ../cmd/shadercompile -i src/scene_cull.comp.glsl -o spv:build/scene_cull.comp.spv -o metallib:build/scene_cull.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/scene_skin.comp.glsl -o spv:build/scene_skin.comp.spv -o metallib:build/scene_skin.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/scene_draw.vert.glsl -o spv:build/scene_draw.vert.spv -o metallib:build/scene_draw.vert.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_shadow.vert.glsl -o spv:build/scene_shadow.vert.spv -o metallib:build/scene_shadow.vert.metalbin
+//go:generate go run ../cmd/shadercompile -i src/scene_depth.vert.glsl -o spv:build/scene_depth.vert.spv -o metallib:build/scene_depth.vert.metalbin
+//go:generate go run ../cmd/shadercompile -i src/scene_depth.vert.glsl -D USE_MASK -o spv:build/scene_depth_masked.vert.spv -o metallib:build/scene_depth_masked.vert.metalbin
+//go:generate go run ../cmd/shadercompile -i src/scene_depth_masked.frag.glsl -o spv:build/scene_depth_masked.frag.spv -o metallib:build/scene_depth_masked.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/scene_basic.frag.glsl -o spv:build/scene_basic.frag.spv -o metallib:build/scene_basic.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/scene_lit.frag.glsl -o spv:build/scene_lit.frag.spv -o metallib:build/scene_lit.frag.metalbin
 
@@ -50,6 +52,47 @@ import _ "embed"
 //go:generate go run ../cmd/shadercompile -i src/scene_debug_position.frag.glsl -o spv:build/scene_debug_position.frag.spv -o metallib:build/scene_debug_position.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/scene_debug_object.frag.glsl -o spv:build/scene_debug_object.frag.spv -o metallib:build/scene_debug_object.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/scene_debug_triangle.frag.glsl -o spv:build/scene_debug_triangle.frag.spv -o metallib:build/scene_debug_triangle.frag.metalbin
+
+// --- ambient occlusion (see Renderer.EnableAmbientOcclusion) ---
+//
+// Each method's passes are named for it, vbao_* and assao_*; what both share is
+// occlusion_*: occlusion.glsl, occlusion_openness.glsl and occlusion_apply.frag.
+//
+// VBAODepth and VBAODepthMip build a mip chain of the scene's depth; VBAOSlices
+// measures how open each surface is from it, VBAODenoise smooths the result, and
+// VBAOUpsample brings it up to full resolution. OcclusionApply darkens the scene by
+// either method's result, or shows it.
+
+//go:embed build/vbao_depth.comp.spv
+var VBAODepth []byte
+
+//go:embed build/vbao_depth_mip.comp.spv
+var VBAODepthMip []byte
+
+//go:embed build/vbao_slices.comp.spv
+var VBAOSlices []byte
+
+//go:embed build/vbao_denoise.comp.spv
+var VBAODenoise []byte
+
+//go:embed build/vbao_upsample.comp.spv
+var VBAOUpsample []byte
+
+// ASSAODepth, ASSAOGather and ASSAOBlur are the ASSAO method's passes (see
+// AmbientOcclusionASSAO): depth split into four interleaved images, and occlusion
+// gathered and blurred in each. OcclusionApply puts the four back together as it draws.
+
+//go:embed build/assao_depth.comp.spv
+var ASSAODepth []byte
+
+//go:embed build/assao_gather.comp.spv
+var ASSAOGather []byte
+
+//go:embed build/assao_blur.comp.spv
+var ASSAOBlur []byte
+
+//go:embed build/occlusion_apply.frag.spv
+var OcclusionApply []byte
 
 // --- particles ---
 
@@ -67,6 +110,15 @@ import _ "embed"
 //go:generate go run ../cmd/shadercompile -i src/fog_inject.comp.glsl -o spv:build/fog_inject.comp.spv -o metallib:build/fog_inject.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/fog_integrate.comp.glsl -o spv:build/fog_integrate.comp.spv -o metallib:build/fog_integrate.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/fog_background.frag.glsl -o spv:build/fog_background.frag.spv -o metallib:build/fog_background.frag.metalbin
+//go:generate go run ../cmd/shadercompile -i src/vbao_depth.comp.glsl -o spv:build/vbao_depth.comp.spv -o metallib:build/vbao_depth.comp.metalbin
+//go:generate go run ../cmd/shadercompile -i src/vbao_depth_mip.comp.glsl -o spv:build/vbao_depth_mip.comp.spv -o metallib:build/vbao_depth_mip.comp.metalbin
+//go:generate go run ../cmd/shadercompile -i src/vbao_slices.comp.glsl -o spv:build/vbao_slices.comp.spv -o metallib:build/vbao_slices.comp.metalbin
+//go:generate go run ../cmd/shadercompile -i src/vbao_denoise.comp.glsl -o spv:build/vbao_denoise.comp.spv -o metallib:build/vbao_denoise.comp.metalbin
+//go:generate go run ../cmd/shadercompile -i src/vbao_upsample.comp.glsl -o spv:build/vbao_upsample.comp.spv -o metallib:build/vbao_upsample.comp.metalbin
+//go:generate go run ../cmd/shadercompile -i src/assao_depth.comp.glsl -o spv:build/assao_depth.comp.spv -o metallib:build/assao_depth.comp.metalbin
+//go:generate go run ../cmd/shadercompile -i src/assao_gather.comp.glsl -o spv:build/assao_gather.comp.spv -o metallib:build/assao_gather.comp.metalbin
+//go:generate go run ../cmd/shadercompile -i src/assao_blur.comp.glsl -o spv:build/assao_blur.comp.spv -o metallib:build/assao_blur.comp.metalbin
+//go:generate go run ../cmd/shadercompile -i src/occlusion_apply.frag.glsl -o spv:build/occlusion_apply.frag.spv -o metallib:build/occlusion_apply.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/particle_update.comp.glsl -o spv:build/particle_update.comp.spv -o metallib:build/particle_update.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/particle_sort_keys.comp.glsl -o spv:build/particle_sort_keys.comp.spv -o metallib:build/particle_sort_keys.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/particle_sort_step.comp.glsl -o spv:build/particle_sort_step.comp.spv -o metallib:build/particle_sort_step.comp.metalbin
@@ -82,8 +134,21 @@ var SceneSkin []byte
 //go:embed build/scene_draw.vert.spv
 var SceneDraw []byte
 
-//go:embed build/scene_shadow.vert.spv
-var SceneShadowVert []byte
+// SceneDepthVert is the depth-only passes' vertex stage — the shadow maps and the depth
+// prepass — reading positions alone, with no fragment stage after it.
+//
+//go:embed build/scene_depth.vert.spv
+var SceneDepthVert []byte
+
+// SceneDepthMaskedVert and SceneDepthMaskedFrag are the depth-only passes' program for
+// masked materials, whatever their type: scene_depth.vert with USE_MASK defined, and a fragment stage that discards where the material has
+// no surface.
+//
+//go:embed build/scene_depth_masked.vert.spv
+var SceneDepthMaskedVert []byte
+
+//go:embed build/scene_depth_masked.frag.spv
+var SceneDepthMaskedFrag []byte
 
 // --- debug views (see Renderer.SetDebugView) ---
 //

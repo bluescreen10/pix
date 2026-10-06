@@ -41,7 +41,7 @@ func environmentScene(t *testing.T, environment *scenes.Environment, material fu
 	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 	scene := scenes.New()
 	t.Cleanup(scene.Destroy)
-	scene.SetAmbient(colors.RGB32F{})
+	scene.SetAmbient(colors.RGB32F{}, 1)
 	scene.SetEnvironment(environment)
 	if material != nil {
 		sphere := scene.NewMesh(r.NewSphereGeometry(1, 48, 32), material(r))

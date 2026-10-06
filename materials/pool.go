@@ -29,6 +29,9 @@ type entry struct {
 	inst  Instance
 	cull  CullMode
 	blend BlendMode
+	// isMasked is whether the instance cuts its surface out (see Masked), as last
+	// marked dirty.
+	isMasked bool
 }
 
 // Pool holds every material of one kind (one shader). The material system
@@ -54,6 +57,9 @@ type Pool struct {
 	stride uint32     // bytes per record, learned from the first material registered
 	cap    uint32     // records the device buffer holds
 	buf    gpu.Buffer // MemoryDevice; written only by Sync
+	// masks holds, for each record slot, how its material cuts its surface out (see
+	// Masked): what the depth-only passes discard by, whatever the material's type.
+	masks gpu.Buffer
 
 	// rasterRevision counts changes to any instance's cull or blend mode. Those two
 	// are the whole of what a pipeline's identity adds to the pool's shader, so a
@@ -95,7 +101,7 @@ func (s *Pool) Create(inst Instance) ref.Ref {
 	}
 	id, gen := s.entries.Alloc(entry{inst: inst, cull: CullNone, blend: BlendOpaque})
 	s.ensureCap(id + 1)
-	s.markDirty(id)
+	s.MarkDirty(id)
 
 	return ref.New(id, gen, s.dispose, s.validate)
 }
@@ -113,9 +119,11 @@ func (s *Pool) ensureCap(n uint32) {
 	}
 	if s.buf.IsValid() {
 		s.backend.Free(s.buf)
+		s.backend.Free(s.masks)
 	}
 	s.cap = newCap
 	s.buf = s.backend.Alloc(uint64(newCap)*uint64(s.stride), gpu.MemoryDevice, s.label)
+	s.masks = s.backend.Alloc(uint64(newCap)*alphaMaskSize, gpu.MemoryDevice, s.label+" masks")
 	s.markAllDirty()
 }
 
@@ -131,9 +139,10 @@ func (s *Pool) markAllDirty() {
 	clear(s.dirty)
 }
 
-// scatterPart is one changed record: data lands at dstOffset in the store's record
+// scatterPart is one changed record, or mask table entry: data lands at dstOffset in
 // buffer, wherever the uploader's arena happens to stage it.
 type scatterPart struct {
+	buffer    gpu.Buffer
 	dstOffset uint32
 	data      []byte
 }
@@ -158,7 +167,7 @@ func (s *Pool) Sync(u Uploader) {
 	if len(s.dirty) == 0 {
 		return
 	}
-	need := len(s.dirty) * int(s.stride)
+	need := len(s.dirty) * (int(s.stride) + alphaMaskSize)
 	if cap(s.scratch) < need {
 		s.scratch = make([]byte, need)
 	}
@@ -166,18 +175,28 @@ func (s *Pool) Sync(u Uploader) {
 	parts := s.parts[:0]
 	for id := range s.dirty {
 		lo := len(scratch)
+		var mask []byte
 		if s.entries.IsAlive(id) {
-			scratch = append(scratch, s.entries.Value(id).inst.Bytes()...)
+			inst := s.entries.Value(id).inst
+			scratch = append(scratch, inst.Bytes()...)
+			mask = s.alphaMaskOf(inst)
 		} else {
 			// A freed slot still gets one last write, of zeros: a draw issued in the
 			// same frame the material was released must not read its old record.
 			scratch = scratch[:lo+int(s.stride)]
 			clear(scratch[lo:])
 		}
-		parts = append(parts, scatterPart{dstOffset: id * s.stride, data: scratch[lo:]})
+		parts = append(parts, scatterPart{buffer: s.buf, dstOffset: id * s.stride, data: scratch[lo:]})
+		// An instance that is not masked, or no longer alive, gets zeros: a cut-off of
+		// 0, which keeps every texel.
+		lo = len(scratch)
+		scratch = scratch[:lo+alphaMaskSize]
+		clear(scratch[lo:])
+		copy(scratch[lo:], mask)
+		parts = append(parts, scatterPart{buffer: s.masks, dstOffset: id * alphaMaskSize, data: scratch[lo:]})
 	}
 	for _, p := range parts {
-		u.Copy(s.buf, p.dstOffset, p.data)
+		u.Copy(p.buffer, p.dstOffset, p.data)
 	}
 	s.scratch, s.parts = scratch, parts[:0]
 	clear(s.dirty)
@@ -187,6 +206,12 @@ func (s *Pool) Sync(u Uploader) {
 // time because it moves when the pool grows.
 func (s *Pool) RecordsAddr() uint64 {
 	return s.buf.Addr
+}
+
+// MasksAddr is the device address of the pool's mask table — one AlphaMask entry per
+// record slot (see Masked) — resolved at draw time because it moves when the pool grows.
+func (s *Pool) MasksAddr() uint64 {
+	return s.masks.Addr
 }
 
 // Hash is this pool's shader identity, wide enough to stand alone as its dedup key
@@ -222,8 +247,39 @@ func (s *Pool) Live(id, gen uint32) bool {
 // MarkDirty flags an instance's record for re-upload on the next Sync. A material
 // implementation must call it from every setter, or the GPU keeps rendering the
 // previous value indefinitely.
+//
+// It also notes whether the instance is masked now (see Masked): that decides which
+// pipeline the depth-only passes draw it with, so a change counts as a change of
+// rasterization state (see RasterRevision), noticed before the next frame is laid out
+// rather than once its records are uploaded.
 func (s *Pool) MarkDirty(id uint32) {
+	e := s.entries.Value(id)
+	isMasked := s.alphaMaskOf(e.inst) != nil
+	if isMasked != e.isMasked {
+		e.isMasked = isMasked
+		s.rasterRevision++
+	}
 	s.markDirty(id)
+}
+
+// alphaMaskOf is inst's entry in the mask table (see AlphaMask.ToBytes), or nil when it
+// is not masked now.
+func (s *Pool) alphaMaskOf(inst Instance) []byte {
+	masked, ok := inst.(Masked)
+	if !ok {
+		return nil
+	}
+	mask, isMasked := masked.AlphaMask()
+	if !isMasked {
+		return nil
+	}
+	return mask.ToBytes()
+}
+
+// IsMaskedAt reports whether the instance in slot id cuts its surface out by alpha (see
+// Masked).
+func (s *Pool) IsMaskedAt(id uint32) bool {
+	return s.entries.Value(id).isMasked
 }
 
 // Cull/Blend rasterization state, stored per instance beside the record so the
@@ -255,12 +311,13 @@ func (s *Pool) SetBlendAt(id uint32, b BlendMode) {
 	s.rasterRevision++
 }
 
-// RasterRevision changes whenever any instance's cull or blend mode does, and so
-// whenever a pipeline resolved from this pool might have become the wrong one.
+// RasterRevision changes whenever any instance's cull or blend mode, or whether it is
+// masked, does, and so whenever a pipeline resolved from this pool might have become
+// the wrong one.
 //
 // It is deliberately per pool rather than per instance: every material in a pool shares
-// its shader, so cull and blend are all that can move a material to a different
-// pipeline, and one counter covers every instance at once. A consumer holding pipelines
+// its shader, so cull, blend and masking are all that can move a material to a
+// different pipeline, and one counter covers every instance at once. A consumer holding pipelines
 // for a whole scene can check a handful of these instead of remembering which materials
 // it resolved and re-resolving each of them every frame.
 func (s *Pool) RasterRevision() uint64 {
@@ -287,6 +344,8 @@ func (s *Pool) dispose(id uint32) {
 func (s *Pool) destroy() {
 	if s.buf.IsValid() {
 		s.backend.Free(s.buf)
+		s.backend.Free(s.masks)
 		s.buf = gpu.Buffer{}
+		s.masks = gpu.Buffer{}
 	}
 }

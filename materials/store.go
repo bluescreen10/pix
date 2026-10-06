@@ -20,10 +20,22 @@ import (
 type Store struct {
 	backend gpu.Backend
 	pools   []*Pool
+	// defaultSampler is the sampler every map of a new material reads with until one is
+	// set (see DefaultSampler).
+	defaultSampler uint32
 }
 
-func NewStore(backend gpu.Backend) *Store {
-	return &Store{backend: backend}
+// NewStore creates a store whose materials' maps read with defaultSampler, a bindless
+// sampler heap index, until each is given one of its own.
+func NewStore(backend gpu.Backend, defaultSampler uint32) *Store {
+	return &Store{backend: backend, defaultSampler: defaultSampler}
+}
+
+// DefaultSampler is the sampler every map of a new material reads with until one is
+// set: without one a map would read through heap index 0, which need not be a sampler
+// meant for colour, and could read black.
+func (s *Store) DefaultSampler() uint32 {
+	return s.defaultSampler
 }
 
 // Pool returns the pool for a material kind, creating it on first use. The kind is

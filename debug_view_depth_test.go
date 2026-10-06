@@ -30,7 +30,7 @@ func TestDepthDebugPolarity(t *testing.T) {
 	defer r.Destroy()
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
+	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9}, 1)
 
 	mat := r.NewPBRMaterial()
 	nearGeo := r.GeometryStore.Create(pix.BoxGeometry(10, 10, 10))

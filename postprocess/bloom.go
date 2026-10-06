@@ -119,7 +119,7 @@ func (b *Bloom) ensurePasses(backend gpu.Backend) {
 		return
 	}
 	// Upsampling adds each smaller level into the one above it.
-	additive := []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendOne, Dst: gpu.BlendOne, Op: gpu.BlendAdd}}}
+	additive := []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendOne, Dst: gpu.BlendOne, Op: gpu.BlendAdd}, AlphaOp: gpu.BlendFactorOp{Src: gpu.BlendOne, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}}}
 	b.backend = backend
 	b.downsample = NewFullscreenPass(backend, FullscreenPassDescriptor{Fragment: shaders.BloomDownsample, Label: "bloom-downsample"})
 	b.upsample = NewFullscreenPass(backend, FullscreenPassDescriptor{Fragment: shaders.BloomUpsample, Blend: additive, Label: "bloom-upsample"})

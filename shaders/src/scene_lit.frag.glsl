@@ -39,6 +39,7 @@ vec3 blinnPhong(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float specSt
 }
 
 void main() {
+    discardCutOut();
     Material m = MatBuf(pc.materials).v[vMat];
     vec4 base = sampleBase(m.color, m.flags, m.colorMap, m.samp);
     vec3 albedo = base.rgb;
@@ -55,7 +56,8 @@ void main() {
     if (hasEnvironment(L)) {
         ambient = environmentDiffuse(L, N);
     }
-    vec3 lit = ambient * albedo;
+    vec3 indirect = ambient * albedo;
+    vec3 lit = indirect;
     float viewDist = length(pc.eye.xyz - vWorldPos);
     for (uint i = 0u; i < L.numDir; i++) {
         vec3 Ldir = normalize(-L.dirs[i].dir.xyz);
@@ -92,6 +94,7 @@ void main() {
         lit += sh * blinnPhong(N, V, Ldir, sl.color.rgb * sl.color.w * atten, albedo, m.specular, m.shininess);
     }
 
-    lit = applyFog(lit + m.emissive.rgb, vWorldPos, pc.eye.xyz, L.fogColor, L.fogParams);
-    outColor = vec4(lit, base.a); // linear: the target encodes it for display
+    lit += m.emissive.rgb;
+    vec3 color = applyFog(lit, vWorldPos, pc.eye.xyz, L.fogColor, L.fogParams);
+    outColor = vec4(color, outputAlpha(color, lit, indirect, base.a)); // linear: the target encodes it for display
 }

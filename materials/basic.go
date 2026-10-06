@@ -27,12 +27,16 @@ type BasicMaterial struct {
 	color        colors.RGBA32F
 	colorMap     textures.Texture
 	colorSampler uint32
+
+	// alphaCutoff makes the material masked: where its colour's alpha falls below it,
+	// there is no surface (see Masked). 0 keeps every texel.
+	alphaCutoff float32
 }
 
 // NewBasicMaterial creates an unlit material with an unbound color map.
 func NewBasicMaterial(store *Store) *BasicMaterial {
 	st := store.Pool(Shader{Fragment: shaders.BasicFragment}, "Basic Material")
-	m := &BasicMaterial{color: colors.RGBA32F{1, 1, 1, 1}}
+	m := &BasicMaterial{color: colors.RGBA32F{1, 1, 1, 1}, colorSampler: store.DefaultSampler()}
 	m.pool = st
 	m.ref = st.Create(m)
 	return m
@@ -182,4 +186,26 @@ func (m *BasicMaterial) Pool() *Pool {
 // record buffer address, resolved at draw time because it moves when the store grows.
 func (m *BasicMaterial) ID() ID {
 	return m.pool.IDOf(m.ref)
+}
+
+// AlphaCutoff is the alpha below which the material has no surface; 0, the default,
+// keeps all of it.
+func (m *BasicMaterial) AlphaCutoff() float32 {
+	return m.alphaCutoff
+}
+
+// SetAlphaCutoff makes the material masked: where its colour's alpha — the colour map's
+// times the colour's own — falls below cutoff, there is no surface, in shading, shadows
+// and depth alike (glTF's alphaMode MASK, whose alphaCutoff defaults to 0.5). 0 makes it
+// whole again.
+func (m *BasicMaterial) SetAlphaCutoff(cutoff float32) {
+	m.alphaCutoff = cutoff
+	m.dirty()
+}
+
+// AlphaMask implements Masked: the material cuts its surface out by its colour's alpha
+// once it has a cut-off.
+func (m *BasicMaterial) AlphaMask() (AlphaMask, bool) {
+	mask := AlphaMask{Map: m.colorMap, Sampler: m.colorSampler, Alpha: m.color[3], Cutoff: m.alphaCutoff}
+	return mask, m.alphaCutoff > 0
 }

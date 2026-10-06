@@ -148,8 +148,10 @@ type Scene struct {
 	// environment is the light surrounding the scene, or nil for flat ambient light.
 	environment *Environment
 
-	// ambient is the scene-wide ambient light term.
-	ambient colors.RGB32F
+	// ambient is the colour of the scene-wide ambient light, and ambientIntensity how
+	// bright it is (see SetAmbient).
+	ambient          colors.RGB32F
+	ambientIntensity float32
 
 	// dirLights contains the scene's directional lights.
 	dirLights []*DirectionalLight
@@ -228,9 +230,17 @@ func (s *Scene) NewGroup() Group {
 	return Group{Node: Node{scene: s, id: s.allocNode(kindGroup)}}
 }
 
-// SetAmbient sets the ambient light term.
-func (s *Scene) SetAmbient(color colors.RGB32F) {
+// SetAmbient sets the light that reaches every surface from every direction, as lights
+// are set: its colour, times intensity. The colour is linear light, so it can carry the
+// brightness too; intensity is there to turn it up and down without retinting it.
+func (s *Scene) SetAmbient(color colors.RGB32F, intensity float32) {
 	s.ambient = color
+	s.ambientIntensity = intensity
+}
+
+// Ambient returns the ambient light's colour (see SetAmbient).
+func (s *Scene) Ambient() (colors.RGB32F, float32) {
+	return s.ambient, s.ambientIntensity
 }
 
 // SetFog sets the scene's distance fog, or clears it when fog is nil (the default).

@@ -10,7 +10,7 @@ import (
 )
 
 // PBRMaterial is a metallic-roughness physically-based material (Cook-Torrance) with
-// optional base-color, normal, metallic and roughness maps.
+// optional base-color, normal, metallic, roughness, occlusion and transmission maps.
 //
 // The material is its own GPU record: these fields are the source of truth and Bytes
 // serializes them on demand. Every setter must call dirty(), or the change is never
@@ -45,40 +45,58 @@ type PBRMaterial struct {
 	// sign with a glass front — becomes uniformly transparent.
 	transmissionMap     textures.Texture
 	transmissionSampler uint32
+
+	// occlusionMap is how much of the light around it reaches each texel, baked into the
+	// map's red channel (glTF's occlusionTexture): it darkens ambient and environment
+	// light, never direct light. occlusionStrength is how far: 0 not at all, 1 fully.
+	occlusionStrength float32
+	occlusionMap      textures.Texture
+	occlusionSampler  uint32
+
+	// alphaCutoff makes the material masked: where its colour's alpha falls below it,
+	// there is no surface (see Masked). 0 keeps every texel.
+	alphaCutoff float32
 }
 
-// NewPBRMaterial creates a PBR material with four unbound maps: color, normal,
-// metallic and roughness.
+// NewPBRMaterial creates a PBR material with no maps bound.
 func NewPBRMaterial(store *Store) *PBRMaterial {
 	st := store.Pool(Shader{Fragment: shaders.PBRFragment}, "PBR Material")
-	m := &PBRMaterial{color: colors.RGBA32F{1, 1, 1, 1}, roughness: 0.5}
+	sampler := store.DefaultSampler()
+	m := &PBRMaterial{
+		color: colors.RGBA32F{1, 1, 1, 1}, roughness: 0.5, occlusionStrength: 1,
+		colorSampler: sampler, normalSampler: sampler, metallicSampler: sampler,
+		roughnessSampler: sampler, transmissionSampler: sampler, occlusionSampler: sampler,
+	}
 	m.pool = st
 	m.ref = st.Create(m)
 	return m
 }
 
-// Bytes implements Instance: the 88-byte record matching the Material struct
+// Bytes implements Instance: the 100-byte record matching the Material struct
 // in shaders/src/scene_pbr.frag.glsl. Field order and padding here ARE the GPU layout —
 // changing either without changing the shader silently misreads every material.
 func (m *PBRMaterial) Bytes() []byte {
 	rec := struct {
-		color            colors.RGBA32F
-		emissive         colors.RGB32F
-		_                float32 // the shader declares vec4; the 4th channel is unused
-		metallic         float32
-		roughness        float32
-		transmission     float32
-		flags            uint32
-		colorMap         uint32
-		colorSampler     uint32
-		normalMap        uint32
-		normalSampler    uint32
-		metallicMap      uint32
-		metallicSampler  uint32
-		roughnessMap     uint32
-		roughnessSampler uint32
-		transMap         uint32
-		transSampler     uint32
+		color             colors.RGBA32F
+		emissive          colors.RGB32F
+		_                 float32 // the shader declares vec4; the 4th channel is unused
+		metallic          float32
+		roughness         float32
+		transmission      float32
+		flags             uint32
+		colorMap          uint32
+		colorSampler      uint32
+		normalMap         uint32
+		normalSampler     uint32
+		metallicMap       uint32
+		metallicSampler   uint32
+		roughnessMap      uint32
+		roughnessSampler  uint32
+		transMap          uint32
+		transSampler      uint32
+		occlusionStrength float32
+		occlusionMap      uint32
+		occlusionSampler  uint32
 	}{
 		color:        m.color,
 		emissive:     m.emissive,
@@ -87,12 +105,14 @@ func (m *PBRMaterial) Bytes() []byte {
 		transmission: m.transmission,
 		flags: MapFlag(m.colorMap, MatColorMap) | MapFlag(m.normalMap, MatNormalMap) |
 			MapFlag(m.metallicMap, MatMetalMap) | MapFlag(m.roughnessMap, MatRoughMap) |
-			MapFlag(m.transmissionMap, MatTransMap),
+			MapFlag(m.transmissionMap, MatTransMap) | MapFlag(m.occlusionMap, MatOcclusionMap),
 		colorMap: MapIndex(m.colorMap), colorSampler: m.colorSampler,
 		normalMap: MapIndex(m.normalMap), normalSampler: m.normalSampler,
 		metallicMap: MapIndex(m.metallicMap), metallicSampler: m.metallicSampler,
 		roughnessMap: MapIndex(m.roughnessMap), roughnessSampler: m.roughnessSampler,
 		transMap: MapIndex(m.transmissionMap), transSampler: m.transmissionSampler,
+		occlusionStrength: m.occlusionStrength,
+		occlusionMap:      MapIndex(m.occlusionMap), occlusionSampler: m.occlusionSampler,
 	}
 	return unsafe.Slice((*byte)(unsafe.Pointer(&rec)), unsafe.Sizeof(rec))
 }
@@ -104,6 +124,7 @@ func (m *PBRMaterial) Dispose() {
 	m.metallicMap.Release()
 	m.roughnessMap.Release()
 	m.transmissionMap.Release()
+	m.occlusionMap.Release()
 }
 
 // dirty marks the record for re-upload in the next Sync. Every setter must call it;
@@ -280,6 +301,65 @@ func (m *PBRMaterial) SetTransmissionMap(texture textures.Texture) {
 func (m *PBRMaterial) SetTransmissionMapSampler(sampler uint32) {
 	m.transmissionSampler = sampler
 	m.dirty()
+}
+
+// OcclusionMap returns the bound occlusion map.
+func (m *PBRMaterial) OcclusionMap() textures.Texture {
+	return m.occlusionMap
+}
+
+// SetOcclusionMap binds a map of how much of the light around it reaches each texel, in
+// its red channel (glTF's occlusionTexture): baked occlusion, which darkens ambient and
+// environment light and leaves direct light alone. Packed with roughness and metalness,
+// as glTF's occlusion-roughness-metallic textures are, the same texture can be bound to
+// all three maps.
+func (m *PBRMaterial) SetOcclusionMap(texture textures.Texture) {
+	old := m.occlusionMap
+	m.occlusionMap = texture.Copy()
+	old.Release() // after the copy, so rebinding a texture to itself cannot free it
+	m.dirty()
+}
+
+func (m *PBRMaterial) OcclusionMapSampler() uint32 {
+	return m.occlusionSampler
+}
+
+func (m *PBRMaterial) SetOcclusionMapSampler(sampler uint32) {
+	m.occlusionSampler = sampler
+	m.dirty()
+}
+
+// OcclusionStrength is how far the occlusion map darkens: 0 not at all, 1 fully, the
+// default (glTF's occlusionTexture.strength).
+func (m *PBRMaterial) OcclusionStrength() float32 {
+	return m.occlusionStrength
+}
+
+func (m *PBRMaterial) SetOcclusionStrength(strength float32) {
+	m.occlusionStrength = strength
+	m.dirty()
+}
+
+// AlphaCutoff is the alpha below which the material has no surface; 0, the default,
+// keeps all of it.
+func (m *PBRMaterial) AlphaCutoff() float32 {
+	return m.alphaCutoff
+}
+
+// SetAlphaCutoff makes the material masked: where its colour's alpha — the colour map's
+// times the colour's own — falls below cutoff, there is no surface, in shading, shadows
+// and depth alike (glTF's alphaMode MASK, whose alphaCutoff defaults to 0.5). 0 makes it
+// whole again.
+func (m *PBRMaterial) SetAlphaCutoff(cutoff float32) {
+	m.alphaCutoff = cutoff
+	m.dirty()
+}
+
+// AlphaMask implements Masked: the material cuts its surface out by its colour's alpha
+// once it has a cut-off.
+func (m *PBRMaterial) AlphaMask() (AlphaMask, bool) {
+	mask := AlphaMask{Map: m.colorMap, Sampler: m.colorSampler, Alpha: m.color[3], Cutoff: m.alphaCutoff}
+	return mask, m.alphaCutoff > 0
 }
 
 // --- Material ---

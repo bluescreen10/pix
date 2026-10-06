@@ -30,7 +30,7 @@ func TestDepthPrepassMatchesShadingExactly(t *testing.T) {
 
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{0.4, 0.4, 0.4})
+	scene.SetAmbient(colors.RGB32F{0.4, 0.4, 0.4}, 1)
 	scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 2)
 
 	mat := r.NewPBRMaterial()

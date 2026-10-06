@@ -28,7 +28,7 @@ func TestFogBlendsTowardFogColorWithDistance(t *testing.T) {
 
 		scene := scenes.New()
 		defer scene.Destroy()
-		scene.SetAmbient(colors.RGB32F{1, 1, 1}) // full ambient -> albedo shows directly
+		scene.SetAmbient(colors.RGB32F{1, 1, 1}, 1) // full ambient -> albedo shows directly
 		scene.SetFog(fog)
 
 		geo := ren.GeometryStore.Create(geometries.GeometryConfig{

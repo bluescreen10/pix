@@ -17,6 +17,9 @@ type frameViews struct {
 	// LOD is a main-camera decision whichever view is culling — and shading uses it for
 	// specular.
 	eye glm.Vec3f
+	// projection is the main camera's projection, clip-space Y flipped as main.viewProj
+	// is: what a pass working from the main view's depth unprojects it with.
+	projection glm.Mat4f
 }
 
 // view is one camera the frame renders from, and the buffers its cull fills.

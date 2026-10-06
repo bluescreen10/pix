@@ -68,16 +68,19 @@ func (t *Store) CreateSampler(d gpu.SamplerDescriptor) uint32 {
 
 // Create builds a mipmapped heap texture from RGBA8 pixels (w*h*4, row-major),
 // repacked and filtered according to format, and returns a fresh single-ref handle.
-// Submitted + waited immediately.
+// Submitted + waited immediately. It is Prepare and Upload; a loader with many textures
+// to make prepares them in parallel and uploads them as they are ready.
 func (t *Store) Create(rgba []byte, w, h int, format Format) Texture {
-	// The backend derives each level's extent from the mip index, so
-	// GenerateMipChain's per-level sizes aren't needed here.
-	base, levels, _ := GenerateMipChain(rgba, w, h, format)
+	return t.Upload(Prepare(rgba, w, h, format, FullMipChain))
+}
 
+// Upload makes a heap texture of img and returns a fresh single-ref handle, its levels
+// uploaded and ready to sample when it returns.
+func (t *Store) Upload(img Image) Texture {
 	tex := t.backend.CreateTexture(gpu.TextureDescriptor{
-		Kind: gpu.Texture2D, Width: uint32(w), Height: uint32(h),
-		Mips:   uint32(len(levels) + 1),
-		Format: format.gpuFormat(), Usage: gpu.TextureSampled | gpu.TextureTransfer,
+		Kind: gpu.Texture2D, Width: uint32(img.width), Height: uint32(img.height),
+		Mips:   uint32(len(img.levels)),
+		Format: img.format.gpuFormat(), Usage: gpu.TextureSampled | gpu.TextureTransfer,
 	})
 
 	// Textures upload at load time and must be usable the moment this returns, so
@@ -85,8 +88,8 @@ func (t *Store) Create(rgba []byte, w, h int, format Format) Texture {
 	// frame is submitted). One staging buffer holding the whole chain, one submit,
 	// one wait — which also keeps the stricter buffer-to-image copy alignment out
 	// of the frame arena's business.
-	total := len(base)
-	for _, l := range levels {
+	total := 0
+	for _, l := range img.levels {
 		total += len(l)
 	}
 	staging := t.backend.Alloc(uint64(total), gpu.MemoryHost, "texture-staging")
@@ -94,14 +97,10 @@ func (t *Store) Create(rgba []byte, w, h int, format Format) Texture {
 
 	cmd := t.backend.Begin()
 	var off uint64
-	put := func(level uint32, data []byte) {
+	for level, data := range img.levels {
 		copy(dst[off:], data)
-		cmd.CopyBufferToTexture(tex, level, 0, staging, off)
+		cmd.CopyBufferToTexture(tex, uint32(level), 0, staging, off)
 		off += uint64(len(data))
-	}
-	put(0, base)
-	for i, l := range levels {
-		put(uint32(i+1), l)
 	}
 	cmd.Barrier(gpu.StageTransfer, gpu.StageVertex|gpu.StageFragment|gpu.StageCompute, 0)
 	t.backend.Wait(t.backend.Submit(cmd))

@@ -15,6 +15,7 @@ import (
 	"unsafe"
 
 	"github.com/bluescreen10/pix/postprocess"
+	"github.com/chewxy/math32"
 
 	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/gamekit/ui"
@@ -49,11 +50,14 @@ type Renderer struct {
 	drawable     ui.Drawable
 	drawableSize ui.Size
 	swapchain    gpu.Swapchain
-	target       gpu.Texture
-	hasTarget    bool
-	ownsTarget   bool // renderer created the target (via NewOffscreenRenderer)
-	readback     gpu.Buffer
-	pixels       []byte
+	// presentMode is when the swapchain's frames reach the display (see EnableVSync),
+	// held for a swapchain created after it is set.
+	presentMode gpu.PresentMode
+	target      gpu.Texture
+	hasTarget   bool
+	ownsTarget  bool // renderer created the target (via NewOffscreenRenderer)
+	readback    gpu.Buffer
+	pixels      []byte
 
 	// Renderer-owned shared resources + GPU-driven pipelines. All three stores are
 	// exported: callers create resources on them directly (GeometryStore.Create,
@@ -159,6 +163,29 @@ type Renderer struct {
 	fogIntegratePipeline gpu.Pipeline
 	fogBackgroundPass    *postprocess.FullscreenPass
 
+	// Ambient occlusion: whether it darkens the scene, by which method, and how (see
+	// ambient_occlusion.go).
+	ambientOcclusionEnabled  bool
+	ambientOcclusion         AmbientOcclusion
+	ambientOcclusionSettings AmbientOcclusionSettings
+	// Each method's images, created on first use for the frame's size, and its passes'
+	// pipelines.
+	vbaoImages           vbaoImages
+	vbaoDepthPipeline    gpu.Pipeline
+	vbaoDepthMipPipeline gpu.Pipeline
+	vbaoSlicesPipeline   gpu.Pipeline
+	vbaoDenoisePipeline  gpu.Pipeline
+	vbaoUpsamplePipeline gpu.Pipeline
+	assaoImages          assaoImages
+	assaoDepthPipeline   gpu.Pipeline
+	assaoGatherPipeline  gpu.Pipeline
+	assaoBlurPipeline    gpu.Pipeline
+	// The draws that darken the scene by its occlusion, built for the scene's format and
+	// sample count, and the one that shows it, built for the target's.
+	occludedSharePipeline   gpu.Pipeline
+	occlusionDarkenPipeline gpu.Pipeline
+	occlusionViewPipeline   gpu.Pipeline
+
 	// lightClustersPipeline lists every light cluster's lights (see light_clusters.go).
 	lightClustersPipeline gpu.Pipeline
 
@@ -179,10 +206,14 @@ type Renderer struct {
 	// prepassPipelines fill depth for the forward pass so shading runs once per pixel
 	// (see Renderer.EnableDepthPrepass), one per materials.CullMode.
 	prepassPipelines [3]gpu.Pipeline
-	depthPrepass     bool
-	shadowDistance   float32
-	shadowNear       float32
-	shadowFilter     ShadowFilter
+	// maskedShadowPipeline and maskedPrepassPipelines are the same passes for masked
+	// materials (see materials.Masked), with a fragment stage that cuts them out.
+	maskedShadowPipeline   gpu.Pipeline
+	maskedPrepassPipelines [3]gpu.Pipeline
+	depthPrepass           bool
+	shadowDistance         float32
+	shadowNear             float32
+	shadowFilter           ShadowFilter
 	// shadows is how directional lights are fitted plus that fit's own settings; nil
 	// means ShadowUniform (see Renderer.Shadows).
 	shadows ShadowSettings
@@ -233,6 +264,7 @@ func NewRenderer(cfg *RendererConfig) (*Renderer, error) {
 	if scale <= 0 {
 		scale = 1
 	}
+	textureStore := textures.NewStore(backend)
 	r := &Renderer{
 		backend:   backend,
 		scale:     scale,
@@ -242,8 +274,8 @@ func NewRenderer(cfg *RendererConfig) (*Renderer, error) {
 		// pays off by keeping its memory across frames (see uploader).
 		uploader:      newUploader(backend),
 		GeometryStore: geometries.NewStore(backend),
-		TextureStore:  textures.NewStore(backend),
-		MaterialStore: materials.NewStore(backend),
+		TextureStore:  textureStore,
+		MaterialStore: materials.NewStore(backend, textureStore.DefaultSampler()),
 	}
 
 	switch {
@@ -284,9 +316,10 @@ func (r *Renderer) attachDrawable(drawable ui.Drawable) error {
 		return err
 	}
 	r.swapchain, err = r.backend.CreateSwapchain(surface, gpu.SwapchainDescriptor{
-		Width:  uint32(size.Width),
-		Height: uint32(size.Height),
-		Format: format,
+		Width:       uint32(size.Width),
+		Height:      uint32(size.Height),
+		Format:      format,
+		PresentMode: r.presentMode,
 	})
 	if err != nil {
 		return err
@@ -365,6 +398,11 @@ func (r *Renderer) configure(w, h uint32, format gpu.Format) {
 	if r.isMSAAEnabled() {
 		r.createMultisampledImages()
 	}
+	// Ambient occlusion's images are the frame's size, and its darkening draws are built
+	// for the scene's format and sample count; the next frame that measures it makes
+	// both again.
+	r.releaseAmbientOcclusionImages()
+	r.releaseAmbientOcclusionPipelines()
 	r.releaseFXAASource()
 	if r.isFXAAEnabled() {
 		r.fxaaSource = r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: w, Height: h,
@@ -387,13 +425,14 @@ func (r *Renderer) sceneFormat() gpu.Format {
 }
 
 // createMultisampledImages creates the multisampled images the scene is drawn into with
-// MSAA. Neither is sampled — a pass resolves them into images that are — so on a GPU that
-// renders in tiles they need never leave the tile.
+// MSAA. A pass resolves them into images the rest of the frame samples.
 func (r *Renderer) createMultisampledImages() {
 	r.multisampledColor = r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: r.width, Height: r.height,
 		Format: r.sceneFormat(), Usage: gpu.TextureRenderTarget, Samples: r.sceneSamples(), Label: "scene-color-multisampled"})
+	// The depth is sampled too: ambient occlusion reads its sample zero once the opaque
+	// scene is drawn, long before it is resolved.
 	r.multisampledDepth = r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: r.width, Height: r.height,
-		Format: gpu.FormatDepth32F, Usage: gpu.TextureDepth, Samples: r.sceneSamples(), Label: "depth-multisampled"})
+		Format: gpu.FormatDepth32F, Usage: gpu.TextureDepth | gpu.TextureSampled, Samples: r.sceneSamples(), Label: "depth-multisampled"})
 }
 
 // sceneSamples is how many samples per pixel the scene is drawn with: more than one
@@ -711,6 +750,33 @@ func (r *Renderer) SetDebugView(v DebugView) {
 	r.debugView = v
 }
 
+// EnableVSync waits for the display's refresh to show each frame, as it does by default.
+// Off, a frame is shown as soon as it is finished, and the next starts at once: frames
+// run as fast as the GPU draws them, and may tear.
+//
+// Turn it off to measure. With it on, a frame that finishes early waits for the refresh,
+// and the GPU, finding itself idle, slows its clock until the work fills the frame: GPU
+// times then hardly change with the work, and two settings that cost very differently
+// can read the same. A renderer drawing offscreen presents nothing and is unaffected.
+func (r *Renderer) EnableVSync(on bool) {
+	mode := gpu.PresentVSync
+	if !on {
+		mode = gpu.PresentImmediate
+	}
+	if mode == r.presentMode {
+		return
+	}
+	r.presentMode = mode
+	if r.swapchain.IsValid() {
+		r.backend.SetPresentMode(r.swapchain, mode)
+	}
+}
+
+// VSyncEnabled reports whether frames wait for the display's refresh (see EnableVSync).
+func (r *Renderer) VSyncEnabled() bool {
+	return r.presentMode == gpu.PresentVSync
+}
+
 // HDREnabled reports whether frames are rendered in high dynamic range (see EnableHDR).
 func (r *Renderer) HDREnabled() bool {
 	return r.hdr
@@ -779,6 +845,56 @@ func (r *Renderer) setAntiAliasing(on bool, method AntiAliasing) {
 		return
 	}
 	r.configure(r.width, r.height, r.color)
+}
+
+// AmbientOcclusionEnabled reports whether surfaces are darkened by how occluded they
+// are (see EnableAmbientOcclusion).
+func (r *Renderer) AmbientOcclusionEnabled() bool {
+	return r.ambientOcclusionEnabled
+}
+
+// EnableAmbientOcclusion darkens the indirect light on each surface by how much of the
+// scene around it occludes it, measured by the method SetAmbientOcclusion chooses —
+// AmbientOcclusionVBAO unless another was chosen — with SetAmbientOcclusionSettings's
+// radius and intensity. Off by default.
+//
+// Materials report which part of their light is indirect; the built-in ones all do. A
+// custom material's opaque shader takes part by writing its alpha through outputAlpha
+// (material_common.glsl); one that writes an alpha of 1 is left as it is.
+func (r *Renderer) EnableAmbientOcclusion(on bool) {
+	r.ambientOcclusionEnabled = on
+}
+
+// AmbientOcclusion is the method occlusion is measured by while ambient occlusion is
+// enabled (see SetAmbientOcclusion).
+func (r *Renderer) AmbientOcclusion() AmbientOcclusion {
+	return r.ambientOcclusion
+}
+
+// SetAmbientOcclusion chooses how occlusion is measured while ambient occlusion is
+// enabled (see AmbientOcclusion for the methods). It does not enable it.
+func (r *Renderer) SetAmbientOcclusion(method AmbientOcclusion) {
+	if method != r.ambientOcclusion {
+		// The methods measure in images of their own; the next frame that measures
+		// makes the new one's.
+		r.releaseAmbientOcclusionImages()
+	}
+	r.ambientOcclusion = method
+}
+
+// AmbientOcclusionSettings returns the radius, intensity and resolution ambient
+// occlusion is measured with, as set — zero fields standing for their defaults.
+func (r *Renderer) AmbientOcclusionSettings() AmbientOcclusionSettings {
+	return r.ambientOcclusionSettings
+}
+
+// SetAmbientOcclusionSettings sets the radius, intensity and resolution ambient
+// occlusion is measured with (see AmbientOcclusionSettings). It does not enable it.
+func (r *Renderer) SetAmbientOcclusionSettings(settings AmbientOcclusionSettings) {
+	if settings.FullResolution != r.ambientOcclusionSettings.FullResolution {
+		r.releaseAmbientOcclusionImages()
+	}
+	r.ambientOcclusionSettings = settings
 }
 
 // ToneMapping is the curve an HDR frame is mapped through (see SetToneMapping).
@@ -1234,6 +1350,7 @@ func (r *Renderer) extractViews(p *scenes.FramePacket, st *renderState) frameVie
 		main:        view{viewProj: flipClipY(vp), planes: glm.FrustumPlanes(vp), cull: &st.mainCull},
 		hasMainView: true,
 		eye:         mainView.Position,
+		projection:  flipClipY(mainView.Projection),
 	}
 	if !r.shadowsEnabled {
 		return views
@@ -1504,7 +1621,7 @@ func (r *Renderer) buildOverlay() {
 			// The per-pass breakdown is the half of this worth reading: a total says
 			// the budget is gone, the split says which pass spent it.
 			row := 3
-			for _, p := range []GPUPass{GPUPassCull, GPUPassShadow, GPUPassPrepass, GPUPassForward, GPUPassPostProcessing} {
+			for p := range gpuPassCount {
 				if !r.profiler.IsPassRecorded(p) {
 					continue
 				}
@@ -1512,9 +1629,9 @@ func (r *Renderer) buildOverlay() {
 				// run, and hiding it says the wrong thing (see Profiler.IsPassRecorded). Plain
 				// ASCII, because the HUD font is a hand-drawn bitmap with no dashes to
 				// spare.
-				line := fmt.Sprintf("  %-8s  n/a", p)
+				line := fmt.Sprintf("  %-11s  n/a", p)
 				if d := r.profiler.PassTime(p); d > 0 {
-					line = fmt.Sprintf("  %-8s %.2f", p, ms(d))
+					line = fmt.Sprintf("  %-11s %.2f", p, ms(d))
 				}
 				r.overlay.text(line, x, y+float32(row)*step, size, r.fontColor)
 				row++
@@ -1590,7 +1707,7 @@ func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture,
 	// 5e. A debug view replaces shading entirely, so nothing after it runs. It draws
 	// straight into the target: its values are data, not light, and neither the
 	// post-processing chain nor tone mapping should touch them.
-	if r.debugViewActive() {
+	if r.isGeometryDebugViewActive() {
 		r.encodeDebugView(st, views, target, cmd)
 		return
 	}
@@ -1607,11 +1724,19 @@ func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture,
 	r.encodeFrameSteps(FrameStageAfterDepth, cmd)
 
 	// 5h. Shade. Without HDR that is the finished image.
-	r.encodeDrawingPass(st, views, depthFilled, sceneImage, cmd)
+	darkening := r.occlusionDarkeningPassFor(r.hasTransparentPass(st))
+	r.encodeDrawingPass(st, views, depthFilled, darkening, sceneImage, cmd)
+
+	// The ambient occlusion view shows what this frame measured, in place of the frame:
+	// data, like the other views, and no more to be post-processed than they are.
+	if r.debugView == DebugAmbientOcclusion {
+		r.encodeAmbientOcclusionView(target, cmd)
+		return
+	}
 
 	// 5i. With HDR, run the post-processing chain over the scene image, then tone-map the
 	// result into the display image.
-	r.encodePostProcessingAndToneMapping(displayImage, cmd)
+	r.encodePostProcessingAndToneMapping(darkening == darkeningInToneMapping, displayImage, cmd)
 
 	// 5j. With FXAA, smooth the display image into the target.
 	r.encodeFXAA(target, cmd)
@@ -1955,16 +2080,33 @@ func (r *Renderer) encodeShadowMap(group []view, st *renderState, cmd gpu.Comman
 			Load:    gpu.LoadClear, Store: gpu.StoreKeep, Clear: 0.0,
 		},
 	})
-	cmd.SetPipeline(r.shadowPipeline)
-
 	for _, v := range group {
-		root := r.positionRoot(v, st)
 		cmd.SetViewport(float32(v.x), 0, float32(v.width), float32(v.height), 0, 1)
 		cmd.SetScissor(v.x, 0, int32(v.width), int32(v.height))
-		cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, v.cull.indirectBuf, 0, uint32(len(st.layout.batches)), indirectSize)
+		r.drawShadowCasters(v, st, cmd)
 	}
 
 	cmd.EndRenderPass()
+}
+
+// drawShadowCasters draws every batch into the shadow map v renders: each run of
+// unmasked batches with one call through the vertex-only pipeline, and each pool's
+// masked ones through the masked pipeline, with that pool's mask table.
+func (r *Renderer) drawShadowCasters(v view, st *renderState, cmd gpu.CommandBuffer) {
+	root := r.positionRoot(v, st)
+	maskedRoot := r.maskedDepthRoot(v, st)
+	for first, count := range maskSpans(st.layout.batches) {
+		b := &st.layout.batches[first]
+		offset := uint64(first) * uint64(indirectSize)
+		if !b.isMasked {
+			cmd.SetPipeline(r.shadowPipeline)
+			cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, v.cull.indirectBuf, offset, uint32(count), indirectSize)
+			continue
+		}
+		maskedRoot.masks = b.pool.MasksAddr()
+		cmd.SetPipeline(r.maskedShadowPipeline)
+		cmd.DrawIndexedIndirect(utils.ToBytes(&maskedRoot), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, v.cull.indirectBuf, offset, uint32(count), indirectSize)
+	}
 }
 
 // encodeTargetClear clears the target to the clear colour, for a frame with no view to
@@ -2096,11 +2238,11 @@ func (r *Renderer) encodeDepthPrepass(st *renderState, main view, cmd gpu.Comman
 	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
 	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
 
-	// One root serves every span: this pass reads positions and transforms, nothing that
-	// varies by material.
+	// One root serves every unmasked span: this pass reads positions and transforms,
+	// nothing that varies by material. A masked span adds its pool's mask table.
 	root := r.positionRoot(main, st)
+	maskedRoot := r.maskedDepthRoot(main, st)
 	drew := false
-	boundCull := materials.CullMode(255)
 	for first, count := range rasterSpans(st.layout.batches) {
 		b := &st.layout.batches[first]
 		if b.blend != materials.BlendOpaque {
@@ -2113,12 +2255,17 @@ func (r *Renderer) encodeDepthPrepass(st *renderState, main view, cmd gpu.Comman
 			continue
 		}
 		// Match the drawing pass's culling exactly, or this writes depth for faces it will
-		// discard. Spans arrive grouped by raster state, so this rebinds rarely.
-		if b.cull != boundCull {
-			boundCull = b.cull
-			cmd.SetPipeline(r.prepassPipelines[min(int(b.cull), len(r.prepassPipelines)-1)])
+		// discard.
+		cull := min(int(b.cull), len(r.prepassPipelines)-1)
+		offset := uint64(first) * uint64(indirectSize)
+		if b.isMasked {
+			maskedRoot.masks = b.pool.MasksAddr()
+			cmd.SetPipeline(r.maskedPrepassPipelines[cull])
+			cmd.DrawIndexedIndirect(utils.ToBytes(&maskedRoot), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, main.cull.indirectBuf, offset, uint32(count), indirectSize)
+		} else {
+			cmd.SetPipeline(r.prepassPipelines[cull])
+			cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, main.cull.indirectBuf, offset, uint32(count), indirectSize)
 		}
-		cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, main.cull.indirectBuf, uint64(first)*uint64(indirectSize), uint32(count), indirectSize)
 		drew = true
 	}
 
@@ -2134,18 +2281,41 @@ func (r *Renderer) encodeDepthPrepass(st *renderState, main view, cmd gpu.Comman
 // particles over them. Two rather than one so that the frame steps needing the
 // finished opaque scene — a sky drawn behind it, a copy of it for refraction — run in
 // between.
-func (r *Renderer) encodeDrawingPass(st *renderState, views frameViews, depthFilled bool, image gpu.Texture, cmd gpu.CommandBuffer) {
+//
+// darkening is the pass ambient occlusion darkens the scene in (see
+// occlusionDarkeningPassFor).
+func (r *Renderer) encodeDrawingPass(st *renderState, views frameViews, depthFilled bool, darkening occlusionDarkeningPass, image gpu.Texture, cmd gpu.CommandBuffer) {
 	opaque, transparent := splitByBlend(st.layout.batches)
+	hasTransparentPass := r.hasTransparentPass(st)
 
-	r.profiler.beginPass(GPUPassForward, cmd)
+	r.profiler.beginPass(GPUPassOpaque, cmd)
 	r.encodeOpaquePass(opaque, st, views, depthFilled, image, cmd)
+	r.profiler.endPass(GPUPassOpaque, cmd)
+
+	r.profiler.beginPass(GPUPassAmbientOcclusion, cmd)
+	r.encodeAmbientOcclusion(views, cmd)
+	if darkening == darkeningInOwnPass {
+		r.encodeOcclusionDarkening(image, cmd)
+	}
+	r.profiler.endPass(GPUPassAmbientOcclusion, cmd)
+
+	r.profiler.beginPass(GPUPassTransparent, cmd)
 	r.encodeEnvironmentBackground(image, cmd)
 	r.encodeFrameSteps(FrameStageAfterOpaque, cmd)
 	r.encodeFogBackground(image, cmd)
-	r.encodeTransparentPass(transparent, st, views, image, cmd)
+	if hasTransparentPass {
+		r.encodeTransparentPass(transparent, st, views, darkening == darkeningInTransparentPass, image, cmd)
+	}
 	r.encodeFrameSteps(FrameStageAfterTransparent, cmd)
-	r.encodeSceneResolve(image, cmd)
-	r.profiler.endPass(GPUPassForward, cmd)
+	r.encodeSceneResolve(image, darkening == darkeningInResolvePass, cmd)
+	r.profiler.endPass(GPUPassTransparent, cmd)
+}
+
+// hasTransparentPass reports whether the frame has blended batches or particles to draw
+// over the opaque scene.
+func (r *Renderer) hasTransparentPass(st *renderState) bool {
+	_, transparent := splitByBlend(st.layout.batches)
+	return !transparent.isEmpty() || len(r.frame.Particles.Data) > 0
 }
 
 // encodeOpaquePass clears image and draws the opaque batches into it. It clears depth
@@ -2163,9 +2333,534 @@ func (r *Renderer) encodeOpaquePass(batches batchRange, st *renderState, views f
 	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
 	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
 
-	r.drawBatches(batches, st, views, cmd)
+	root := r.sceneRoot(st, views)
+	if r.ambientOcclusionEnabled {
+		root.directShareInAlpha = 1
+	}
+	r.drawBatches(batches, root, st, views, cmd)
 
 	cmd.EndRenderPass()
+}
+
+// encodeAmbientOcclusion measures how open each surface is from the depth the opaque
+// pass left, into the openness image, for the scene to be darkened by (see
+// drawOcclusionDarkening) or the debug view to show.
+func (r *Renderer) encodeAmbientOcclusion(views frameViews, cmd gpu.CommandBuffer) {
+	if !r.isAmbientOcclusionMeasured() {
+		return
+	}
+
+	r.ensureAmbientOcclusionPipelines()
+	// The passes read the depth the opaque pass wrote.
+	cmd.Barrier(gpu.StageDepth|gpu.StageColorOutput, gpu.StageCompute, 0)
+	if r.ambientOcclusion == AmbientOcclusionASSAO {
+		r.encodeASSAO(views, cmd)
+	} else {
+		r.encodeVBAO(views, cmd)
+	}
+	// Whichever pass darkens the scene, or shows the occlusion, reads it.
+	cmd.Barrier(gpu.StageCompute, gpu.StageFragment, 0)
+}
+
+// isAmbientOcclusionMeasured reports whether this frame measures occlusion: to darken
+// the scene by it, or to show it.
+func (r *Renderer) isAmbientOcclusionMeasured() bool {
+	return r.ambientOcclusionEnabled || r.debugView == DebugAmbientOcclusion
+}
+
+// ensureAmbientOcclusionPipelines builds the passes' pipelines unless they exist. The
+// draws that darken the scene are built for its format and sample count, and the one
+// that shows the occlusion for the target's format; configure releases all of them
+// when either may have changed.
+func (r *Renderer) ensureAmbientOcclusionPipelines() {
+	if r.vbaoDepthPipeline.IsValid() {
+		return
+	}
+
+	compute := func(shader []byte, label string) gpu.Pipeline {
+		return r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shader), Entry: "main", Label: label})
+	}
+	r.vbaoDepthPipeline = compute(shaders.VBAODepth, "vbao-depth")
+	r.vbaoDepthMipPipeline = compute(shaders.VBAODepthMip, "vbao-depth-mip")
+	r.vbaoSlicesPipeline = compute(shaders.VBAOSlices, "vbao-slices")
+	r.vbaoDenoisePipeline = compute(shaders.VBAODenoise, "vbao-denoise")
+	r.vbaoUpsamplePipeline = compute(shaders.VBAOUpsample, "vbao-upsample")
+	r.assaoDepthPipeline = compute(shaders.ASSAODepth, "assao-depth")
+	r.assaoGatherPipeline = compute(shaders.ASSAOGather, "assao-gather")
+	r.assaoBlurPipeline = compute(shaders.ASSAOBlur, "assao-blur")
+
+	// The darkening draws are built for the scene's passes, which have its depth
+	// attached; they neither test nor write it.
+	apply := func(format, depthFormat gpu.Format, samples uint8, blend gpu.BlendState, label string) gpu.Pipeline {
+		return r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
+			VertexShader:   shaders.ForBackend(r.backend, shaders.FullscreenVert),
+			FragmentShader: shaders.ForBackend(r.backend, shaders.OcclusionApply),
+			Topology:       gpu.TopologyTriangles,
+			ColorFormats:   []gpu.Format{format},
+			DepthFormat:    depthFormat,
+			Samples:        samples,
+			Blend:          []gpu.BlendState{blend},
+			CullMode:       gpu.CullNone,
+			Label:          label,
+		})
+	}
+	// alpha = k − d·k: the share k of the indirect light to take away, of the share
+	// 1 − d of the colour that is indirect. The colour is left alone.
+	r.occludedSharePipeline = apply(r.sceneFormat(), gpu.FormatDepth32F, r.sceneSamples(), gpu.BlendState{
+		Enable:    true,
+		ColorOp:   gpu.BlendFactorOp{Src: gpu.BlendZero, Dst: gpu.BlendOne, Op: gpu.BlendAdd},
+		AlphaOp:   gpu.BlendFactorOp{Src: gpu.BlendOne, Dst: gpu.BlendSrcAlpha, Op: gpu.BlendSubtract},
+		WriteMask: 1 << 3,
+	}, "occlusion-occluded-share")
+	// colour × (1 − alpha), and alpha back to the 1 an opaque surface has.
+	r.occlusionDarkenPipeline = apply(r.sceneFormat(), gpu.FormatDepth32F, r.sceneSamples(), gpu.BlendState{
+		Enable:  true,
+		ColorOp: gpu.BlendFactorOp{Src: gpu.BlendZero, Dst: gpu.BlendOneMinusDstAlpha, Op: gpu.BlendAdd},
+		AlphaOp: gpu.BlendFactorOp{Src: gpu.BlendOne, Dst: gpu.BlendZero, Op: gpu.BlendAdd},
+	}, "occlusion-darken")
+	r.occlusionViewPipeline = apply(r.color, gpu.FormatUndefined, 1, gpu.BlendState{}, "occlusion-view")
+}
+
+// encodeVBAO measures occlusion by VBAO: the depth chain, the slices, their
+// denoise, and the upsample to full resolution.
+func (r *Renderer) encodeVBAO(views frameViews, cmd gpu.CommandBuffer) {
+	r.ensureVBAOImages()
+	r.encodeVBAODepthChain(views, cmd)
+	r.encodeVBAOSlices(views, cmd)
+	r.encodeVBAODenoise(cmd)
+	r.encodeVBAOUpsample(views, cmd)
+}
+
+// ensureVBAOImages creates the images VBAO measures in, for the frame's size and the
+// settings' resolution, unless they exist. They are released with ASSAO's (see
+// releaseAmbientOcclusionImages).
+func (r *Renderer) ensureVBAOImages() {
+	if r.vbaoImages.isCreated() {
+		return
+	}
+
+	images := vbaoImages{topMip: r.ambientOcclusionSettings.topMip()}
+	width, height := r.frameMipSize(int(images.topMip))
+	mips := min(maxDepthChainMips, bits.Len32(max(width, height)))
+	// 32-bit, as the VBAO pass reconstructs normals from neighbouring depths: XeGTAO
+	// found 16-bit depths visibly degrade them.
+	images.depthChain = r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: width, Height: height,
+		Mips: uint32(mips), Format: gpu.FormatR32F, Usage: gpu.TextureSampled | gpu.TextureStorage, Label: "occlusion-depth-chain"})
+	images.depthChainLevels = make([]gpu.Texture, mips)
+	for level := range images.depthChainLevels {
+		images.depthChainLevels[level] = r.backend.TextureView(images.depthChain, gpu.Texture2D, uint32(level), 1, 0, 1)
+	}
+
+	occlusionImage := func(label string) gpu.Texture {
+		return r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: width, Height: height,
+			Format: gpu.FormatRG16F, Usage: gpu.TextureSampled | gpu.TextureStorage, Label: label})
+	}
+	images.occlusion = occlusionImage("occlusion")
+	images.denoiseScratch = occlusionImage("occlusion-denoise-scratch")
+	if images.topMip > 0 {
+		images.upsampled = r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: r.width, Height: r.height,
+			Format: gpu.FormatRG16F, Usage: gpu.TextureSampled | gpu.TextureStorage, Label: "occlusion-upsampled"})
+	}
+	r.vbaoImages = images
+}
+
+// encodeVBAODepthChain fills the depth chain: its first level from the scene's depth, and
+// each level after from the one before.
+func (r *Renderer) encodeVBAODepthChain(views frameViews, cmd gpu.CommandBuffer) {
+	images := &r.vbaoImages
+	fullSize := r.frameSize()
+	root := vbaoDepthRoot{
+		depthUnprojection: depthUnprojection(views.projection),
+		depth:             r.sceneDepthAttachment().Index,
+		depthSamples:      uint32(r.sceneSamples()),
+		target:            images.depthChainLevels[0].Index,
+		topMip:            images.topMip,
+		fullSize:          fullSize,
+	}
+	width, height := r.frameMipSize(int(images.topMip))
+	cmd.SetPipeline(r.vbaoDepthPipeline)
+	cmd.Dispatch(utils.ToBytes(&root), occlusionWorkgroupCount(width), occlusionWorkgroupCount(height), 1)
+
+	cmd.SetPipeline(r.vbaoDepthMipPipeline)
+	for level := 1; level < len(images.depthChainLevels); level++ {
+		// Each level reads the one the dispatch before wrote.
+		cmd.Barrier(gpu.StageCompute, gpu.StageCompute, 0)
+		mip := int(images.topMip) + level
+		mipRoot := vbaoDepthMipRoot{
+			chain:    images.depthChain.Index,
+			target:   images.depthChainLevels[level].Index,
+			mip:      uint32(mip),
+			topMip:   images.topMip,
+			fullSize: fullSize,
+		}
+		width, height := r.frameMipSize(mip)
+		cmd.Dispatch(utils.ToBytes(&mipRoot), occlusionWorkgroupCount(width), occlusionWorkgroupCount(height), 1)
+	}
+}
+
+// encodeVBAOSlices measures how open each surface is, into the occlusion image.
+func (r *Renderer) encodeVBAOSlices(views frameViews, cmd gpu.CommandBuffer) {
+	images := &r.vbaoImages
+	settings := r.ambientOcclusionSettings.resolved()
+	cmd.Barrier(gpu.StageCompute, gpu.StageCompute, 0)
+	pixelRay, pixelRayOrigin := pixelRays(views.projection, r.width, r.height)
+	sampling := settings.sampling()
+	root := vbaoSlicesRoot{
+		pixelRay:       pixelRay,
+		pixelRayOrigin: pixelRayOrigin,
+		chain:          images.depthChain.Index,
+		chainMips:      uint32(len(images.depthChainLevels)),
+		topMip:         images.topMip,
+		target:         images.occlusion.Index,
+		fullSize:       r.frameSize(),
+		radius:         settings.Radius,
+		thickness:      settings.Thickness,
+		slices:         float32(sampling.slices),
+		steps:          float32(sampling.steps),
+	}
+	width, height := r.frameMipSize(int(images.topMip))
+	cmd.SetPipeline(r.vbaoSlicesPipeline)
+	cmd.Dispatch(utils.ToBytes(&root), occlusionWorkgroupCount(width), occlusionWorkgroupCount(height), 1)
+}
+
+// encodeVBAODenoise smooths the occlusion image within surfaces, as many times as
+// the quality says, back and forth with its scratch image, leaving the result in occlusion.
+func (r *Renderer) encodeVBAODenoise(cmd gpu.CommandBuffer) {
+	images := &r.vbaoImages
+	width, height := r.frameMipSize(int(images.topMip))
+	cmd.SetPipeline(r.vbaoDenoisePipeline)
+	passes := r.ambientOcclusionSettings.sampling().denoisePasses
+	for pass := range passes {
+		cmd.Barrier(gpu.StageCompute, gpu.StageCompute, 0)
+		root := vbaoDenoiseRoot{
+			source:       images.occlusion.Index,
+			target:       images.denoiseScratch.Index,
+			size:         [2]int32{int32(width), int32(height)},
+			centerWeight: vbaoDenoiseCenterWeight / 5,
+		}
+		if pass == passes-1 {
+			root.centerWeight = vbaoDenoiseCenterWeight
+		}
+		cmd.Dispatch(utils.ToBytes(&root), occlusionWorkgroupCount(width), occlusionWorkgroupCount(height), 1)
+		images.occlusion, images.denoiseScratch = images.denoiseScratch, images.occlusion
+	}
+}
+
+// encodeVBAOUpsample brings the occlusion up to full resolution, when it was
+// measured at less.
+func (r *Renderer) encodeVBAOUpsample(views frameViews, cmd gpu.CommandBuffer) {
+	images := &r.vbaoImages
+	if !images.upsampled.IsValid() {
+		return
+	}
+	cmd.Barrier(gpu.StageCompute, gpu.StageCompute, 0)
+	root := vbaoUpsampleRoot{
+		depthUnprojection: depthUnprojection(views.projection),
+		depth:             r.sceneDepthAttachment().Index,
+		depthSamples:      uint32(r.sceneSamples()),
+		occlusion:         images.occlusion.Index,
+		chain:             images.depthChain.Index,
+		target:            images.upsampled.Index,
+		topMip:            images.topMip,
+		fullSize:          r.frameSize(),
+	}
+	cmd.SetPipeline(r.vbaoUpsamplePipeline)
+	cmd.Dispatch(utils.ToBytes(&root), occlusionWorkgroupCount(r.width), occlusionWorkgroupCount(r.height), 1)
+}
+
+// encodeASSAO measures occlusion by ASSAO: the depth split into interleaved images, the
+// gather in each, and their blur, which leaves it back in images.occlusion. Its readers
+// put the images back together (see opennessSource).
+func (r *Renderer) encodeASSAO(views frameViews, cmd gpu.CommandBuffer) {
+	r.ensureASSAOImages()
+	r.encodeASSAODepth(views, cmd)
+	r.encodeASSAOGather(views, cmd)
+	r.encodeASSAOBlur(cmd)
+}
+
+// encodeASSAODepth splits the scene's depth into the interleaved depth images, as view
+// depth.
+func (r *Renderer) encodeASSAODepth(views frameViews, cmd gpu.CommandBuffer) {
+	images := &r.assaoImages
+	width, height := r.assaoInterleavedSize()
+	root := assaoDepthRoot{
+		depthUnprojection: depthUnprojection(views.projection),
+		depth:             r.sceneDepthAttachment().Index,
+		depthSamples:      uint32(r.sceneSamples()),
+		stride:            images.stride,
+		targets:           indices(images.depth),
+		interleavedSize:   [2]int32{int32(width), int32(height)},
+		fullSize:          r.frameSize(),
+	}
+	cmd.SetPipeline(r.assaoDepthPipeline)
+	cmd.Dispatch(utils.ToBytes(&root), occlusionWorkgroupCount(width), occlusionWorkgroupCount(height), 1)
+}
+
+// encodeASSAOGather measures how open each surface is in each interleaved image, into
+// its occlusion image.
+func (r *Renderer) encodeASSAOGather(views frameViews, cmd gpu.CommandBuffer) {
+	images := &r.assaoImages
+	width, height := r.assaoInterleavedSize()
+	settings := r.ambientOcclusionSettings.resolved()
+	// Shrink the disk of a point closer than about this, so it does not cover
+	// more of the screen than is worth sampling; projection[5] is 1/tan(fov/2).
+	radiusNearLimit := settings.Radius * 1.2 * 1.5 * math32.Abs(views.projection[5])
+	pixelRay, pixelRayOrigin := pixelRays(views.projection, r.width, r.height)
+	root := assaoGatherRoot{
+		pixelRay:           pixelRay,
+		pixelRayOrigin:     pixelRayOrigin,
+		depth:              indices(images.depth),
+		targets:            indices(images.occlusion),
+		stride:             images.stride,
+		radius:             settings.Radius,
+		invRadiusNearLimit: 1 / radiusNearLimit,
+		fadeOutMul:         -1.0 / (assaoFadeOutTo - assaoFadeOutFrom),
+		fadeOutAdd:         assaoFadeOutFrom/(assaoFadeOutTo-assaoFadeOutFrom) + 1,
+		interleavedSize:    [2]int32{int32(width), int32(height)},
+		fullSize:           r.frameSize(),
+		taps:               int32(settings.sampling().assaoTaps),
+	}
+	cmd.Barrier(gpu.StageCompute, gpu.StageCompute, 0)
+	cmd.SetPipeline(r.assaoGatherPipeline)
+	cmd.Dispatch(utils.ToBytes(&root), occlusionWorkgroupCount(width), occlusionWorkgroupCount(height), assaoInterleavedImages)
+}
+
+// encodeASSAOBlur smooths each occlusion image within surfaces, as many times as the
+// quality says, back and forth with its scratch image. The passes are even in number, so
+// the result is left in occlusion.
+func (r *Renderer) encodeASSAOBlur(cmd gpu.CommandBuffer) {
+	images := &r.assaoImages
+	width, height := r.assaoInterleavedSize()
+	cmd.SetPipeline(r.assaoBlurPipeline)
+	source, target := images.occlusion, images.blurScratch
+	for range r.ambientOcclusionSettings.sampling().assaoBlurPasses {
+		cmd.Barrier(gpu.StageCompute, gpu.StageCompute, 0)
+		root := assaoBlurRoot{
+			sources:         indices(source),
+			targets:         indices(target),
+			interleavedSize: [2]int32{int32(width), int32(height)},
+		}
+		cmd.Dispatch(utils.ToBytes(&root), occlusionWorkgroupCount(width), occlusionWorkgroupCount(height), assaoInterleavedImages)
+		source, target = target, source
+	}
+}
+
+// ensureASSAOImages creates the images ASSAO measures in, for the frame's size and the
+// settings' resolution, unless they exist. They are released with VBAO's (see
+// releaseAmbientOcclusionImages).
+func (r *Renderer) ensureASSAOImages() {
+	if r.assaoImages.isCreated() {
+		return
+	}
+	images := assaoImages{stride: r.assaoStride()}
+	width, height := r.assaoInterleavedSize()
+	interleavedImage := func(label string) gpu.Texture {
+		return r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: width, Height: height,
+			Format: gpu.FormatR32F, Usage: gpu.TextureSampled | gpu.TextureStorage, Label: label})
+	}
+	occlusionImage := func(label string) gpu.Texture {
+		return r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: width, Height: height,
+			Format: gpu.FormatRG16F, Usage: gpu.TextureSampled | gpu.TextureStorage, Label: label})
+	}
+	for i := range assaoInterleavedImages {
+		images.depth[i] = interleavedImage("assao-depth")
+		// Occlusion carries its texel's edges beside it (see surfaceEdges in
+		// assao.glsl), packed in a second channel.
+		images.occlusion[i] = occlusionImage("assao-occlusion")
+		images.blurScratch[i] = occlusionImage("assao-blur-scratch")
+	}
+	r.assaoImages = images
+}
+
+// assaoStride is how many pixels apart the interleaved images sample: every fourth, or
+// with FullResolution every second.
+func (r *Renderer) assaoStride() int32 {
+	if r.ambientOcclusionSettings.FullResolution {
+		return 2
+	}
+	return 4
+}
+
+// assaoInterleavedSize is the size of each interleaved image.
+func (r *Renderer) assaoInterleavedSize() (width, height uint32) {
+	stride := uint32(r.assaoStride())
+	return (r.width + stride - 1) / stride, (r.height + stride - 1) / stride
+}
+
+// occlusionDarkeningPassFor picks the pass this frame darkens the scene in, given
+// whether it has a transparent pass to draw.
+//
+// A pass of its own costs a load and a store of the whole scene image — of all its
+// samples, with MSAA, which on a phone-sized frame is the most expensive part of ambient
+// occlusion — so it joins a pass the frame runs anyway when it can: the transparent
+// pass, or with MSAA the resolve pass. The backgrounds drawn before either cover only
+// where no surface is, and nothing is occluded there. Frame steps, though, are told the
+// opaque scene is finished, occlusion included, so it cannot move past any.
+//
+// Best of all is tone mapping, which reads every pixel of the scene anyway and can
+// darken it in that read: at 2560x1440 the darkening draws and their pass cost 0.7 ms,
+// and the same work in tone mapping about 0.2. It needs the alpha the opaque pass left
+// to reach it untouched, and so nothing drawn over the scene in between — no
+// transparent pass, no frame step after it and no post-processing — and one value per
+// pixel, so no MSAA, whose samples the resolve averages first.
+func (r *Renderer) occlusionDarkeningPassFor(hasTransparentPass bool) occlusionDarkeningPass {
+	switch {
+	case !r.ambientOcclusionEnabled:
+		return darkeningNotDrawn
+	case r.hasFrameStepsAt(FrameStageAfterOpaque):
+		return darkeningInOwnPass
+	case hasTransparentPass:
+		return darkeningInTransparentPass
+	case r.isMSAAEnabled() && !r.hasFrameStepsAt(FrameStageAfterTransparent):
+		return darkeningInResolvePass
+	case r.hdr && !r.isMSAAEnabled() && !r.hasFrameStepsAt(FrameStageAfterTransparent) && len(r.postProcessing) == 0:
+		return darkeningInToneMapping
+	default:
+		return darkeningInOwnPass
+	}
+}
+
+// encodeOcclusionDarkening darkens image by the occlusion in a pass of its own.
+func (r *Renderer) encodeOcclusionDarkening(image gpu.Texture, cmd gpu.CommandBuffer) {
+	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth, gpu.StageColorOutput|gpu.StageDepth, 0)
+	cmd.BeginRenderPass(gpu.RenderTargets{
+		Color: []gpu.ColorAttachment{{Texture: r.sceneColorAttachment(image), Load: gpu.LoadKeep, Store: gpu.StoreKeep}},
+		Depth: &gpu.DepthAttachment{Texture: r.sceneDepthAttachment(), Load: gpu.LoadKeep, Store: gpu.StoreKeep, ReadOnly: true},
+	})
+	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
+	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
+	r.drawOcclusionDarkening(cmd)
+	cmd.EndRenderPass()
+}
+
+// drawOcclusionDarkening darkens the scene by the occlusion, in the pass being recorded,
+// which has the scene's images attached.
+//
+// It takes away the occluded share of each pixel's indirect light, and nothing of its
+// direct light, without reading the image: what the pixel's light is made of went into
+// its alpha in the opaque pass, as the share d of its colour that is not indirect (see
+// outputAlpha in material_common.glsl). With k the share of the indirect light to take
+// away, two blended draws do it, sample by sample, ordered by blending itself: the first
+// replaces the alpha with k(1 − d), the share of the whole colour to take away, and the
+// second scales the colour by one minus that and puts the alpha back to 1.
+func (r *Renderer) drawOcclusionDarkening(cmd gpu.CommandBuffer) {
+	share := r.occlusionApplyRoot(occlusionOutputOccludedShare)
+	cmd.SetPipeline(r.occludedSharePipeline)
+	cmd.Draw(utils.ToBytes(&share), 3, 1, 0, 0)
+
+	darken := r.occlusionApplyRoot(occlusionOutputDarkening)
+	cmd.SetPipeline(r.occlusionDarkenPipeline)
+	cmd.Draw(utils.ToBytes(&darken), 3, 1, 0, 0)
+}
+
+// encodeAmbientOcclusionView shows the occlusion measured this frame in target, in
+// place of the shaded frame: the DebugAmbientOcclusion view.
+func (r *Renderer) encodeAmbientOcclusionView(target gpu.Texture, cmd gpu.CommandBuffer) {
+	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth, gpu.StageColorOutput, 0)
+	cmd.BeginRenderPass(gpu.RenderTargets{
+		Color: []gpu.ColorAttachment{{Texture: target, Load: gpu.LoadDontCare, Store: gpu.StoreKeep}},
+	})
+	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
+	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
+	root := r.occlusionApplyRoot(occlusionOutputOpenness)
+	cmd.SetPipeline(r.occlusionViewPipeline)
+	cmd.Draw(utils.ToBytes(&root), 3, 1, 0, 0)
+	cmd.EndRenderPass()
+}
+
+// occlusionApplyRoot is the root of a draw of occlusion_apply.frag.glsl producing kind.
+func (r *Renderer) occlusionApplyRoot(kind occlusionOutput) occlusionApplyRoot {
+	return occlusionApplyRoot{source: r.opennessSource(), outputKind: kind}
+}
+
+// opennessSource is where this frame's openness is read from, by the darkening draws,
+// the debug view or tone mapping.
+func (r *Renderer) opennessSource() opennessSource {
+	intensity := r.ambientOcclusionSettings.resolved().Intensity
+	if r.ambientOcclusion != AmbientOcclusionASSAO {
+		return opennessSource{
+			openness:  r.vbaoImages.openness().Index,
+			intensity: intensity,
+		}
+	}
+	// ASSAO's four images are put back together by their reader itself (see
+	// interleavedOpenness in occlusion_openness.glsl).
+	width, height := r.assaoInterleavedSize()
+	return opennessSource{
+		isInterleaved:     1,
+		linearSampler:     r.ensureLinearSampler().Index,
+		stride:            r.assaoImages.stride,
+		interleavedImages: indices(r.assaoImages.occlusion),
+		interleavedSize:   [2]int32{int32(width), int32(height)},
+		intensity:         intensity,
+	}
+}
+
+// releaseAmbientOcclusionImages frees the images occlusion is measured in, by either
+// method; the next frame that measures it creates them again. configure calls it when
+// the frame's size changes, SetAmbientOcclusion when the method does, and
+// SetAmbientOcclusionSettings when the resolution does.
+func (r *Renderer) releaseAmbientOcclusionImages() {
+	r.releaseVBAOImages()
+	r.releaseASSAOImages()
+}
+
+// releaseVBAOImages frees the images VBAO measures in.
+func (r *Renderer) releaseVBAOImages() {
+	images := r.vbaoImages
+	if !images.isCreated() {
+		return
+	}
+	for _, view := range images.depthChainLevels {
+		r.backend.DestroyTexture(view)
+	}
+	for _, t := range []gpu.Texture{images.depthChain, images.occlusion, images.denoiseScratch, images.upsampled} {
+		if t.IsValid() {
+			r.backend.DestroyTexture(t)
+		}
+	}
+	r.vbaoImages = vbaoImages{}
+}
+
+// releaseASSAOImages frees the images ASSAO measures in.
+func (r *Renderer) releaseASSAOImages() {
+	images := r.assaoImages
+	if !images.isCreated() {
+		return
+	}
+	for i := range assaoInterleavedImages {
+		for _, t := range []gpu.Texture{images.depth[i], images.occlusion[i], images.blurScratch[i]} {
+			r.backend.DestroyTexture(t)
+		}
+	}
+	r.assaoImages = assaoImages{}
+}
+
+// releaseAmbientOcclusionPipelines frees the passes' pipelines; the next frame that
+// measures occlusion builds them again.
+func (r *Renderer) releaseAmbientOcclusionPipelines() {
+	if !r.vbaoDepthPipeline.IsValid() {
+		return
+	}
+	pipelines := []gpu.Pipeline{
+		r.vbaoDepthPipeline, r.vbaoDepthMipPipeline, r.vbaoSlicesPipeline, r.vbaoDenoisePipeline, r.vbaoUpsamplePipeline,
+		r.assaoDepthPipeline, r.assaoGatherPipeline, r.assaoBlurPipeline,
+		r.occludedSharePipeline, r.occlusionDarkenPipeline, r.occlusionViewPipeline,
+	}
+	for _, p := range pipelines {
+		r.backend.DestroyPipeline(p)
+	}
+	r.vbaoDepthPipeline = gpu.Pipeline{}
+}
+
+// frameSize is the frame's size in pixels, as the occlusion shaders take it.
+func (r *Renderer) frameSize() [2]int32 {
+	return [2]int32{int32(r.width), int32(r.height)}
+}
+
+// frameMipSize is the size of mip of the frame, in pixels.
+func (r *Renderer) frameMipSize(mip int) (width, height uint32) {
+	return max(r.width>>mip, 1), max(r.height>>mip, 1)
 }
 
 // encodeEnvironmentBackground draws the scene's environment behind it, when it asks to
@@ -2216,14 +2911,12 @@ func (r *Renderer) encodeFogBackground(image gpu.Texture, cmd gpu.CommandBuffer)
 }
 
 // encodeTransparentPass draws the blended batches, back to front, then the particles,
-// over the opaque scene in image, testing against the depth it left. A frame with neither skips the
-// pass: ending one render pass and starting another stores both attachments and loads
-// them back, which is a cost for nothing when nothing is drawn.
-func (r *Renderer) encodeTransparentPass(batches batchRange, st *renderState, views frameViews, image gpu.Texture, cmd gpu.CommandBuffer) {
-	if batches.isEmpty() && len(r.frame.Particles.Data) == 0 {
-		return
-	}
-
+// over the opaque scene in image, testing against the depth it left — first darkening the
+// opaque scene by its occlusion, with darkensOcclusion. A frame with neither batches nor
+// particles has no transparent pass: ending one render pass and starting another stores
+// both attachments and loads them back, which is a cost for nothing when nothing is
+// drawn.
+func (r *Renderer) encodeTransparentPass(batches batchRange, st *renderState, views frameViews, darkensOcclusion bool, image gpu.Texture, cmd gpu.CommandBuffer) {
 	// Blending reads what the opaque pass wrote, and the depth test its depth.
 	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth, gpu.StageColorOutput|gpu.StageDepth, 0)
 	cmd.BeginRenderPass(gpu.RenderTargets{
@@ -2233,6 +2926,9 @@ func (r *Renderer) encodeTransparentPass(batches batchRange, st *renderState, vi
 	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
 	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
 
+	if darkensOcclusion {
+		r.drawOcclusionDarkening(cmd)
+	}
 	r.drawBackToFront(batches, st, views, cmd)
 	r.drawParticles(st, views, cmd)
 
@@ -2244,12 +2940,13 @@ func (r *Renderer) encodeTransparentPass(batches batchRange, st *renderState, vi
 // its depth into the depth post-processing samples. Without MSAA the scene was drawn
 // into both directly, and there is nothing to do.
 //
-// A pass of its own, with nothing drawn, because which pass draws last depends on the
-// frame — the transparent pass is skipped when it has nothing to draw, and frame steps
-// may come after it. And the only place either is resolved, because a resolve has to
-// be the samples' last use (see gpu.ColorAttachment.ResolveTexture): a pass that kept
-// the depth for the passes after it could not resolve it too.
-func (r *Renderer) encodeSceneResolve(image gpu.Texture, cmd gpu.CommandBuffer) {
+// A pass of its own, because which pass draws last depends on the frame — the
+// transparent pass is skipped when it has nothing to draw, and frame steps may come after
+// it. And the only place either is resolved, because a resolve has to be the samples'
+// last use (see gpu.ColorAttachment.ResolveTexture): a pass that kept the depth for the
+// passes after it could not resolve it too. Nothing is drawn in it but, with
+// darkensOcclusion, the darkening by ambient occlusion, which it saves a pass of its own.
+func (r *Renderer) encodeSceneResolve(image gpu.Texture, darkensOcclusion bool, cmd gpu.CommandBuffer) {
 	if !r.isMSAAEnabled() {
 		return
 	}
@@ -2259,19 +2956,28 @@ func (r *Renderer) encodeSceneResolve(image gpu.Texture, cmd gpu.CommandBuffer) 
 		Color: []gpu.ColorAttachment{{Texture: r.multisampledColor, Load: gpu.LoadKeep, Store: gpu.StoreDontCare, ResolveTexture: image}},
 		Depth: &gpu.DepthAttachment{Texture: r.multisampledDepth, Load: gpu.LoadKeep, Store: gpu.StoreDontCare, ResolveTexture: r.depth},
 	})
+	if darkensOcclusion {
+		cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
+		cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
+		r.drawOcclusionDarkening(cmd)
+	}
 	cmd.EndRenderPass()
 }
 
-// drawBatches issues one multi-draw-indirect call per raster span in batches: every
-// per-geometry command sharing a pipeline goes in a single DrawIndexedIndirect. Each
+// drawBatches issues one multi-draw-indirect call per raster span in batches, each with
+// root and its span's materials: every per-geometry command sharing a pipeline goes in a
+// single DrawIndexedIndirect. Each
 // command's firstInstance is its region base, so gl_InstanceIndex indexes the compacted
 // visible buffer directly.
-func (r *Renderer) drawBatches(batches batchRange, st *renderState, views frameViews, cmd gpu.CommandBuffer) {
-	root := r.sceneRoot(st, views)
+func (r *Renderer) drawBatches(batches batchRange, root drawRoot, st *renderState, views frameViews, cmd gpu.CommandBuffer) {
 	for offset, count := range rasterSpans(st.layout.batches[batches.first:batches.end]) {
 		first := batches.first + offset
 		b := &st.layout.batches[first]
 		root.materials = b.pool.RecordsAddr()
+		root.masks = 0
+		if b.isMasked {
+			root.masks = b.pool.MasksAddr()
+		}
 		cmd.SetPipeline(r.drawPipelines[r.pipelineForPool(b.pool, b.cull, b.blend)])
 		cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, views.main.cull.indirectBuf, uint64(first)*uint64(indirectSize), uint32(count), indirectSize)
 	}
@@ -2338,8 +3044,9 @@ func (r *Renderer) drawParticles(st *renderState, views frameViews, cmd gpu.Comm
 
 // encodePostProcessingAndToneMapping finishes an HDR frame in displayImage: it runs the
 // post-processing chain over the scene image, which samples it and may sample its depth,
-// then tone-maps the result. Without HDR the scene was shaded into displayImage already.
-func (r *Renderer) encodePostProcessingAndToneMapping(displayImage gpu.Texture, cmd gpu.CommandBuffer) {
+// then tone-maps the result — darkened by ambient occlusion first, with
+// appliesOcclusion. Without HDR the scene was shaded into displayImage already.
+func (r *Renderer) encodePostProcessingAndToneMapping(appliesOcclusion bool, displayImage gpu.Texture, cmd gpu.CommandBuffer) {
 	if !r.hdr {
 		return
 	}
@@ -2347,7 +3054,7 @@ func (r *Renderer) encodePostProcessingAndToneMapping(displayImage gpu.Texture, 
 	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth, gpu.StageFragment, 0)
 	r.profiler.beginPass(GPUPassPostProcessing, cmd)
 	image := r.encodePostProcessing(cmd)
-	r.encodeToneMapping(image, displayImage, cmd)
+	r.encodeToneMapping(image, appliesOcclusion, displayImage, cmd)
 	r.profiler.endPass(GPUPassPostProcessing, cmd)
 }
 
@@ -2383,12 +3090,19 @@ func (r *Renderer) encodePostProcessing(cmd gpu.CommandBuffer) gpu.Texture {
 
 // encodeToneMapping maps the finished HDR image into the target: exposed as the main
 // camera asks, and through the tone-map curve. The target encodes it for display.
-func (r *Renderer) encodeToneMapping(image, target gpu.Texture, cmd gpu.CommandBuffer) {
+//
+// With appliesOcclusion, image is the opaque scene, and tone mapping darkens it by its
+// ambient occlusion first (see darkeningInToneMapping).
+func (r *Renderer) encodeToneMapping(image gpu.Texture, appliesOcclusion bool, target gpu.Texture, cmd gpu.CommandBuffer) {
 	frame := r.postProcessingFrame(image, target)
 	root := toneMapRoot{
 		Root:     frame.Root(image, r.width, r.height),
 		operator: r.toneMapping,
 		exposure: r.frame.Views[0].Exposure,
+	}
+	if appliesOcclusion {
+		root.appliesOcclusion = 1
+		root.occlusion = r.opennessSource()
 	}
 	r.toneMapPass.Draw(target, r.width, r.height, gpu.LoadClear, utils.ToBytes(&root), cmd)
 }
@@ -2591,6 +3305,20 @@ func (r *Renderer) sceneRoot(st *renderState, views frameViews) drawRoot {
 	}
 }
 
+// maskedDepthRoot is the root of a depth-only pass drawing masked materials for one
+// view, but for the mask table, which is the drawn span's pool's.
+func (r *Renderer) maskedDepthRoot(v view, st *renderState) maskedDepthRoot {
+	return maskedDepthRoot{
+		viewProj:  v.viewProj,
+		pos:       r.GeometryStore.PositionsAddr(),
+		attr:      r.GeometryStore.AttributesAddr(),
+		descs:     r.GeometryStore.DescriptorsAddr(),
+		models:    st.worldBuf.Addr,
+		drawables: st.drawableBuf.Addr,
+		visible:   v.cull.visibleBuf.Addr,
+	}
+}
+
 // positionRoot is the root of a position-only pass rendering one view: the shadow
 // passes, the depth prepass and the id debug views.
 func (r *Renderer) positionRoot(v view, st *renderState) positionRoot {
@@ -2753,7 +3481,7 @@ func (r *Renderer) ensureFogBackgroundPass() *postprocess.FullscreenPass {
 		Fragment:     shaders.ForBackend(r.backend, shaders.FogBackground),
 		Format:       r.sceneFormat(),
 		Samples:      r.sceneSamples(),
-		Blend:        []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}}},
+		Blend:        []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}, AlphaOp: gpu.BlendFactorOp{Src: gpu.BlendOne, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}}},
 		DepthFormat:  gpu.FormatDepth32F,
 		DepthCompare: gpu.CompareGreaterEqual,
 		Label:        "fog-background",
@@ -3228,7 +3956,11 @@ func (r *Renderer) buildPipelines() {
 		r.backend.DestroyPipeline(r.fogIntegratePipeline)
 		r.backend.DestroyPipeline(r.lightClustersPipeline)
 		r.backend.DestroyPipeline(r.shadowPipeline)
+		r.backend.DestroyPipeline(r.maskedShadowPipeline)
 		for _, p := range r.prepassPipelines {
+			r.backend.DestroyPipeline(p)
+		}
+		for _, p := range r.maskedPrepassPipelines {
 			r.backend.DestroyPipeline(p)
 		}
 		for _, p := range r.drawPipelines {
@@ -3252,7 +3984,7 @@ func (r *Renderer) buildPipelines() {
 	// depth-only path.
 	depthOnly := func(cull gpu.CullMode, samples uint8, label string) gpu.Pipeline {
 		return r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
-			VertexShader: shaders.ForBackend(r.backend, shaders.SceneShadowVert),
+			VertexShader: shaders.ForBackend(r.backend, shaders.SceneDepthVert),
 			Topology:     gpu.TopologyTriangles, DepthFormat: gpu.FormatDepth32F,
 			DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareGreater,
 			Samples: samples, CullMode: cull, FrontFaceCW: true, Label: label,
@@ -3270,6 +4002,23 @@ func (r *Renderer) buildPipelines() {
 	// it — a far wall hiding the room, terrain hiding what is under it.
 	for i := range r.prepassPipelines {
 		r.prepassPipelines[i] = depthOnly(gpu.CullMode(i), r.sceneSamples(), "scene-depth-prepass")
+	}
+
+	// Masked materials need a fragment stage after all, to discard where they have no
+	// surface; one serves every material type, as it reads their masks from one table
+	// layout (see alpha_mask.glsl).
+	maskedDepth := func(cull gpu.CullMode, samples uint8, label string) gpu.Pipeline {
+		return r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
+			VertexShader:   shaders.ForBackend(r.backend, shaders.SceneDepthMaskedVert),
+			FragmentShader: shaders.ForBackend(r.backend, shaders.SceneDepthMaskedFrag),
+			Topology:       gpu.TopologyTriangles, DepthFormat: gpu.FormatDepth32F,
+			DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareGreater,
+			Samples: samples, CullMode: cull, FrontFaceCW: true, Label: label,
+		})
+	}
+	r.maskedShadowPipeline = maskedDepth(gpu.CullNone, 1, "scene-shadow-masked")
+	for i := range r.maskedPrepassPipelines {
+		r.maskedPrepassPipelines[i] = maskedDepth(gpu.CullMode(i), r.sceneSamples(), "scene-depth-prepass-masked")
 	}
 
 	for i, k := range r.drawPipelineKeys {
@@ -3305,9 +4054,9 @@ func (r *Renderer) buildDrawPipe(k materialPipeline) gpu.Pipeline {
 	var blend []gpu.BlendState
 	switch k.blend {
 	case materials.BlendAlpha:
-		blend = []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}}}
+		blend = []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}, AlphaOp: gpu.BlendFactorOp{Src: gpu.BlendOne, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}}}
 	case materials.BlendAdditive:
-		blend = []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOne, Op: gpu.BlendAdd}}}
+		blend = []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOne, Op: gpu.BlendAdd}, AlphaOp: gpu.BlendFactorOp{Src: gpu.BlendOne, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}}}
 	}
 	// Transparent (blended) materials test depth against opaque geometry but do NOT
 	// write depth, so they don't occlude each other and blend correctly.
@@ -3427,8 +4176,8 @@ func sameKey(a, b materialPipeline) bool {
 }
 
 // debugViewActive reports whether this frame draws a debug view instead of shading.
-func (r *Renderer) debugViewActive() bool {
-	return r.debugView != DebugOff && int(r.debugView) < len(debugViewNames)
+func (r *Renderer) isGeometryDebugViewActive() bool {
+	return r.debugView != DebugOff && r.debugView != DebugAmbientOcclusion && int(r.debugView) < len(debugViewNames)
 }
 
 // debugSurfaceView reports whether the active view runs over the ordinary scene vertex
@@ -3598,6 +4347,13 @@ func (r *Renderer) registerBuiltins(c *console.Console) {
 		func(v bool) error { r.EnableDepthPrepass(v); return nil },
 		"fill depth before shading; helps desktop GPUs, costs Apple GPUs (they already shade each pixel once)")
 
+	console.BindFunc(c, "vsync", r.VSyncEnabled,
+		func(v bool) error {
+			r.EnableVSync(v)
+			return nil
+		},
+		"wait for the display's refresh to show each frame; off to measure GPU time")
+
 	console.BindFunc(c, "hdr", r.HDREnabled,
 		func(v bool) error {
 			r.EnableHDR(v)
@@ -3620,6 +4376,76 @@ func (r *Renderer) registerBuiltins(c *console.Console) {
 			r.SetAntiAliasing(method)
 			return nil
 		})
+
+	console.BindFunc(c, "ao", r.AmbientOcclusionEnabled,
+		func(v bool) error { r.EnableAmbientOcclusion(v); return nil },
+		"darken indirect light where the scene occludes it, by ao.method")
+
+	c.Register("ao.algorithm",
+		"how occlusion is measured: "+strings.Join(AmbientOcclusionNames(), "/"),
+		func() string { return r.AmbientOcclusion().String() },
+		func(v string) error {
+			method, ok := ParseAmbientOcclusion(v)
+			if !ok {
+				return fmt.Errorf("unknown method %q; want one of %s", v, strings.Join(AmbientOcclusionNames(), ", "))
+			}
+			r.SetAmbientOcclusion(method)
+			return nil
+		})
+
+	c.Register("ao.quality",
+		"how many samples occlusion takes, against grain: "+strings.Join(AmbientOcclusionQualityNames(), "/"),
+		func() string { return r.AmbientOcclusionSettings().resolved().Quality.String() },
+		func(v string) error {
+			quality, ok := ParseAmbientOcclusionQuality(v)
+			if !ok {
+				return fmt.Errorf("unknown quality %q; want one of %s", v, strings.Join(AmbientOcclusionQualityNames(), ", "))
+			}
+			settings := r.AmbientOcclusionSettings()
+			settings.Quality = quality
+			r.SetAmbientOcclusionSettings(settings)
+			return nil
+		})
+
+	console.BindFunc(c, "ao.radius",
+		func() float32 { return r.AmbientOcclusionSettings().resolved().Radius },
+		func(v float32) error {
+			settings := r.AmbientOcclusionSettings()
+			settings.Radius = v
+			r.SetAmbientOcclusionSettings(settings)
+			return nil
+		},
+		"how far apart, in world units, surfaces can be and still occlude each other")
+
+	console.BindFunc(c, "ao.thickness",
+		func() float32 { return r.AmbientOcclusionSettings().resolved().Thickness },
+		func(v float32) error {
+			settings := r.AmbientOcclusionSettings()
+			settings.Thickness = v
+			r.SetAmbientOcclusionSettings(settings)
+			return nil
+		},
+		"how deep, in world units, vbao takes surfaces to be")
+
+	console.BindFunc(c, "ao.intensity",
+		func() float32 { return r.AmbientOcclusionSettings().resolved().Intensity },
+		func(v float32) error {
+			settings := r.AmbientOcclusionSettings()
+			settings.Intensity = v
+			r.SetAmbientOcclusionSettings(settings)
+			return nil
+		},
+		"how dark occluded surfaces get")
+
+	console.BindFunc(c, "ao.fullresolution",
+		func() bool { return r.AmbientOcclusionSettings().FullResolution },
+		func(v bool) error {
+			settings := r.AmbientOcclusionSettings()
+			settings.FullResolution = v
+			r.SetAmbientOcclusionSettings(settings)
+			return nil
+		},
+		"measure occlusion at every pixel rather than one in four")
 
 	console.BindFunc(c, "stats", r.StatsVisible,
 		func(v bool) error { r.ShowFPS(v); return nil },
@@ -3746,7 +4572,11 @@ func (r *Renderer) Destroy() {
 		r.backend.DestroyPipeline(r.fogInjectPipeline)
 		r.backend.DestroyPipeline(r.fogIntegratePipeline)
 		r.backend.DestroyPipeline(r.shadowPipeline)
+		r.backend.DestroyPipeline(r.maskedShadowPipeline)
 		for _, p := range r.prepassPipelines {
+			r.backend.DestroyPipeline(p)
+		}
+		for _, p := range r.maskedPrepassPipelines {
 			r.backend.DestroyPipeline(p)
 		}
 		for _, p := range r.drawPipelines {
@@ -3789,6 +4619,8 @@ func (r *Renderer) Destroy() {
 	if r.fogBackgroundPass != nil {
 		r.fogBackgroundPass.Release()
 	}
+	r.releaseAmbientOcclusionImages()
+	r.releaseAmbientOcclusionPipelines()
 	r.releaseMultisampledImages()
 	r.releaseFXAASource()
 	for _, t := range []gpu.Texture{r.depth, r.sceneColor, r.postColor} {

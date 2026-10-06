@@ -24,7 +24,7 @@ func TestTransparency(t *testing.T) {
 	r.SetClearColor([4]float32{0, 0, 0, 1})
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{1, 1, 1}) // full ambient → albedo shows directly
+	scene.SetAmbient(colors.RGB32F{1, 1, 1}, 1) // full ambient → albedo shows directly
 
 	quad := func(z float32) geometries.Geometry {
 		return r.GeometryStore.Create(geometries.GeometryConfig{
@@ -77,7 +77,7 @@ func TestBlendChangeRebatches(t *testing.T) {
 	r.SetClearColor([4]float32{0, 0, 0, 1})
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{1, 1, 1}) // full ambient → albedo shows directly
+	scene.SetAmbient(colors.RGB32F{1, 1, 1}, 1) // full ambient → albedo shows directly
 
 	quad := func(z float32) geometries.Geometry {
 		return r.GeometryStore.Create(geometries.GeometryConfig{
@@ -129,7 +129,7 @@ func TestTransparentBehindOpaqueIsHidden(t *testing.T) {
 	r.SetClearColor([4]float32{0, 0, 0, 1})
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{1, 1, 1}) // full ambient → albedo shows directly
+	scene.SetAmbient(colors.RGB32F{1, 1, 1}, 1) // full ambient → albedo shows directly
 
 	quad := func(z float32) geometries.Geometry {
 		return r.GeometryStore.Create(geometries.GeometryConfig{

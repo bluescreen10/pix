@@ -14,7 +14,7 @@ import (
 func cameraRigScene(t *testing.T, r *pix.Renderer) (*scenes.Scene, scenes.Group, scenes.Camera) {
 	t.Helper()
 	scene := scenes.New()
-	scene.SetAmbient(colors.RGB32F{1, 1, 1})
+	scene.SetAmbient(colors.RGB32F{1, 1, 1}, 1)
 	geo := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	mat := r.NewBasicMaterial()
 	mat.SetColor(colors.RGBA32F{0, 1, 0, 1})

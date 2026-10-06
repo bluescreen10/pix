@@ -53,6 +53,15 @@ func TestBuiltinVarsDriveRendererState(t *testing.T) {
 	if !r.StatsVisible() {
 		t.Error("set stats on did not show the HUD")
 	}
+
+	c.Exec("set vsync off")
+	if r.VSyncEnabled() {
+		t.Error("set vsync off left vsync on")
+	}
+	c.Exec("set vsync on")
+	if !r.VSyncEnabled() {
+		t.Error("set vsync on left vsync off")
+	}
 }
 
 // TestShadowAlgorithmVarRoundTrips covers the enum path: the algorithm is addressed by

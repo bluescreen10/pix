@@ -31,7 +31,7 @@ func TestPassRecordedSeparatesUnrunFromUnmeasured(t *testing.T) {
 
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{0.3, 0.3, 0.3})
+	scene.SetAmbient(colors.RGB32F{0.3, 0.3, 0.3}, 1)
 	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 2)
 	light.SetCastShadow(true)
 	box := scene.NewMesh(r.GeometryStore.Create(pix.BoxGeometry(40, 40, 40)), r.NewPBRMaterial())
@@ -47,7 +47,7 @@ func TestPassRecordedSeparatesUnrunFromUnmeasured(t *testing.T) {
 	}
 
 	// Rendering forward with shadows on: these happen every frame.
-	for _, p := range []pix.GPUPass{pix.GPUPassCull, pix.GPUPassShadow, pix.GPUPassForward} {
+	for _, p := range []pix.GPUPass{pix.GPUPassCull, pix.GPUPassShadow, pix.GPUPassOpaque} {
 		if !r.Profiler().IsPassRecorded(p) {
 			t.Errorf("%s did not report as recorded, but a forward frame with shadows runs it", p)
 		}
@@ -76,7 +76,7 @@ func TestWaitsAreSeparatedFromCPUTime(t *testing.T) {
 
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{0.3, 0.3, 0.3})
+	scene.SetAmbient(colors.RGB32F{0.3, 0.3, 0.3}, 1)
 	scene.Add(scene.NewMesh(r.GeometryStore.Create(pix.BoxGeometry(40, 40, 40)), r.NewPBRMaterial()))
 	cam := scene.NewPerspectiveCamera(60, 1, 1, 5000)
 	scene.Add(cam)
@@ -101,5 +101,51 @@ func TestWaitsAreSeparatedFromCPUTime(t *testing.T) {
 	sum := p.CPUTime() + p.WaitTime(pix.WaitAcquire) + p.WaitTime(pix.WaitSubmit)
 	if diff := p.FrameTime() - sum; diff < 0 || diff > 3*time.Nanosecond {
 		t.Errorf("CPUTime + waits = %v, want FrameTime() = %v", sum, p.FrameTime())
+	}
+}
+
+// TestPassTimesAddUpToNoMoreThanTheFrame: the passes are parts of the frame, so their
+// times together cannot exceed the frame's — however much a GPU overlaps one pass with
+// the next, and with every pass running, ambient occlusion included.
+func TestPassTimesAddUpToNoMoreThanTheFrame(t *testing.T) {
+	r, err := pix.NewOffscreenRenderer(256, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	r.ShowFPS(true)
+	r.EnableHDR(true)
+	r.EnableShadows(true)
+	r.EnableAntiAliasing(true)
+	r.EnableAmbientOcclusion(true)
+
+	scene := scenes.New()
+	defer scene.Destroy()
+	scene.SetAmbient(colors.RGB32F{0.3, 0.3, 0.3}, 1)
+	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 2)
+	light.SetCastShadow(true)
+	scene.Add(scene.NewMesh(r.NewPlaneGeometry(40, 40, 1, 1), r.NewPBRMaterial()))
+	box := scene.NewMesh(r.NewBoxGeometry(2, 2, 2), r.NewPBRMaterial())
+	box.SetPosition(glm.Vec3f{0, 1, -4})
+	scene.Add(box)
+	cam := scene.NewPerspectiveCamera(60, 1, 0.1, 100)
+	scene.Add(cam)
+	cam.SetPosition(glm.Vec3f{0, 2, 3})
+	cam.LookAt(glm.Vec3f{0, 0.5, -4})
+	for range 30 {
+		r.Render(scene)
+	}
+
+	var passes time.Duration
+	for i := range pix.GPUPassNames() {
+		passes += r.Profiler().PassTime(pix.GPUPass(i))
+	}
+	frame := r.Profiler().GPUTime()
+	t.Logf("passes %v, frame %v", passes, frame)
+	if frame == 0 {
+		t.Skip("this backend measures no GPU time")
+	}
+	if passes > frame+frame/100 {
+		t.Errorf("passes add up to %v, more than the frame's %v", passes, frame)
 	}
 }

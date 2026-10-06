@@ -42,7 +42,7 @@ func TestMaterialClasses(t *testing.T) {
 	place(phong, 0)
 	place(pbr, 1.4)
 
-	scene.SetAmbient(colors.RGB32F{0.15, 0.15, 0.15})
+	scene.SetAmbient(colors.RGB32F{0.15, 0.15, 0.15}, 1)
 	scene.AddDirectionalLight(glm.Vec3f{-1, -0.3, -0.6}, colors.RGB32F{1, 1, 1}, 1.0)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 1000)

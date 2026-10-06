@@ -10,10 +10,10 @@ import (
 // "what is the geometry pass actually producing?" question, answered without a
 // graphics debugger.
 //
-// Every view is a real geometry pass, not a re-read of a stored target. That is what
-// makes them uniform: each reads only what the shared vertex stage provides, so a view
-// behaves identically for a Basic, Blinn-Phong, PBR or custom material, and shows
-// geometry no earlier pass happened to write.
+// Every view but DebugAmbientOcclusion is a real geometry pass, not a re-read of a
+// stored target. That is what makes them uniform: each reads only what the shared
+// vertex stage provides, so a view behaves identically for a Basic, Blinn-Phong, PBR or
+// custom material, and shows geometry no earlier pass happened to write.
 //
 // These used to be re-reads of the G-buffer's own targets, which meant they applied
 // only while deferred rendering was on and only to materials that had a deferred path;
@@ -24,18 +24,19 @@ import (
 type DebugView uint32
 
 const (
-	DebugOff        DebugView = iota // shade normally
-	DebugNormal                      // world normals, decoded and remapped to [0,1]
-	DebugDepth                       // depth, curved for readability: near dark, far bright
-	DebugPosition                    // world position, fractional, so the scene reads as a unit grid
-	DebugObjectID                    // one flat color per drawable, from a small palette
-	DebugTriangleID                  // one flat color per triangle, from the same palette
+	DebugOff              DebugView = iota // shade normally
+	DebugNormal                            // world normals, decoded and remapped to [0,1]
+	DebugDepth                             // depth, curved for readability: near dark, far bright
+	DebugPosition                          // world position, fractional, so the scene reads as a unit grid
+	DebugObjectID                          // one flat color per drawable, from a small palette
+	DebugTriangleID                        // one flat color per triangle, from the same palette
+	DebugAmbientOcclusion                  // how open a position is to light
 
 	debugViewCount
 )
 
 // debugViewNames is the console/round-trip spelling of each view, in enum order.
-var debugViewNames = [...]string{"off", "normal", "depth", "position", "objectid", "triangleid"}
+var debugViewNames = [...]string{"off", "normal", "depth", "position", "objectid", "triangleid", "ao"}
 
 // String returns the view's name ("off", "normal", …).
 func (v DebugView) String() string {

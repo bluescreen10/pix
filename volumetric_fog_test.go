@@ -25,7 +25,7 @@ func fogScene(t *testing.T, fog scenes.Fog) (*pix.Renderer, *scenes.Scene) {
 
 	scene := scenes.New()
 	t.Cleanup(scene.Destroy)
-	scene.SetAmbient(colors.RGB32F{})
+	scene.SetAmbient(colors.RGB32F{}, 1)
 	scene.SetFog(fog)
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 200)
 	scene.Add(cam)

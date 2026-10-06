@@ -30,7 +30,7 @@ func TestSceneWorksWithoutARenderer(t *testing.T) {
 	light := scene.AddDirectionalLight(glm.Vec3f{0, -1, 0}, colors.RGB32F{1, 1, 1}, 2)
 	light.SetCastShadow(true)
 	light.Shadow().SetSize(2048)
-	scene.SetAmbient(colors.RGB32F{0.1, 0.1, 0.1})
+	scene.SetAmbient(colors.RGB32F{0.1, 0.1, 0.1}, 1)
 
 	scene.Sync()
 
@@ -96,7 +96,7 @@ func TestHandAuthoredPacketNeedsNoScene(t *testing.T) {
 	defer r.Destroy()
 	scene := scenes.New() // only used to allocate real geometry/material resources
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{1, 1, 1})
+	scene.SetAmbient(colors.RGB32F{1, 1, 1}, 1)
 
 	geo := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	defer geo.Release()

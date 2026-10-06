@@ -25,7 +25,7 @@ func TestLoadSkinnedAnimatedAsset(t *testing.T) {
 	scene := scenes.New()
 	defer scene.Destroy()
 
-	res, err := gltf.LoadFull(r, scene, capoeiraAsset)
+	res, err := gltf.Load(r, scene, capoeiraAsset, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

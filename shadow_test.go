@@ -69,7 +69,7 @@ func TestDirectionalShadowDepthPass(t *testing.T) {
 
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{0.3, 0.3, 0.3})
+	scene.SetAmbient(colors.RGB32F{0.3, 0.3, 0.3}, 1)
 	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 2)
 	light.SetCastShadow(true)
 
@@ -141,7 +141,7 @@ func TestSpotShadowDarkensReceiver(t *testing.T) {
 
 		scene := scenes.New()
 		defer scene.Destroy()
-		scene.SetAmbient(colors.RGB32F{0.04, 0.04, 0.04})
+		scene.SetAmbient(colors.RGB32F{0.04, 0.04, 0.04}, 1)
 		// Spot up and to the side, aimed at the scene center, so the occluder's shadow
 		// falls offset onto the ground where the camera can see it (a straight-down spot
 		// would hide its own shadow behind the occluder).
@@ -199,7 +199,7 @@ func TestPointShadowDarkensReceiver(t *testing.T) {
 
 		scene := scenes.New()
 		defer scene.Destroy()
-		scene.SetAmbient(colors.RGB32F{0.04, 0.04, 0.04})
+		scene.SetAmbient(colors.RGB32F{0.04, 0.04, 0.04}, 1)
 		// Point light up and to the side so the occluder's shadow lands offset on the
 		// ground within the camera's view.
 		pl := scene.AddPointLight(glm.Vec3f{3, 5, 2}, colors.RGB32F{1, 1, 1}, 8, 40)
@@ -265,7 +265,7 @@ func TestDirectionalShadowDarkensReceiver(t *testing.T) {
 
 		scene := scenes.New()
 		defer scene.Destroy()
-		scene.SetAmbient(colors.RGB32F{0.05, 0.05, 0.05}) // low fill so the shadow is visible
+		scene.SetAmbient(colors.RGB32F{0.05, 0.05, 0.05}, 1) // low fill so the shadow is visible
 		light := scene.AddDirectionalLight(glm.Vec3f{0.15, -1, 0.15}, colors.RGB32F{1, 1, 1}, 3)
 		light.SetCastShadow(true)
 
@@ -385,7 +385,7 @@ func TestEnableShadowsTogglesAtRuntime(t *testing.T) {
 
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{0.04, 0.04, 0.04})
+	scene.SetAmbient(colors.RGB32F{0.04, 0.04, 0.04}, 1)
 	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 3)
 	light.SetCastShadow(true)
 

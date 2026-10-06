@@ -1,6 +1,9 @@
 package scenes
 
-import "github.com/bluescreen10/pix/glm"
+import (
+	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/glm"
+)
 
 // Extract publishes this scene's current rendering description into p. It is the whole
 // of what a renderer is told; nothing downstream of it touches a Node, a payload table,
@@ -217,7 +220,8 @@ func (s *Scene) extractLights() {
 		out = append(out, lp)
 	}
 	s.packet.Lights.Data = out
-	s.packet.Environment = EnvironmentPacket{Ambient: s.ambient, Fog: StateOf(s.fog), Map: environmentState(s.environment)}
+	ambient := colors.RGB32F{s.ambient[0] * s.ambientIntensity, s.ambient[1] * s.ambientIntensity, s.ambient[2] * s.ambientIntensity}
+	s.packet.Environment = EnvironmentPacket{Ambient: ambient, Fog: StateOf(s.fog), Map: environmentState(s.environment)}
 }
 
 // applyShadowSettings copies a light's shadow settings into its packet. A nil shadow

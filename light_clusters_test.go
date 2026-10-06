@@ -26,7 +26,7 @@ func floorScene(t *testing.T) (*pix.Renderer, *scenes.Scene, scenes.Camera) {
 
 	scene := scenes.New()
 	t.Cleanup(scene.Destroy)
-	scene.SetAmbient(colors.RGB32F{})
+	scene.SetAmbient(colors.RGB32F{}, 1)
 	material := r.NewBlinnPhongMaterial()
 	material.SetSpecular(0)
 	scene.Add(scene.NewMesh(r.NewPlaneGeometry(200, 200, 1, 1), material))

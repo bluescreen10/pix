@@ -66,12 +66,12 @@ func TestMultiSceneOnlyDefault(t *testing.T) {
 	defer r.Destroy()
 	scene := scenes.New()
 	defer scene.Destroy()
-	n, err := gltf.Load(r, scene, path)
+	res, err := gltf.Load(r, scene, path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 || scene.MeshCount() != 1 {
-		t.Fatalf("loaded %d meshes (scene has %d), want 1 — the second scene's node leaked", n, scene.MeshCount())
+	if res.Added != 1 || scene.MeshCount() != 1 {
+		t.Fatalf("loaded %d meshes (scene has %d), want 1 — the second scene's node leaked", res.Added, scene.MeshCount())
 	}
 }
 
@@ -133,17 +133,17 @@ func TestLoadTriangle(t *testing.T) {
 	scene := scenes.New()
 	defer scene.Destroy()
 
-	n, err := gltf.Load(r, scene, writeTriangleGLTF(t))
+	res, err := gltf.Load(r, scene, writeTriangleGLTF(t), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 || scene.MeshCount() != 1 {
-		t.Fatalf("loaded %d meshes (scene has %d), want 1", n, scene.MeshCount())
+	if res.Added != 1 || scene.MeshCount() != 1 {
+		t.Fatalf("loaded %d meshes (scene has %d), want 1", res.Added, scene.MeshCount())
 	}
 
 	// Flat white ambient so the unlit base color shows through (this test checks
 	// loading/material/transform, not lighting — and there's no default ambient).
-	scene.SetAmbient(colors.RGB32F{1, 1, 1})
+	scene.SetAmbient(colors.RGB32F{1, 1, 1}, 1)
 
 	cam := scene.NewPerspectiveCamera(50, 1, 0.1, 100)
 	scene.Add(cam)

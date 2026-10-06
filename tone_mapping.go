@@ -25,7 +25,10 @@ const (
 // toneMapRoot is the root of the tone-map pass, shaders/src/tonemap.frag.glsl.
 type toneMapRoot struct {
 	postprocess.Root
-	operator ToneMapOperator
-	exposure float32 // in stops
-	_        [2]float32
+	operator         ToneMapOperator
+	exposure         float32 // in stops
+	appliesOcclusion uint32
+	_                float32
+	occlusion        opennessSource
+	_                float32
 }

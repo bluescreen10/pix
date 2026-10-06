@@ -28,7 +28,7 @@ func testStore(t *testing.T) (*materials.Store, gpu.Backend) {
 	if err := backend.Init(); err != nil {
 		t.Fatal(err)
 	}
-	s := materials.NewStore(backend)
+	s := materials.NewStore(backend, 0)
 	t.Cleanup(s.Destroy)
 	return s, backend
 }

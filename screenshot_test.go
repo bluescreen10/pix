@@ -26,7 +26,7 @@ func shotScene(t *testing.T, w, h uint32) (*pix.Renderer, *scenes.Scene) {
 
 	scene := scenes.New()
 	t.Cleanup(scene.Destroy)
-	scene.SetAmbient(colors.RGB32F{0.3, 0.3, 0.3})
+	scene.SetAmbient(colors.RGB32F{0.3, 0.3, 0.3}, 1)
 	scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 2)
 
 	cube := r.GeometryStore.Create(normalCube())

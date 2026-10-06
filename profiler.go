@@ -8,7 +8,9 @@ import (
 	"github.com/bluescreen10/gamekit/gpu"
 )
 
-// GPUPass names a phase of the frame that is timed separately.
+// GPUPass names a phase of the frame that is timed separately, listed in the order the
+// frame runs them. No pass is timed inside another, so their times add up to no more
+// than the frame's.
 type GPUPass uint8
 
 const (
@@ -24,9 +26,16 @@ const (
 	// GPUPassPrepass is the depth-only pass that precedes forward shading, and does not
 	// run unless Renderer.EnableDepthPrepass turned it on.
 	GPUPassPrepass
-	// GPUPassForward is the forward pass: all shaded geometry, opaque and blended, and
-	// particles.
-	GPUPassForward
+	// GPUPassOpaque is the opaque pass: every opaque surface shaded.
+	GPUPassOpaque
+	// GPUPassAmbientOcclusion measures ambient occlusion from the opaque scene's depth,
+	// and darkens the scene by it when that needs a pass of its own. It does not run
+	// unless ambient occlusion is enabled or shown.
+	GPUPassAmbientOcclusion
+	// GPUPassTransparent is everything drawn over the opaque scene: the backgrounds, the
+	// blended surfaces and particles, the frame steps between them, and resolving the
+	// multisampled scene.
+	GPUPassTransparent
 	// GPUPassPostProcessing is an HDR frame's post-processing chain and the tone-map
 	// pass that follows it. Without HDR it does not run.
 	GPUPassPostProcessing
@@ -35,7 +44,7 @@ const (
 )
 
 // gpuPassNames is each pass's label, in enum order.
-var gpuPassNames = [gpuPassCount]string{"cull", "shadow", "clusters", "prepass", "forward", "post"}
+var gpuPassNames = [gpuPassCount]string{"cull", "shadow", "clusters", "prepass", "opaque", "occlusion", "transparent", "post"}
 
 // String returns the pass's label.
 func (p GPUPass) String() string {

@@ -45,8 +45,14 @@ var metalSceneSkin []byte
 //go:embed build/scene_draw.vert.metalbin
 var metalSceneDraw []byte
 
-//go:embed build/scene_shadow.vert.metalbin
-var metalSceneShadowVert []byte
+//go:embed build/scene_depth.vert.metalbin
+var metalSceneDepthVert []byte
+
+//go:embed build/scene_depth_masked.vert.metalbin
+var metalSceneDepthMaskedVert []byte
+
+//go:embed build/scene_depth_masked.frag.metalbin
+var metalSceneDepthMaskedFrag []byte
 
 //go:embed build/scene_debug_id.vert.metalbin
 var metalSceneDebugIDVert []byte
@@ -102,6 +108,33 @@ var metalFogIntegrate []byte
 //go:embed build/fog_background.frag.metalbin
 var metalFogBackground []byte
 
+//go:embed build/vbao_depth.comp.metalbin
+var metalVBAODepth []byte
+
+//go:embed build/vbao_depth_mip.comp.metalbin
+var metalVBAODepthMip []byte
+
+//go:embed build/vbao_slices.comp.metalbin
+var metalVBAOSlices []byte
+
+//go:embed build/vbao_denoise.comp.metalbin
+var metalVBAODenoise []byte
+
+//go:embed build/vbao_upsample.comp.metalbin
+var metalVBAOUpsample []byte
+
+//go:embed build/assao_depth.comp.metalbin
+var metalASSAODepth []byte
+
+//go:embed build/assao_gather.comp.metalbin
+var metalASSAOGather []byte
+
+//go:embed build/assao_blur.comp.metalbin
+var metalASSAOBlur []byte
+
+//go:embed build/occlusion_apply.frag.metalbin
+var metalOcclusionApply []byte
+
 //go:embed build/particle_update.comp.metalbin
 var metalParticleUpdate []byte
 
@@ -149,7 +182,9 @@ var metalVariants = []struct{ spirv, metal []byte }{
 	{SceneCull, metalSceneCull},
 	{SceneSkin, metalSceneSkin},
 	{SceneDraw, metalSceneDraw},
-	{SceneShadowVert, metalSceneShadowVert},
+	{SceneDepthVert, metalSceneDepthVert},
+	{SceneDepthMaskedVert, metalSceneDepthMaskedVert},
+	{SceneDepthMaskedFrag, metalSceneDepthMaskedFrag},
 	{SceneDebugIDVert, metalSceneDebugIDVert},
 	{SceneDebugNormal, metalSceneDebugNormal},
 	{SceneDebugDepth, metalSceneDebugDepth},
@@ -168,6 +203,15 @@ var metalVariants = []struct{ spirv, metal []byte }{
 	{FogInject, metalFogInject},
 	{FogIntegrate, metalFogIntegrate},
 	{FogBackground, metalFogBackground},
+	{VBAODepth, metalVBAODepth},
+	{VBAODepthMip, metalVBAODepthMip},
+	{VBAOSlices, metalVBAOSlices},
+	{VBAODenoise, metalVBAODenoise},
+	{VBAOUpsample, metalVBAOUpsample},
+	{ASSAODepth, metalASSAODepth},
+	{ASSAOGather, metalASSAOGather},
+	{ASSAOBlur, metalASSAOBlur},
+	{OcclusionApply, metalOcclusionApply},
 	{ParticleUpdate, metalParticleUpdate},
 	{ParticleSortKeys, metalParticleSortKeys},
 	{ParticleSortStep, metalParticleSortStep},

@@ -37,7 +37,7 @@ func TestDebugObjectIDView(t *testing.T) {
 	defer r.Destroy()
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
+	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9}, 1)
 
 	geo := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	mat := r.NewBasicMaterial()
@@ -74,7 +74,7 @@ func TestDebugTriangleIDView(t *testing.T) {
 	defer r.Destroy()
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
+	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9}, 1)
 
 	geo := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	mat := r.NewBasicMaterial()

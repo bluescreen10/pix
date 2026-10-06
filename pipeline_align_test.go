@@ -29,7 +29,7 @@ func TestPipelineAlignmentDetachedMesh(t *testing.T) {
 		defer r.Destroy()
 		scene := scenes.New()
 		defer scene.Destroy()
-		scene.SetAmbient(colors.RGB32F{0.8, 0.8, 0.8})
+		scene.SetAmbient(colors.RGB32F{0.8, 0.8, 0.8}, 1)
 
 		geo := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 		phong := r.NewBlinnPhongMaterial()
@@ -74,7 +74,7 @@ func TestDrawableFlagsFollowShadowToggle(t *testing.T) {
 
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{0.05, 0.05, 0.05})
+	scene.SetAmbient(colors.RGB32F{0.05, 0.05, 0.05}, 1)
 	light := scene.AddDirectionalLight(glm.Vec3f{0.15, -1, 0.15}, colors.RGB32F{1, 1, 1}, 3)
 	light.SetCastShadow(true)
 
@@ -118,7 +118,7 @@ func TestPipelineFollowsMaterialSwap(t *testing.T) {
 	defer r.Destroy()
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{0.8, 0.8, 0.8})
+	scene.SetAmbient(colors.RGB32F{0.8, 0.8, 0.8}, 1)
 
 	red := r.NewBasicMaterial()
 	red.SetColor(colors.RGBA32F{1, 0, 0, 1})
@@ -162,7 +162,7 @@ func TestMaterialSwapWithinOnePool(t *testing.T) {
 	defer r.Destroy()
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{0.8, 0.8, 0.8})
+	scene.SetAmbient(colors.RGB32F{0.8, 0.8, 0.8}, 1)
 
 	red := r.NewBasicMaterial()
 	red.SetColor(colors.RGBA32F{1, 0, 0, 1})

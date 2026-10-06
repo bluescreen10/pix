@@ -19,7 +19,7 @@ func bigScene(t *testing.T, r *pix.Renderer, mapSize uint32) (*scenes.Scene, sce
 	const radius = 300
 
 	scene := scenes.New()
-	scene.SetAmbient(colors.RGB32F{0.35, 0.35, 0.42})
+	scene.SetAmbient(colors.RGB32F{0.35, 0.35, 0.42}, 1)
 	light := scene.AddDirectionalLight(glm.Vec3f{-0.5, -1, -0.35}, colors.RGB32F{1, 0.96, 0.9}, 2)
 	light.SetCastShadow(true)
 	if mapSize != 0 {
@@ -258,7 +258,7 @@ func TestShadowBiasHoldsAsTheLightGrazes(t *testing.T) {
 
 		scene := scenes.New()
 		defer scene.Destroy()
-		scene.SetAmbient(colors.RGB32F{0.05, 0.05, 0.05})
+		scene.SetAmbient(colors.RGB32F{0.05, 0.05, 0.05}, 1)
 		light := scene.AddDirectionalLight(
 			glm.Vec3f{0.3, -elevation, 0.5}.Normalize(), colors.RGB32F{1, 1, 1}, 3)
 		light.SetCastShadow(true)

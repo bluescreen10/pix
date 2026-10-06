@@ -61,10 +61,13 @@ func TestMaterialRecordLayouts(t *testing.T) {
 		m.SetNormalMapSampler(7)
 		m.SetTransmissionMap(tex)
 		m.SetTransmissionMapSampler(9)
+		m.SetOcclusionMap(tex)
+		m.SetOcclusionMapSampler(11)
+		m.SetOcclusionStrength(0.6)
 
 		b := m.Bytes()
-		if len(b) != 88 {
-			t.Fatalf("record is %d bytes, shader expects 88", len(b))
+		if len(b) != 100 {
+			t.Fatalf("record is %d bytes, shader expects 100", len(b))
 		}
 		checks := []struct {
 			name string
@@ -74,14 +77,15 @@ func TestMaterialRecordLayouts(t *testing.T) {
 			{"color.r", 0, 0.1}, {"color.a", 12, 0.4},
 			{"emissive.r", 16, 0.5}, {"emissive.b", 24, 0.7},
 			{"metallic", 32, 0.25}, {"roughness", 36, 0.75}, {"transmission", 40, 0.5},
+			{"occlusionStrength", 88, 0.6},
 		}
 		for _, c := range checks {
 			if got := f32At(t, b, c.off); got != c.want {
 				t.Errorf("%s at byte %d = %v, want %v", c.name, c.off, got, c.want)
 			}
 		}
-		if want := materials.MatNormalMap | materials.MatTransMap; u32At(t, b, 44) != want {
-			t.Errorf("flags at byte 44 = %#x, want MatNormalMap|MatTransMap (%#x)", u32At(t, b, 44), want)
+		if want := materials.MatNormalMap | materials.MatTransMap | materials.MatOcclusionMap; u32At(t, b, 44) != want {
+			t.Errorf("flags at byte 44 = %#x, want MatNormalMap|MatTransMap|MatOcclusionMap (%#x)", u32At(t, b, 44), want)
 		}
 		if got := u32At(t, b, 48); got != materials.NoTextureIndex {
 			t.Errorf("unbound colorMap at byte 48 = %d, want the no-texture sentinel", got)
@@ -97,6 +101,12 @@ func TestMaterialRecordLayouts(t *testing.T) {
 		}
 		if got := u32At(t, b, 84); got != 9 {
 			t.Errorf("transmissionSampler at byte 84 = %d, want 9", got)
+		}
+		if got := u32At(t, b, 92); got != tex.Index() {
+			t.Errorf("occlusionMap index at byte 92 = %d, want %d", got, tex.Index())
+		}
+		if got := u32At(t, b, 96); got != 11 {
+			t.Errorf("occlusionSampler at byte 96 = %d, want 11", got)
 		}
 	})
 
@@ -202,5 +212,80 @@ func TestMaterialCopyIsTheSameInstance(t *testing.T) {
 	dup.Release()
 	if dup.IsValid() {
 		t.Fatal("instance outlived its last handle")
+	}
+}
+
+// TestMapsReadWithTheStoresDefaultSampler: a map bound without a sampler of its own reads
+// with the store's default one — not with heap index 0, which need not be meant for
+// colour — and one set explicitly replaces it.
+func TestMapsReadWithTheStoresDefaultSampler(t *testing.T) {
+	backend := gpu.Instance(nil)
+	if err := backend.Init(); err != nil {
+		t.Fatal(err)
+	}
+	const defaultSampler = 5
+	store := materials.NewStore(backend, defaultSampler)
+	defer store.Destroy()
+
+	m := materials.NewPBRMaterial(store)
+	defer m.Release()
+	samplers := map[string]uint32{
+		"color": m.ColorMapSampler(), "normal": m.NormalMapSampler(), "metallic": m.MetallicMapSampler(),
+		"roughness": m.RoughnessMapSampler(), "occlusion": m.OcclusionMapSampler(),
+	}
+	for name, got := range samplers {
+		if got != defaultSampler {
+			t.Errorf("PBR %s map sampler = %d, want the store's default %d", name, got, defaultSampler)
+		}
+	}
+	m.SetOcclusionMapSampler(9)
+	if got := m.OcclusionMapSampler(); got != 9 {
+		t.Errorf("OcclusionMapSampler() = %d after SetOcclusionMapSampler(9), want 9", got)
+	}
+
+	basic := materials.NewBasicMaterial(store)
+	defer basic.Release()
+	if got := basic.ColorMapSampler(); got != defaultSampler {
+		t.Errorf("Basic color map sampler = %d, want the store's default %d", got, defaultSampler)
+	}
+	lit := materials.NewBlinnPhongMaterial(store)
+	defer lit.Release()
+	if got := lit.ColorMapSampler(); got != defaultSampler {
+		t.Errorf("BlinnPhong color map sampler = %d, want the store's default %d", got, defaultSampler)
+	}
+}
+
+// TestAlphaCutoffMakesAMaterialMasked: a built-in material is masked once it has a cut-off
+// and whole again without one, with the mask its colour map and colour describe; and
+// becoming masked, or whole, is a change of rasterization state.
+func TestAlphaCutoffMakesAMaterialMasked(t *testing.T) {
+	store, backend := testStore(t)
+	texStore := textures.NewStore(backend)
+	defer texStore.Destroy()
+	tex := texStore.Create([]byte{255, 255, 255, 128}, 1, 1, textures.SRGB)
+	defer tex.Release()
+
+	m := materials.NewPBRMaterial(store)
+	defer m.Release()
+	m.SetColorMap(tex)
+	m.SetColor(colors.RGBA32F{1, 1, 1, 0.5})
+	if _, isMasked := m.AlphaMask(); isMasked {
+		t.Fatal("a new PBR material is masked, want it whole")
+	}
+	before := m.Pool().RasterRevision()
+	m.SetAlphaCutoff(0.4)
+	mask, isMasked := m.AlphaMask()
+	if !isMasked || mask.Cutoff != 0.4 || mask.Alpha != 0.5 || mask.Map.Index() != tex.Index() {
+		t.Errorf("AlphaMask() = %+v, %v after SetAlphaCutoff(0.4); want masked by the colour map at cut-off 0.4, alpha 0.5", mask, isMasked)
+	}
+	if !m.Pool().IsMaskedAt(m.ID().Slot) {
+		t.Error("the pool does not see the material as masked")
+	}
+	if m.Pool().RasterRevision() == before {
+		t.Error("becoming masked left the pool's raster revision as it was")
+	}
+	m.SetAlphaCutoff(0)
+	if m.Pool().IsMaskedAt(m.ID().Slot) {
+		t.Error("the pool still sees the material as masked after SetAlphaCutoff(0)")
 	}
 }

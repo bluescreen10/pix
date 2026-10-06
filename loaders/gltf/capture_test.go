@@ -31,11 +31,11 @@ func TestCaptureAnimatedFrames(t *testing.T) {
 
 	scene := scenes.New()
 	defer scene.Destroy()
-	res, err := gltf.LoadFull(r, scene, capoeiraAsset)
+	res, err := gltf.Load(r, scene, capoeiraAsset, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	scene.SetAmbient(colors.RGB32F{0.35, 0.35, 0.42})
+	scene.SetAmbient(colors.RGB32F{0.35, 0.35, 0.42}, 1)
 	light := scene.AddDirectionalLight(glm.Vec3f{-0.5, -1, -0.35}, colors.RGB32F{1, 0.96, 0.9}, 2.0)
 	light.SetCastShadow(true)
 

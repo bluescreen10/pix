@@ -129,3 +129,36 @@ func TestRepackNarrowsChannels(t *testing.T) {
 		t.Fatalf("SRGB base = %v, want %v (RGBA passes through unchanged)", base, rgba)
 	}
 }
+
+// TestSRGBMipsKeepUniformColours: mipmapping a uniform sRGB image leaves every level the
+// same colour, for each of the 256 values a channel can hold — the decoding and encoding
+// tables round-trip exactly.
+func TestSRGBMipsKeepUniformColours(t *testing.T) {
+	for v := range 256 {
+		rgba := make([]byte, 4*4*4)
+		for i := 0; i < len(rgba); i += 4 {
+			rgba[i], rgba[i+1], rgba[i+2], rgba[i+3] = byte(v), byte(v), byte(v), 255
+		}
+		_, levels, _ := textures.GenerateMipChain(rgba, 4, 4, textures.SRGB)
+		for l, level := range levels {
+			if level[0] != byte(v) {
+				t.Fatalf("level %d of a uniform image of %d = %d, want %d", l+1, v, level[0], v)
+			}
+		}
+	}
+}
+
+// TestPrepareBuildsTheLevelsAsked: Prepare makes the whole chain by default, and the
+// base level alone with BaseLevelOnly.
+func TestPrepareBuildsTheLevelsAsked(t *testing.T) {
+	rgba := make([]byte, 8*8*4)
+	full := textures.Prepare(rgba, 8, 8, textures.Linear, textures.FullMipChain)
+	// 8x8, 4x4, 2x2, 1x1.
+	if got, want := full.Levels(), 4; got != want {
+		t.Errorf("Prepare(FullMipChain).Levels() = %d, want %d", got, want)
+	}
+	base := textures.Prepare(rgba, 8, 8, textures.Linear, textures.BaseLevelOnly)
+	if got := base.Levels(); got != 1 {
+		t.Errorf("Prepare(BaseLevelOnly).Levels() = %d, want 1", got)
+	}
+}

@@ -112,13 +112,21 @@ type drawRoot struct {
 	// passed to every vertex/fragment shader pair unconditionally, built-in or a
 	// custom material's; nothing requires reading it (see material_common.glsl and
 	// scene_draw.vert.glsl, which both declare it but only some shaders use it).
-	time       float32
-	pad0, pad1 uint32
+	time float32
+	// directShareInAlpha has a material write, where its alpha goes, the share of its
+	// colour that ambient occlusion leaves alone (see outputAlpha in
+	// material_common.glsl). Set in the opaque pass while ambient occlusion is on.
+	directShareInAlpha uint32
+	pad                uint32
+	// masks is the material pool's mask table (see materials.Masked) while drawing a
+	// span of masked materials, and 0 otherwise: what discardCutOut reads.
+	masks uint64
+	_     [2]uint32
 }
 
 // positionRoot is the root of every position-only pass: the shadow depth pass, the
 // depth prepass, and the object/triangle debug views. It matches the push constant in
-// scene_shadow.vert and scene_debug_id.vert, which declare the same block.
+// scene_depth.vert and scene_debug_id.vert, which declare the same block.
 //
 // A stripped drawRoot: no attributes and no material, but descriptors are still needed
 // to locate the position stream. viewProj is whichever camera the pass renders from, and
@@ -135,6 +143,20 @@ type positionRoot struct {
 	// these the Metal backend rejects the draw — "data is 104 bytes but the shader's root
 	// argument is 112" — rather than letting the shader read past a short buffer.
 	pad0, pad1 uint32
+}
+
+// maskedDepthRoot is the root of the depth-only passes for a span of masked materials:
+// the position root plus what scene_depth_masked.vert and .frag cut the surface out by.
+type maskedDepthRoot struct {
+	viewProj  glm.Mat4f
+	pos       uint64
+	attr      uint64
+	descs     uint64
+	models    uint64
+	drawables uint64
+	visible   uint64
+	masks     uint64
+	_         [2]uint32
 }
 
 // skinCmd is one SkinnedMesh's compute-skinning dispatch, built by

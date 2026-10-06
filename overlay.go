@@ -57,6 +57,7 @@ func newOverlay(b gpu.Backend, texStore *textures.Store, scale float32, colorFor
 		Blend: []gpu.BlendState{{
 			Enable:  true,
 			ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd},
+			AlphaOp: gpu.BlendFactorOp{Src: gpu.BlendOne, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd},
 		}},
 	})
 	return o

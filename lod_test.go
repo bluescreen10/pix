@@ -41,7 +41,7 @@ func TestMeshLODSelection(t *testing.T) {
 	defer r.Destroy()
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
+	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9}, 1)
 
 	near := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	far := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
@@ -88,7 +88,7 @@ func TestInstancedMeshLODSelection(t *testing.T) {
 	defer r.Destroy()
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
+	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9}, 1)
 
 	near := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	far := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
@@ -140,7 +140,7 @@ func TestMeshLODHysteresis(t *testing.T) {
 	defer r.Destroy()
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9})
+	scene.SetAmbient(colors.RGB32F{0.9, 0.9, 0.9}, 1)
 
 	near := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	far := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))

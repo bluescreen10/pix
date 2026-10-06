@@ -35,7 +35,7 @@ type BasicParticleMaterial struct {
 // map.
 func NewBasicParticleMaterial(store *Store) *BasicParticleMaterial {
 	st := store.Pool(Shader{Vertex: shaders.ParticleDraw, Fragment: shaders.ParticleBasicFragment}, "Basic Particle Material")
-	m := &BasicParticleMaterial{color: colors.RGBA32F{1, 1, 1, 1}}
+	m := &BasicParticleMaterial{color: colors.RGBA32F{1, 1, 1, 1}, colorSampler: store.DefaultSampler()}
 	m.pool = st
 	m.ref = st.Create(m)
 	return m

@@ -56,6 +56,9 @@ layout(push_constant, scalar) uniform PC {
     float time;
     uint spad0;
     uint spad1;
+    uint64_t masks;
+    uint spad2;
+    uint spad3;
 } pc;
 
 layout(location = 0) out vec3 vColor;

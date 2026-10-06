@@ -11,7 +11,7 @@
 // space (joints already carry rootWorldInv * boneWorld * invBind — see
 // Scene.updateSkinning), so the drawable's own transformID (the skeleton root node)
 // applies the remaining world transform exactly like static geometry:
-// scene_cull.comp / scene_draw.vert / scene_shadow.vert are untouched by skinning.
+// scene_cull.comp / scene_draw.vert / scene_depth.vert are untouched by skinning.
 // One dispatch per skinned mesh (see Renderer.dispatchSkinning).
 layout(local_size_x = 64) in;
 

@@ -111,8 +111,10 @@ type material struct {
 	Name                 string              `json:"name"`
 	PbrMetallicRoughness *pbr                `json:"pbrMetallicRoughness"`
 	NormalTexture        *textureRef         `json:"normalTexture"`
+	OcclusionTexture     *occlusionRef       `json:"occlusionTexture"`
 	DoubleSided          bool                `json:"doubleSided"`
 	AlphaMode            string              `json:"alphaMode"`
+	AlphaCutoff          *float32            `json:"alphaCutoff"` // MASK only; default 0.5
 	Extensions           *materialExtensions `json:"extensions"`
 }
 
@@ -139,6 +141,12 @@ type pbr struct {
 type textureRef struct {
 	Index    int `json:"index"`
 	TexCoord int `json:"texCoord"`
+}
+
+// occlusionRef is a textureRef with how far the occlusion it holds applies.
+type occlusionRef struct {
+	textureRef
+	Strength *float32 `json:"strength"` // default 1
 }
 
 type texture struct {

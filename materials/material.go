@@ -18,6 +18,8 @@ const (
 	MatMetalMap  uint32 = 1 << 2 // metallic map bound (PBR; sampled .b)
 	MatRoughMap  uint32 = 1 << 3 // roughness map bound (PBR; sampled .g)
 	MatTransMap  uint32 = 1 << 4 // transmission map bound (PBR; sampled .r)
+	// MatOcclusionMap: occlusion map bound (PBR; sampled .r).
+	MatOcclusionMap uint32 = 1 << 5
 )
 
 // CullMode selects which triangle faces are discarded. CullNone is double-sided.
@@ -61,9 +63,47 @@ type Shader struct {
 // embedded backend-native variant before computing pipeline identity. Custom
 // shaders must already be supplied in the selected backend's format.
 
-// Alpha-testing (a "masked" material) has no representation yet: the G-buffer shaders
-// do not discard on alpha, so a masked material routed deferred would silently render
-// as opaque. Add the flag together with the discard support, not before.
+// AlphaMask is how a material cuts its surface out: where Map's alpha, times Alpha, falls
+// below Cutoff there is no surface — not when shaded, nor in the shadow maps or the
+// depth prepass. Map is the material's colour map, or a zero Texture for none.
+type AlphaMask struct {
+	Map     textures.Texture
+	Sampler uint32
+	Alpha   float32
+	Cutoff  float32
+}
+
+// Masked is implemented by materials that can cut their surface out by alpha — leaves,
+// fences, grilles. A material that cannot need not implement it. One that does reports
+// whether it is masked now, and calls its pool's MarkDirty whenever that or its mask
+// changes, as for any change to its record.
+//
+// A masked material's fragment shader cuts its surface out by calling discardCutOut
+// (material_common.glsl); the depth-only passes do it for every masked material alike,
+// from the mask this reports, so it needs no shader of its own for them.
+type Masked interface {
+	AlphaMask() (AlphaMask, bool)
+}
+
+// ToBytes is the mask as an entry of a pool's mask table: AlphaMask in
+// shaders/src/alpha_mask.glsl.
+func (m AlphaMask) ToBytes() []byte {
+	entry := struct {
+		mapIndex uint32
+		sampler  uint32
+		alpha    float32
+		cutoff   float32
+	}{
+		mapIndex: MapIndex(m.Map),
+		sampler:  m.Sampler,
+		alpha:    m.Alpha,
+		cutoff:   m.Cutoff,
+	}
+	return unsafe.Slice((*byte)(unsafe.Pointer(&entry)), unsafe.Sizeof(entry))
+}
+
+// alphaMaskSize is the size of one entry of a pool's mask table (see AlphaMask.ToBytes).
+const alphaMaskSize = 16
 
 // ID names one material by value: which pool holds its record, its slot in that pool,
 // and the slot's generation. It is the whole of what a renderer needs to find a

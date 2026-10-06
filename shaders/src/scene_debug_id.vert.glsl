@@ -5,7 +5,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
 // Position-only vertex-pull for the object/triangle-id debug view (see
-// recordDebugIDView) — a stripped scene_draw.vert, same shape as scene_shadow.vert:
+// recordDebugIDView) — a stripped scene_draw.vert, same shape as scene_depth.vert:
 // no attributes, normals, UVs or material are read, just clip position plus the
 // drawable index forwarded for the object-id mode (see scene_debug_id.frag.glsl;
 // triangle-id mode instead reads gl_PrimitiveID there directly, a free fragment-stage

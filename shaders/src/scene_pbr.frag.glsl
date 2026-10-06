@@ -22,12 +22,15 @@
 // once: another shading model packs its own parameters into the same channels.
 const uint MODEL_PBR = 0u;
 
-vec4 pbrPack(float metallic, float roughness) {
-    return vec4(metallic, roughness, 0.0, 0.0);
+vec4 pbrPack(float metallic, float roughness, float occlusion) {
+    return vec4(metallic, roughness, occlusion, 0.0);
 }
 
 float pbrMetallic(Surface s) { return s.material.r; }
 float pbrRoughness(Surface s) { return s.material.g; }
+// pbrOcclusion is how much of the light around it reaches the surface, by its occlusion
+// map: what ambient and environment light are scaled by.
+float pbrOcclusion(Surface s) { return s.material.b; }
 
 // ---------------------------------------------------------------------------
 // Outputs
@@ -43,8 +46,10 @@ const uint MAT_NORMAL_MAP = 2u;
 const uint MAT_METAL_MAP = 4u;
 const uint MAT_ROUGH_MAP = 8u;
 const uint MAT_TRANS_MAP = 16u;
+const uint MAT_OCCLUSION_MAP = 32u;
 
-// Material mirrors pix.pbrRecord (88 bytes). Each map carries its own sampler.
+// Material mirrors materials.PBRMaterial's record (100 bytes). Each map carries its own
+// sampler.
 struct Material {
     vec4 color;
     vec4 emissive;
@@ -62,6 +67,9 @@ struct Material {
     uint roughSampler;
     uint transMap;
     uint transSampler;
+    float occlusionStrength;
+    uint occlusionMap;
+    uint occlusionSampler;
 };
 layout(buffer_reference, scalar) readonly buffer MatBuf { Material v[]; };
 
@@ -100,11 +108,32 @@ Surface materialSurface(Material m, out float baseAlpha) {
     s.albedo = base.rgb;
     s.emissive = m.emissive.rgb;
 
+    // Metalness, roughness and occlusion are often one texture's blue, green and red
+    // (glTF's occlusion-roughness-metallic packing), bound to all three maps: a map
+    // with the texture and sampler of one already read reuses its texel.
     float metallic = m.metallic;
-    if ((m.flags & MAT_METAL_MAP) != 0u) metallic *= tex(m.metalMap, m.metalSampler).b;
+    vec4 metalTexel = vec4(1.0);
+    bool hasMetalMap = (m.flags & MAT_METAL_MAP) != 0u;
+    if (hasMetalMap) {
+        metalTexel = tex(m.metalMap, m.metalSampler);
+        metallic *= metalTexel.b;
+    }
     float roughness = m.roughness;
-    if ((m.flags & MAT_ROUGH_MAP) != 0u) roughness *= tex(m.roughMap, m.roughSampler).g;
-    s.material = pbrPack(metallic, roughness);
+    vec4 roughTexel = vec4(1.0);
+    bool hasRoughMap = (m.flags & MAT_ROUGH_MAP) != 0u;
+    if (hasRoughMap) {
+        bool isMetalMap = hasMetalMap && m.roughMap == m.metalMap && m.roughSampler == m.metalSampler;
+        roughTexel = isMetalMap ? metalTexel : tex(m.roughMap, m.roughSampler);
+        roughness *= roughTexel.g;
+    }
+    float occlusion = 1.0;
+    if ((m.flags & MAT_OCCLUSION_MAP) != 0u) {
+        bool isMetalMap = hasMetalMap && m.occlusionMap == m.metalMap && m.occlusionSampler == m.metalSampler;
+        bool isRoughMap = hasRoughMap && m.occlusionMap == m.roughMap && m.occlusionSampler == m.roughSampler;
+        vec4 occlusionTexel = isMetalMap ? metalTexel : (isRoughMap ? roughTexel : tex(m.occlusionMap, m.occlusionSampler));
+        occlusion = mix(1.0, occlusionTexel.r, m.occlusionStrength);
+    }
+    s.material = pbrPack(metallic, roughness, occlusion);
 
     s.normal = normalize(vNormal);
     if ((m.flags & MAT_NORMAL_MAP) != 0u) {
@@ -178,12 +207,13 @@ vec3 environmentLight(LightBuf L, Surface s, vec3 V, float diffuseScale) {
 }
 
 // shadeSurface accumulates every light in the table onto a Surface and returns the
-// LINEAR result (ambient + direct + emissive) — the caller encodes it once. receives
-// lets the forward path honour a drawable's receive-shadow flag.
+// LINEAR result (ambient + direct + emissive) — the caller encodes it once — and in
+// indirect its ambient (or environment) share. receives lets the forward path honour a
+// drawable's receive-shadow flag.
 // (The light table is read from the push constants rather than passed in: a buffer_reference
 // can't cross a function parameter without dropping its readonly qualifier, and both
 // passes that compile this function expose it as pc.lights.)
-vec3 shadeSurface(Surface s, vec3 worldPos, vec3 V, uint shadowSamp, float diffuseScale, bool receives) {
+vec3 shadeSurface(Surface s, vec3 worldPos, vec3 V, uint shadowSamp, float diffuseScale, bool receives, out vec3 indirect) {
     LightBuf L = pc.lights;
     vec3 lo = vec3(0.0);
     // Every directional light selects its cascade on this, and it does not vary between
@@ -233,11 +263,17 @@ vec3 shadeSurface(Surface s, vec3 worldPos, vec3 V, uint shadowSamp, float diffu
     if (hasEnvironment(L)) {
         ambient = environmentLight(L, s, V, diffuseScale);
     }
+    // Baked occlusion takes its share of the light from around the surface; ambient
+    // occlusion, measured on screen, then takes its share of what is left (see
+    // outputAlpha in material_common.glsl).
+    ambient *= pbrOcclusion(s);
+    indirect = ambient;
     return ambient + lo + s.emissive;
 }
 
 // ---------------------------------------------------------------------------
 void main() {
+    discardCutOut();
     Material m = MatBuf(pc.materials).v[vMat];
     float baseAlpha;
     Surface s = materialSurface(m, baseAlpha);
@@ -255,11 +291,12 @@ void main() {
     vec3 V = normalize(pc.eye.xyz - vWorldPos);
     bool receives = (vFlags & FLAG_RECEIVES_SHADOW) != 0u;
 
-    vec3 lit = shadeSurface(s, vWorldPos, V, pc.shadowSampler, diffuseScale, receives);
+    vec3 indirect;
+    vec3 unfogged = shadeSurface(s, vWorldPos, V, pc.shadowSampler, diffuseScale, receives, indirect);
     // Fogged before the alpha below reads its luminance: a distant window should
     // derive its coverage from what it actually contributes to the frame, not from
     // an unfogged highlight it never shows.
-    lit = applyFog(lit, vWorldPos, pc.eye.xyz, pc.lights.fogColor, pc.lights.fogParams);
+    vec3 lit = applyFog(unfogged, vWorldPos, pc.eye.xyz, pc.lights.fogColor, pc.lights.fogParams);
 
     float alpha = baseAlpha;
     if (transmission > 0.0) {
@@ -285,6 +322,6 @@ void main() {
         float refl = max(fres * fres, dot(lit, vec3(0.2126, 0.7152, 0.0722)));
         alpha = clamp(baseAlpha * mix(1.0, refl, transmission), 0.04, 1.0);
     }
-    outColor = vec4(lit, alpha); // linear: the target encodes it for display
+    outColor = vec4(lit, outputAlpha(lit, unfogged, indirect, alpha)); // linear: the target encodes it for display
 
 }

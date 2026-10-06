@@ -23,7 +23,7 @@ import (
 func occluderScene(t *testing.T, r *pix.Renderer, origin glm.Vec3f) (*scenes.Scene, scenes.LightID) {
 	t.Helper()
 	scene := scenes.New()
-	scene.SetAmbient(colors.RGB32F{0.05, 0.05, 0.05})
+	scene.SetAmbient(colors.RGB32F{0.05, 0.05, 0.05}, 1)
 	light := scene.AddDirectionalLight(glm.Vec3f{0.15, -1, 0.15}, colors.RGB32F{1, 1, 1}, 3)
 	light.SetCastShadow(true)
 

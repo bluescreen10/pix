@@ -61,7 +61,7 @@ func TestDirectionalLighting(t *testing.T) {
 	m := scene.NewMesh(cube, mat)
 	m.SetRotationQuat(glm.NewQuat(float32(0.6), glm.Vec3f{0, 1, 0})) // rotate so +X and +Z faces both show
 	scene.Add(m)
-	scene.SetAmbient(colors.RGB32F{0.1, 0.1, 0.1})
+	scene.SetAmbient(colors.RGB32F{0.1, 0.1, 0.1}, 1)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
 	scene.Add(cam)

@@ -38,7 +38,7 @@ func TestSurfacesFacingAwayAreUnlit(t *testing.T) {
 		defer scene.Destroy()
 		// No ambient: anything not lit directly has to come out black, which is what
 		// makes "unlit" measurable at all.
-		scene.SetAmbient(colors.RGB32F{0, 0, 0})
+		scene.SetAmbient(colors.RGB32F{0, 0, 0}, 1)
 		light := scene.AddDirectionalLight(lightDir, colors.RGB32F{1, 1, 1}, 3)
 		light.SetCastShadow(true)
 
@@ -94,7 +94,7 @@ func BenchmarkFrame(b *testing.B) {
 
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.SetAmbient(colors.RGB32F{0.3, 0.3, 0.35})
+	scene.SetAmbient(colors.RGB32F{0.3, 0.3, 0.35}, 1)
 	light := scene.AddDirectionalLight(glm.Vec3f{-0.5, -1, -0.35}, colors.RGB32F{1, 0.96, 0.9}, 2)
 	light.SetCastShadow(true)
 
@@ -120,7 +120,7 @@ func BenchmarkFrame(b *testing.B) {
 		r.Render(scene)
 	}
 	b.StopTimer()
-	for _, p := range []pix.GPUPass{pix.GPUPassCull, pix.GPUPassShadow, pix.GPUPassPrepass, pix.GPUPassForward, pix.GPUPassPostProcessing} {
+	for _, p := range []pix.GPUPass{pix.GPUPassCull, pix.GPUPassShadow, pix.GPUPassPrepass, pix.GPUPassOpaque, pix.GPUPassAmbientOcclusion, pix.GPUPassTransparent, pix.GPUPassPostProcessing} {
 		if d := r.Profiler().PassTime(p); d > 0 {
 			b.Logf("%-8s %.3f ms", p, float64(d.Microseconds())/1000)
 		}
@@ -153,7 +153,7 @@ func TestDepthPrepassDoesNotChangeTheImage(t *testing.T) {
 
 		scene := scenes.New()
 		defer scene.Destroy()
-		scene.SetAmbient(colors.RGB32F{0.2, 0.2, 0.25})
+		scene.SetAmbient(colors.RGB32F{0.2, 0.2, 0.25}, 1)
 		light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 3)
 		light.SetCastShadow(true)
 
@@ -232,7 +232,7 @@ func TestDepthPrepassRespectsCulling(t *testing.T) {
 
 		scene := scenes.New()
 		defer scene.Destroy()
-		scene.SetAmbient(colors.RGB32F{0.5, 0.5, 0.5})
+		scene.SetAmbient(colors.RGB32F{0.5, 0.5, 0.5}, 1)
 		light := scene.AddDirectionalLight(glm.Vec3f{0, -1, -0.4}, colors.RGB32F{1, 1, 1}, 2)
 		light.SetCastShadow(true)
 
@@ -305,7 +305,7 @@ func TestDepthDebugViewIsMaterialIndependent(t *testing.T) {
 
 		scene := scenes.New()
 		defer scene.Destroy()
-		scene.SetAmbient(colors.RGB32F{0.3, 0.3, 0.3})
+		scene.SetAmbient(colors.RGB32F{0.3, 0.3, 0.3}, 1)
 		scene.AddDirectionalLight(glm.Vec3f{0.2, -1, 0.3}, colors.RGB32F{1, 1, 1}, 2)
 
 		cube := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
