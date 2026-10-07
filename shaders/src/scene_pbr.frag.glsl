@@ -5,12 +5,11 @@
 // — both halves run here, back to back — but it keeps the per-material-type half
 // separate from the half every shading model shares.
 //
-// TODO: review its cost (see pix.materialPipeline for specialization constants). Its
-// record grew from 100 bytes to 132, reflectance head-on is derived from the index of
-// refraction per fragment, and every light pays the pane's reflection scale. Compare how
-// three.js (its meshphysical chunks, compiled per material with defines) and Godot (its
-// generated scene shaders and specialization-constant variants) split the same work,
-// then profile this one branch by branch.
+// The glass path is a specialization constant, TRANSMISSION, compiled out of every
+// pipeline whose draws let no light through: present but never taken, it cost the beach
+// scene's opaque pass (examples/beachbench, 2500x1400, MSAA 4x) 0.37 ms of 2.6.
+// TODO: profile the per-map flags. They stay runtime tests, as a constant per map would
+// split the batches that draw many materials at once.
 #version 460
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference2 : require
@@ -23,6 +22,13 @@
 // vertex-pull varyings.
 #include "material_common.glsl"
 #include "surface.glsl"
+#include "ggx.glsl"
+
+// TRANSMISSION keeps the glass path (see main): the renderer sets it false for draws
+// whose materials let no light through (see pix.fragmentVariant), which then shade
+// every light without its diffuse and reflection scales, and never read the scene copy.
+// IDs below 16 are the renderer's (see material_common.glsl).
+layout(constant_id = 2) const bool TRANSMISSION = true;
 
 // This model's id and its interpretation of Surface.material (the model-defined
 // G-buffer slot). Every pass goes through these two helpers, so the packing is stated
@@ -190,77 +196,108 @@ Surface materialSurface(Material m, out float baseAlpha) {
 
 const float PI = 3.14159265359;
 
-float distributionGGX(vec3 N, vec3 H, float rough) {
-    float a = rough * rough;
-    float a2 = a * a;
-    float ndh = max(dot(N, H), 0.0);
-    float d = ndh * ndh * (a2 - 1.0) + 1.0;
-    return a2 / max(PI * d * d, 1e-5);
+// Shading is what every light's term needs of the surface and the eye, worked out once
+// per fragment rather than once per light: which of it depends on the light is only
+// what the light's direction changes.
+struct Shading {
+    vec3 normal;
+    vec3 V;
+    float NdotV;
+    // f0 is how much of the light meeting it head-on the surface reflects (pbrF0).
+    vec3 f0;
+    // alpha is GGX's alpha, the perceptual roughness squared, and alpha2 its square.
+    float alpha;
+    float alpha2;
+    // diffuseAlbedo is the albedo diffuse light scatters, after metal and diffuseScale
+    // take their share (see shadeSurface); specularScale scales the reflection.
+    vec3 diffuseAlbedo;
+    float specularScale;
+};
+
+// shadingOf works out the Shading of s seen from V. diffuseScale attenuates the
+// diffuse light, for glass, whose light passes through instead, and specularScale
+// scales the reflection, for a pane's two surfaces reflecting where one is drawn (see
+// main).
+Shading shadingOf(Surface s, vec3 V, float diffuseScale, float specularScale) {
+    Shading sh;
+    sh.normal = s.normal;
+    sh.V = V;
+    sh.NdotV = max(dot(s.normal, V), 0.0);
+    sh.f0 = pbrF0(s);
+    sh.alpha = pbrRoughness(s) * pbrRoughness(s);
+    sh.alpha2 = sh.alpha * sh.alpha;
+    sh.diffuseAlbedo = s.albedo * (1.0 - pbrMetallic(s)) * diffuseScale;
+    sh.specularScale = specularScale;
+    return sh;
 }
 
-float geometrySchlickGGX(float ndv, float rough) {
-    float r = rough + 1.0;
-    float k = (r * r) / 8.0;
-    return ndv / (ndv * (1.0 - k) + k);
+// schlickWeight is Schlick's (1 - cosTheta)^5, as multiplies rather than pow.
+float schlickWeight(float cosTheta) {
+    float x = clamp(1.0 - cosTheta, 0.0, 1.0);
+    float x2 = x * x;
+    return x2 * x2 * x;
 }
 
-float geometrySmith(vec3 N, vec3 V, vec3 L, float rough) {
-    return geometrySchlickGGX(max(dot(N, V), 0.0), rough) * geometrySchlickGGX(max(dot(N, L), 0.0), rough);
+vec3 fresnelSchlick(float cosTheta, vec3 f0) {
+    return f0 + (1.0 - f0) * schlickWeight(cosTheta);
 }
 
-vec3 fresnelSchlick(float cosT, vec3 f0) {
-    return f0 + (1.0 - f0) * pow(clamp(1.0 - cosT, 0.0, 1.0), 5.0);
-}
+// cookTorrance returns the radiance one light, arriving from L with radiance, leaves the
+// surface with toward the eye: GGX distribution, height-correlated Smith visibility,
+// Schlick Fresnel.
+vec3 cookTorrance(Shading sh, vec3 L, vec3 radiance) {
+    vec3 H = normalize(sh.V + L);
+    float NdotL = max(dot(sh.normal, L), 0.0);
+    float NdotH = max(dot(sh.normal, H), 0.0);
+    float VdotH = max(dot(sh.V, H), 0.0);
 
-// cookTorrance returns the radiance one light leaves s with toward V. diffuseScale
-// attenuates the diffuse term for glass, whose light passes through instead, and
-// specularScale scales the reflection, for a pane's two surfaces reflecting where one
-// is drawn (see main).
-vec3 cookTorrance(Surface s, vec3 V, vec3 L, vec3 radiance, float diffuseScale, float specularScale) {
-    vec3 N = s.normal;
-    vec3 albedo = s.albedo;
-    float metallic = pbrMetallic(s);
-    float rough = pbrRoughness(s);
-    vec3 H = normalize(V + L);
-    vec3 f0 = pbrF0(s);
-    float ndf = distributionGGX(N, H, rough);
-    float g = geometrySmith(N, V, L, rough);
-    vec3 f = fresnelSchlick(max(dot(H, V), 0.0), f0);
-    vec3 spec = (ndf * g * f) / max(4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0), 1e-4);
-    vec3 kd = (vec3(1.0) - f) * (1.0 - metallic);
-    float ndl = max(dot(N, L), 0.0);
-    return (kd * albedo / PI * diffuseScale + spec * specularScale) * radiance * ndl;
+    float d = NdotH * NdotH * (sh.alpha2 - 1.0) + 1.0;
+    float distribution = sh.alpha2 / max(PI * d * d, 1e-5);
+    float visibility = smithVisibility(sh.NdotV, NdotL, sh.alpha);
+    vec3 fresnel = fresnelSchlick(VdotH, sh.f0);
+
+    vec3 specular = distribution * visibility * fresnel * sh.specularScale;
+    vec3 diffuse = (vec3(1.0) - fresnel) * sh.diffuseAlbedo * (1.0 / PI);
+    return (diffuse + specular) * radiance * NdotL;
 }
 
 // environmentLight is what a surface takes from the scene's environment, in place of
 // the flat ambient colour: its diffuse light, less the share Fresnel reflects instead,
 // and its reflection of the environment, blurred for its roughness and weighted by the
-// split-sum table. diffuseScale and specularScale scale each, as in cookTorrance.
-vec3 environmentLight(LightBuf L, Surface s, vec3 V, float diffuseScale, float specularScale) {
+// split-sum table. The Shading's diffuse albedo and specular scale scale each, as in
+// cookTorrance.
+vec3 environmentLight(LightBuf L, Surface s, Shading sh) {
     float rough = pbrRoughness(s);
-    float metal = pbrMetallic(s);
-    vec3 f0 = pbrF0(s);
-    vec2 brdf = environmentBRDF(L, max(dot(s.normal, V), 0.0), rough);
-    vec3 reflected = f0 * brdf.x + brdf.y;
-    vec3 specular = environmentSpecular(L, reflect(-V, s.normal), rough) * reflected * specularScale;
-    vec3 diffuse = (vec3(1.0) - reflected) * (1.0 - metal) * s.albedo * environmentDiffuse(L, s.normal) * diffuseScale;
+    vec2 brdf = environmentBRDF(L, sh.NdotV, rough);
+    vec3 reflected = sh.f0 * brdf.x + brdf.y;
+    vec3 specular = environmentSpecular(L, reflect(-sh.V, sh.normal), rough) * reflected * sh.specularScale;
+    vec3 diffuse = (vec3(1.0) - reflected) * sh.diffuseAlbedo * environmentDiffuse(L, sh.normal);
     return diffuse + specular;
 }
 
 // shadeSurface accumulates every light in the table onto a Surface and returns the
 // LINEAR result (ambient + direct + emissive) — the caller encodes it once — and in
-// indirect its ambient (or environment) share. diffuseScale and specularScale scale its
-// diffuse light and its reflection, as in cookTorrance. receives lets the forward path
-// honour a drawable's receive-shadow flag.
+// indirect its ambient (or environment) share. viewDist is how far the surface is from
+// the eye; diffuseScale scales its diffuse light, as in shadingOf. receives lets the
+// forward path honour a drawable's receive-shadow flag.
 // (The light table is read from the push constants rather than passed in: a buffer_reference
 // can't cross a function parameter without dropping its readonly qualifier, and both
 // passes that compile this function expose it as pc.lights.)
-vec3 shadeSurface(Surface s, vec3 worldPos, vec3 V, uint shadowSamp, float diffuseScale, float specularScale, bool receives, out vec3 indirect) {
+vec3 shadeSurface(Surface s, Shading sh, vec3 worldPos, float viewDist, float diffuseScale, uint shadowSamp, bool receives, out vec3 indirect) {
     LightBuf L = pc.lights;
-    vec3 lo = vec3(0.0);
-    // Every directional light selects its cascade on this, and it does not vary between
-    // them.
-    float viewDist = length(pc.eye.xyz - worldPos);
+    // Indirect light first: it is all that needs the Surface beyond its Shading, which is
+    // then free before the light loops, which hold a lot else.
+    vec3 ambient = L.ambient.rgb * s.albedo * diffuseScale;
+    if (hasEnvironment(L)) {
+        ambient = environmentLight(L, s, sh);
+    }
+    // Baked occlusion takes its share of the light from around the surface; ambient
+    // occlusion, measured on screen, then takes its share of what is left (see
+    // outputAlpha in material_common.glsl).
+    ambient *= pbrOcclusion(s);
+    indirect = ambient;
+    vec3 lo = ambient + s.emissive;
+
     for (uint i = 0u; i < L.numDir; i++) {
         vec3 Ldir = normalize(-L.dirs[i].dir.xyz);
         // A surface turned away from a light receives nothing from it: cookTorrance
@@ -268,10 +305,11 @@ vec3 shadeSurface(Surface s, vec3 worldPos, vec3 V, uint shadowSamp, float diffu
         // not an approximation. It is worth doing because the shadow lookup is not free
         // — up to nine texture fetches for a result about to be multiplied by zero — and
         // roughly half the fragments in a closed scene face away from any given light.
-        if (dot(s.normal, Ldir) <= 0.0) continue;
-        float sh = receives ? dirShadowFactor(L, i, worldPos, s.normal, viewDist, shadowSamp) : 1.0;
+        if (dot(sh.normal, Ldir) <= 0.0) continue;
+        // Every directional light selects its cascade on viewDist.
+        float shadow = receives ? dirShadowFactor(L, i, worldPos, sh.normal, viewDist, shadowSamp) : 1.0;
         vec3 radiance = L.dirs[i].color.rgb * L.dirs[i].color.w * dirMask(L, i, worldPos);
-        lo += sh * cookTorrance(s, V, Ldir, radiance, diffuseScale, specularScale);
+        lo += shadow * cookTorrance(sh, Ldir, radiance);
     }
     // Point and spot lights: only those the fragment's cluster lists.
     uint cluster = lightCluster(L, worldPos);
@@ -284,9 +322,9 @@ vec3 shadeSurface(Surface s, vec3 worldPos, vec3 V, uint shadowSamp, float diffu
         float dist = length(d);
         float atten = pointAttenuation(pl, dist);
         vec3 Ldir = d / max(dist, 0.0001);
-        if (atten <= 0.0 || dot(s.normal, Ldir) <= 0.0) continue;
-        float sh = receives ? pointShadowFactor(L, li, worldPos, shadowSamp) : 1.0;
-        lo += sh * cookTorrance(s, V, Ldir, pl.color.rgb * pl.color.w * atten, diffuseScale, specularScale);
+        if (atten <= 0.0 || dot(sh.normal, Ldir) <= 0.0) continue;
+        float shadow = receives ? pointShadowFactor(L, li, worldPos, shadowSamp) : 1.0;
+        lo += shadow * cookTorrance(sh, Ldir, pl.color.rgb * pl.color.w * atten);
     }
     for (uint i = 0u; i < spotCount; i++) {
         uint li = clusterLight(L, cluster, pointCount + i);
@@ -295,20 +333,11 @@ vec3 shadeSurface(Surface s, vec3 worldPos, vec3 V, uint shadowSamp, float diffu
         float dist = length(d);
         vec3 Ldir = d / max(dist, 1e-4);
         float atten = spotAttenuation(sl, worldPos, Ldir, dist);
-        if (atten <= 0.0 || dot(s.normal, Ldir) <= 0.0) continue;
-        float sh = receives ? spotShadowFactor(L, li, worldPos, shadowSamp) : 1.0;
-        lo += sh * cookTorrance(s, V, Ldir, sl.color.rgb * sl.color.w * atten, diffuseScale, specularScale);
+        if (atten <= 0.0 || dot(sh.normal, Ldir) <= 0.0) continue;
+        float shadow = receives ? spotShadowFactor(L, li, worldPos, shadowSamp) : 1.0;
+        lo += shadow * cookTorrance(sh, Ldir, sl.color.rgb * sl.color.w * atten);
     }
-    vec3 ambient = L.ambient.rgb * s.albedo * diffuseScale;
-    if (hasEnvironment(L)) {
-        ambient = environmentLight(L, s, V, diffuseScale, specularScale);
-    }
-    // Baked occlusion takes its share of the light from around the surface; ambient
-    // occlusion, measured on screen, then takes its share of what is left (see
-    // outputAlpha in material_common.glsl).
-    ambient *= pbrOcclusion(s);
-    indirect = ambient;
-    return ambient + lo + s.emissive;
+    return lo;
 }
 
 // fresnelReflectance is the share of the light meeting the surface from V that it
@@ -319,7 +348,7 @@ vec3 shadeSurface(Surface s, vec3 worldPos, vec3 V, uint shadowSamp, float diffu
 float fresnelReflectance(Surface s, vec3 V) {
     float f0 = dot(pbrF0(s), vec3(0.2126, 0.7152, 0.0722));
     float ndv = abs(dot(s.normal, V));
-    return f0 + (1.0 - f0) * pow(1.0 - ndv, 5.0);
+    return f0 + (1.0 - f0) * schlickWeight(ndv);
 }
 
 // sceneBehind is the light from behind the surface that comes through it toward the
@@ -362,6 +391,20 @@ void main() {
     Material m = MatBuf(pc.materials).v[vMat];
     float baseAlpha;
     Surface s = materialSurface(m, baseAlpha);
+    vec3 toEye = pc.eye.xyz - vWorldPos;
+    float viewDist = length(toEye);
+    vec3 V = toEye / viewDist;
+    bool receives = (vFlags & FLAG_RECEIVES_SHADOW) != 0u;
+
+    if (!TRANSMISSION) {
+        vec3 indirect;
+        Shading sh = shadingOf(s, V, 1.0, 1.0);
+        vec3 unfogged = shadeSurface(s, sh, vWorldPos, viewDist, 1.0, pc.shadowSampler, receives, indirect);
+        Fog fog = fogAt(viewDist, pc.lights.fogColor, pc.lights.fogParams);
+        vec3 lit = applyFog(unfogged, fog);
+        outColor = vec4(lit, outputAlpha(lit, indirect, fog, baseAlpha)); // linear: the target encodes it for display
+        return;
+    }
 
     // Transmission (glass): the share of the light that passes through the surface takes
     // the place of its diffuse term, and the scene behind it shows through instead
@@ -372,8 +415,6 @@ void main() {
     // the whole cabinet into a ghost.
     float transmission = m.transmission;
     if ((m.flags & MAT_TRANS_MAP) != 0u) transmission *= tex(m.transMap, m.transSampler).r;
-    vec3 V = normalize(pc.eye.xyz - vWorldPos);
-    bool receives = (vFlags & FLAG_RECEIVES_SHADOW) != 0u;
 
     // reflectance is what one surface of the glass reflects of the light meeting it, and
     // passedShare what comes through of the light from behind: what the surface
@@ -397,10 +438,12 @@ void main() {
     }
 
     vec3 indirect;
-    vec3 unfogged = shadeSurface(s, vWorldPos, V, pc.shadowSampler, 1.0 - transmission, specularScale, receives, indirect);
+    Shading sh = shadingOf(s, V, 1.0 - transmission, specularScale);
+    vec3 unfogged = shadeSurface(s, sh, vWorldPos, viewDist, 1.0 - transmission, pc.shadowSampler, receives, indirect);
+    Fog fog = fogAt(viewDist, pc.lights.fogColor, pc.lights.fogParams);
     if (transmission <= 0.0) {
-        vec3 lit = applyFog(unfogged, vWorldPos, pc.eye.xyz, pc.lights.fogColor, pc.lights.fogParams);
-        outColor = vec4(lit, outputAlpha(lit, unfogged, indirect, baseAlpha)); // linear: the target encodes it for display
+        vec3 lit = applyFog(unfogged, fog);
+        outColor = vec4(lit, outputAlpha(lit, indirect, fog, baseAlpha)); // linear: the target encodes it for display
         return;
     }
 
@@ -419,22 +462,21 @@ void main() {
     // Fog scales what it covers and adds its own light. The scene behind already carries
     // the fog in front of the glass, so the glass adds the fog's light only for the share
     // of the scene it keeps out.
-    vec3 lit = applyFog(unfogged, vWorldPos, pc.eye.xyz, pc.lights.fogColor, pc.lights.fogParams);
-    vec3 fogLight = applyFog(vec3(0.0), vWorldPos, pc.eye.xyz, pc.lights.fogColor, pc.lights.fogParams);
+    vec3 lit = applyFog(unfogged, fog);
 
     if (pc.sceneCopy == NO_SCENE_COPY) {
         // No copy of the scene to read (see pix.sceneCopy): the scene behind shows
         // through by blending, neither bent nor tinted, and alpha is the share of it
         // the glass keeps out.
         float alpha = baseAlpha * (1.0 - passedShare);
-        lit -= fogLight * (1.0 - alpha);
-        outColor = vec4(lit, outputAlpha(lit, unfogged, indirect, alpha));
+        lit -= fog.light * (1.0 - alpha);
+        outColor = vec4(lit, outputAlpha(lit, indirect, fog, alpha));
         return;
     }
 
     // With the scene copy the glass draws what is behind it itself, and covers the
     // scene in full where its colour's alpha does.
-    lit -= fogLight * passedShare;
+    lit -= fog.light * passedShare;
     lit += passedShare * sceneBehind(m, s, V);
     outColor = vec4(lit * baseAlpha, baseAlpha);
 }

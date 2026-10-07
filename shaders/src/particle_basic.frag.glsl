@@ -31,6 +31,7 @@ void main() {
     vec4 base = sampleParticleBase(m.color, m.flags, m.colorMap, m.samp);
     // Unlit, but still fogged: an unlit particle that ignored fog would hang in
     // front of the haze while everything around it receded into it.
-    vec3 c = applyFog(base.rgb + m.emissive.rgb, vWorldPos, pc.eye.xyz, pc.lights.fogColor, pc.lights.fogParams);
+    Fog fog = fogAt(distance(pc.eye.xyz, vWorldPos), pc.lights.fogColor, pc.lights.fogParams);
+    vec3 c = applyFog(base.rgb + m.emissive.rgb, fog);
     outColor = vec4(c, base.a); // linear: the target encodes it for display
 }

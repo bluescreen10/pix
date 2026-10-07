@@ -166,10 +166,15 @@ func translateMetal(spirv []byte, entry string) ([]byte, error) {
 	if len(info.Push) == 1 {
 		name := regexp.QuoteMeta(info.Push[0].Name)
 		re := regexp.MustCompile(`\b` + name + `\s+\[\[buffer\([0-9]+\)\]\]`)
-		if len(re.FindAll(source, -1)) != 1 {
+		// A stage that declares the root but never reads it has none in the MSL:
+		// SPIRV-Cross leaves out what the entry point does not use.
+		switch len(re.FindAll(source, -1)) {
+		case 0:
+		case 1:
+			source = re.ReplaceAllLiteral(source, []byte(info.Push[0].Name+" [[buffer(0)]]"))
+		default:
 			return nil, fmt.Errorf("cannot locate root argument %q in generated MSL", info.Push[0].Name)
 		}
-		source = re.ReplaceAllLiteral(source, []byte(info.Push[0].Name+" [[buffer(0)]]"))
 	}
 	return encodeMetal(source, group), nil
 }

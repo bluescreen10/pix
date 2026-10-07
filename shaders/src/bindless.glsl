@@ -12,6 +12,8 @@ layout(set = 0, binding = 0) uniform texture2D gShadowTextures[];
 // The same heap again for 3D textures. A texture keeps its index whichever
 // declaration reads it; a shader uses the one matching the texture's kind.
 layout(set = 0, binding = 0) uniform texture3D gTextures3D[];
+// And for cube textures, sampled with a direction.
+layout(set = 0, binding = 0) uniform textureCube gTexturesCube[];
 // And once more for multisampled images, whose samples are read one at a time with
 // texelFetch (GL_EXT_samplerless_texture_functions): they cannot be filtered.
 layout(set = 0, binding = 0) uniform texture2DMS gTexturesMS[];
@@ -23,5 +25,8 @@ layout(set = 0, binding = 2) uniform sampler gSamplers[];
 // makes them write-only: read one back by sampling it.
 layout(set = 0, binding = 1) uniform writeonly image2D gImages[];
 layout(set = 0, binding = 1) uniform writeonly image3D gImages3D[];
+// A cube is written a face at a time: ivec3(texel, face), faces ordered +X, -X, +Y, -Y,
+// +Z, -Z.
+layout(set = 0, binding = 1) uniform writeonly imageCube gImagesCube[];
 
 #endif

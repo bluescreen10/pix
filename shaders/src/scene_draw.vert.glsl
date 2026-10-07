@@ -3,6 +3,9 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_GOOGLE_include_directive : require
+
+#include "normal_matrix.glsl"
 
 // Vertex-pulling draw for the GPU-driven path. gl_InstanceIndex indexes this
 // batch's region of the visible buffer (regionBase + local instance) to reach the
@@ -108,13 +111,13 @@ void main() {
     }
 
     // World-space normal: decode glm.Unorm10x3 and remap back to [-1,1] (the
-    // inverse of the pack in geometry.go), then rotate by the model's 3x3.
+    // inverse of the pack in geometry.go), then turn it as the model turns its surface.
     vec3 nrm = vec3(0.0, 0.0, 1.0);
     if ((g.flags & FLAG_NORMAL) != 0u) {
         uint nw = pc.attr.v[ab];
         nrm = vec3(float(nw & 0x3FFu), float((nw >> 10) & 0x3FFu), float((nw >> 20) & 0x3FFu)) / 1023.0 * 2.0 - 1.0;
     }
-    vNormal = mat3(m) * nrm;
+    vNormal = normalMatrix(m) * nrm;
 
     vec4 wp = m * vec4(p, 1.0);
     vWorldPos = wp.xyz;

@@ -114,7 +114,10 @@ func compile(input, entry, stage string, defines, includes []string, outputs []o
 	defer os.RemoveAll(dir)
 
 	spvPath := filepath.Join(dir, "shader.spv")
-	args := []string{"-fshader-stage=" + stage, "--target-env=vulkan1.4", "-O"}
+	// Not -O: glslc's optimizer strips the module's debug names, and a pipeline sets
+	// specialization constants by name (gpu.PipelineDescriptor.Constants). The drivers
+	// optimize the code again as they build a pipeline either way.
+	args := []string{"-fshader-stage=" + stage, "--target-env=vulkan1.4"}
 	for _, define := range defines {
 		args = append(args, "-D"+define)
 	}

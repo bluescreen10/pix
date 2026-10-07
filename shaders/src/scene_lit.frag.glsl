@@ -48,7 +48,9 @@ void main() {
     // A back face is drawn only for a double-sided surface, which is lit on the side
     // it is seen from.
     vec3 N = gl_FrontFacing ? normalize(vNormal) : -normalize(vNormal);
-    vec3 V = normalize(pc.eye.xyz - vWorldPos);
+    vec3 toEye = pc.eye.xyz - vWorldPos;
+    float viewDist = length(toEye);
+    vec3 V = toEye / viewDist;
 
     uint shadowSamp = pc.shadowSampler;
     bool receives = (vFlags & FLAG_RECEIVES_SHADOW) != 0u;
@@ -60,7 +62,6 @@ void main() {
     }
     vec3 indirect = ambient * albedo;
     vec3 lit = indirect;
-    float viewDist = length(pc.eye.xyz - vWorldPos);
     for (uint i = 0u; i < L.numDir; i++) {
         vec3 Ldir = normalize(-L.dirs[i].dir.xyz);
         // Nothing reaches a surface turned away from the light, so neither the shading
@@ -80,9 +81,10 @@ void main() {
         vec3 d = pl.pos.xyz - vWorldPos;
         float dist = length(d);
         float atten = pointAttenuation(pl, dist);
-        if (atten <= 0.0) continue;
+        vec3 Ldir = d / max(dist, 0.0001);
+        if (atten <= 0.0 || dot(N, Ldir) <= 0.0) continue;
         float sh = receives ? pointShadowFactor(L, li, vWorldPos, shadowSamp) : 1.0;
-        lit += sh * blinnPhong(N, V, d / max(dist, 0.0001), pl.color.rgb * pl.color.w * atten, albedo, m.specular, m.shininess);
+        lit += sh * blinnPhong(N, V, Ldir, pl.color.rgb * pl.color.w * atten, albedo, m.specular, m.shininess);
     }
     for (uint i = 0u; i < spotCount; i++) {
         uint li = clusterLight(L, cluster, pointCount + i);
@@ -91,12 +93,13 @@ void main() {
         float dist = length(d);
         vec3 Ldir = d / max(dist, 1e-4);
         float atten = spotAttenuation(sl, vWorldPos, Ldir, dist);
-        if (atten <= 0.0) continue;
+        if (atten <= 0.0 || dot(N, Ldir) <= 0.0) continue;
         float sh = receives ? spotShadowFactor(L, li, vWorldPos, shadowSamp) : 1.0;
         lit += sh * blinnPhong(N, V, Ldir, sl.color.rgb * sl.color.w * atten, albedo, m.specular, m.shininess);
     }
 
     lit += m.emissive.rgb;
-    vec3 color = applyFog(lit, vWorldPos, pc.eye.xyz, L.fogColor, L.fogParams);
-    outColor = vec4(color, outputAlpha(color, lit, indirect, base.a)); // linear: the target encodes it for display
+    Fog fog = fogAt(viewDist, L.fogColor, L.fogParams);
+    vec3 color = applyFog(lit, fog);
+    outColor = vec4(color, outputAlpha(color, indirect, fog, base.a)); // linear: the target encodes it for display
 }

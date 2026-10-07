@@ -29,7 +29,8 @@ void main() {
     // Unlit, but still fogged: an unlit surface that ignored fog would hang in
     // front of the haze while everything around it receded into it.
     vec3 lit = base.rgb + m.emissive.rgb;
-    vec3 c = applyFog(lit, vWorldPos, pc.eye.xyz, pc.lights.fogColor, pc.lights.fogParams);
+    Fog fog = fogAt(distance(pc.eye.xyz, vWorldPos), pc.lights.fogColor, pc.lights.fogParams);
+    vec3 c = applyFog(lit, fog);
     // No light reaches an unlit surface, so there is nothing for occlusion to take.
-    outColor = vec4(c, outputAlpha(c, lit, vec3(0.0), base.a)); // linear: the target encodes it for display
+    outColor = vec4(c, outputAlpha(c, vec3(0.0), fog, base.a)); // linear: the target encodes it for display
 }

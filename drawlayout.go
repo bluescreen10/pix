@@ -45,8 +45,9 @@ type drawLayout struct {
 
 // batch is one indirect command: the drawables sharing raster state and a geometry.
 //
-// Raster state is a material pool plus a cull and a blend mode — exactly what selects a
-// pipeline — so every material in a batch draws through the same one. The material
+// Raster state is a material pool, a cull and a blend mode, and whether its materials
+// are masked or transmissive — exactly what selects a pipeline (see fragmentVariant) —
+// so every material in a batch draws through the same one. The material
 // itself is not part of the key: each drawable carries its own record slot.
 type batch struct {
 	pool  *materials.Pool
@@ -79,7 +80,7 @@ type batch struct {
 // hasRasterOf reports whether two batches share raster state, and so draw through the
 // same pipeline.
 func (b *batch) hasRasterOf(other *batch) bool {
-	return b.pool == other.pool && b.cull == other.cull && b.blend == other.blend && b.isMasked == other.isMasked
+	return b.pool == other.pool && b.cull == other.cull && b.blend == other.blend && b.isMasked == other.isMasked && b.isTransmissive == other.isTransmissive
 }
 
 // rasterSpans yields each span of adjacent batches sharing raster state, as its first
@@ -352,7 +353,10 @@ func orderBatches(layout *drawLayout, geometryStore *geometries.Store) {
 		if x.blend != y.blend {
 			return x.blend < y.blend
 		}
-		return !x.isMasked && y.isMasked
+		if x.isMasked != y.isMasked {
+			return !x.isMasked
+		}
+		return !x.isTransmissive && y.isTransmissive
 	})
 
 	remap := make([]uint32, len(layout.batches))

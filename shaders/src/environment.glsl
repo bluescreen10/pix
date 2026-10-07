@@ -22,11 +22,34 @@ vec3 equirectDirection(vec2 uv) {
     return vec3(sin(theta) * cos(phi), cos(theta), sin(theta) * sin(phi));
 }
 
+// cubeDirection is the direction through texel uv, in [0,1] across the face, of cube
+// face face (+X, -X, +Y, -Y, +Z, -Z): the inverse of the hardware's cube lookup, so
+// that what is written there is what a lookup along the direction reads.
+vec3 cubeDirection(uint face, vec2 uv) {
+    vec2 st = uv * 2.0 - 1.0;
+    vec3 dir;
+    switch (face) {
+    case 0u: dir = vec3(1.0, -st.y, -st.x); break;
+    case 1u: dir = vec3(-1.0, -st.y, st.x); break;
+    case 2u: dir = vec3(st.x, 1.0, st.y); break;
+    case 3u: dir = vec3(st.x, -1.0, -st.y); break;
+    case 4u: dir = vec3(st.x, -st.y, 1.0); break;
+    default: dir = vec3(-st.x, -st.y, -1.0); break;
+    }
+    return normalize(dir);
+}
+
+// unrotateEnvironment turns a world direction into the frame of an environment turned
+// about the vertical by the angle whose cosine and sine are rotation.
+vec3 unrotateEnvironment(vec3 dir, vec2 rotation) {
+    float c = rotation.x, s = rotation.y;
+    return vec3(c * dir.x + s * dir.z, dir.y, -s * dir.x + c * dir.z);
+}
+
 // unrotateEnvironment turns a world direction into the frame of an environment turned
 // rotation radians about the vertical.
 vec3 unrotateEnvironment(vec3 dir, float rotation) {
-    float c = cos(rotation), s = sin(rotation);
-    return vec3(c * dir.x + s * dir.z, dir.y, -s * dir.x + c * dir.z);
+    return unrotateEnvironment(dir, vec2(cos(rotation), sin(rotation)));
 }
 
 #endif // PIX_ENVIRONMENT_GLSL

@@ -99,6 +99,9 @@ var metalEnvPrefilter []byte
 //go:embed build/env_brdf.comp.metalbin
 var metalEnvBRDF []byte
 
+//go:embed build/env_irradiance.comp.metalbin
+var metalEnvIrradiance []byte
+
 //go:embed build/env_background.frag.metalbin
 var metalEnvBackground []byte
 
@@ -206,6 +209,7 @@ var metalVariants = []struct{ spirv, metal []byte }{
 	{SceneCopyMip, metalSceneCopyMip},
 	{EnvPrefilter, metalEnvPrefilter},
 	{EnvBRDF, metalEnvBRDF},
+	{EnvIrradiance, metalEnvIrradiance},
 	{EnvBackground, metalEnvBackground},
 	{LightClusters, metalLightClusters},
 	{FogInject, metalFogInject},

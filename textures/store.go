@@ -196,10 +196,6 @@ func (t *Store) GPU(tex Texture) gpu.Texture {
 }
 
 // Destroy releases all uploaded textures and samplers.
-//
-// TODO: with two renderers that each loaded a glTF in one test, the second's teardown
-// crashes here: vkDestroySampler is handed a null device. Not investigated; the loader's
-// tests use one renderer each.
 func (t *Store) Destroy() {
 	for e := range t.entries.Values() {
 		t.destroyEntry(&e)

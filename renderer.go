@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"maps"
 	"math"
 	"math/bits"
 	"os"
@@ -104,6 +105,10 @@ type Renderer struct {
 	// demand; entries stay valid across a format change, which rebuilds the pipelines
 	// in place and leaves their indices alone.
 	pools []poolPipelines
+	// sceneVariant is what the scene being drawn has that its draw pipelines compile in.
+	// The pools hold pipelines for this one only, and are cleared when it changes (see
+	// setSceneVariant).
+	sceneVariant sceneVariant
 
 	// debugView draws the scene with a dedicated fragment shader instead of shading it;
 	// one pipeline per view, built on first use since most frames never need any of
@@ -158,12 +163,13 @@ type Renderer struct {
 	// an environment's light, the BRDF table they share, computed once, and the pass
 	// that draws an environment behind the scene, built on first use for the scene's
 	// format and sample count, and again after configure changes either.
-	environmentSampler   gpu.Sampler
-	envPrefilterPipeline gpu.Pipeline
-	envBRDFPipeline      gpu.Pipeline
-	envBRDF              gpu.Texture
-	envBRDFComputed      bool
-	envBackgroundPass    *postprocess.FullscreenPass
+	environmentSampler    gpu.Sampler
+	envPrefilterPipeline  gpu.Pipeline
+	envBRDFPipeline       gpu.Pipeline
+	envIrradiancePipeline gpu.Pipeline
+	envBRDF               gpu.Texture
+	envBRDFComputed       bool
+	envBackgroundPass     *postprocess.FullscreenPass
 
 	// sceneCopy is the opaque scene, copied after it is drawn and before the transparent
 	// pass, with a chain of ever blurrier levels below it. Materials that show what is
@@ -1627,6 +1633,17 @@ func (r *Renderer) extractLights(p *scenes.FramePacket, st *renderState) {
 		&st.environment, r.environmentSampler, r.envBRDF,
 		r.fogVolume, r.linearSampler, r.volumetricFog.resolved(), r.width, r.height, st.clusters)
 	st.lights.Sync()
+	r.setSceneVariant(sceneVariant{
+		hasEnvironment: st.environment.radiance.IsValid(),
+		fogMode:        p.Environment.Fog.Mode,
+		hasShadows:     r.shadowsEnabled && slices.ContainsFunc(p.Lights.Data, castsShadow),
+		hasSoftShadows: r.shadowFilter == ShadowFilterSoft,
+	})
+}
+
+// castsShadow reports whether a light casts a shadow.
+func castsShadow(light scenes.LightPacket) bool {
+	return light.CastsShadow
 }
 
 // prepareLightClusters lays the cluster grid over the main view. The cells are made
@@ -1650,7 +1667,7 @@ func (r *Renderer) prepareLightClusters(p *scenes.FramePacket, st *renderState) 
 // every scene — are made here too.
 func (r *Renderer) prepareEnvironment(environment scenes.EnvironmentMapState, state *environmentState) {
 	if environment.Revision == 0 {
-		state.destroy()
+		state.destroy(r.backend)
 		return
 	}
 	r.ensureEnvironment(state)
@@ -1962,8 +1979,9 @@ func (r *Renderer) encodeFrameSteps(stage FrameStage, cmd gpu.CommandBuffer) {
 // encodeEnvironment derives the scene's environment light from its image, when the
 // image has changed since it last was — after the first frame steps, so that a sky
 // drawing the image in one is lit by the same frame. It prefilters the reflections one
-// mip at a time, each mip blurring the one before it; the roughest is the diffuse light
-// too. The BRDF table every environment shares is computed the first time.
+// mip at a time, each mip blurring the one before it, then projects the sharpest onto
+// spherical harmonics for its diffuse light. The BRDF table every environment shares is
+// computed the first time.
 func (r *Renderer) encodeEnvironment(st *renderState, cmd gpu.CommandBuffer) {
 	environment := r.frame.Environment.Map
 	if environment.Revision == 0 || environment.Revision == st.environment.revision {
@@ -1980,21 +1998,34 @@ func (r *Renderer) encodeEnvironment(st *renderState, cmd gpu.CommandBuffer) {
 
 	cmd.SetPipeline(r.envPrefilterPipeline)
 	for mip := range uint32(environmentMips) {
-		width, height := uint32(environmentRadianceWidth)>>mip, uint32(environmentRadianceHeight)>>mip
+		size := uint32(environmentRadianceSize) >> mip
 		prefilter := envPrefilterRoot{
 			source:        environment.Texture,
 			target:        st.environment.radiance.Mips[mip].Index,
 			sampler:       sampler,
 			blurRoughness: environmentMipBlurs[mip],
-			size:          [2]uint32{width, height},
+			size:          size,
 		}
 		if mip > 0 {
 			// Each blurred mip reads the one before it, written by the dispatch before.
 			cmd.Barrier(gpu.StageCompute, gpu.StageCompute, 0)
 			prefilter.source = st.environment.radiance.Index()
+			prefilter.sourceIsCube = 1
 		}
-		cmd.Dispatch(utils.ToBytes(&prefilter), (width+7)/8, (height+7)/8, 1)
+		// One workgroup layer per face.
+		cmd.Dispatch(utils.ToBytes(&prefilter), (size+7)/8, (size+7)/8, 6)
 	}
+
+	// The diffuse light is projected from the sharpest reflections, written above.
+	cmd.Barrier(gpu.StageCompute, gpu.StageCompute, 0)
+	irradiance := envIrradianceRoot{
+		irradiance: st.environment.irradiance.Addr,
+		radiance:   st.environment.radiance.Index(),
+		sampler:    sampler,
+		size:       environmentRadianceSize,
+	}
+	cmd.SetPipeline(r.envIrradiancePipeline)
+	cmd.Dispatch(utils.ToBytes(&irradiance), 1, 1, 1)
 	cmd.Barrier(gpu.StageCompute, gpu.StageFragment|gpu.StageCompute, 0)
 	st.environment.revision = environment.Revision
 }
@@ -2503,10 +2534,7 @@ func (r *Renderer) encodeOpaquePass(batches batchRange, st *renderState, views f
 	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
 
 	root := r.sceneRoot(st, views)
-	if r.ambientOcclusionEnabled {
-		root.directShareInAlpha = 1
-	}
-	r.drawBatches(batches, root, r.sceneSamples(), st, views, cmd)
+	r.drawBatches(batches, root, r.ambientOcclusionEnabled, r.sceneSamples(), st, views, cmd)
 	r.drawEnvironmentBackground(image, cmd)
 
 	cmd.EndRenderPass()
@@ -3271,8 +3299,9 @@ func (r *Renderer) encodeSceneResolve(image gpu.Texture, cmd gpu.CommandBuffer) 
 // root and its span's materials: every per-geometry command sharing a pipeline goes in a
 // single DrawIndexedIndirect. Each
 // command's firstInstance is its region base, so gl_InstanceIndex indexes the compacted
-// visible buffer directly.
-func (r *Renderer) drawBatches(batches batchRange, root drawRoot, samples uint8, st *renderState, views frameViews, cmd gpu.CommandBuffer) {
+// visible buffer directly. isAmbientOcclusionEnabled is whether the pass writes the
+// direct share ambient occlusion leaves alone (see fragmentVariant).
+func (r *Renderer) drawBatches(batches batchRange, root drawRoot, isAmbientOcclusionEnabled bool, samples uint8, st *renderState, views frameViews, cmd gpu.CommandBuffer) {
 	for offset, count := range rasterSpans(st.layout.batches[batches.first:batches.end]) {
 		first := batches.first + offset
 		b := &st.layout.batches[first]
@@ -3281,7 +3310,8 @@ func (r *Renderer) drawBatches(batches batchRange, root drawRoot, samples uint8,
 		if b.isMasked {
 			root.masks = b.pool.MasksAddr()
 		}
-		cmd.SetPipeline(r.drawPipelines[r.pipelineForPool(b.pool, b.cull, b.blend, samples)])
+		variant := fragmentVariant{isMasked: b.isMasked, isTransmissive: b.isTransmissive, isAmbientOcclusionEnabled: isAmbientOcclusionEnabled}
+		cmd.SetPipeline(r.drawPipelines[r.pipelineForPool(b.pool, b.cull, b.blend, variant, samples)])
 		cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, views.main.cull.indirectBuf, uint64(first)*uint64(indirectSize), uint32(count), indirectSize)
 	}
 }
@@ -3306,8 +3336,10 @@ func (r *Renderer) drawBackToFront(batches batchRange, st *renderState, views fr
 	for _, entry := range st.backToFront {
 		b := &st.layout.batches[entry.batch]
 		root.materials = b.pool.RecordsAddr()
+		// Not masked: this pass leaves root.masks 0, and so cuts nothing out.
+		variant := fragmentVariant{isTransmissive: b.isTransmissive}
 		drawCulling := func(cull materials.CullMode) {
-			if pipeline := r.pipelineForPool(b.pool, cull, b.blend, r.afterOpaqueSamples()); pipeline != boundPipeline {
+			if pipeline := r.pipelineForPool(b.pool, cull, b.blend, variant, r.afterOpaqueSamples()); pipeline != boundPipeline {
 				cmd.SetPipeline(r.drawPipelines[pipeline])
 				boundPipeline = pipeline
 			}
@@ -3351,7 +3383,8 @@ func (r *Renderer) drawParticles(st *renderState, views frameViews, cmd gpu.Comm
 		if pp.Sort == scenes.ParticleSortBackToFront {
 			root.order = ps.orderBuf.Addr
 		}
-		pipeline := r.pipelineForPool(pool, pool.CullAt(pp.Material.Slot), pool.BlendAt(pp.Material.Slot), r.afterOpaqueSamples())
+		variant := fragmentVariant{isTransmissive: pool.IsTransmissiveAt(pp.Material.Slot)}
+		pipeline := r.pipelineForPool(pool, pool.CullAt(pp.Material.Slot), pool.BlendAt(pp.Material.Slot), variant, r.afterOpaqueSamples())
 		cmd.SetPipeline(r.drawPipelines[pipeline])
 		cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, ps.indirectBuf, 0, 1, indirectSize)
 	}
@@ -3700,9 +3733,10 @@ func (r *Renderer) ensureEnvironment(e *environmentState) {
 		return
 	}
 	e.radiance = r.TextureStore.CreateWritable(textures.WritableConfig{
-		Kind: gpu.Texture2D, Width: environmentRadianceWidth, Height: environmentRadianceHeight,
+		Kind: gpu.TextureCube, Width: environmentRadianceSize, Height: environmentRadianceSize, Layers: 6,
 		Mips: environmentMips, Format: gpu.FormatRGBA16F, Label: "environment-radiance",
 	})
+	e.irradiance = r.backend.Alloc(environmentIrradianceSize, gpu.MemoryDevice, "environment-irradiance")
 }
 
 // ensureEnvironmentSampler creates the sampler environment images are read with, on
@@ -4266,6 +4300,7 @@ func (r *Renderer) buildPipelines() {
 		r.backend.DestroyPipeline(r.sceneCopyPipeline)
 		r.backend.DestroyPipeline(r.sceneCopyMipPipeline)
 		r.backend.DestroyPipeline(r.envBRDFPipeline)
+		r.backend.DestroyPipeline(r.envIrradiancePipeline)
 		r.backend.DestroyPipeline(r.fogInjectPipeline)
 		r.backend.DestroyPipeline(r.fogIntegratePipeline)
 		r.backend.DestroyPipeline(r.lightClustersPipeline)
@@ -4290,6 +4325,7 @@ func (r *Renderer) buildPipelines() {
 	r.sceneCopyPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.SceneCopy), Entry: "main", Label: "scene-copy"})
 	r.sceneCopyMipPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.SceneCopyMip), Entry: "main", Label: "scene-copy-mip"})
 	r.envBRDFPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.EnvBRDF), Entry: "main", Label: "env-brdf"})
+	r.envIrradiancePipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.EnvIrradiance), Entry: "main", Label: "env-irradiance"})
 	r.fogInjectPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.FogInject), Entry: "main", Label: "fog-inject"})
 	r.fogIntegratePipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.FogIntegrate), Entry: "main", Label: "fog-integrate"})
 	r.lightClustersPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.LightClusters), Entry: "main", Label: "light-clusters"})
@@ -4349,21 +4385,16 @@ func (r *Renderer) buildPipelines() {
 	}
 }
 
-// materialPipeline is a material's full pipeline identity: shaders + raster state.
+// materialPipeline is a material's full pipeline identity: shaders, raster state, and
+// the variant of its fragment shader.
 //
-// TODO: specialization constants, so that a pipeline compiles only the shader features
-// its materials use. The PBR shader is one shader for every material — a flag test per
-// map, and the whole glass path inline — and in the beach scene (examples/beachbench,
-// 2500x1400, MSAA 4x) the opaque pass went from 5.1 to 5.9 ms with the glass work,
-// though nothing there is glass: about 0.25 ms is the refraction code being present,
-// the rest not yet attributed. Steps: gamekit takes specialization values on
-// gpu.PipelineDescriptor (VkSpecializationInfo; Metal function constants, which
-// SPIRV-Cross makes of constant_id); this key gains a feature set, as do the pools'
-// tables in pipelineForPool; the glass path, which only blended pipelines run, is the
-// first constant. Profile the per-map flags before making any of them constants: each
-// splits batches, and a branch that is the same for a whole draw is cheap but for the
-// registers it holds. A pipeline created mid-frame compiles the driver's code and can
-// stall it, so cache them or create the likely ones ahead.
+// A pipeline compiles only the shader features its draws use, through the
+// specialization constants of fragmentVariant. Per-map flags stay runtime tests: a
+// constant splits batches, and a branch that is the same for a whole draw is cheap but
+// for the registers it holds. A pipeline created mid-frame compiles the driver's code
+// and can stall it.
+// TODO: create the likely pipelines ahead, or draw with an unspecialized one until the
+// specialized one is built.
 type materialPipeline struct {
 	shaderHash       uint64 // cached (vertex,fragment) identity — the dedup key
 	vertex, fragment []byte // kept only to build the pipeline
@@ -4373,6 +4404,103 @@ type materialPipeline struct {
 	// the opaque pass, one after it (see encodeOpaquePass) — whatever the blend mode, as
 	// a particle material may be opaque, and is drawn in the transparent pass.
 	samples uint8
+	variant fragmentVariant
+	scene   sceneVariant
+}
+
+// fragmentVariant is what a pipeline compiles in or out of its material's fragment
+// shader, through the specialization constants material_common.glsl and the built-in
+// shaders declare. A shader that declares none of them ignores it.
+type fragmentVariant struct {
+	// isMasked keeps the cut-out test: the draw's materials cut their surface out by
+	// alpha (see materials.Masked). A shader that may discard can lose the GPU's early
+	// depth test, which runs before the shader, whether or not it ever discards.
+	isMasked bool
+	// isTransmissive keeps the glass path: the draw's materials let light through (see
+	// materials.Transmissive).
+	isTransmissive bool
+	// isAmbientOcclusionEnabled has the shader write, where its alpha goes, the share of
+	// its colour ambient occlusion leaves alone (see outputAlpha in
+	// material_common.glsl): the opaque pass, while ambient occlusion is on.
+	isAmbientOcclusionEnabled bool
+}
+
+// fragmentVariantCount is how many fragmentVariant values there are, one per
+// combination of its flags.
+const fragmentVariantCount = 8
+
+// index numbers a variant from 0 to fragmentVariantCount-1.
+func (v fragmentVariant) index() int {
+	index := 0
+	if v.isMasked {
+		index |= 1
+	}
+	if v.isTransmissive {
+		index |= 2
+	}
+	if v.isAmbientOcclusionEnabled {
+		index |= 4
+	}
+	return index
+}
+
+// constants is the variant as the shaders' specialization constants.
+func (v fragmentVariant) constants() map[string]float64 {
+	return map[string]float64{
+		"MASKED":            constantOf(v.isMasked),
+		"TRANSMISSION":      constantOf(v.isTransmissive),
+		"AMBIENT_OCCLUSION": constantOf(v.isAmbientOcclusionEnabled),
+	}
+}
+
+// sceneVariant is what the scene a frame draws has, which its draw pipelines compile
+// in through the specialization constants lighting.glsl declares: what the scene lacks
+// is compiled out. It changes when the scene's settings do, rarely, and the pipelines
+// built for each value are kept.
+type sceneVariant struct {
+	hasEnvironment bool
+	fogMode        uint32 // scenes.FogNone, FogLinear, FogExp2 or FogVolumetric
+	// hasShadows is whether any light may cast a shadow, and hasSoftShadows whether
+	// directional lights filter theirs softly (see ShadowFilterSoft).
+	hasShadows     bool
+	hasSoftShadows bool
+}
+
+// constants is the variant as the shaders' specialization constants.
+func (v sceneVariant) constants() map[string]float64 {
+	return map[string]float64{
+		"ENVIRONMENT":  constantOf(v.hasEnvironment),
+		"FOG_MODE":     float64(v.fogMode),
+		"SHADOWS":      constantOf(v.hasShadows),
+		"SOFT_SHADOWS": constantOf(v.hasSoftShadows),
+	}
+}
+
+// setSceneVariant makes v the scene variant the draw pipelines are resolved for. The
+// pools' tables hold pipelines for the previous one, so a change clears them: each cell
+// then resolves again, to a pipeline already built for v if there is one.
+func (r *Renderer) setSceneVariant(v sceneVariant) {
+	if v == r.sceneVariant {
+		return
+	}
+	r.sceneVariant = v
+	clear(r.pools)
+}
+
+// constantOf is a bool as a specialization constant's value.
+func constantOf(value bool) float64 {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+// constants is every specialization constant the key sets: its fragment variant's and
+// its scene's.
+func (k materialPipeline) constants() map[string]float64 {
+	constants := k.variant.constants()
+	maps.Copy(constants, k.scene.constants())
+	return constants
 }
 
 // buildDrawPipe creates a graphics pipeline for a material pipeline key against the
@@ -4412,6 +4540,7 @@ func (r *Renderer) buildDrawPipe(k materialPipeline) gpu.Pipeline {
 		// below, on Vulkan and Metal alike, and gl_FrontFacing was false on the faces
 		// the camera faced.
 		CullMode: gpu.CullMode(k.cull), Blend: blend,
+		Constants: k.constants(),
 	})
 }
 
@@ -4462,40 +4591,28 @@ func (r *Renderer) pipelineFor(k materialPipeline) uint32 {
 	return id
 }
 
-// pipelineUnresolved marks a cell of a pool's pipeline table that has not been built
-// yet. Zero is a perfectly good pipeline index, so it cannot double as "empty".
-const pipelineUnresolved uint32 = 0xFFFFFFFF
-
 // poolPipelines is every draw pipeline the instances of one material pool can select
 // between. A pool is keyed by a Shader that never changes for its lifetime, so the
-// only things that vary within it are the per-instance cull and blend modes. Three
-// values each, so the entire space is a fixed table indexed directly — no hashing, no
-// scan, no map — filled lazily because most pools use one or two of the cells.
+// only things that vary within it are the per-instance cull and blend modes, and the
+// variant of its fragment shader a draw needs. A few values each, so the entire space
+// is a fixed table indexed directly — no hashing, no scan, no map — filled lazily
+// because most pools use a few of the cells.
 type poolPipelines struct {
-	table [2][3][4]uint32 // [multisampled][cull][blend]
-}
-
-func newPoolPipelines() poolPipelines {
-	var pp poolPipelines
-	for m := range pp.table {
-		for c := range pp.table[m] {
-			for b := range pp.table[m][c] {
-				pp.table[m][c][b] = pipelineUnresolved
-			}
-		}
-	}
-	return pp
+	// table holds each pipeline's index plus one, so that the zero value, 0, is a
+	// pipeline not built yet.
+	table [2][3][4][fragmentVariantCount]uint32 // [multisampled][cull][blend][variant]
 }
 
 // pipelineForPool resolves the draw pipeline for one material of a pool, given that
-// material's rasterization state, for a pass of samples samples a pixel.
+// material's rasterization state and the variant of its fragment shader the draw
+// needs, for a pass of samples samples a pixel.
 //
 // The shaders come from the pool rather than the material because the pool is keyed by
 // those very shaders — a material cannot disagree with it, and so cannot ask for a
 // pipeline built out of SPIR-V its pool does not have.
-func (r *Renderer) pipelineForPool(p *materials.Pool, cull materials.CullMode, blend materials.BlendMode, samples uint8) uint32 {
+func (r *Renderer) pipelineForPool(p *materials.Pool, cull materials.CullMode, blend materials.BlendMode, variant fragmentVariant, samples uint8) uint32 {
 	for uint32(len(r.pools)) <= p.Index() {
-		r.pools = append(r.pools, newPoolPipelines())
+		r.pools = append(r.pools, poolPipelines{})
 	}
 	pp := &r.pools[p.Index()]
 	// A pass is multisampled with the scene's samples, or not at all; one slot serves
@@ -4505,21 +4622,22 @@ func (r *Renderer) pipelineForPool(p *materials.Pool, cull materials.CullMode, b
 		multisampled = 1
 	}
 
-	if id := pp.table[multisampled][cull][blend]; id != pipelineUnresolved {
-		return id
+	cell := &pp.table[multisampled][cull][blend][variant.index()]
+	if *cell != 0 {
+		return *cell - 1
 	}
 	sh := p.Shader()
 	id := r.pipelineFor(materialPipeline{
 		shaderHash: p.Hash(), vertex: sh.Vertex, fragment: sh.Fragment,
-		cull: cull, blend: blend, samples: max(samples, 1),
+		cull: cull, blend: blend, samples: max(samples, 1), variant: variant, scene: r.sceneVariant,
 	})
-	pp.table[multisampled][cull][blend] = id
+	*cell = id + 1
 	return id
 }
 
 // sameKey compares two pipeline keys.
 func sameKey(a, b materialPipeline) bool {
-	return a.shaderHash == b.shaderHash && a.cull == b.cull && a.blend == b.blend && a.samples == b.samples
+	return a.shaderHash == b.shaderHash && a.cull == b.cull && a.blend == b.blend && a.samples == b.samples && a.variant == b.variant && a.scene == b.scene
 }
 
 // debugViewActive reports whether this frame draws a debug view instead of shading.
@@ -4896,7 +5014,7 @@ func (r *Renderer) releaseState(st *renderState) {
 	for _, ps := range st.particles {
 		ps.destroy(r.backend)
 	}
-	st.environment.destroy()
+	st.environment.destroy(r.backend)
 }
 
 // Destroy releases the renderer's GPU resources and the backend it owns.

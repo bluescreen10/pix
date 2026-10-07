@@ -113,11 +113,7 @@ type drawRoot struct {
 	// custom material's; nothing requires reading it (see material_common.glsl and
 	// scene_draw.vert.glsl, which both declare it but only some shaders use it).
 	time float32
-	// directShareInAlpha has a material write, where its alpha goes, the share of its
-	// colour that ambient occlusion leaves alone (see outputAlpha in
-	// material_common.glsl). Set in the opaque pass while ambient occlusion is on.
-	directShareInAlpha uint32
-	pad                uint32
+	_    [2]uint32
 	// masks is the material pool's mask table (see materials.Masked) while drawing a
 	// span of masked materials, and 0 otherwise: what discardCutOut reads.
 	masks uint64

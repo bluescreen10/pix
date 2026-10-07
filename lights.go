@@ -124,19 +124,22 @@ type gpuLights struct {
 	numDir    uint32
 	numPoint  uint32
 	numSpot   uint32
-	pad0      uint32
 	// The environment the scene is lit by — see environmentState and lighting.glsl;
-	// envRadiance is noEnvironment when there is none.
+	// envRadiance is noEnvironment when there is none, and envRotation the cosine and
+	// sine of its turn about the vertical.
+	envIntensity float32
 	envRadiance  uint32
 	envSampler   uint32
 	envMips      uint32
 	envBRDF      uint32
-	envIntensity float32
-	envRotation  float32
+	envRotation  [2]float32
 	points       uint64
 	spots        uint64
 	pointShadows uint64
 	spotShadows  uint64
+	// envIrradiance is the address of the environment's diffuse light, as spherical-
+	// harmonic coefficients (see environmentState.irradiance).
+	envIrradiance uint64
 	// clusters is the main view's light clusters: where its cells are and how a world
 	// position finds its own (see clusterGrid).
 	clusters          uint64
@@ -231,7 +234,9 @@ func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPack
 		next.envSampler = environmentSampler.Index
 		next.envMips = environmentMips
 		next.envBRDF = environmentBRDF.Index
-		next.envIntensity, next.envRotation = env.Map.Intensity, env.Map.Rotation
+		next.envIrradiance = environment.irradiance.Addr
+		next.envIntensity = env.Map.Intensity
+		next.envRotation = [2]float32{math32.Cos(env.Map.Rotation), math32.Sin(env.Map.Rotation)}
 	}
 	fs := env.Fog
 	next.fogColor = fs.Color.RGBA(float32(fs.Mode))

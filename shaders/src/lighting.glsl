@@ -5,6 +5,7 @@
 
 #include "bindless.glsl"
 #include "environment.glsl"
+#include "spherical_harmonics.glsl"
 
 const uint MAX_DIR = 4u;
 // Fog modes, mirroring scenes.FogNone/FogLinear/FogExp2/FogVolumetric.
@@ -16,6 +17,20 @@ const uint FOG_VOLUMETRIC = 3u;
 const uint NO_SHADOW = 0xFFFFFFFFu; // shadowMap sentinel: light casts no shadow
 const uint NO_MASK = 0xFFFFFFFFu;   // mask sentinel: directional light has no mask
 const uint NO_ENVIRONMENT = 0xFFFFFFFFu; // envRadiance sentinel: the scene has no environment
+
+// Specialization constants: what the scene has, set per pipeline by the renderer (see
+// pix.sceneVariant), so that what it lacks is compiled out. Each defaults to reading the
+// light table at run time, as a pipeline created without them, or a compute shader that
+// includes this file, does. IDs below 16 are the renderer's (see material_common.glsl).
+//
+// ENVIRONMENT false: the scene is lit by its flat ambient colour, never an environment.
+// FOG_MODE: the scene's FOG_* mode, or FOG_FROM_TABLE to read it from the light table.
+// SHADOWS false: no light casts a shadow. SOFT_SHADOWS false: none is filtered softly.
+const uint FOG_FROM_TABLE = 0xFFFFFFFFu;
+layout(constant_id = 3) const bool ENVIRONMENT = true;
+layout(constant_id = 4) const uint FOG_MODE = 0xFFFFFFFFu;
+layout(constant_id = 5) const bool SHADOWS = true;
+layout(constant_id = 6) const bool SOFT_SHADOWS = true;
 
 #define MAX_CASCADES 4
 struct DirLight {
@@ -65,6 +80,9 @@ layout(buffer_reference, scalar) readonly buffer PointLights { PointLight v[]; }
 layout(buffer_reference, scalar) readonly buffer PointShadows { PointShadow v[]; };
 layout(buffer_reference, scalar) readonly buffer SpotLights { SpotLight v[]; };
 layout(buffer_reference, scalar) readonly buffer SpotShadows { SpotShadow v[]; };
+// EnvironmentIrradiance is an environment's diffuse light, as spherical-harmonic
+// coefficients (see env_irradiance.comp.glsl).
+layout(buffer_reference, scalar) readonly buffer EnvironmentIrradiance { vec3 coefficients[9]; };
 
 // Light clusters: the main view is cut into CLUSTER_X x CLUSTER_Y tiles across the
 // screen and CLUSTER_Z slices in depth, and each of those cells lists the point and
@@ -89,21 +107,22 @@ layout(buffer_reference, scalar) readonly buffer LightBuf {
     uint numDir;
     uint numPoint;
     uint numSpot;
-    uint pad0;
     // The environment the scene is lit by (see pix.environmentState): its prefiltered
-    // reflections — one mip per roughness, the roughest also its diffuse light — and the
-    // BRDF table reflections are weighted by; envRadiance is NO_ENVIRONMENT when there
-    // is none.
+    // reflections, a cube with one mip per roughness, and the BRDF table reflections are
+    // weighted by; envRadiance is NO_ENVIRONMENT when there is none. Its diffuse light
+    // is envIrradiance, below. envRotation is the cosine and sine of its turn about the vertical, worked
+    // out once rather than per lookup.
+    float envIntensity;
     uint envRadiance;
     uint envSampler;
     uint envMips;
     uint envBRDF;
-    float envIntensity;
-    float envRotation;
+    vec2 envRotation;
     PointLights points;
     SpotLights spots;
     PointShadows pointShadows;
     SpotShadows spotShadows;
+    EnvironmentIrradiance envIrradiance;
     // clusters is the main view's cells; clusterViewProj and clusterDepth find the cell
     // a world position falls in — its tile through the view's projection, its slice
     // from its depth along the view, sliced as log(depth) * clusterSliceScale +
@@ -250,7 +269,7 @@ float shadowSoft(uint shadowMap, uint shadowSamp, vec2 uv, float ref, ShadowSlot
 // light type carries its own, so LightShadow.Bias means something for all of them.
 float shadowFactor(mat4 shadowVP, uint shadowMap, vec3 worldPos, uint shadowSamp, float bias,
                    uint slot, uint slots, uint mapSide, uint filterMode) {
-    if (shadowMap == NO_SHADOW) return 1.0;
+    if (!SHADOWS || shadowMap == NO_SHADOW) return 1.0;
     vec4 c = shadowVP * vec4(worldPos, 1.0);
     if (c.w <= 0.0) return 1.0;
     vec3 ndc = c.xyz / c.w;
@@ -269,7 +288,7 @@ float shadowFactor(mat4 shadowVP, uint shadowMap, vec3 worldPos, uint shadowSamp
     // GreaterEqual to match (see Renderer.prepareShadows).
     float ref = ndc.z + bias;
     ShadowSlot s = shadowSlot(slot, slots, mapSide);
-    if (filterMode == SHADOW_FILTER_SOFT) {
+    if (SOFT_SHADOWS && filterMode == SHADOW_FILTER_SOFT) {
         return shadowSoft(shadowMap, shadowSamp, uv, ref, s, float(mapSide));
     }
     return shadowTap(shadowMap, shadowSamp, uv, ref, s);
@@ -350,7 +369,7 @@ const float shadowCascadeBlend = 0.1;
 // step over enough pixels to disappear, at the cost of a second lookup for the fragments
 // inside the band.
 float dirShadowFactor(LightBuf L, uint li, vec3 worldPos, vec3 N, float viewDist, uint shadowSamp) {
-    if (L.dirs[li].shadowMap == NO_SHADOW) return 1.0;
+    if (!SHADOWS || L.dirs[li].shadowMap == NO_SHADOW) return 1.0;
     uint n = max(L.dirs[li].cascades, 1u);
     uint i = n - 1u;
     for (uint c = 0u; c < n; c++) {
@@ -394,27 +413,31 @@ vec3 environmentFrame(LightBuf L, vec3 dir) {
 // hasEnvironment reports whether the scene is lit by an environment rather than by its
 // flat ambient colour.
 bool hasEnvironment(LightBuf L) {
-    return L.envRadiance != NO_ENVIRONMENT;
+    return ENVIRONMENT && L.envRadiance != NO_ENVIRONMENT;
 }
 
 // environmentDiffuse is the light a white diffuse surface facing N takes from the
 // environment: the same kind of value as the ambient colour it replaces, so a uniform
-// white environment lights such a surface to exactly 1. It is the roughest mip of the
-// prefiltered reflections, looked up along the normal for a sky's diffuse light too. 
-// That mip is the environment blurred by a GGX lobe of roughness 1, a little narrower
-// than the cosine lobe diffuse light is, which is close enough for light that changes 
-// this slowly across normals.
+// white environment lights such a surface to exactly 1. It is the environment's
+// spherical-harmonic coefficients, which hold its light already blurred by the cosine
+// lobe, evaluated along the normal: arithmetic on nine values every fragment reads
+// alike, rather than a texture fetch. Nine terms can ring a little below zero opposite
+// a small, very bright source, which no light can be.
 vec3 environmentDiffuse(LightBuf L, vec3 N) {
-    vec2 uv = equirectUV(environmentFrame(L, N));
-    return textureLod(sampler2D(gTextures[nonuniformEXT(L.envRadiance)], gSamplers[nonuniformEXT(L.envSampler)]), uv, float(L.envMips - 1u)).rgb * L.envIntensity;
+    float basis[9] = shBasis(environmentFrame(L, N));
+    vec3 light = vec3(0.0);
+    for (uint k = 0u; k < 9u; k++) {
+        light += L.envIrradiance.coefficients[k] * basis[k];
+    }
+    return max(light, vec3(0.0)) * L.envIntensity;
 }
 
 // environmentSpecular is the environment as a surface of the given roughness mirrors it
 // along R: the prefiltered image, at the mip blurred for that roughness.
 vec3 environmentSpecular(LightBuf L, vec3 R, float roughness) {
-    vec2 uv = equirectUV(environmentFrame(L, R));
+    vec3 dir = environmentFrame(L, R);
     float lod = roughness * float(L.envMips - 1u);
-    return textureLod(sampler2D(gTextures[nonuniformEXT(L.envRadiance)], gSamplers[nonuniformEXT(L.envSampler)]), uv, lod).rgb * L.envIntensity;
+    return textureLod(samplerCube(gTexturesCube[nonuniformEXT(L.envRadiance)], gSamplers[nonuniformEXT(L.envSampler)]), dir, lod).rgb * L.envIntensity;
 }
 
 // environmentBRDF is the split-sum pair (scale, bias) a reflection of the environment
@@ -432,7 +455,7 @@ vec2 environmentBRDF(LightBuf L, float NdotV, float roughness) {
 // point light li's shadow.
 float pointShadowFactor(LightBuf L, uint li, vec3 worldPos, uint shadowSamp) {
     uint si = L.points.v[li].shadow;
-    if (si == NO_SHADOW) return 1.0;
+    if (!SHADOWS || si == NO_SHADOW) return 1.0;
     vec3 v = worldPos - L.points.v[li].pos.xyz;
     vec3 a = abs(v);
     uint face;
@@ -450,7 +473,7 @@ float pointShadowFactor(LightBuf L, uint li, vec3 worldPos, uint shadowSamp) {
 // spotShadowFactor samples spot light li's shadow.
 float spotShadowFactor(LightBuf L, uint li, vec3 worldPos, uint shadowSamp) {
     uint si = L.spots.v[li].shadow;
-    if (si == NO_SHADOW) return 1.0;
+    if (!SHADOWS || si == NO_SHADOW) return 1.0;
     return shadowFactor(L.spotShadows.v[si].shadowVP, L.spotShadows.v[si].shadowMap, worldPos, shadowSamp,
                         L.spotShadows.v[si].shadowBias, 0u, 1u, 1u, SHADOW_FILTER_HARD);
 }
@@ -481,44 +504,59 @@ float fogVolumeSlice(float d, float reach, float slices) {
     return sqrt(clamp(d / reach, 0.0, 1.0)) - 0.5 / slices;
 }
 
-// applyFog reads gl_FragCoord, which only a fragment shader has; a compute shader that
+// fogAt reads gl_FragCoord, which only a fragment shader has; a compute shader that
 // includes this file for its light table defines PIX_NO_FRAGMENT_FOG to leave it out.
 #ifndef PIX_NO_FRAGMENT_FOG
-// applyFog blends a LINEAR-space shaded colour toward the scene's fog colour by
-// distance from the eye. Fog is a physical blend between the surface and the medium
-// in front of it, so it belongs in linear light, before anything encodes for display.
+// Fog is what the medium between the eye and a surface does to the light leaving it:
+// it lets through transmittance of that light (1 for none of it fogged out) and adds
+// light of its own. Fog is a physical blend between the surface and the medium in front
+// of it, so it belongs in linear light, before anything encodes for display.
 //
-// The returned value is the fogged colour; a scene with no fog returns lit unchanged
-// (one compare, and the branch is uniform across the draw).
+// A shader evaluates it once (fogAt) and applies it to whatever it needs fogged
+// (applyFog): the volumetric kind is a 3D texture fetch, and every other use is
+// arithmetic on the same two values — what fog does to part of a colour is
+// transmittance times that part.
+struct Fog {
+    float transmittance;
+    vec3 light;
+};
+
+// fogAt is the fog in front of a surface viewDist from the eye. A scene with no fog
+// lets everything through (one compare, and the branch is uniform across the draw).
 //
 // fogColor/fogParams are passed by value rather than the LightBuf itself: a
 // buffer_reference cannot cross a function parameter without dropping its readonly
 // qualifier, the same reason shadeSurface reads the table from the push constants directly.
-vec3 applyFog(vec3 lit, vec3 worldPos, vec3 eye, vec4 fogColor, vec4 fogParams) {
-    uint mode = uint(fogColor.w);
-    if (mode == FOG_NONE) return lit;
-    float d = distance(worldPos, eye);
+Fog fogAt(float viewDist, vec4 fogColor, vec4 fogParams) {
+    uint mode = FOG_MODE == FOG_FROM_TABLE ? uint(fogColor.w) : FOG_MODE;
+    if (mode == FOG_NONE) {
+        return Fog(1.0, vec3(0.0));
+    }
     if (mode == FOG_VOLUMETRIC) {
         // The renderer has already worked out, for every froxel, what the fog between
         // it and the eye adds and how much it lets through (see fog_integrate.comp);
         // all that is left is to look it up. fogColor is (1/width, 1/height of the
         // screen the volume lies over, the fog's reach, mode), fogParams (volume,
         // sampler, slices, _) — see pix.Lights.rebuild.
-        vec3 uvw = vec3(gl_FragCoord.xy * fogColor.xy, fogVolumeSlice(d, fogColor.z, fogParams.z));
+        vec3 uvw = vec3(gl_FragCoord.xy * fogColor.xy, fogVolumeSlice(viewDist, fogColor.z, fogParams.z));
         vec4 fog = textureLod(sampler3D(gTextures3D[nonuniformEXT(uint(fogParams.x))], gSamplers[nonuniformEXT(uint(fogParams.y))]), uvw, 0.0);
-        return lit * fog.a + fog.rgb;
+        return Fog(fog.a, fog.rgb);
     }
-    // f is transmittance: 1 = the surface is fully visible, 0 = fully fogged out.
-    float f;
+    float transmittance;
     if (mode == FOG_LINEAR) {
-        f = clamp((fogParams.y - d) / max(fogParams.y - fogParams.x, 1e-4), 0.0, 1.0);
+        transmittance = clamp((fogParams.y - viewDist) / max(fogParams.y - fogParams.x, 1e-4), 0.0, 1.0);
     } else {
         // exp(-(d*density)^2): Beer-Lambert with the exponent squared, which keeps
         // the foreground clear instead of hazing from the camera outward.
-        float t = d * fogParams.z;
-        f = exp(-t * t);
+        float t = viewDist * fogParams.z;
+        transmittance = exp(-t * t);
     }
-    return mix(fogColor.rgb, lit, f);
+    return Fog(transmittance, fogColor.rgb * (1.0 - transmittance));
+}
+
+// applyFog is a LINEAR-space shaded colour as seen through fog.
+vec3 applyFog(vec3 lit, Fog fog) {
+    return lit * fog.transmittance + fog.light;
 }
 #endif // PIX_NO_FRAGMENT_FOG
 

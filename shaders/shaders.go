@@ -107,6 +107,7 @@ var OcclusionApply []byte
 //go:generate go run ../cmd/shadercompile -i src/scene_copy.comp.glsl -o spv:build/scene_copy.comp.spv -o metallib:build/scene_copy.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/scene_copy_mip.comp.glsl -o spv:build/scene_copy_mip.comp.spv -o metallib:build/scene_copy_mip.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/env_brdf.comp.glsl -o spv:build/env_brdf.comp.spv -o metallib:build/env_brdf.comp.metalbin
+//go:generate go run ../cmd/shadercompile -i src/env_irradiance.comp.glsl -o spv:build/env_irradiance.comp.spv -o metallib:build/env_irradiance.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/env_background.frag.glsl -o spv:build/env_background.frag.spv -o metallib:build/env_background.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/light_clusters.comp.glsl -o spv:build/light_clusters.comp.spv -o metallib:build/light_clusters.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/fog_inject.comp.glsl -o spv:build/fog_inject.comp.spv -o metallib:build/fog_inject.comp.metalbin
@@ -242,15 +243,21 @@ var SceneCopyMip []byte
 
 // --- environment lighting (see scenes.Environment) ---
 //
-// EnvPrefilter and EnvBRDF derive an environment's light — its blurred reflections,
-// the roughest of which is its diffuse light too, and the table reflections are
-// weighted by; EnvBackground draws it behind the scene.
+// EnvPrefilter, EnvIrradiance and EnvBRDF derive an environment's light — its blurred
+// reflections, its diffuse light, and the table reflections are weighted by;
+// EnvBackground draws it behind the scene.
 
 //go:embed build/env_prefilter.comp.spv
 var EnvPrefilter []byte
 
 //go:embed build/env_brdf.comp.spv
 var EnvBRDF []byte
+
+// EnvIrradiance projects an environment's reflections onto spherical harmonics: its
+// diffuse light.
+//
+//go:embed build/env_irradiance.comp.spv
+var EnvIrradiance []byte
 
 //go:embed build/env_background.frag.spv
 var EnvBackground []byte
