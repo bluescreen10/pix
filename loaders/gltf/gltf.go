@@ -718,6 +718,7 @@ func (l *loader) materialTextures() []texKey {
 			add(gm.Extensions.Transmission.TransmissionTexture, textures.Grayscale)
 		}
 		add(gm.NormalTexture, textures.Normal)
+		add(gm.EmissiveTexture, textures.SRGB)
 		if gm.OcclusionTexture != nil {
 			add(&gm.OcclusionTexture.textureRef, textures.Linear)
 		}
@@ -841,10 +842,46 @@ func (l *loader) loadMaterials() {
 				}
 			}
 		}
+		// KHR_materials_ior: how much the surface reflects head-on, and how sharply it
+		// bends what passes through it.
+		if ext := gm.Extensions; ext != nil && ext.IOR != nil && ext.IOR.IOR != nil {
+			m.SetIOR(*ext.IOR.IOR)
+		}
+		// KHR_materials_volume: the volume behind a transmissive surface. glTF measures
+		// its thickness in the mesh's own units, and pix in world units, which agree for
+		// a mesh at the scale it was made at.
+		if ext := gm.Extensions; ext != nil && ext.Volume != nil {
+			m.SetThickness(ext.Volume.ThicknessFactor)
+			color := colors.RGB32F{1, 1, 1}
+			if c := ext.Volume.AttenuationColor; len(c) == 3 {
+				color = colors.RGB32F{c[0], c[1], c[2]}
+			}
+			// glTF's default, an infinite distance, absorbs nothing, as pix's 0 does.
+			distance := float32(0)
+			if d := ext.Volume.AttenuationDistance; d != nil {
+				distance = *d
+			}
+			m.SetAttenuation(color, distance)
+		}
 		if gm.NormalTexture != nil {
 			if t := l.texture(gm.NormalTexture.Index, textures.Normal); t.IsValid() {
 				m.SetNormalMap(t)
 				m.SetNormalMapSampler(samp)
+			}
+		}
+		// The light the surface emits: its emissive factor, scaled by
+		// KHR_materials_emissive_strength, times its emissive texture.
+		if f := gm.EmissiveFactor; len(f) == 3 {
+			strength := float32(1)
+			if ext := gm.Extensions; ext != nil && ext.EmissiveStrength != nil {
+				strength = ext.EmissiveStrength.EmissiveStrength
+			}
+			m.SetEmissive(colors.RGB32F{f[0] * strength, f[1] * strength, f[2] * strength})
+		}
+		if gm.EmissiveTexture != nil {
+			if t := l.texture(gm.EmissiveTexture.Index, textures.SRGB); t.IsValid() {
+				m.SetEmissiveMap(t)
+				m.SetEmissiveMapSampler(samp)
 			}
 		}
 		if gm.OcclusionTexture != nil {

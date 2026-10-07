@@ -258,9 +258,9 @@ func TestEnvironmentRederivedOnlyWhenInvalidated(t *testing.T) {
 	image := r.TextureStore.CreateWritable(textures.WritableConfig{
 		Kind: gpu.Texture2D, Width: side, Height: side, Format: gpu.FormatRGBA16F, Label: "environment",
 	})
-	step := &fillStep{texture: image, side: side, color: [4]float32{1, 1, 1, 1}, shader: testShader(t, r, "image_fill.comp")}
+	step := &fillStep{texture: image.Texture, side: side, color: [4]float32{1, 1, 1, 1}, shader: testShader(t, r, "image_fill.comp")}
 	r.AddFrameStep(pix.FrameStageStart, step)
-	environment := scenes.NewEnvironment(image)
+	environment := scenes.NewEnvironment(image.Texture)
 	image.Release()
 	defer environment.Release()
 	scene.SetEnvironment(environment)

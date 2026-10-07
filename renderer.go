@@ -126,18 +126,30 @@ type Renderer struct {
 	// Anti-aliasing: whether it is on, and by which method (see SetAntiAliasing).
 	//
 	// With MSAA the scene's passes draw into multisampledColor, in the scene's format,
-	// and multisampledDepth, and once they are done both are resolved into the scene
-	// image and depth, which are what everything after them samples (see
-	// encodeSceneResolve). Without it neither exists, and the passes draw into the scene
-	// image and depth directly.
+	// and multisampledDepth, which are resolved into the scene image and depth that
+	// everything after them samples. Where depends on the frame (see
+	// resolvesOpaquePassEarly): the opaque pass resolves them as it ends when it can,
+	// and the multisampled images are then transient, never leaving tile memory on a
+	// tile-based GPU — but for the depth when it has to outlive the pass. Otherwise
+	// every pass up to the transparent one draws into them, and a pass of its own
+	// resolves them at the end (see encodeSceneResolve). The images are made for the
+	// frame's needs (see ensureMultisampledImages), which multisampledColorIsTransient
+	// and multisampledDepthIsTransient record. Without MSAA neither exists, and the
+	// passes draw into the scene image and depth directly.
 	//
 	// With FXAA the frame is finished in fxaaSource, in the target's format, rather than
 	// in the target, and fxaaPass smooths it into the target (see encodeFXAA). Without it
 	// neither exists.
-	antiAliasingEnabled bool
-	antiAliasing        AntiAliasing
-	multisampledColor   gpu.Texture
-	multisampledDepth   gpu.Texture
+	antiAliasingEnabled          bool
+	antiAliasing                 AntiAliasing
+	multisampledColor            gpu.Texture
+	multisampledDepth            gpu.Texture
+	multisampledColorIsTransient bool
+	multisampledDepthIsTransient bool
+	// resolvesOpaqueEarly is resolvesOpaquePassEarly as of the last frame, so that what
+	// is built for the number of samples after the opaque pass is rebuilt when it
+	// changes.
+	resolvesOpaqueEarly bool
 	fxaaSource          gpu.Texture
 	fxaaPass            *postprocess.FullscreenPass
 
@@ -152,6 +164,37 @@ type Renderer struct {
 	envBRDF              gpu.Texture
 	envBRDFComputed      bool
 	envBackgroundPass    *postprocess.FullscreenPass
+
+	// sceneCopy is the opaque scene, copied after it is drawn and before the transparent
+	// pass, with a chain of ever blurrier levels below it. Materials that show what is
+	// behind them — glass, bending and blurring it — read it there. They cannot read the
+	// scene image itself, which they are drawing into: a draw sampling its own target is
+	// undefined, and they read pixels other draws in the same pass may be writing.
+	//
+	// It is made the frame's size on first use, and again after configure changes the size.
+	// The passes that make it are built with the other compute pipelines, and the sampler
+	// it is read with on first use.
+	//
+	// TODO: take it at half resolution. Refraction reads it blurred by roughness, so only a
+	// smooth pane magnifying what is behind it shows full resolution; half would cut it from
+	// about 22 MB at 1080p to 6, and its copy's cost by four. Measure a smooth thin pane
+	// first.
+	//
+	// TODO: share its memory. It lives from the copy to the end of the transparent pass;
+	// postColor, bloom's chain and fxaaSource are used only after that, so one allocation
+	// could serve them — by hand, or by a small render-graph step assigning memory by
+	// lifetime.
+	//
+	// TODO: reflect from it. Screen-space reflections can read the previous frame's copy, as
+	// engines read last frame's colour: it exists before the opaque pass, so reflective
+	// opaque surfaces — shop windows — stay in that pass, and Frame.PreviousViewProj gives
+	// the reprojection. Undecided: the depth to trace against (a pass of its own after the
+	// depth prepass, last frame's depth, or a depth copy beside this one). Fall back to the
+	// environment where a ray leaves the screen.
+	sceneCopy            textures.WritableTexture
+	sceneCopySampler     gpu.Sampler
+	sceneCopyPipeline    gpu.Pipeline
+	sceneCopyMipPipeline gpu.Pipeline
 
 	// Volumetric fog: how finely it is simulated; the medium volume the inject pass writes
 	// and the fog volume the integrate pass accumulates from it, created when a scene
@@ -394,15 +437,15 @@ func (r *Renderer) configure(w, h uint32, format gpu.Format) {
 		r.sceneColor = postprocess.CreateImage(r.backend, w, h, "scene-color")
 	}
 
+	// The multisampled images are the frame's size and the scene's format; the next
+	// frame drawn with MSAA makes them again (see ensureMultisampledImages).
 	r.releaseMultisampledImages()
-	if r.isMSAAEnabled() {
-		r.createMultisampledImages()
-	}
 	// Ambient occlusion's images are the frame's size, and its darkening draws are built
 	// for the scene's format and sample count; the next frame that measures it makes
 	// both again.
 	r.releaseAmbientOcclusionImages()
 	r.releaseAmbientOcclusionPipelines()
+	r.releaseSceneCopy()
 	r.releaseFXAASource()
 	if r.isFXAAEnabled() {
 		r.fxaaSource = r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: w, Height: h,
@@ -424,15 +467,110 @@ func (r *Renderer) sceneFormat() gpu.Format {
 	return r.color
 }
 
-// createMultisampledImages creates the multisampled images the scene is drawn into with
-// MSAA. A pass resolves them into images the rest of the frame samples.
-func (r *Renderer) createMultisampledImages() {
+// resolvesOpaquePassEarly reports whether, with MSAA, the opaque pass resolves the
+// multisampled scene as it ends, so that everything after it draws one sample a pixel
+// and the multisampled images need not outlive it. Not when frame steps draw into the
+// scene after it: a step drawing behind the opaque scene, as a sky does, has to fill the
+// samples an edge left uncovered in its pixels, which are gone once resolved — the clear
+// colour would rim every silhouette. Those frames resolve once the scene is drawn, as
+// the environment's background never needs: it is drawn in the opaque pass itself.
+//
+// TODO: a stage where frame steps record draws into the still-open opaque pass, rather
+// than passes of their own, so that steps drawing backgrounds — the sky example's — no
+// longer force the late resolve and its stored multisampled images.
+func (r *Renderer) resolvesOpaquePassEarly() bool {
+	return r.isMSAAEnabled() && !r.hasFrameStepsAt(FrameStageAfterOpaque) && !r.hasFrameStepsAt(FrameStageAfterTransparent)
+}
+
+// prepareMultisampling readies the frame's multisampling: when it resolves the scene
+// (see resolvesOpaquePassEarly), what is built for the number of samples after the
+// opaque pass, and the multisampled images.
+func (r *Renderer) prepareMultisampling() {
+	early := r.resolvesOpaquePassEarly()
+	if early != r.resolvesOpaqueEarly {
+		r.releaseBackgroundPasses()
+		r.releaseAmbientOcclusionPipelines()
+		r.resolvesOpaqueEarly = early
+	}
+	if r.isMSAAEnabled() {
+		r.ensureMultisampledImages()
+	}
+}
+
+// ensureMultisampledImages creates the multisampled images the scene's passes draw into
+// with MSAA, unless they exist as this frame needs them. The colour is transient when
+// the opaque pass resolves it (see resolvesOpaquePassEarly), as then nothing after it
+// touches it. So is the depth, unless it has to outlive the opaque pass too: when the
+// depth prepass fills it, or frame steps test against it, before that pass, or ambient
+// occlusion reads its samples after it. What the frame needs may change from one frame
+// to the next, so it is checked every frame.
+func (r *Renderer) ensureMultisampledImages() {
+	isColorTransient := r.resolvesOpaqueEarly
+	isDepthTransient := r.resolvesOpaqueEarly && !r.depthPrepass && !r.hasFrameStepsAt(FrameStageAfterDepth) && !r.isAmbientOcclusionMeasured()
+	if r.multisampledColor.IsValid() && r.multisampledColorIsTransient == isColorTransient && r.multisampledDepthIsTransient == isDepthTransient {
+		return
+	}
+	r.releaseMultisampledImages()
+
+	// Kept, the images are sampled too: the scene copy reads the colour's samples, and
+	// ambient occlusion the depth's.
+	colorUsage, depthUsage := gpu.TextureRenderTarget|gpu.TextureSampled, gpu.TextureDepth|gpu.TextureSampled
+	if isColorTransient {
+		colorUsage = gpu.TextureRenderTarget | gpu.TextureTransient
+	}
+	if isDepthTransient {
+		depthUsage = gpu.TextureDepth | gpu.TextureTransient
+	}
 	r.multisampledColor = r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: r.width, Height: r.height,
-		Format: r.sceneFormat(), Usage: gpu.TextureRenderTarget, Samples: r.sceneSamples(), Label: "scene-color-multisampled"})
-	// The depth is sampled too: ambient occlusion reads its sample zero once the opaque
-	// scene is drawn, long before it is resolved.
+		Format: r.sceneFormat(), Usage: colorUsage, Samples: r.sceneSamples(), Label: "scene-color-multisampled"})
 	r.multisampledDepth = r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: r.width, Height: r.height,
-		Format: gpu.FormatDepth32F, Usage: gpu.TextureDepth | gpu.TextureSampled, Samples: r.sceneSamples(), Label: "depth-multisampled"})
+		Format: gpu.FormatDepth32F, Usage: depthUsage, Samples: r.sceneSamples(), Label: "depth-multisampled"})
+	r.multisampledColorIsTransient, r.multisampledDepthIsTransient = isColorTransient, isDepthTransient
+}
+
+// afterOpaqueSamples is how many samples a pixel the passes after the opaque pass draw
+// into: the scene's, unless the opaque pass resolved them (see resolvesOpaquePassEarly).
+func (r *Renderer) afterOpaqueSamples() uint8 {
+	if r.resolvesOpaqueEarly {
+		return 1
+	}
+	return r.sceneSamples()
+}
+
+// sceneColorAttachment is what the passes after the opaque pass draw colour into: the
+// multisampled image while it is not resolved, otherwise image — the scene image, or the
+// target — itself.
+func (r *Renderer) sceneColorAttachment(image gpu.Texture) gpu.Texture {
+	if r.isMSAAEnabled() && !r.resolvesOpaqueEarly {
+		return r.multisampledColor
+	}
+	return image
+}
+
+// sceneDepthAttachment is the depth the passes after the opaque pass test against: the
+// multisampled depth while it is not resolved, otherwise the depth everything after them
+// samples.
+func (r *Renderer) sceneDepthAttachment() gpu.Texture {
+	if r.isMSAAEnabled() && !r.resolvesOpaqueEarly {
+		return r.multisampledDepth
+	}
+	return r.depth
+}
+
+// occlusionDepth is the depth ambient occlusion reads, and how many samples a pixel it
+// holds: the multisampled depth with MSAA, whose first and last samples together give a
+// pixel's depth at its centre, as one sample cannot — so the opaque pass keeps it (see
+// ensureMultisampledImages) — otherwise the scene's.
+//
+// TODO: read the resolved depth instead, so the multisampled depth can stay memoryless
+// with ambient occlusion on. The resolve keeps sample 0, which is off the pixel's centre
+// and moved occlusion measurably (TestAmbientOcclusionMatchesWithMSAA: 0.527 against
+// 0.558); unprojecting it at the standard position of sample 0 would correct that.
+func (r *Renderer) occlusionDepth() (gpu.Texture, uint8) {
+	if r.isMSAAEnabled() {
+		return r.multisampledDepth, r.sceneSamples()
+	}
+	return r.depth, 1
 }
 
 // sceneSamples is how many samples per pixel the scene is drawn with: more than one
@@ -462,18 +600,20 @@ func (r *Renderer) releaseFXAASource() {
 	r.fxaaSource = gpu.Texture{}
 }
 
-// sceneColorAttachment is what the scene's passes draw colour into: the multisampled
-// image with MSAA, otherwise image — the scene image, or the target — itself.
-func (r *Renderer) sceneColorAttachment(image gpu.Texture) gpu.Texture {
+// opaqueColorAttachment is what the opaque pass draws colour into: the multisampled image
+// with MSAA, otherwise image — the scene image, or the target — itself. Every pass after
+// it draws into image.
+func (r *Renderer) opaqueColorAttachment(image gpu.Texture) gpu.Texture {
 	if r.isMSAAEnabled() {
 		return r.multisampledColor
 	}
 	return image
 }
 
-// sceneDepthAttachment is the depth the scene's passes draw and test against: the
-// multisampled depth with MSAA, otherwise the depth everything after them samples.
-func (r *Renderer) sceneDepthAttachment() gpu.Texture {
+// opaqueDepthAttachment is the depth the depth prepass and the opaque pass draw and test
+// against: the multisampled depth with MSAA, otherwise the depth everything after them
+// tests against and samples.
+func (r *Renderer) opaqueDepthAttachment() gpu.Texture {
 	if r.isMSAAEnabled() {
 		return r.multisampledDepth
 	}
@@ -1510,7 +1650,7 @@ func (r *Renderer) prepareLightClusters(p *scenes.FramePacket, st *renderState) 
 // every scene — are made here too.
 func (r *Renderer) prepareEnvironment(environment scenes.EnvironmentMapState, state *environmentState) {
 	if environment.Revision == 0 {
-		state.destroy(r.backend)
+		state.destroy()
 		return
 	}
 	r.ensureEnvironment(state)
@@ -1686,6 +1826,7 @@ func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture,
 	if r.hdr {
 		sceneImage = r.sceneColor
 	}
+	r.prepareMultisampling()
 	r.prepareStepFrame(st, views, sceneImage)
 	r.encodeFrameSteps(FrameStageStart, cmd)
 	r.encodeEnvironment(st, cmd)
@@ -1724,8 +1865,9 @@ func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture,
 	r.encodeFrameSteps(FrameStageAfterDepth, cmd)
 
 	// 5h. Shade. Without HDR that is the finished image.
-	darkening := r.occlusionDarkeningPassFor(r.hasTransparentPass(st))
-	r.encodeDrawingPass(st, views, depthFilled, darkening, sceneImage, cmd)
+	copiesScene := r.isSceneCopyNeeded(st)
+	darkening := r.occlusionDarkeningPassFor(r.hasTransparentPass(st), copiesScene)
+	r.encodeDrawingPass(st, views, depthFilled, darkening, copiesScene, sceneImage, cmd)
 
 	// The ambient occlusion view shows what this frame measured, in place of the frame:
 	// data, like the other views, and no more to be post-processed than they are.
@@ -1769,7 +1911,7 @@ func (r *Renderer) prepareStepFrame(st *renderState, views frameViews, image gpu
 		SceneDepth:       r.sceneDepthAttachment(),
 		SceneColor:       r.sceneColorAttachment(image),
 		SceneColorFormat: r.sceneFormat(),
-		SceneSamples:     r.sceneSamples(),
+		SceneSamples:     r.afterOpaqueSamples(),
 		Backend:          r.backend,
 		LinearSampler:    r.ensureLinearSampler(),
 	}
@@ -1799,6 +1941,11 @@ func (r *Renderer) encodeFrameSteps(stage FrameStage, cmd gpu.CommandBuffer) {
 	frame := r.stepFrame
 	if stage < FrameStageAfterDepth {
 		frame.SceneDepth = gpu.Texture{}
+	}
+	// Until the opaque pass resolves it, the depth is the multisampled one, with MSAA.
+	if stage == FrameStageAfterDepth {
+		frame.SceneDepth = r.opaqueDepthAttachment()
+		frame.SceneSamples = r.sceneSamples()
 	}
 	if stage < FrameStageAfterOpaque {
 		frame.SceneColor = gpu.Texture{}
@@ -1836,7 +1983,7 @@ func (r *Renderer) encodeEnvironment(st *renderState, cmd gpu.CommandBuffer) {
 		width, height := uint32(environmentRadianceWidth)>>mip, uint32(environmentRadianceHeight)>>mip
 		prefilter := envPrefilterRoot{
 			source:        environment.Texture,
-			target:        st.environment.mipViews[mip].Index,
+			target:        st.environment.radiance.Mips[mip].Index,
 			sampler:       sampler,
 			blurRoughness: environmentMipBlurs[mip],
 			size:          [2]uint32{width, height},
@@ -1844,7 +1991,7 @@ func (r *Renderer) encodeEnvironment(st *renderState, cmd gpu.CommandBuffer) {
 		if mip > 0 {
 			// Each blurred mip reads the one before it, written by the dispatch before.
 			cmd.Barrier(gpu.StageCompute, gpu.StageCompute, 0)
-			prefilter.source = st.environment.radiance.Index
+			prefilter.source = st.environment.radiance.Index()
 		}
 		cmd.Dispatch(utils.ToBytes(&prefilter), (width+7)/8, (height+7)/8, 1)
 	}
@@ -2097,10 +2244,10 @@ func (r *Renderer) drawShadowCasters(v view, st *renderState, cmd gpu.CommandBuf
 	root := r.positionRoot(v, st)
 	maskedRoot := r.maskedDepthRoot(v, st)
 	maskedRoot.isShadowPass = 1
-	for first, count := range maskSpans(st.layout.batches) {
+	for first, count := range shadowMaskSpans(st.layout.batches) {
 		b := &st.layout.batches[first]
 		offset := uint64(first) * uint64(indirectSize)
-		if !b.isMasked {
+		if !b.hasShadowMask() {
 			cmd.SetPipeline(r.shadowPipeline)
 			cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, v.cull.indirectBuf, offset, uint32(count), indirectSize)
 			continue
@@ -2235,7 +2382,7 @@ func (r *Renderer) encodeDepthPrepass(st *renderState, main view, cmd gpu.Comman
 
 	r.profiler.beginPass(GPUPassPrepass, cmd)
 	cmd.BeginRenderPass(gpu.RenderTargets{
-		Depth: &gpu.DepthAttachment{Texture: r.sceneDepthAttachment(), Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: 0.0},
+		Depth: &gpu.DepthAttachment{Texture: r.opaqueDepthAttachment(), Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: 0.0},
 	})
 	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
 	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
@@ -2281,12 +2428,13 @@ func (r *Renderer) encodeDepthPrepass(st *renderState, main view, cmd gpu.Comman
 // encodeDrawingPass shades the scene into image — the HDR scene image, or the target
 // itself — in two render passes: the opaque batches, then the blended batches and the
 // particles over them. Two rather than one so that the frame steps needing the
-// finished opaque scene — a sky drawn behind it, a copy of it for refraction — run in
-// between.
+// finished opaque scene — a sky drawn behind it — run in between, and, with
+// copiesScene, the copy of it refractive materials read (see sceneCopy), taken once
+// everything but the transparent pass is drawn.
 //
 // darkening is the pass ambient occlusion darkens the scene in (see
 // occlusionDarkeningPassFor).
-func (r *Renderer) encodeDrawingPass(st *renderState, views frameViews, depthFilled bool, darkening occlusionDarkeningPass, image gpu.Texture, cmd gpu.CommandBuffer) {
+func (r *Renderer) encodeDrawingPass(st *renderState, views frameViews, depthFilled bool, darkening occlusionDarkeningPass, copiesScene bool, image gpu.Texture, cmd gpu.CommandBuffer) {
 	opaque, transparent := splitByBlend(st.layout.batches)
 	hasTransparentPass := r.hasTransparentPass(st)
 
@@ -2296,20 +2444,23 @@ func (r *Renderer) encodeDrawingPass(st *renderState, views frameViews, depthFil
 
 	r.profiler.beginPass(GPUPassAmbientOcclusion, cmd)
 	r.encodeAmbientOcclusion(views, cmd)
+	r.encodeOpaqueDepthResolve(cmd)
 	if darkening == darkeningInOwnPass {
 		r.encodeOcclusionDarkening(image, cmd)
 	}
 	r.profiler.endPass(GPUPassAmbientOcclusion, cmd)
 
 	r.profiler.beginPass(GPUPassTransparent, cmd)
-	r.encodeEnvironmentBackground(image, cmd)
 	r.encodeFrameSteps(FrameStageAfterOpaque, cmd)
 	r.encodeFogBackground(image, cmd)
+	if copiesScene {
+		r.encodeSceneCopy(image, cmd)
+	}
 	if hasTransparentPass {
-		r.encodeTransparentPass(transparent, st, views, darkening == darkeningInTransparentPass, image, cmd)
+		r.encodeTransparentPass(transparent, st, views, darkening == darkeningInTransparentPass, copiesScene, image, cmd)
 	}
 	r.encodeFrameSteps(FrameStageAfterTransparent, cmd)
-	r.encodeSceneResolve(image, darkening == darkeningInResolvePass, cmd)
+	r.encodeSceneResolve(image, cmd)
 	r.profiler.endPass(GPUPassTransparent, cmd)
 }
 
@@ -2320,18 +2471,34 @@ func (r *Renderer) hasTransparentPass(st *renderState) bool {
 	return !transparent.isEmpty() || len(r.frame.Particles.Data) > 0
 }
 
-// encodeOpaquePass clears image and draws the opaque batches into it. It clears depth
-// unless the prepass already filled it.
+// encodeOpaquePass clears image and draws the opaque batches into it, then the
+// environment behind them. It clears depth unless the prepass already filled it.
+//
+// With MSAA it draws into the multisampled images. When it can (see
+// resolvesOpaquePassEarly) it resolves them into image and the scene's depth as it
+// ends, so that everything after it draws into and reads one sample a pixel, and the
+// multisampled images need not outlive it. Blended surfaces are drawn without MSAA in
+// return; the opaque scene's edges, resolved already, keep theirs. With ambient
+// occlusion it keeps the multisampled depth instead, for occlusion to read, and a pass
+// of its own resolves it after (see encodeOpaqueDepthResolve).
+//
+// TODO: soften blended surfaces' edges in frames that resolve early, which draw them one
+// sample a pixel — FXAA after them would.
 func (r *Renderer) encodeOpaquePass(batches batchRange, st *renderState, views frameViews, depthFilled bool, image gpu.Texture, cmd gpu.CommandBuffer) {
 	depthLoad := gpu.LoadClear
 	if depthFilled {
 		depthLoad = gpu.LoadKeep
 	}
+	color := gpu.ColorAttachment{Texture: r.opaqueColorAttachment(image), Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: [4]float32(r.clear)}
+	depth := gpu.DepthAttachment{Texture: r.opaqueDepthAttachment(), Load: depthLoad, Store: gpu.StoreKeep, Clear: 0.0}
+	if r.resolvesOpaqueEarly {
+		color.Store, color.ResolveTexture = gpu.StoreDontCare, image
+		if !r.isAmbientOcclusionMeasured() {
+			depth.Store, depth.ResolveTexture = gpu.StoreDontCare, r.depth
+		}
+	}
 
-	cmd.BeginRenderPass(gpu.RenderTargets{
-		Color: []gpu.ColorAttachment{{Texture: r.sceneColorAttachment(image), Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: [4]float32(r.clear)}},
-		Depth: &gpu.DepthAttachment{Texture: r.sceneDepthAttachment(), Load: depthLoad, Store: gpu.StoreKeep, Clear: 0.0},
-	})
+	cmd.BeginRenderPass(gpu.RenderTargets{Color: []gpu.ColorAttachment{color}, Depth: &depth})
 	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
 	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
 
@@ -2339,8 +2506,23 @@ func (r *Renderer) encodeOpaquePass(batches batchRange, st *renderState, views f
 	if r.ambientOcclusionEnabled {
 		root.directShareInAlpha = 1
 	}
-	r.drawBatches(batches, root, st, views, cmd)
+	r.drawBatches(batches, root, r.sceneSamples(), st, views, cmd)
+	r.drawEnvironmentBackground(image, cmd)
 
+	cmd.EndRenderPass()
+}
+
+// encodeOpaqueDepthResolve resolves the multisampled depth into the scene's, for a frame
+// whose opaque pass resolved its colour as it ended but kept its depth for ambient
+// occlusion to read (see encodeOpaquePass).
+func (r *Renderer) encodeOpaqueDepthResolve(cmd gpu.CommandBuffer) {
+	if !r.resolvesOpaqueEarly || !r.isAmbientOcclusionMeasured() {
+		return
+	}
+	cmd.Barrier(gpu.StageCompute|gpu.StageDepth, gpu.StageDepth, 0)
+	cmd.BeginRenderPass(gpu.RenderTargets{
+		Depth: &gpu.DepthAttachment{Texture: r.multisampledDepth, Load: gpu.LoadKeep, Store: gpu.StoreDontCare, ResolveTexture: r.depth},
+	})
 	cmd.EndRenderPass()
 }
 
@@ -2408,14 +2590,14 @@ func (r *Renderer) ensureAmbientOcclusionPipelines() {
 	}
 	// alpha = k − d·k: the share k of the indirect light to take away, of the share
 	// 1 − d of the colour that is indirect. The colour is left alone.
-	r.occludedSharePipeline = apply(r.sceneFormat(), gpu.FormatDepth32F, r.sceneSamples(), gpu.BlendState{
+	r.occludedSharePipeline = apply(r.sceneFormat(), gpu.FormatDepth32F, r.afterOpaqueSamples(), gpu.BlendState{
 		Enable:    true,
 		ColorOp:   gpu.BlendFactorOp{Src: gpu.BlendZero, Dst: gpu.BlendOne, Op: gpu.BlendAdd},
 		AlphaOp:   gpu.BlendFactorOp{Src: gpu.BlendOne, Dst: gpu.BlendSrcAlpha, Op: gpu.BlendSubtract},
 		WriteMask: 1 << 3,
 	}, "occlusion-occluded-share")
 	// colour × (1 − alpha), and alpha back to the 1 an opaque surface has.
-	r.occlusionDarkenPipeline = apply(r.sceneFormat(), gpu.FormatDepth32F, r.sceneSamples(), gpu.BlendState{
+	r.occlusionDarkenPipeline = apply(r.sceneFormat(), gpu.FormatDepth32F, r.afterOpaqueSamples(), gpu.BlendState{
 		Enable:  true,
 		ColorOp: gpu.BlendFactorOp{Src: gpu.BlendZero, Dst: gpu.BlendOneMinusDstAlpha, Op: gpu.BlendAdd},
 		AlphaOp: gpu.BlendFactorOp{Src: gpu.BlendOne, Dst: gpu.BlendZero, Op: gpu.BlendAdd},
@@ -2436,6 +2618,9 @@ func (r *Renderer) encodeVBAO(views frameViews, cmd gpu.CommandBuffer) {
 // ensureVBAOImages creates the images VBAO measures in, for the frame's size and the
 // settings' resolution, unless they exist. They are released with ASSAO's (see
 // releaseAmbientOcclusionImages).
+//
+// TODO: drop the full-resolution upsampled image (about 8 MB at 1080p) by upsampling
+// where the darkening reads the occlusion.
 func (r *Renderer) ensureVBAOImages() {
 	if r.vbaoImages.isCreated() {
 		return
@@ -2446,12 +2631,10 @@ func (r *Renderer) ensureVBAOImages() {
 	mips := min(maxDepthChainMips, bits.Len32(max(width, height)))
 	// 32-bit, as the VBAO pass reconstructs normals from neighbouring depths: XeGTAO
 	// found 16-bit depths visibly degrade them.
-	images.depthChain = r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: width, Height: height,
-		Mips: uint32(mips), Format: gpu.FormatR32F, Usage: gpu.TextureSampled | gpu.TextureStorage, Label: "occlusion-depth-chain"})
-	images.depthChainLevels = make([]gpu.Texture, mips)
-	for level := range images.depthChainLevels {
-		images.depthChainLevels[level] = r.backend.TextureView(images.depthChain, gpu.Texture2D, uint32(level), 1, 0, 1)
-	}
+	images.depthChain = r.TextureStore.CreateWritable(textures.WritableConfig{
+		Kind: gpu.Texture2D, Width: width, Height: height, Mips: uint32(mips),
+		Format: gpu.FormatR32F, Label: "occlusion-depth-chain",
+	})
 
 	occlusionImage := func(label string) gpu.Texture {
 		return r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: width, Height: height,
@@ -2470,12 +2653,13 @@ func (r *Renderer) ensureVBAOImages() {
 // each level after from the one before.
 func (r *Renderer) encodeVBAODepthChain(views frameViews, cmd gpu.CommandBuffer) {
 	images := &r.vbaoImages
+	occlusionDepth, occlusionSamples := r.occlusionDepth()
 	fullSize := r.frameSize()
 	root := vbaoDepthRoot{
 		depthUnprojection: depthUnprojection(views.projection),
-		depth:             r.sceneDepthAttachment().Index,
-		depthSamples:      uint32(r.sceneSamples()),
-		target:            images.depthChainLevels[0].Index,
+		depth:             occlusionDepth.Index,
+		depthSamples:      uint32(occlusionSamples),
+		target:            images.depthChain.Mips[0].Index,
 		topMip:            images.topMip,
 		fullSize:          fullSize,
 	}
@@ -2484,13 +2668,13 @@ func (r *Renderer) encodeVBAODepthChain(views frameViews, cmd gpu.CommandBuffer)
 	cmd.Dispatch(utils.ToBytes(&root), occlusionWorkgroupCount(width), occlusionWorkgroupCount(height), 1)
 
 	cmd.SetPipeline(r.vbaoDepthMipPipeline)
-	for level := 1; level < len(images.depthChainLevels); level++ {
+	for level := 1; level < len(images.depthChain.Mips); level++ {
 		// Each level reads the one the dispatch before wrote.
 		cmd.Barrier(gpu.StageCompute, gpu.StageCompute, 0)
 		mip := int(images.topMip) + level
 		mipRoot := vbaoDepthMipRoot{
-			chain:    images.depthChain.Index,
-			target:   images.depthChainLevels[level].Index,
+			chain:    images.depthChain.Index(),
+			target:   images.depthChain.Mips[level].Index,
 			mip:      uint32(mip),
 			topMip:   images.topMip,
 			fullSize: fullSize,
@@ -2510,8 +2694,8 @@ func (r *Renderer) encodeVBAOSlices(views frameViews, cmd gpu.CommandBuffer) {
 	root := vbaoSlicesRoot{
 		pixelRay:       pixelRay,
 		pixelRayOrigin: pixelRayOrigin,
-		chain:          images.depthChain.Index,
-		chainMips:      uint32(len(images.depthChainLevels)),
+		chain:          images.depthChain.Index(),
+		chainMips:      uint32(len(images.depthChain.Mips)),
 		topMip:         images.topMip,
 		target:         images.occlusion.Index,
 		fullSize:       r.frameSize(),
@@ -2552,16 +2736,17 @@ func (r *Renderer) encodeVBAODenoise(cmd gpu.CommandBuffer) {
 // measured at less.
 func (r *Renderer) encodeVBAOUpsample(views frameViews, cmd gpu.CommandBuffer) {
 	images := &r.vbaoImages
+	occlusionDepth, occlusionSamples := r.occlusionDepth()
 	if !images.upsampled.IsValid() {
 		return
 	}
 	cmd.Barrier(gpu.StageCompute, gpu.StageCompute, 0)
 	root := vbaoUpsampleRoot{
 		depthUnprojection: depthUnprojection(views.projection),
-		depth:             r.sceneDepthAttachment().Index,
-		depthSamples:      uint32(r.sceneSamples()),
+		depth:             occlusionDepth.Index,
+		depthSamples:      uint32(occlusionSamples),
 		occlusion:         images.occlusion.Index,
-		chain:             images.depthChain.Index,
+		chain:             images.depthChain.Index(),
 		target:            images.upsampled.Index,
 		topMip:            images.topMip,
 		fullSize:          r.frameSize(),
@@ -2584,11 +2769,12 @@ func (r *Renderer) encodeASSAO(views frameViews, cmd gpu.CommandBuffer) {
 // depth.
 func (r *Renderer) encodeASSAODepth(views frameViews, cmd gpu.CommandBuffer) {
 	images := &r.assaoImages
+	occlusionDepth, occlusionSamples := r.occlusionDepth()
 	width, height := r.assaoInterleavedSize()
 	root := assaoDepthRoot{
 		depthUnprojection: depthUnprojection(views.projection),
-		depth:             r.sceneDepthAttachment().Index,
-		depthSamples:      uint32(r.sceneSamples()),
+		depth:             occlusionDepth.Index,
+		depthSamples:      uint32(occlusionSamples),
 		stride:            images.stride,
 		targets:           indices(images.depth),
 		interleavedSize:   [2]int32{int32(width), int32(height)},
@@ -2690,13 +2876,12 @@ func (r *Renderer) assaoInterleavedSize() (width, height uint32) {
 }
 
 // occlusionDarkeningPassFor picks the pass this frame darkens the scene in, given
-// whether it has a transparent pass to draw.
+// whether it has a transparent pass to draw and copies the scene before it.
 //
-// A pass of its own costs a load and a store of the whole scene image — of all its
-// samples, with MSAA, which on a phone-sized frame is the most expensive part of ambient
-// occlusion — so it joins a pass the frame runs anyway when it can: the transparent
-// pass, or with MSAA the resolve pass. The backgrounds drawn before either cover only
-// where no surface is, and nothing is occluded there. Frame steps, though, are told the
+// A pass of its own costs a load and a store of the whole scene image, which on a
+// phone-sized frame is the most expensive part of ambient occlusion — so it joins a pass
+// the frame runs anyway when it can: the transparent pass. The backgrounds drawn before
+// it cover only where no surface is, and nothing is occluded there. Frame steps, though, are told the
 // opaque scene is finished, occlusion included, so it cannot move past any.
 //
 // Best of all is tone mapping, which reads every pixel of the scene anyway and can
@@ -2705,16 +2890,22 @@ func (r *Renderer) assaoInterleavedSize() (width, height uint32) {
 // to reach it untouched, and so nothing drawn over the scene in between — no
 // transparent pass, no frame step after it and no post-processing — and one value per
 // pixel, so no MSAA, whose samples the resolve averages first.
-func (r *Renderer) occlusionDarkeningPassFor(hasTransparentPass bool) occlusionDarkeningPass {
+//
+// A frame that copies the scene for refraction darkens it in a pass of its own too:
+// what glass shows of the scene behind it has to be darkened like the rest of it.
+//
+// TODO: darken in tone mapping with MSAA too, in frames that resolve early (see
+// resolvesOpaquePassEarly): the scene holds one value a pixel from the end of the opaque
+// pass. The resolve averages the direct share in alpha along with the colour, so edge
+// pixels darken by an averaged share; measure that error first.
+func (r *Renderer) occlusionDarkeningPassFor(hasTransparentPass, copiesScene bool) occlusionDarkeningPass {
 	switch {
 	case !r.ambientOcclusionEnabled:
 		return darkeningNotDrawn
-	case r.hasFrameStepsAt(FrameStageAfterOpaque):
+	case r.hasFrameStepsAt(FrameStageAfterOpaque) || copiesScene:
 		return darkeningInOwnPass
 	case hasTransparentPass:
 		return darkeningInTransparentPass
-	case r.isMSAAEnabled() && !r.hasFrameStepsAt(FrameStageAfterTransparent):
-		return darkeningInResolvePass
 	case r.hdr && !r.isMSAAEnabled() && !r.hasFrameStepsAt(FrameStageAfterTransparent) && len(r.postProcessing) == 0:
 		return darkeningInToneMapping
 	default:
@@ -2813,10 +3004,8 @@ func (r *Renderer) releaseVBAOImages() {
 	if !images.isCreated() {
 		return
 	}
-	for _, view := range images.depthChainLevels {
-		r.backend.DestroyTexture(view)
-	}
-	for _, t := range []gpu.Texture{images.depthChain, images.occlusion, images.denoiseScratch, images.upsampled} {
+	images.depthChain.Release()
+	for _, t := range []gpu.Texture{images.occlusion, images.denoiseScratch, images.upsampled} {
 		if t.IsValid() {
 			r.backend.DestroyTexture(t)
 		}
@@ -2865,19 +3054,20 @@ func (r *Renderer) frameMipSize(mip int) (width, height uint32) {
 	return max(r.width>>mip, 1), max(r.height>>mip, 1)
 }
 
-// encodeEnvironmentBackground draws the scene's environment behind it, when it asks to
+// drawEnvironmentBackground draws the scene's environment behind it, when it asks to
 // be: the image itself, in the direction each pixel looks, wherever no geometry is. It
-// runs straight after the opaque pass, so that the steps after it — a sky — and the
-// volumetric fog's background are drawn over it.
-func (r *Renderer) encodeEnvironmentBackground(image gpu.Texture, cmd gpu.CommandBuffer) {
+// is the opaque pass's last draw, testing depth sample by sample, so that with MSAA it
+// fills exactly the samples an edge left uncovered in its pixels before they are
+// resolved; drawn after a resolve, the clear colour would rim every silhouette. The
+// steps after the opaque pass — a sky — and the volumetric fog's background are drawn
+// over it.
+func (r *Renderer) drawEnvironmentBackground(image gpu.Texture, cmd gpu.CommandBuffer) {
 	environment := r.frame.Environment.Map
 	if environment.Revision == 0 || !environment.Background {
 		return
 	}
 
 	pass := r.ensureEnvironmentBackgroundPass()
-	// It tests against the depth the opaque pass wrote, and draws over what it cleared.
-	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth, gpu.StageDepth|gpu.StageColorOutput, 0)
 	frame := r.postProcessingFrame(image, image)
 	params := envBackgroundParams{
 		inverseViewProj: r.stepFrame.InverseViewProj,
@@ -2885,7 +3075,7 @@ func (r *Renderer) encodeEnvironmentBackground(image gpu.Texture, cmd gpu.Comman
 		intensity:       environment.Intensity,
 		rotation:        environment.Rotation,
 	}
-	pass.DrawWithDepth(r.sceneColorAttachment(image), r.sceneDepthAttachment(), r.width, r.height, gpu.LoadKeep, frame.Root(image, r.width, r.height).With(utils.ToBytes(&params)), cmd)
+	pass.DrawInPass(frame.Root(image, r.width, r.height).With(utils.ToBytes(&params)), cmd)
 }
 
 // encodeFogBackground fogs the pixels no geometry covers, for a scene whose fog is
@@ -2912,13 +3102,129 @@ func (r *Renderer) encodeFogBackground(image gpu.Texture, cmd gpu.CommandBuffer)
 	pass.DrawWithDepth(r.sceneColorAttachment(image), r.sceneDepthAttachment(), r.width, r.height, gpu.LoadKeep, frame.Root(image, r.width, r.height).With(utils.ToBytes(&params)), cmd)
 }
 
+// noSceneCopy is the draw root's sceneCopy when there is none to read: outside the
+// transparent pass, or in a frame that does not copy the scene.
+const noSceneCopy uint32 = 0xFFFFFFFF
+
+// sceneCopyRoot matches PC in scene_copy.comp.glsl.
+type sceneCopyRoot struct {
+	scene   uint32
+	samples uint32
+	target  uint32
+	_       uint32
+	size    [2]uint32
+}
+
+// sceneCopyMipRoot matches PC in scene_copy_mip.comp.glsl.
+type sceneCopyMipRoot struct {
+	copy      uint32
+	sampler   uint32
+	target    uint32
+	sourceLod float32
+	size      [2]uint32
+}
+
+// isSceneCopyNeeded reports whether this frame copies the opaque scene: when it draws a
+// blended batch that lets light through, the only kind that reads the copy, and the
+// scene can be read at all. Other blended surfaces — a decal, smoke — never need it, and
+// the copy, a full-screen read and a chain of halvings, is far from free. Without HDR or
+// FXAA the scene is drawn into the target itself, which cannot be sampled — though a
+// multisampled scene the opaque pass does not resolve can be (see
+// resolvesOpaquePassEarly); otherwise glass shows what is behind it unbent (see
+// scene_pbr.frag.glsl).
+//
+// TODO: refract without HDR or FXAA. In frames that need the copy, draw the scene into an
+// intermediate image in the target's format — the pipelines are built for that format —
+// and copy it into the target at the end with a full-screen pass, as FXAA's source
+// works already; the two can share the image.
+func (r *Renderer) isSceneCopyNeeded(st *renderState) bool {
+	_, transparent := splitByBlend(st.layout.batches)
+	if !slices.ContainsFunc(st.layout.batches[transparent.first:transparent.end], func(b batch) bool {
+		return b.isTransmissive
+	}) {
+		return false
+	}
+	return r.hdr || r.isFXAAEnabled() || (r.isMSAAEnabled() && !r.resolvesOpaqueEarly)
+}
+
+// encodeSceneCopy copies the opaque scene in image into the scene copy, then halves it
+// level by level down to a single texel.
+func (r *Renderer) encodeSceneCopy(image gpu.Texture, cmd gpu.CommandBuffer) {
+	r.ensureSceneCopy()
+	sampler := r.ensureSceneCopySampler()
+
+	// The copy reads what the passes before it drew.
+	cmd.Barrier(gpu.StageColorOutput, gpu.StageCompute, 0)
+	copyRoot := sceneCopyRoot{
+		scene:   r.sceneColorAttachment(image).Index,
+		samples: uint32(r.afterOpaqueSamples()),
+		target:  r.sceneCopy.Mips[0].Index,
+		size:    [2]uint32{r.width, r.height},
+	}
+	cmd.SetPipeline(r.sceneCopyPipeline)
+	cmd.Dispatch(utils.ToBytes(&copyRoot), (r.width+7)/8, (r.height+7)/8, 1)
+
+	cmd.SetPipeline(r.sceneCopyMipPipeline)
+	width, height := r.width, r.height
+	for level := 1; level < len(r.sceneCopy.Mips); level++ {
+		width, height = max(width/2, 1), max(height/2, 1)
+		// Each level reads the one before it, written by the dispatch before.
+		cmd.Barrier(gpu.StageCompute, gpu.StageCompute, 0)
+		mipRoot := sceneCopyMipRoot{
+			copy:      r.sceneCopy.Index(),
+			sampler:   sampler.Index,
+			target:    r.sceneCopy.Mips[level].Index,
+			sourceLod: float32(level - 1),
+			size:      [2]uint32{width, height},
+		}
+		cmd.Dispatch(utils.ToBytes(&mipRoot), (width+7)/8, (height+7)/8, 1)
+	}
+
+	// The transparent pass samples the copy, and draws again into the scene it was read
+	// from.
+	cmd.Barrier(gpu.StageCompute, gpu.StageFragment|gpu.StageColorOutput, 0)
+}
+
+// ensureSceneCopy creates the scene copy for the frame's size, unless it exists.
+func (r *Renderer) ensureSceneCopy() {
+	if r.sceneCopy.IsValid() {
+		return
+	}
+	r.sceneCopy = r.TextureStore.CreateWritable(textures.WritableConfig{
+		Kind: gpu.Texture2D, Width: r.width, Height: r.height,
+		Mips:   uint32(bits.Len32(max(r.width, r.height))),
+		Format: gpu.FormatRGBA16F, Label: "scene-copy",
+	})
+}
+
+// releaseSceneCopy frees the scene copy; the next frame that copies the scene makes it
+// again. configure calls it when the frame's size changes.
+func (r *Renderer) releaseSceneCopy() {
+	r.sceneCopy.Release()
+	r.sceneCopy = textures.WritableTexture{}
+}
+
+// ensureSceneCopySampler creates the sampler the scene copy is read with, on first use:
+// linear between texels and between levels, so blur grows smoothly with roughness, and
+// clamped, so a refraction bent off the screen takes its edge.
+func (r *Renderer) ensureSceneCopySampler() gpu.Sampler {
+	if !r.sceneCopySampler.IsValid() {
+		r.sceneCopySampler = r.backend.CreateSampler(gpu.SamplerDescriptor{
+			MinLinear: true, MagLinear: true, MipLinear: true,
+			AddressU: gpu.AddressClamp, AddressV: gpu.AddressClamp, AddressW: gpu.AddressClamp,
+			Label: "scene-copy",
+		})
+	}
+	return r.sceneCopySampler
+}
+
 // encodeTransparentPass draws the blended batches, back to front, then the particles,
 // over the opaque scene in image, testing against the depth it left — first darkening the
 // opaque scene by its occlusion, with darkensOcclusion. A frame with neither batches nor
 // particles has no transparent pass: ending one render pass and starting another stores
 // both attachments and loads them back, which is a cost for nothing when nothing is
 // drawn.
-func (r *Renderer) encodeTransparentPass(batches batchRange, st *renderState, views frameViews, darkensOcclusion bool, image gpu.Texture, cmd gpu.CommandBuffer) {
+func (r *Renderer) encodeTransparentPass(batches batchRange, st *renderState, views frameViews, darkensOcclusion, hasSceneCopy bool, image gpu.Texture, cmd gpu.CommandBuffer) {
 	// Blending reads what the opaque pass wrote, and the depth test its depth.
 	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth, gpu.StageColorOutput|gpu.StageDepth, 0)
 	cmd.BeginRenderPass(gpu.RenderTargets{
@@ -2931,7 +3237,7 @@ func (r *Renderer) encodeTransparentPass(batches batchRange, st *renderState, vi
 	if darkensOcclusion {
 		r.drawOcclusionDarkening(cmd)
 	}
-	r.drawBackToFront(batches, st, views, cmd)
+	r.drawBackToFront(batches, st, views, hasSceneCopy, cmd)
 	r.drawParticles(st, views, cmd)
 
 	cmd.EndRenderPass()
@@ -2946,10 +3252,10 @@ func (r *Renderer) encodeTransparentPass(batches batchRange, st *renderState, vi
 // transparent pass is skipped when it has nothing to draw, and frame steps may come after
 // it. And the only place either is resolved, because a resolve has to be the samples'
 // last use (see gpu.ColorAttachment.ResolveTexture): a pass that kept the depth for the
-// passes after it could not resolve it too. Nothing is drawn in it but, with
-// darkensOcclusion, the darkening by ambient occlusion, which it saves a pass of its own.
-func (r *Renderer) encodeSceneResolve(image gpu.Texture, darkensOcclusion bool, cmd gpu.CommandBuffer) {
-	if !r.isMSAAEnabled() {
+// passes after it could not resolve it too. It only runs for a frame whose opaque pass
+// does not resolve the scene as it ends (see resolvesOpaquePassEarly).
+func (r *Renderer) encodeSceneResolve(image gpu.Texture, cmd gpu.CommandBuffer) {
+	if !r.isMSAAEnabled() || r.resolvesOpaqueEarly {
 		return
 	}
 
@@ -2958,11 +3264,6 @@ func (r *Renderer) encodeSceneResolve(image gpu.Texture, darkensOcclusion bool, 
 		Color: []gpu.ColorAttachment{{Texture: r.multisampledColor, Load: gpu.LoadKeep, Store: gpu.StoreDontCare, ResolveTexture: image}},
 		Depth: &gpu.DepthAttachment{Texture: r.multisampledDepth, Load: gpu.LoadKeep, Store: gpu.StoreDontCare, ResolveTexture: r.depth},
 	})
-	if darkensOcclusion {
-		cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
-		cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
-		r.drawOcclusionDarkening(cmd)
-	}
 	cmd.EndRenderPass()
 }
 
@@ -2971,7 +3272,7 @@ func (r *Renderer) encodeSceneResolve(image gpu.Texture, darkensOcclusion bool, 
 // single DrawIndexedIndirect. Each
 // command's firstInstance is its region base, so gl_InstanceIndex indexes the compacted
 // visible buffer directly.
-func (r *Renderer) drawBatches(batches batchRange, root drawRoot, st *renderState, views frameViews, cmd gpu.CommandBuffer) {
+func (r *Renderer) drawBatches(batches batchRange, root drawRoot, samples uint8, st *renderState, views frameViews, cmd gpu.CommandBuffer) {
 	for offset, count := range rasterSpans(st.layout.batches[batches.first:batches.end]) {
 		first := batches.first + offset
 		b := &st.layout.batches[first]
@@ -2980,7 +3281,7 @@ func (r *Renderer) drawBatches(batches batchRange, root drawRoot, st *renderStat
 		if b.isMasked {
 			root.masks = b.pool.MasksAddr()
 		}
-		cmd.SetPipeline(r.drawPipelines[r.pipelineForPool(b.pool, b.cull, b.blend)])
+		cmd.SetPipeline(r.drawPipelines[r.pipelineForPool(b.pool, b.cull, b.blend, samples)])
 		cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, views.main.cull.indirectBuf, uint64(first)*uint64(indirectSize), uint32(count), indirectSize)
 	}
 }
@@ -2990,22 +3291,34 @@ func (r *Renderer) drawBatches(batches batchRange, root drawRoot, st *renderStat
 // frame, since the order changes whenever the camera or a mesh moves. The layout is
 // built once and never reordered; only the order the draws are issued in changes.
 //
-// TODO: a double-sided blended mesh overlaps itself — a jar's back wall is behind its
-// front wall, in the same draw — and which is drawn first is up to triangle order. Draw
-// such a batch twice, back faces first (cull front), then front faces (cull back).
-func (r *Renderer) drawBackToFront(batches batchRange, st *renderState, views frameViews, cmd gpu.CommandBuffer) {
+// A double-sided mesh overlaps itself — a jar's far wall is behind its near one, in the
+// same draw — and its triangles would blend in whatever order they are stored. So it is
+// drawn twice: its back faces, which face away and so are the far side of a closed
+// shape, then its front faces over them.
+func (r *Renderer) drawBackToFront(batches batchRange, st *renderState, views frameViews, hasSceneCopy bool, cmd gpu.CommandBuffer) {
 	st.backToFront = sortBackToFront(batches, &st.layout, &r.frame, views.eye, st.backToFront)
 
 	root := r.sceneRoot(st, views)
+	if hasSceneCopy {
+		root.sceneCopy, root.sceneCopySampler = r.sceneCopy.Index(), r.sceneCopySampler.Index
+	}
 	boundPipeline := ^uint32(0)
 	for _, entry := range st.backToFront {
 		b := &st.layout.batches[entry.batch]
-		if pipeline := r.pipelineForPool(b.pool, b.cull, b.blend); pipeline != boundPipeline {
-			cmd.SetPipeline(r.drawPipelines[pipeline])
-			boundPipeline = pipeline
-		}
 		root.materials = b.pool.RecordsAddr()
-		cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, views.main.cull.indirectBuf, uint64(entry.batch)*uint64(indirectSize), 1, indirectSize)
+		drawCulling := func(cull materials.CullMode) {
+			if pipeline := r.pipelineForPool(b.pool, cull, b.blend, r.afterOpaqueSamples()); pipeline != boundPipeline {
+				cmd.SetPipeline(r.drawPipelines[pipeline])
+				boundPipeline = pipeline
+			}
+			cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, views.main.cull.indirectBuf, uint64(entry.batch)*uint64(indirectSize), 1, indirectSize)
+		}
+		if b.cull == materials.CullNone {
+			drawCulling(materials.CullFront)
+			drawCulling(materials.CullBack)
+			continue
+		}
+		drawCulling(b.cull)
 	}
 }
 
@@ -3038,7 +3351,7 @@ func (r *Renderer) drawParticles(st *renderState, views frameViews, cmd gpu.Comm
 		if pp.Sort == scenes.ParticleSortBackToFront {
 			root.order = ps.orderBuf.Addr
 		}
-		pipeline := r.pipelineForPool(pool, pool.CullAt(pp.Material.Slot), pool.BlendAt(pp.Material.Slot))
+		pipeline := r.pipelineForPool(pool, pool.CullAt(pp.Material.Slot), pool.BlendAt(pp.Material.Slot), r.afterOpaqueSamples())
 		cmd.SetPipeline(r.drawPipelines[pipeline])
 		cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, ps.indirectBuf, 0, 1, indirectSize)
 	}
@@ -3304,6 +3617,7 @@ func (r *Renderer) sceneRoot(st *renderState, views frameViews) drawRoot {
 		eye:           glm.Vec4f{views.eye[0], views.eye[1], views.eye[2], 1},
 		shadowSampler: r.shadowSampler.Index,
 		time:          r.frame.Time,
+		sceneCopy:     noSceneCopy,
 	}
 }
 
@@ -3385,14 +3699,10 @@ func (r *Renderer) ensureEnvironment(e *environmentState) {
 	if e.radiance.IsValid() {
 		return
 	}
-	e.radiance = r.backend.CreateTexture(gpu.TextureDescriptor{
+	e.radiance = r.TextureStore.CreateWritable(textures.WritableConfig{
 		Kind: gpu.Texture2D, Width: environmentRadianceWidth, Height: environmentRadianceHeight,
-		Mips: environmentMips, Format: gpu.FormatRGBA16F,
-		Usage: gpu.TextureSampled | gpu.TextureStorage, Label: "environment-radiance",
+		Mips: environmentMips, Format: gpu.FormatRGBA16F, Label: "environment-radiance",
 	})
-	for mip := range uint32(environmentMips) {
-		e.mipViews[mip] = r.backend.TextureView(e.radiance, gpu.Texture2D, mip, 1, 0, 1)
-	}
 }
 
 // ensureEnvironmentSampler creates the sampler environment images are read with, on
@@ -3482,7 +3792,7 @@ func (r *Renderer) ensureFogBackgroundPass() *postprocess.FullscreenPass {
 	r.fogBackgroundPass = postprocess.NewFullscreenPass(r.backend, postprocess.FullscreenPassDescriptor{
 		Fragment:     shaders.ForBackend(r.backend, shaders.FogBackground),
 		Format:       r.sceneFormat(),
-		Samples:      r.sceneSamples(),
+		Samples:      r.afterOpaqueSamples(),
 		Blend:        []gpu.BlendState{{Enable: true, ColorOp: gpu.BlendFactorOp{Src: gpu.BlendSrcAlpha, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}, AlphaOp: gpu.BlendFactorOp{Src: gpu.BlendOne, Dst: gpu.BlendOneMinusSrcAlpha, Op: gpu.BlendAdd}}},
 		DepthFormat:  gpu.FormatDepth32F,
 		DepthCompare: gpu.CompareGreaterEqual,
@@ -3953,6 +4263,8 @@ func (r *Renderer) buildPipelines() {
 		r.backend.DestroyPipeline(r.particleSortKeysPipeline)
 		r.backend.DestroyPipeline(r.particleSortStepPipeline)
 		r.backend.DestroyPipeline(r.envPrefilterPipeline)
+		r.backend.DestroyPipeline(r.sceneCopyPipeline)
+		r.backend.DestroyPipeline(r.sceneCopyMipPipeline)
 		r.backend.DestroyPipeline(r.envBRDFPipeline)
 		r.backend.DestroyPipeline(r.fogInjectPipeline)
 		r.backend.DestroyPipeline(r.fogIntegratePipeline)
@@ -3975,6 +4287,8 @@ func (r *Renderer) buildPipelines() {
 	r.particleSortKeysPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleSortKeys), Entry: "main", Label: "particle-sort-keys"})
 	r.particleSortStepPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleSortStep), Entry: "main", Label: "particle-sort-step"})
 	r.envPrefilterPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.EnvPrefilter), Entry: "main", Label: "env-prefilter"})
+	r.sceneCopyPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.SceneCopy), Entry: "main", Label: "scene-copy"})
+	r.sceneCopyMipPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.SceneCopyMip), Entry: "main", Label: "scene-copy-mip"})
 	r.envBRDFPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.EnvBRDF), Entry: "main", Label: "env-brdf"})
 	r.fogInjectPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.FogInject), Entry: "main", Label: "fog-inject"})
 	r.fogIntegratePipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.FogIntegrate), Entry: "main", Label: "fog-integrate"})
@@ -4036,11 +4350,29 @@ func (r *Renderer) buildPipelines() {
 }
 
 // materialPipeline is a material's full pipeline identity: shaders + raster state.
+//
+// TODO: specialization constants, so that a pipeline compiles only the shader features
+// its materials use. The PBR shader is one shader for every material — a flag test per
+// map, and the whole glass path inline — and in the beach scene (examples/beachbench,
+// 2500x1400, MSAA 4x) the opaque pass went from 5.1 to 5.9 ms with the glass work,
+// though nothing there is glass: about 0.25 ms is the refraction code being present,
+// the rest not yet attributed. Steps: gamekit takes specialization values on
+// gpu.PipelineDescriptor (VkSpecializationInfo; Metal function constants, which
+// SPIRV-Cross makes of constant_id); this key gains a feature set, as do the pools'
+// tables in pipelineForPool; the glass path, which only blended pipelines run, is the
+// first constant. Profile the per-map flags before making any of them constants: each
+// splits batches, and a branch that is the same for a whole draw is cheap but for the
+// registers it holds. A pipeline created mid-frame compiles the driver's code and can
+// stall it, so cache them or create the likely ones ahead.
 type materialPipeline struct {
 	shaderHash       uint64 // cached (vertex,fragment) identity — the dedup key
 	vertex, fragment []byte // kept only to build the pipeline
 	cull             materials.CullMode
 	blend            materials.BlendMode
+	// samples is how many samples a pixel the pass drawing with it has: the scene's in
+	// the opaque pass, one after it (see encodeOpaquePass) — whatever the blend mode, as
+	// a particle material may be opaque, and is drawn in the transparent pass.
+	samples uint8
 }
 
 // buildDrawPipe creates a graphics pipeline for a material pipeline key against the
@@ -4073,7 +4405,7 @@ func (r *Renderer) buildDrawPipe(k materialPipeline) gpu.Pipeline {
 		// difference is which of two exactly-coplanar surfaces wins, where nothing was
 		// well defined to begin with.
 		DepthFormat: gpu.FormatDepth32F, DepthTest: true, DepthWrite: depthWrite, DepthCompare: gpu.CompareGreaterEqual,
-		Samples: r.sceneSamples(),
+		Samples: k.samples,
 		// Front faces are counter-clockwise, as glTF and the primitives wind them, for
 		// all the clip-space Y flip (see flipClipY). Measured, not reasoned: with
 		// FrontFaceCW set, CullBack culled a plane seen from above and drew it from
@@ -4140,46 +4472,54 @@ const pipelineUnresolved uint32 = 0xFFFFFFFF
 // values each, so the entire space is a fixed table indexed directly — no hashing, no
 // scan, no map — filled lazily because most pools use one or two of the cells.
 type poolPipelines struct {
-	table [3][4]uint32 // [cull][blend]
+	table [2][3][4]uint32 // [multisampled][cull][blend]
 }
 
 func newPoolPipelines() poolPipelines {
 	var pp poolPipelines
-	for c := range pp.table {
-		for b := range pp.table[c] {
-			pp.table[c][b] = pipelineUnresolved
+	for m := range pp.table {
+		for c := range pp.table[m] {
+			for b := range pp.table[m][c] {
+				pp.table[m][c][b] = pipelineUnresolved
+			}
 		}
 	}
 	return pp
 }
 
 // pipelineForPool resolves the draw pipeline for one material of a pool, given that
-// material's rasterization state.
+// material's rasterization state, for a pass of samples samples a pixel.
 //
 // The shaders come from the pool rather than the material because the pool is keyed by
 // those very shaders — a material cannot disagree with it, and so cannot ask for a
 // pipeline built out of SPIR-V its pool does not have.
-func (r *Renderer) pipelineForPool(p *materials.Pool, cull materials.CullMode, blend materials.BlendMode) uint32 {
+func (r *Renderer) pipelineForPool(p *materials.Pool, cull materials.CullMode, blend materials.BlendMode, samples uint8) uint32 {
 	for uint32(len(r.pools)) <= p.Index() {
 		r.pools = append(r.pools, newPoolPipelines())
 	}
 	pp := &r.pools[p.Index()]
+	// A pass is multisampled with the scene's samples, or not at all; one slot serves
+	// each.
+	multisampled := 0
+	if samples > 1 {
+		multisampled = 1
+	}
 
-	if id := pp.table[cull][blend]; id != pipelineUnresolved {
+	if id := pp.table[multisampled][cull][blend]; id != pipelineUnresolved {
 		return id
 	}
 	sh := p.Shader()
 	id := r.pipelineFor(materialPipeline{
 		shaderHash: p.Hash(), vertex: sh.Vertex, fragment: sh.Fragment,
-		cull: cull, blend: blend,
+		cull: cull, blend: blend, samples: max(samples, 1),
 	})
-	pp.table[cull][blend] = id
+	pp.table[multisampled][cull][blend] = id
 	return id
 }
 
 // sameKey compares two pipeline keys.
 func sameKey(a, b materialPipeline) bool {
-	return a.shaderHash == b.shaderHash && a.cull == b.cull && a.blend == b.blend
+	return a.shaderHash == b.shaderHash && a.cull == b.cull && a.blend == b.blend && a.samples == b.samples
 }
 
 // debugViewActive reports whether this frame draws a debug view instead of shading.
@@ -4556,7 +4896,7 @@ func (r *Renderer) releaseState(st *renderState) {
 	for _, ps := range st.particles {
 		ps.destroy(r.backend)
 	}
-	st.environment.destroy(r.backend)
+	st.environment.destroy()
 }
 
 // Destroy releases the renderer's GPU resources and the backend it owns.
@@ -4575,6 +4915,8 @@ func (r *Renderer) Destroy() {
 		r.backend.DestroyPipeline(r.particleSortKeysPipeline)
 		r.backend.DestroyPipeline(r.particleSortStepPipeline)
 		r.backend.DestroyPipeline(r.envPrefilterPipeline)
+		r.backend.DestroyPipeline(r.sceneCopyPipeline)
+		r.backend.DestroyPipeline(r.sceneCopyMipPipeline)
 		r.backend.DestroyPipeline(r.envBRDFPipeline)
 		r.backend.DestroyPipeline(r.fogInjectPipeline)
 		r.backend.DestroyPipeline(r.fogIntegratePipeline)
@@ -4618,6 +4960,10 @@ func (r *Renderer) Destroy() {
 	}
 	if r.envBackgroundPass != nil {
 		r.envBackgroundPass.Release()
+	}
+	r.releaseSceneCopy()
+	if r.sceneCopySampler.IsValid() {
+		r.backend.DestroySampler(r.sceneCopySampler)
 	}
 	if r.environmentSampler.IsValid() {
 		r.backend.DestroySampler(r.environmentSampler)

@@ -87,6 +87,12 @@ var metalOverlayVert []byte
 //go:embed build/overlay.frag.metalbin
 var metalOverlayFrag []byte
 
+//go:embed build/scene_copy.comp.metalbin
+var metalSceneCopy []byte
+
+//go:embed build/scene_copy_mip.comp.metalbin
+var metalSceneCopyMip []byte
+
 //go:embed build/env_prefilter.comp.metalbin
 var metalEnvPrefilter []byte
 
@@ -196,6 +202,8 @@ var metalVariants = []struct{ spirv, metal []byte }{
 	{PBRFragment, metalPBRFragment},
 	{OverlayVert, metalOverlayVert},
 	{OverlayFrag, metalOverlayFrag},
+	{SceneCopy, metalSceneCopy},
+	{SceneCopyMip, metalSceneCopyMip},
 	{EnvPrefilter, metalEnvPrefilter},
 	{EnvBRDF, metalEnvBRDF},
 	{EnvBackground, metalEnvBackground},

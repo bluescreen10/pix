@@ -81,24 +81,24 @@ type Frame struct {
 	// pixel. From FrameStageAfterDepth on a step may attach it read-only and depth-test
 	// against it; before that it is zero. A step must not write it.
 	//
-	// It can be sampled only when SceneSamples is 1. With MSAA the scene's depth is
-	// resolved to one sample per pixel only after the last stage — a resolve has to be
-	// the samples' last use, and the scene's passes go on testing against them — so a
-	// step that samples depth must check SceneSamples and do without. Post-processing
-	// always gets depth it can sample.
+	// At FrameStageAfterDepth it is the depth the opaque pass is about to draw over, which
+	// with MSAA is multisampled: it can then be tested against but not sampled. The opaque
+	// pass resolves it to one sample a pixel as it ends, so from FrameStageAfterOpaque on
+	// it can be sampled too. Post-processing always gets depth it can sample.
 	SceneDepth gpu.Texture
-	// SceneColor is the image the scene is shaded into, in SceneColorFormat, with
-	// SceneSamples samples per pixel; from FrameStageAfterOpaque on a step may draw into
-	// it, and before that it is zero. With HDR on it holds linear, unclamped light; with
-	// HDR off, light encoded for display. Without MSAA it is the image post-processing
-	// reads — or with HDR off the render target itself; with MSAA it is resolved into
-	// that image once the scene is drawn.
+	// SceneColor is the image the scene is shaded into, in SceneColorFormat, one sample a
+	// pixel; from FrameStageAfterOpaque on a step may draw into it, and before that it is
+	// zero. With HDR on it holds linear, unclamped light; with HDR off, light encoded for
+	// display. It is the image post-processing reads — or with HDR off the render target
+	// itself.
 	SceneColor       gpu.Texture
 	SceneColorFormat gpu.Format
-	// SceneSamples is how many samples per pixel SceneColor and SceneDepth hold: more
-	// than one while anti-aliasing by MSAA (see Renderer.SetAntiAliasing). A pipeline drawing into them must be built for it. The
-	// samples are resolved after FrameStageAfterTransparent, so a step drawing into the
-	// scene at any stage gets the same anti-aliasing as the scene itself.
+	// SceneSamples is how many samples per pixel SceneDepth holds — and SceneColor, where
+	// it is set — at the stage being run. A pipeline drawing into them must be built for
+	// it. It is more than one only at FrameStageAfterDepth while anti-aliasing by MSAA
+	// (see Renderer.SetAntiAliasing): the opaque pass draws multisampled and resolves as
+	// it ends, and everything after it — frame steps included — draws one sample a
+	// pixel.
 	SceneSamples uint8
 
 	// Backend is the GPU backend, for a step creating resources of its own.

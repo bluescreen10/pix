@@ -4,8 +4,8 @@
 package pix
 
 import (
-	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/textures"
 )
 
 // The prefiltered reflections are an equirectangular image of
@@ -41,22 +41,14 @@ const noEnvironment uint32 = 0xFFFFFFFF
 // it no longer does (see Renderer.prepareEnvironment); no resources means no
 // environment.
 type environmentState struct {
-	radiance gpu.Texture
-	mipViews [environmentMips]gpu.Texture
+	radiance textures.WritableTexture
 	// revision is the environment revision it was derived from; 0 until it has been.
 	revision uint64
 }
 
 // destroy frees what the state holds.
-func (e *environmentState) destroy(backend gpu.Backend) {
-	for _, view := range e.mipViews {
-		if view.IsValid() {
-			backend.DestroyTexture(view)
-		}
-	}
-	if e.radiance.IsValid() {
-		backend.DestroyTexture(e.radiance)
-	}
+func (e *environmentState) destroy() {
+	e.radiance.Release()
 	*e = environmentState{}
 }
 

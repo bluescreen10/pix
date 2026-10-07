@@ -114,12 +114,35 @@ type material struct {
 	OcclusionTexture     *occlusionRef       `json:"occlusionTexture"`
 	DoubleSided          bool                `json:"doubleSided"`
 	AlphaMode            string              `json:"alphaMode"`
-	AlphaCutoff          *float32            `json:"alphaCutoff"` // MASK only; default 0.5
+	AlphaCutoff          *float32            `json:"alphaCutoff"`    // MASK only; default 0.5
+	EmissiveFactor       []float32           `json:"emissiveFactor"` // default black
+	EmissiveTexture      *textureRef         `json:"emissiveTexture"`
 	Extensions           *materialExtensions `json:"extensions"`
 }
 
 type materialExtensions struct {
 	Transmission *transmissionExt `json:"KHR_materials_transmission"`
+	IOR          *iorExt          `json:"KHR_materials_ior"`
+	Volume       *volumeExt       `json:"KHR_materials_volume"`
+	// EmissiveStrength scales the emissive factor past 1, which the core spec clamps
+	// it to.
+	EmissiveStrength *emissiveStrengthExt `json:"KHR_materials_emissive_strength"`
+}
+
+type emissiveStrengthExt struct {
+	EmissiveStrength float32 `json:"emissiveStrength"`
+}
+
+type iorExt struct {
+	IOR *float32 `json:"ior"` // default 1.5
+}
+
+// volumeExt is the volume behind a transmissive surface. Its thicknessTexture is not
+// read: the factor alone gives the whole surface one thickness.
+type volumeExt struct {
+	ThicknessFactor     float32   `json:"thicknessFactor"`     // default 0: a thin wall
+	AttenuationDistance *float32  `json:"attenuationDistance"` // default infinite: nothing absorbed
+	AttenuationColor    []float32 `json:"attenuationColor"`    // default white
 }
 
 type transmissionExt struct {

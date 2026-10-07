@@ -20,6 +20,8 @@ const (
 	MatTransMap  uint32 = 1 << 4 // transmission map bound (PBR; sampled .r)
 	// MatOcclusionMap: occlusion map bound (PBR; sampled .r).
 	MatOcclusionMap uint32 = 1 << 5
+	// MatEmissiveMap: emissive map bound (PBR; sampled .rgb, sRGB).
+	MatEmissiveMap uint32 = 1 << 6
 )
 
 // CullMode selects which triangle faces are discarded. CullNone is double-sided.
@@ -70,7 +72,8 @@ type Shader struct {
 
 // AlphaMask is how a material cuts its surface out: where Map's alpha, times Alpha, falls
 // below Cutoff there is no surface — not when shaded, nor in the shadow maps or the
-// depth prepass. Map is the material's colour map, or a zero Texture for none.
+// depth prepass. Map is the material's colour map, or a zero Texture for none. A cut-off
+// of 0 cuts nothing out.
 type AlphaMask struct {
 	Map     textures.Texture
 	Sampler uint32
@@ -78,16 +81,21 @@ type AlphaMask struct {
 	Cutoff  float32
 }
 
+// IsMasked reports whether the mask cuts anything out: whether it has a cut-off.
+func (m AlphaMask) IsMasked() bool {
+	return m.Cutoff > 0
+}
+
 // Masked is implemented by materials that can cut their surface out by alpha — leaves,
 // fences, grilles. A material that cannot need not implement it. One that does reports
-// whether it is masked now, and calls its pool's MarkDirty whenever that or its mask
-// changes, as for any change to its record.
+// its mask — whether it cuts anything out now is the mask's IsMasked — and calls its
+// pool's MarkDirty whenever the mask changes, as for any change to its record.
 //
 // A masked material's fragment shader cuts its surface out by calling discardCutOut
 // (material_common.glsl); the depth-only passes do it for every masked material alike,
 // from the mask this reports, so it needs no shader of its own for them.
 type Masked interface {
-	AlphaMask() (AlphaMask, bool)
+	AlphaMask() AlphaMask
 }
 
 // ToBytes is the mask as the first half of an entry of a pool's mask table: AlphaMask in
@@ -109,21 +117,27 @@ func (m AlphaMask) ToBytes() []byte {
 
 // TransmissionMask is how much light a surface lets through, texel by texel: Factor,
 // times the red channel of Map where one is bound — where KHR_materials_transmission
-// keeps it. Map is a zero Texture for none.
+// keeps it. Map is a zero Texture for none. A factor of 0 lets nothing through.
 type TransmissionMask struct {
 	Map     textures.Texture
 	Sampler uint32
 	Factor  float32
 }
 
+// IsTransmissive reports whether the mask lets any light through: whether its factor is
+// above 0.
+func (m TransmissionMask) IsTransmissive() bool {
+	return m.Factor > 0
+}
+
 // Transmissive is implemented by materials that can let light through — glass. The
 // shadow passes leave out every texel of a transmissive material that lets through at
 // least half the light, so a pane casts no shadow while the frame around it does;
 // shading and the depth prepass draw it whole. A material that implements it reports
-// whether it lets light through now, and calls its pool's MarkDirty whenever that or
-// its mask changes, as for Masked.
+// its mask — whether it lets light through now is the mask's IsTransmissive — and calls
+// its pool's MarkDirty whenever the mask changes, as for Masked.
 type Transmissive interface {
-	TransmissionMask() (TransmissionMask, bool)
+	TransmissionMask() TransmissionMask
 }
 
 // ToBytes is the mask as the second half of an entry of a pool's mask table:
@@ -142,12 +156,9 @@ func (m TransmissionMask) ToBytes() []byte {
 	return unsafe.Slice((*byte)(unsafe.Pointer(&entry)), unsafe.Sizeof(entry))
 }
 
-// maskHalfSize is the size of each half of an entry of a pool's mask table: an
-// AlphaMask, then a TransmissionMask.
-const maskHalfSize = 16
-
-// maskEntrySize is the size of one entry of a pool's mask table.
-const maskEntrySize = 2 * maskHalfSize
+// maskEntrySize is the size of one entry of a pool's mask table: an AlphaMask's 16 bytes,
+// then a TransmissionMask's 16.
+const maskEntrySize = 32
 
 // ID names one material by value: which pool holds its record, its slot in that pool,
 // and the slot's generation. It is the whole of what a renderer needs to find a

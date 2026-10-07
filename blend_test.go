@@ -281,6 +281,9 @@ func TestGlassReflectsInFull(t *testing.T) {
 	glass.SetMetallic(0)
 	glass.SetRoughness(0.4)
 	glass.SetTransmission(1)
+	// With a thickness, one surface, like the opaque one: a pane with none reflects from
+	// both its surfaces, and twice the highlight (see TestThinGlassReflectsFromBothSurfaces).
+	glass.SetThickness(0.1)
 	// Unlit, so that the backdrop has no highlight of its own to show through.
 	red := r.NewBasicMaterial()
 	red.SetColor(colors.RGBA32F{1, 0, 0, 1})
@@ -395,5 +398,56 @@ func TestGlassShadowFollowsItsTransmissionMap(t *testing.T) {
 	clear, opaque := floorUnder(255), floorUnder(0)
 	if clear <= opaque+40 {
 		t.Errorf("floor under glass mapped clear = %d, mapped opaque = %d; want it lit under the clear one, shadowed under the other", clear, opaque)
+	}
+}
+
+// TestDoubleSidedBlendedMeshDrawsItsBackFirst renders one double-sided, 50%-alpha mesh
+// of two walls over black: a red one facing the camera, and behind it a blue one facing
+// away, as a jar's far wall does. The red wall comes first in the mesh's triangles. The
+// far wall has to be blended first all the same, so the overlap is half red plus a
+// quarter of blue, (0.5, 0, 0.25) linear, which the display target encodes as 188 and
+// 137; drawn in triangle order, red and blue swap.
+func TestDoubleSidedBlendedMeshDrawsItsBackFirst(t *testing.T) {
+	const size = 64
+	r, err := pix.NewOffscreenRenderer(size, size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
+	scene := scenes.New()
+	defer scene.Destroy()
+
+	red, blue := glm.Vec4f{1, 0, 0, 1}, glm.Vec4f{0, 0, 1, 1}
+	walls := r.GeometryStore.Create(geometries.GeometryConfig{
+		Attributes: []geometries.Attribute{
+			geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, []glm.Vec3f{
+				{-0.8, -0.8, 0}, {0.8, -0.8, 0}, {0.8, 0.8, 0}, {-0.8, 0.8, 0},
+				{-0.8, -0.8, -0.5}, {0.8, -0.8, -0.5}, {0.8, 0.8, -0.5}, {-0.8, 0.8, -0.5},
+			}),
+			geometries.NewAttribute(geometries.AttributeColor, geometries.Float32x4, []glm.Vec4f{
+				red, red, red, red, blue, blue, blue, blue,
+			}),
+		},
+		// The near wall counter-clockwise from the camera, facing it; the far wall
+		// clockwise, facing away.
+		Indices: []uint32{0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6},
+	})
+	material := r.NewBasicMaterial()
+	material.SetColor(colors.RGBA32F{1, 1, 1, 0.5})
+	material.SetBlend(materials.BlendAlpha)
+	material.SetDoubleSided(true)
+	scene.Add(scene.NewMesh(walls, material))
+
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
+	cam.SetPosition(glm.Vec3f{0, 0, 2})
+	cam.LookAt(glm.Vec3f{})
+	r.Render(scene)
+
+	px := r.Pixels()
+	i := (size/2*size + size/2) * 4
+	if got := [3]byte{px[i], px[i+1], px[i+2]}; absDiff(int(got[0]), 188) > 3 || absDiff(int(got[2]), 137) > 3 {
+		t.Errorf("overlap = %v, want (188, 0, 137): the far blue wall blended first, the near red one over it", got)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/materials"
 	"github.com/bluescreen10/pix/scenes"
 )
 
@@ -190,5 +191,73 @@ func TestMSAAFrameStepDrawsIntoTheScene(t *testing.T) {
 	}
 	if got, want := pixelAt(r, 0, 0), [3]byte{0, 255, 0}; got != want {
 		t.Errorf("corner = %v, want %v, the step's green", got, want)
+	}
+}
+
+// TestMSAABlendsOverTheResolvedScene: with MSAA and no frame step drawing after the
+// opaque pass, the opaque pass resolves the scene as it ends and blended surfaces are
+// drawn one sample a pixel over it. A 50% blue quad in front of an opaque red one must
+// still blend with it, red and blue both showing — with the depth prepass too, whose
+// multisampled depth the opaque pass loads rather than clears.
+func TestMSAABlendsOverTheResolvedScene(t *testing.T) {
+	for _, prepass := range []bool{false, true} {
+		name := "no prepass"
+		if prepass {
+			name = "prepass"
+		}
+		t.Run(name, func(t *testing.T) {
+			r, err := pix.NewOffscreenRenderer(postSize, postSize)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Destroy()
+			r.EnableAntiAliasing(true)
+			r.EnableDepthPrepass(prepass)
+			r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
+			scene := scenes.New()
+			defer scene.Destroy()
+
+			quad := func(z float32) geometries.Geometry {
+				return r.GeometryStore.Create(geometries.GeometryConfig{
+					Attributes: []geometries.Attribute{
+						geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, []glm.Vec3f{{-0.8, -0.8, z}, {0.8, -0.8, z}, {0.8, 0.8, z}, {-0.8, 0.8, z}}),
+					},
+					Indices: []uint32{0, 1, 2, 0, 2, 3},
+				})
+			}
+			red := r.NewBasicMaterial()
+			red.SetColor(colors.RGBA32F{1, 0, 0, 1})
+			blue := r.NewBasicMaterial()
+			blue.SetColor(colors.RGBA32F{0, 0, 1, 0.5})
+			blue.SetBlend(materials.BlendAlpha)
+			scene.Add(scene.NewMesh(quad(-0.5), red))
+			scene.Add(scene.NewMesh(quad(0), blue))
+			cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+			scene.Add(cam)
+			cam.SetPosition(glm.Vec3f{0, 0, 2})
+			r.Render(scene)
+
+			// Half blue over red: (0.5, 0, 0.5) linear, 188 on the display.
+			if got := pixelAt(r, postSize/2, postSize/2); absDiff(int(got[0]), 188) > 3 || got[1] != 0 || absDiff(int(got[2]), 188) > 3 {
+				t.Errorf("centre = %v, want (188, 0, 188): blue blended half over red", got)
+			}
+		})
+	}
+}
+
+// TestMSAAFrameStepAfterDepthTestsSamples: a step that runs between the depth prepass
+// and the opaque pass is told the depth is multisampled, with MSAA, though the steps
+// after the opaque pass — where there are none — would draw one sample a pixel.
+func TestMSAAFrameStepAfterDepthTestsSamples(t *testing.T) {
+	r, scene := stepScene(t)
+	r.EnableAntiAliasing(true)
+	var log []string
+	step := &recordingStep{name: "after-depth", log: &log}
+	r.AddFrameStep(pix.FrameStageAfterDepth, step)
+	r.Render(scene)
+
+	frame := step.frames[len(step.frames)-1]
+	if frame.SceneSamples != 4 || !frame.SceneDepth.IsValid() {
+		t.Errorf("after depth: SceneSamples = %d, SceneDepth valid = %v; want 4 and a depth to test against", frame.SceneSamples, frame.SceneDepth.IsValid())
 	}
 }

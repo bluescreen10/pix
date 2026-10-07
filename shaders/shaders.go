@@ -104,6 +104,8 @@ var OcclusionApply []byte
 //go:generate go run ../cmd/shadercompile -i src/fxaa.frag.glsl -o spv:build/fxaa.frag.spv -o metallib:build/fxaa.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/halftone.frag.glsl -o spv:build/halftone.frag.spv -o metallib:build/halftone.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/env_prefilter.comp.glsl -o spv:build/env_prefilter.comp.spv -o metallib:build/env_prefilter.comp.metalbin
+//go:generate go run ../cmd/shadercompile -i src/scene_copy.comp.glsl -o spv:build/scene_copy.comp.spv -o metallib:build/scene_copy.comp.metalbin
+//go:generate go run ../cmd/shadercompile -i src/scene_copy_mip.comp.glsl -o spv:build/scene_copy_mip.comp.spv -o metallib:build/scene_copy_mip.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/env_brdf.comp.glsl -o spv:build/env_brdf.comp.spv -o metallib:build/env_brdf.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/env_background.frag.glsl -o spv:build/env_background.frag.spv -o metallib:build/env_background.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/light_clusters.comp.glsl -o spv:build/light_clusters.comp.spv -o metallib:build/light_clusters.comp.metalbin
@@ -225,6 +227,18 @@ var OverlayVert []byte
 
 //go:embed build/overlay.frag.spv
 var OverlayFrag []byte
+
+// --- scene copy ---
+//
+// SceneCopy copies the opaque scene before the transparent pass, and SceneCopyMip
+// halves it level by level: what materials that show the scene behind them read, while
+// they draw into the scene itself.
+
+//go:embed build/scene_copy.comp.spv
+var SceneCopy []byte
+
+//go:embed build/scene_copy_mip.comp.spv
+var SceneCopyMip []byte
 
 // --- environment lighting (see scenes.Environment) ---
 //

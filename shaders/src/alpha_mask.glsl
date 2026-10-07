@@ -54,6 +54,10 @@ bool isCutOut(AlphaMask mask, vec2 uv) {
 // letsLightThrough reports whether the surface mask describes lets through at least half
 // the light reaching it at uv: its factor, times its map's red, where KHR_materials_
 // transmission keeps it. A shadow leaves such a texel out.
+//
+// TODO: partial or coloured shadows. All or nothing per texel, glass letting through 30%
+// shadows fully and 70% not at all; dithered shadows or a colour shadow map would grade
+// them.
 bool letsLightThrough(TransmissionMask mask, vec2 uv) {
     float transmission = mask.factor;
     if (mask.map != NO_ALPHA_MASK_MAP) {

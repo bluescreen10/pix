@@ -3,6 +3,7 @@ package pix
 import (
 	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/pix/glm"
+	"github.com/bluescreen10/pix/textures"
 )
 
 // AmbientOcclusion is how the renderer measures ambient occlusion — how much of the
@@ -204,11 +205,9 @@ const occlusionGroupSize = 8
 // vbaoImages are the images VBAO measures occlusion in, all the size of mip topMip of
 // the frame or smaller.
 type vbaoImages struct {
-	// depthChain is the scene's depth as a mip chain, whose first level is
-	// mip topMip of the frame (see occlusion.glsl); depthChainLevels one writable view of
-	// each of its levels.
-	depthChain       gpu.Texture
-	depthChainLevels []gpu.Texture
+	// depthChain is the scene's depth as a mip chain, whose first level is mip topMip of
+	// the frame (see occlusion.glsl).
+	depthChain textures.WritableTexture
 	// occlusion is how open each surface is, and the edges between surfaces (see
 	// vbao_slices.comp.glsl), the size of depthChain's first level; denoiseScratch
 	// holds it between denoise passes.
@@ -407,9 +406,6 @@ const (
 	darkeningInOwnPass
 	// darkeningInTransparentPass: first thing in the transparent pass.
 	darkeningInTransparentPass
-	// darkeningInResolvePass: in the pass that resolves the multisampled scene, before
-	// it resolves.
-	darkeningInResolvePass
 	// darkeningInToneMapping: by tone mapping, as it reads the scene, with no draws of
 	// its own (see tonemap.frag.glsl).
 	darkeningInToneMapping

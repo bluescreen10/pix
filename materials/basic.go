@@ -205,7 +205,6 @@ func (m *BasicMaterial) SetAlphaCutoff(cutoff float32) {
 
 // AlphaMask implements Masked: the material cuts its surface out by its colour's alpha
 // once it has a cut-off.
-func (m *BasicMaterial) AlphaMask() (AlphaMask, bool) {
-	mask := AlphaMask{Map: m.colorMap, Sampler: m.colorSampler, Alpha: m.color[3], Cutoff: m.alphaCutoff}
-	return mask, m.alphaCutoff > 0
+func (m *BasicMaterial) AlphaMask() AlphaMask {
+	return AlphaMask{Map: m.colorMap, Sampler: m.colorSampler, Alpha: m.color[3], Cutoff: m.alphaCutoff}
 }

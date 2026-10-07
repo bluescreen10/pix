@@ -46,9 +46,15 @@ layout(push_constant, scalar) uniform PC {
     // masks is the material pool's mask table (see alpha_mask.glsl), for a batch of
     // masked materials, and 0 for any other.
     uint64_t masks;
-    uint spad2;
-    uint spad3;
+    // sceneCopy is the heap index of the opaque scene, copied before the transparent
+    // pass (see pix.sceneCopy), in that pass, and NO_SCENE_COPY elsewhere;
+    // sceneCopySampler is the sampler it is read with.
+    uint sceneCopy;
+    uint sceneCopySampler;
 } pc;
+
+// NO_SCENE_COPY is pc.sceneCopy when there is no scene copy to read (pix.noSceneCopy).
+const uint NO_SCENE_COPY = 0xFFFFFFFFu;
 
 // Vertex → fragment varyings (produced by scene_draw.vert).
 layout(location = 0) in vec3 vColor;

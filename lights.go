@@ -227,7 +227,7 @@ func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPack
 	next.ambient = env.Ambient.RGBA(1)
 	next.envRadiance = noEnvironment
 	if environment.radiance.IsValid() {
-		next.envRadiance = environment.radiance.Index
+		next.envRadiance = environment.radiance.Index()
 		next.envSampler = environmentSampler.Index
 		next.envMips = environmentMips
 		next.envBRDF = environmentBRDF.Index

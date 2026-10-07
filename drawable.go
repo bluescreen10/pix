@@ -121,7 +121,10 @@ type drawRoot struct {
 	// masks is the material pool's mask table (see materials.Masked) while drawing a
 	// span of masked materials, and 0 otherwise: what discardCutOut reads.
 	masks uint64
-	_     [2]uint32
+	// sceneCopy is the heap index of the scene copy (see sceneCopy) in a transparent pass
+	// that has one, and noSceneCopy otherwise; sceneCopySampler is what it is read with.
+	sceneCopy        uint32
+	sceneCopySampler uint32
 }
 
 // positionRoot is the root of every position-only pass: the shadow depth pass, the

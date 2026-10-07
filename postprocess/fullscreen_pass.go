@@ -75,6 +75,15 @@ func (p *FullscreenPass) DrawWithDepth(target, depth gpu.Texture, width, height 
 	}, width, height, root, cmd)
 }
 
+// DrawInPass runs the pass in the render pass being recorded, whose attachments must
+// match the formats and sample count the pass was built for — to draw where a pass of
+// its own cannot, as into multisampled images that do not outlive their pass. The
+// render pass's viewport and scissor apply.
+func (p *FullscreenPass) DrawInPass(root []byte, cmd gpu.CommandBuffer) {
+	cmd.SetPipeline(p.pipeline)
+	cmd.Draw(root, 3, 1, 0, 0)
+}
+
 // draw draws the triangle into targets.
 func (p *FullscreenPass) draw(targets gpu.RenderTargets, width, height uint32, root []byte, cmd gpu.CommandBuffer) {
 	cmd.BeginRenderPass(targets)

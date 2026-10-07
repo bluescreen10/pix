@@ -54,8 +54,12 @@ type batch struct {
 	blend materials.BlendMode
 	// isMasked is whether the batch's material cuts its surface out by alpha (see
 	// materials.Masked): the depth-only passes draw it with a fragment stage that does.
-	isMasked   bool
-	geometryID uint32
+	isMasked bool
+	// isTransmissive is whether the batch's material lets light through (see
+	// materials.Transmissive), and so reads the scene copy as it draws: a frame copies
+	// the scene only when a batch would (see isSceneCopyNeeded).
+	isTransmissive bool
+	geometryID     uint32
 	// mesh is, for a blended batch, the index in the packet's mesh table of the one mesh
 	// it draws: each blended mesh gets batches of its own, so it can take its place in
 	// the back-to-front order (see sortBackToFront). Opaque batches leave it 0.
@@ -97,16 +101,23 @@ func rasterSpans(batches []batch) iter.Seq2[int, int] {
 	}
 }
 
-// maskSpans yields each span of adjacent batches the depth-only passes can draw with one
-// call, as its first batch and its length: a run of unmasked batches, whatever their
-// pools, as they draw through one vertex-only pipeline; or a run of one pool's masked
-// batches, which share its mask table.
-func maskSpans(batches []batch) iter.Seq2[int, int] {
+// hasShadowMask reports whether the shadow passes draw the batch through its pool's mask
+// table: when its material cuts its surface out by alpha, or lets light through, which
+// leaves those texels out of the shadow.
+func (b *batch) hasShadowMask() bool {
+	return b.isMasked || b.isTransmissive
+}
+
+// shadowMaskSpans yields each span of adjacent batches the shadow passes can draw with
+// one call, as its first batch and its length: a run of batches without a shadow mask,
+// whatever their pools, as they draw through one vertex-only pipeline; or a run of one
+// pool's batches with one, which share its mask table.
+func shadowMaskSpans(batches []batch) iter.Seq2[int, int] {
 	return func(yield func(first, count int) bool) {
 		for first := 0; first < len(batches); {
 			end := first + 1
-			for end < len(batches) && batches[end].isMasked == batches[first].isMasked &&
-				(!batches[first].isMasked || batches[end].pool == batches[first].pool) {
+			for end < len(batches) && batches[end].hasShadowMask() == batches[first].hasShadowMask() &&
+				(!batches[first].hasShadowMask() || batches[end].pool == batches[first].pool) {
 				end++
 			}
 			if !yield(first, end-first) {
@@ -218,12 +229,13 @@ func buildDrawables(p *scenes.FramePacket, layout *drawLayout, materialStore *ma
 	layout.lods = append(layout.lods[:0], gpuLOD{})
 
 	type key struct {
-		pool     *materials.Pool
-		cull     materials.CullMode
-		blend    materials.BlendMode
-		isMasked bool
-		geometry uint32
-		mesh     uint32
+		pool           *materials.Pool
+		cull           materials.CullMode
+		blend          materials.BlendMode
+		isMasked       bool
+		isTransmissive bool
+		geometry       uint32
+		mesh           uint32
 	}
 	batchOf := make(map[key]uint32)
 
@@ -252,11 +264,12 @@ func buildDrawables(p *scenes.FramePacket, layout *drawLayout, materialStore *ma
 
 				pool := materialStore.PoolAt(material.PoolID)
 				k := key{
-					pool:     pool,
-					cull:     pool.CullAt(material.Slot),
-					blend:    pool.BlendAt(material.Slot),
-					isMasked: pool.IsMaskedAt(material.Slot),
-					geometry: geometry.Slot,
+					pool:           pool,
+					cull:           pool.CullAt(material.Slot),
+					blend:          pool.BlendAt(material.Slot),
+					isMasked:       pool.IsMaskedAt(material.Slot),
+					isTransmissive: pool.IsTransmissiveAt(material.Slot),
+					geometry:       geometry.Slot,
 				}
 				// A blended mesh is drawn on its own, so that it can be drawn in its
 				// place back to front; opaque meshes share batches freely.
@@ -268,13 +281,14 @@ func buildDrawables(p *scenes.FramePacket, layout *drawLayout, materialStore *ma
 					batchID = uint32(len(layout.batches))
 					batchOf[k] = batchID
 					layout.batches = append(layout.batches, batch{
-						pool:         k.pool,
-						cull:         k.cull,
-						blend:        k.blend,
-						isMasked:     k.isMasked,
-						geometryID:   k.geometry,
-						mesh:         k.mesh,
-						poolRevision: pool.RasterRevision(),
+						pool:           k.pool,
+						cull:           k.cull,
+						blend:          k.blend,
+						isMasked:       k.isMasked,
+						isTransmissive: k.isTransmissive,
+						geometryID:     k.geometry,
+						mesh:           k.mesh,
+						poolRevision:   pool.RasterRevision(),
 					})
 				}
 				layout.batches[batchID].instanceCount++
@@ -309,10 +323,10 @@ func lodConfig(mesh scenes.MeshPacket, levels []scenes.LODLevel) gpuLOD {
 // order: each batch's region in the visible buffer, and the indirect template.
 //
 // Opaque batches come before blended ones, so blending composites over the opaque
-// scene; within each group, unmasked batches come before masked ones, so the depth-only
-// passes draw every unmasked one with a single call (see drawShadowCasters); and
-// batches sharing raster state are kept together, so they draw as a single
-// multi-draw-indirect call.
+// scene; within each group, batches without a shadow mask come before those with one,
+// so the shadow passes draw every one without it in a single call (see
+// drawShadowCasters); and batches sharing raster state are kept together, so they draw
+// as a single multi-draw-indirect call.
 func orderBatches(layout *drawLayout, geometryStore *geometries.Store) {
 	// Sorted in place. Each batch first records the id its drawables were tagged with,
 	// so the permutation can be inverted afterwards without sorting a separate index
@@ -326,8 +340,8 @@ func orderBatches(layout *drawLayout, geometryStore *geometries.Store) {
 		if xOpaque != yOpaque {
 			return xOpaque
 		}
-		if x.isMasked != y.isMasked {
-			return !x.isMasked
+		if x.hasShadowMask() != y.hasShadowMask() {
+			return !x.hasShadowMask()
 		}
 		if x.pool != y.pool {
 			return x.pool.Index() < y.pool.Index()
@@ -335,7 +349,10 @@ func orderBatches(layout *drawLayout, geometryStore *geometries.Store) {
 		if x.cull != y.cull {
 			return x.cull < y.cull
 		}
-		return x.blend < y.blend
+		if x.blend != y.blend {
+			return x.blend < y.blend
+		}
+		return !x.isMasked && y.isMasked
 	})
 
 	remap := make([]uint32, len(layout.batches))

@@ -70,10 +70,10 @@ func TestComputeWrittenVolumeIsSampledByMaterial(t *testing.T) {
 		Format: gpu.FormatRGBA8Unorm, Label: "volume",
 	})
 	defer volume.Release()
-	r.AddFrameStep(pix.FrameStageStart, &writeStep{texture: volume, side: volumeSize, shader: testShader(t, r, "volume_write.comp")})
+	r.AddFrameStep(pix.FrameStageStart, &writeStep{texture: volume.Texture, side: volumeSize, shader: testShader(t, r, "volume_write.comp")})
 
 	material := r.NewRawMaterial(materials.Shader{Fragment: testShader(t, r, "volume_material.frag")}, 16, 1)
-	material.SetTexture(0, volume)
+	material.SetTexture(0, volume.Texture)
 	setVolumeRecord := func(depth float32) {
 		record := material.Record()
 		binary.LittleEndian.PutUint32(record[0:], volume.Index())
@@ -127,10 +127,10 @@ func TestComputeWrittenImageIsSampledByBasicMaterial(t *testing.T) {
 		Kind: gpu.Texture2D, Width: side, Height: side, Format: gpu.FormatRGBA8Unorm, Label: "image",
 	})
 	defer image.Release()
-	r.AddFrameStep(pix.FrameStageStart, &writeStep{texture: image, side: side, shader: testShader(t, r, "image_write.comp")})
+	r.AddFrameStep(pix.FrameStageStart, &writeStep{texture: image.Texture, side: side, shader: testShader(t, r, "image_write.comp")})
 
 	material := r.NewBasicMaterial()
-	material.SetColorMap(image)
+	material.SetColorMap(image.Texture)
 	material.SetColorMapSampler(r.TextureStore.DefaultSampler())
 	scene := scenes.New()
 	defer scene.Destroy()
@@ -166,4 +166,34 @@ func testShader(t *testing.T, r *pix.Renderer, name string) []byte {
 		t.Fatal(err)
 	}
 	return code
+}
+
+// TestWritableTextureMips: a writable texture made with Mips holds a storage view of each,
+// each with a heap index of its own to be written through, apart from the one the whole
+// texture is sampled through; a texture of one mip holds the texture itself.
+func TestWritableTextureMips(t *testing.T) {
+	r, err := pix.NewOffscreenRenderer(8, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+
+	chain := r.TextureStore.CreateWritable(textures.WritableConfig{Kind: gpu.Texture2D, Width: 16, Height: 8, Mips: 5, Format: gpu.FormatRGBA16F})
+	defer chain.Release()
+	if got := len(chain.Mips); got != 5 {
+		t.Errorf("len(Mips) = %d, want 5", got)
+	}
+	seen := map[uint32]bool{chain.Index(): true}
+	for mip, view := range chain.Mips {
+		if seen[view.Index] {
+			t.Errorf("Mips[%d].Index = %d, an index already taken by the texture or another mip", mip, view.Index)
+		}
+		seen[view.Index] = true
+	}
+
+	single := r.TextureStore.CreateWritable(textures.WritableConfig{Kind: gpu.Texture2D, Width: 4, Height: 4, Format: gpu.FormatRGBA16F})
+	defer single.Release()
+	if len(single.Mips) != 1 || single.Mips[0].Index != single.Index() {
+		t.Errorf("Mips of a texture made without Mips = %v, want the texture itself, at index %d", single.Mips, single.Index())
+	}
 }

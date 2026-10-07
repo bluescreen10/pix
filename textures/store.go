@@ -24,6 +24,9 @@ const defaultAnisotropy = 8
 type entry struct {
 	tex   gpu.Texture
 	index uint32 // bindless sampled-image heap index
+	// mipViews is, for a writable texture of more than one mip, a storage view of each
+	// mip, which the store frees with the texture (see WritableTexture.Mips).
+	mipViews []gpu.Texture
 }
 
 // Store uploads CPU images into the backend's bindless heap and owns them
@@ -123,7 +126,9 @@ func (t *Store) CreateDepthTarget(w, h uint32) Texture {
 }
 
 // WritableConfig describes a texture that compute shaders write: a simulation's state,
-// a baked lookup table, a noise volume.
+// a baked lookup table, a noise volume — or, with Mips, a chain of mips each written from
+// the one before: a blur pyramid, a depth chain, an environment's reflections by
+// roughness.
 type WritableConfig struct {
 	// Kind is the texture's shape. Depth is a 3D texture's depth and Layers an array's
 	// layer count — a cube's is 6; each is 1 when zero.
@@ -131,24 +136,51 @@ type WritableConfig struct {
 	Width, Height uint32
 	Depth         uint32
 	Layers        uint32
+	// Mips is how many mips it has, each half the size of the one before; 1 when zero.
+	Mips uint32
 	// Format is a gpu.Format rather than a Format: what the texture holds is the writing
 	// shader's to define, not an image's to describe.
 	Format gpu.Format
 	Label  string
 }
 
+// WritableTexture is a texture that compute shaders write (see Store.CreateWritable): a
+// Texture, which any shader samples whole through its Index, and the storage views its
+// mips are written through.
+type WritableTexture struct {
+	Texture
+	// Mips holds a storage view of each mip, for a shader writing that mip alone — each
+	// Index is the heap slot to write through. For a texture of one mip, it is the
+	// texture itself. The views belong to the texture, and go when it is released.
+	Mips []gpu.Texture
+}
+
 // CreateWritable allocates a texture that compute shaders write, through the heap's
 // storage arrays (gImages and gImages3D in bindless.glsl), and any shader samples,
-// through its sampled ones (gTextures and gTextures3D) — at the same Index. Nothing is uploaded: its contents are
-// undefined until written, and whatever samples it has to come after whatever writes it.
-func (t *Store) CreateWritable(config WritableConfig) Texture {
+// through its sampled ones (gTextures and gTextures3D). Nothing is uploaded: its contents
+// are undefined until written, and whatever samples it has to come after whatever writes
+// it.
+//
+// A texture of more than one mip is written one mip at a time, each through a storage
+// view of its own (see WritableTexture.Mips); its Index samples them all.
+func (t *Store) CreateWritable(config WritableConfig) WritableTexture {
+	mips := max(config.Mips, 1)
 	tex := t.backend.CreateTexture(gpu.TextureDescriptor{
 		Kind: config.Kind, Width: config.Width, Height: config.Height,
-		Depth: config.Depth, Layers: config.Layers,
+		Depth: config.Depth, Layers: config.Layers, Mips: mips,
 		Format: config.Format, Usage: gpu.TextureSampled | gpu.TextureStorage,
 		Label: config.Label,
 	})
-	return t.handle(tex)
+	handle := t.handle(tex)
+	if mips == 1 {
+		return WritableTexture{Texture: handle, Mips: []gpu.Texture{tex}}
+	}
+	views := make([]gpu.Texture, mips)
+	for mip := range views {
+		views[mip] = t.backend.TextureView(tex, config.Kind, uint32(mip), 1, 0, max(config.Layers, 1))
+	}
+	t.entries.Value(handle.ref.ID()).mipViews = views
+	return WritableTexture{Texture: handle, Mips: views}
 }
 
 // handle records a backend texture in the slab and returns a fresh single-ref handle.
@@ -164,11 +196,13 @@ func (t *Store) GPU(tex Texture) gpu.Texture {
 }
 
 // Destroy releases all uploaded textures and samplers.
+//
+// TODO: with two renderers that each loaded a glTF in one test, the second's teardown
+// crashes here: vkDestroySampler is handed a null device. Not investigated; the loader's
+// tests use one renderer each.
 func (t *Store) Destroy() {
 	for e := range t.entries.Values() {
-		if e.tex.IsValid() {
-			t.backend.DestroyTexture(e.tex)
-		}
+		t.destroyEntry(&e)
 	}
 	for _, s := range t.samplers {
 		t.backend.DestroySampler(s)
@@ -178,11 +212,19 @@ func (t *Store) Destroy() {
 
 // dispose/validate let a ref own a slot in this store.
 func (t *Store) dispose(id uint32) {
-	if e := t.entries.Value(id); e.tex.IsValid() {
-		t.backend.DestroyTexture(e.tex)
-		e.tex = gpu.Texture{}
-	}
+	t.destroyEntry(t.entries.Value(id))
 	t.entries.Free(id) // bumps the slot's generation
+}
+
+// destroyEntry frees an entry's texture and its mip views, leaving it empty.
+func (t *Store) destroyEntry(e *entry) {
+	for _, view := range e.mipViews {
+		t.backend.DestroyTexture(view)
+	}
+	if e.tex.IsValid() {
+		t.backend.DestroyTexture(e.tex)
+	}
+	*e = entry{}
 }
 
 func (t *Store) validate(id, gen uint32) bool {

@@ -64,10 +64,15 @@ func TestMaterialRecordLayouts(t *testing.T) {
 		m.SetOcclusionMap(tex)
 		m.SetOcclusionMapSampler(11)
 		m.SetOcclusionStrength(0.6)
+		m.SetIOR(1.33)
+		m.SetThickness(0.2)
+		m.SetAttenuation(colors.RGB32F{0.8, 0.9, 1}, 3)
+		m.SetEmissiveMap(tex)
+		m.SetEmissiveMapSampler(13)
 
 		b := m.Bytes()
-		if len(b) != 100 {
-			t.Fatalf("record is %d bytes, shader expects 100", len(b))
+		if len(b) != 132 {
+			t.Fatalf("record is %d bytes, shader expects 132", len(b))
 		}
 		checks := []struct {
 			name string
@@ -78,14 +83,22 @@ func TestMaterialRecordLayouts(t *testing.T) {
 			{"emissive.r", 16, 0.5}, {"emissive.b", 24, 0.7},
 			{"metallic", 32, 0.25}, {"roughness", 36, 0.75}, {"transmission", 40, 0.5},
 			{"occlusionStrength", 88, 0.6},
+			{"ior", 100, 1.33}, {"thickness", 104, 0.2}, {"attenuationDistance", 108, 3},
+			{"attenuationColor.r", 112, 0.8}, {"attenuationColor.b", 120, 1},
 		}
 		for _, c := range checks {
 			if got := f32At(t, b, c.off); got != c.want {
 				t.Errorf("%s at byte %d = %v, want %v", c.name, c.off, got, c.want)
 			}
 		}
-		if want := materials.MatNormalMap | materials.MatTransMap | materials.MatOcclusionMap; u32At(t, b, 44) != want {
-			t.Errorf("flags at byte 44 = %#x, want MatNormalMap|MatTransMap|MatOcclusionMap (%#x)", u32At(t, b, 44), want)
+		if want := materials.MatNormalMap | materials.MatTransMap | materials.MatOcclusionMap | materials.MatEmissiveMap; u32At(t, b, 44) != want {
+			t.Errorf("flags at byte 44 = %#x, want MatNormalMap|MatTransMap|MatOcclusionMap|MatEmissiveMap (%#x)", u32At(t, b, 44), want)
+		}
+		if got := u32At(t, b, 124); got != tex.Index() {
+			t.Errorf("emissiveMap index at byte 124 = %d, want %d", got, tex.Index())
+		}
+		if got := u32At(t, b, 128); got != 13 {
+			t.Errorf("emissiveSampler at byte 128 = %d, want 13", got)
 		}
 		if got := u32At(t, b, 48); got != materials.NoTextureIndex {
 			t.Errorf("unbound colorMap at byte 48 = %d, want the no-texture sentinel", got)
@@ -269,14 +282,14 @@ func TestAlphaCutoffMakesAMaterialMasked(t *testing.T) {
 	defer m.Release()
 	m.SetColorMap(tex)
 	m.SetColor(colors.RGBA32F{1, 1, 1, 0.5})
-	if _, isMasked := m.AlphaMask(); isMasked {
+	if m.AlphaMask().IsMasked() {
 		t.Fatal("a new PBR material is masked, want it whole")
 	}
 	before := m.Pool().RasterRevision()
 	m.SetAlphaCutoff(0.4)
-	mask, isMasked := m.AlphaMask()
-	if !isMasked || mask.Cutoff != 0.4 || mask.Alpha != 0.5 || mask.Map.Index() != tex.Index() {
-		t.Errorf("AlphaMask() = %+v, %v after SetAlphaCutoff(0.4); want masked by the colour map at cut-off 0.4, alpha 0.5", mask, isMasked)
+	mask := m.AlphaMask()
+	if !mask.IsMasked() || mask.Cutoff != 0.4 || mask.Alpha != 0.5 || mask.Map.Index() != tex.Index() {
+		t.Errorf("AlphaMask() = %+v after SetAlphaCutoff(0.4); want masked by the colour map at cut-off 0.4, alpha 0.5", mask)
 	}
 	if !m.Pool().IsMaskedAt(m.ID().Slot) {
 		t.Error("the pool does not see the material as masked")
