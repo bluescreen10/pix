@@ -28,10 +28,9 @@ func TestDirectionalShadowMapAllocated(t *testing.T) {
 
 	cube := r.GeometryStore.Create(normalCube())
 	defer cube.Release()
-	scene.Add(scene.NewMesh(cube, r.NewPBRMaterial()))
+	scene.NewMesh(cube, r.NewPBRMaterial())
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
 	r.Render(scene)
 
@@ -77,10 +76,8 @@ func TestDirectionalShadowDepthPass(t *testing.T) {
 	defer cube.Release()
 	mesh := scene.NewMesh(cube, r.NewPBRMaterial())
 	mesh.SetCastShadow(true) // so the shadow view's castersOnly cull keeps it
-	scene.Add(mesh)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
 
 	// Two frames: frame 2 transitions the shadow map back from sampled to depth.
@@ -121,7 +118,6 @@ func TestShadowsEmptyScene(t *testing.T) {
 	light.SetCastShadow(true)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
 	r.Render(scene) // must not panic on the empty draw list
 }
@@ -155,16 +151,13 @@ func TestSpotShadowDarkensReceiver(t *testing.T) {
 
 		ground := scene.NewMesh(cube, r.NewPBRMaterial())
 		ground.SetScale(glm.Vec3f{6, 0.2, 6})
-		scene.Add(ground)
 
 		occluder := scene.NewMesh(cube, r.NewPBRMaterial())
 		occluder.SetPosition(glm.Vec3f{0, 1.5, 0})
 		occluder.SetScale(glm.Vec3f{0.8, 0.8, 0.8})
 		occluder.SetCastShadow(true)
-		scene.Add(occluder)
 
 		cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 5, 6})
 		cam.LookAt(glm.Vec3f{0, 0, 0})
 
@@ -210,16 +203,13 @@ func TestPointShadowDarkensReceiver(t *testing.T) {
 
 		ground := scene.NewMesh(cube, r.NewPBRMaterial())
 		ground.SetScale(glm.Vec3f{6, 0.2, 6})
-		scene.Add(ground)
 
 		occluder := scene.NewMesh(cube, r.NewPBRMaterial())
 		occluder.SetPosition(glm.Vec3f{0, 1.5, 0})
 		occluder.SetScale(glm.Vec3f{0.8, 0.8, 0.8})
 		occluder.SetCastShadow(true)
-		scene.Add(occluder)
 
 		cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 5, 6})
 		cam.LookAt(glm.Vec3f{0, 0, 0})
 
@@ -275,16 +265,13 @@ func TestDirectionalShadowDarkensReceiver(t *testing.T) {
 		ground := scene.NewMesh(cube, r.NewPBRMaterial())
 		ground.SetPosition(glm.Vec3f{0, 0, 0})
 		ground.SetScale(glm.Vec3f{6, 0.2, 6}) // wide flat receiver
-		scene.Add(ground)
 
 		occluder := scene.NewMesh(cube, r.NewPBRMaterial())
 		occluder.SetPosition(glm.Vec3f{0, 1.5, 0})
 		occluder.SetScale(glm.Vec3f{0.8, 0.8, 0.8})
 		occluder.SetCastShadow(true)
-		scene.Add(occluder)
 
 		cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 5, 6})
 		cam.LookAt(glm.Vec3f{0, 0, 0})
 
@@ -323,10 +310,9 @@ func TestShadowSetSizeReallocatesMap(t *testing.T) {
 
 	cube := r.GeometryStore.Create(normalCube())
 	defer cube.Release()
-	scene.Add(scene.NewMesh(cube, r.NewPBRMaterial()))
+	scene.NewMesh(cube, r.NewPBRMaterial())
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
 	r.Render(scene)
 
@@ -394,16 +380,13 @@ func TestEnableShadowsTogglesAtRuntime(t *testing.T) {
 
 	ground := scene.NewMesh(cube, r.NewPBRMaterial())
 	ground.SetScale(glm.Vec3f{6, 0.2, 6})
-	scene.Add(ground)
 
 	occluder := scene.NewMesh(cube, r.NewPBRMaterial())
 	occluder.SetPosition(glm.Vec3f{0, 1.5, 0})
 	occluder.SetScale(glm.Vec3f{0.8, 0.8, 0.8})
 	occluder.SetCastShadow(true)
-	scene.Add(occluder)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 5, 6})
 	cam.LookAt(glm.Vec3f{0, 0, 0})
 

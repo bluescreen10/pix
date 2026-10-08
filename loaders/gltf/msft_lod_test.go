@@ -52,8 +52,7 @@ func TestMSFTLod(t *testing.T) {
 		t.Fatalf("expected exactly 1 Mesh (the alternates must not become their own scene nodes), got %d", got)
 	}
 
-	cam := scene.NewPerspectiveCamera(45, 1, 0.01, 1000)
-	scene.Add(cam) // looks down -Z, at the origin from every position below
+	cam := scene.NewPerspectiveCamera(45, 1, 0.01, 1000) // looks down -Z, at the origin from every position below
 
 	// Cube radius is ~0.866 (half-diagonal of a unit cube). Coverage 0.5 -> distance
 	// ~1.22, coverage 0.2 -> ~1.94 (see applyMSFTLod's radius/sqrt(coverage)

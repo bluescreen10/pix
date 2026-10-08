@@ -44,7 +44,6 @@ func TestCaptureAnimatedFrames(t *testing.T) {
 	action.SetLoop(scenes.LoopRepeat).Play()
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.01, 100)
-	scene.Add(cam)
 	r.Render(scene)
 	center, radius := scene.FrameSphere(0.9)
 	cam.SetPosition(center.Add(glm.Vec3f{0, 0, radius * 2.6}))

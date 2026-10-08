@@ -29,10 +29,9 @@ func floorScene(t *testing.T) (*pix.Renderer, *scenes.Scene, scenes.Camera) {
 	scene.SetAmbient(colors.RGB32F{}, 1)
 	material := r.NewBlinnPhongMaterial()
 	material.SetSpecular(0)
-	scene.Add(scene.NewMesh(r.NewPlaneGeometry(200, 200, 1, 1), material))
+	scene.NewMesh(r.NewPlaneGeometry(200, 200, 1, 1), material)
 
 	cam := scene.NewPerspectiveCamera(60, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{1, 5, 9})
 	cam.LookAt(glm.Vec3f{0, 0, -3})
 	return r, scene, cam

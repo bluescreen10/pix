@@ -89,9 +89,8 @@ func TestComputeWrittenVolumeIsSampledByMaterial(t *testing.T) {
 		},
 		Indices: []uint32{0, 1, 2, 0, 2, 3},
 	})
-	scene.Add(scene.NewMesh(quad, material))
+	scene.NewMesh(quad, material)
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2})
 
 	for _, probe := range []struct {
@@ -141,9 +140,8 @@ func TestComputeWrittenImageIsSampledByBasicMaterial(t *testing.T) {
 		},
 		Indices: []uint32{0, 1, 2, 0, 2, 3},
 	})
-	scene.Add(scene.NewMesh(quad, material))
+	scene.NewMesh(quad, material)
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2})
 
 	r.Render(scene)

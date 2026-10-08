@@ -220,12 +220,14 @@ func (s *Scene) Root() Node {
 	return Node{scene: s, id: s.root}
 }
 
-// Add parents a node under the scene root.
+// Add parents a node under the scene root. A node starts there when it is created, so
+// this is for putting back one that was moved elsewhere or removed.
 func (s *Scene) Add(node SceneNode) {
 	s.reparent(node.ID(), s.root)
 }
 
-// NewGroup creates an empty group node (hierarchy only).
+// NewGroup creates an empty group node (hierarchy only), under the scene root like
+// every new node.
 func (s *Scene) NewGroup() Group {
 	return Group{Node: Node{scene: s, id: s.allocNode(kindGroup)}}
 }
@@ -331,7 +333,14 @@ func (s *Scene) allocNode(kind nodeKind) NodeID {
 		// length.
 		s.packetDirty = true
 	}
-	return NodeID{index: idx, gen: s.generation[idx]}
+	id := NodeID{index: idx, gen: s.generation[idx]}
+	// Every node starts in the scene, under the root, so creating one is enough to
+	// draw it; Add moves it elsewhere, and Remove takes it out. The root itself is the
+	// one node with nothing to start under.
+	if s.root.isValid() {
+		s.reparent(id, s.root)
+	}
+	return id
 }
 
 func (s *Scene) resetSlot(idx uint32, kind nodeKind) {

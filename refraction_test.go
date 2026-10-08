@@ -39,7 +39,6 @@ func newRefractionScene(t *testing.T) refractionScene {
 	t.Cleanup(scene.Destroy)
 	scene.SetAmbient(colors.RGB32F{}, 0)
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
 	cam.LookAt(glm.Vec3f{})
 	return refractionScene{r: r, scene: scene}
@@ -60,7 +59,7 @@ func (s refractionScene) quad(xMin, yMin, xMax, yMax, z float32) geometries.Geom
 
 // addBackdrop puts an unlit rectangle of material 2 units behind the origin.
 func (s refractionScene) addBackdrop(material materials.Material, xMin, xMax float32) {
-	s.scene.Add(s.scene.NewMesh(s.quad(xMin, -3, xMax, 3, -2), material))
+	s.scene.NewMesh(s.quad(xMin, -3, xMax, 3, -2), material)
 }
 
 // unlit is an unlit material of one colour.
@@ -74,7 +73,6 @@ func (s refractionScene) unlit(color colors.RGBA32F) *materials.BasicMaterial {
 func (s refractionScene) addPane(glass *materials.PBRMaterial, yaw float32) {
 	pane := s.scene.NewMesh(s.quad(-1.5, -1.5, 1.5, 1.5, 0), glass)
 	pane.SetRotation(glm.Vec3f{0, yaw, 0})
-	s.scene.Add(pane)
 }
 
 // render renders the scene and returns its pixels.

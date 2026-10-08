@@ -10,15 +10,12 @@ import (
 
 func TestExtractPublishesAttachedVisibleCameras(t *testing.T) {
 	scene := scenes.New()
-	first := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.NewPerspectiveCamera(45, 1, 0.1, 100)
 	hidden := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
 	detached := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	last := scene.NewOrthographicCamera(-1, 1, -1, 1, 0.1, 100)
-	scene.Add(first)
-	scene.Add(hidden)
-	scene.Add(last)
+	scene.NewOrthographicCamera(-1, 1, -1, 1, 0.1, 100)
+	scene.Root().Remove(detached)
 	hidden.SetVisible(false)
-	_ = detached
 
 	var packet scenes.FramePacket
 	scene.Extract(&packet)
@@ -41,7 +38,6 @@ func TestDestroyingACameraKeepsViewOrder(t *testing.T) {
 	var cameras []scenes.Camera
 	for range 3 {
 		camera := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-		scene.Add(camera)
 		cameras = append(cameras, camera)
 	}
 
@@ -62,7 +58,6 @@ func TestDestroyingACameraKeepsViewOrder(t *testing.T) {
 func TestCameraMovesWithItsParent(t *testing.T) {
 	scene := scenes.New()
 	vehicle := scene.NewGroup()
-	scene.Add(vehicle)
 	camera := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
 	camera.SetPosition(glm.Vec3f{0, 2, 0})
 	vehicle.Add(camera)
@@ -83,7 +78,6 @@ func TestCameraLookAtMatchesLookAtMatrix(t *testing.T) {
 
 	scene := scenes.New()
 	camera := scene.NewPerspectiveCamera(60, 1.5, 0.1, 100)
-	scene.Add(camera)
 	camera.SetPosition(eye)
 	camera.LookAt(target)
 
@@ -121,4 +115,59 @@ func TestCameraSetUpKeepsForward(t *testing.T) {
 
 func isNearlyEqual(a, b glm.Vec3f) bool {
 	return a.Sub(b).Length() < 1e-4
+}
+
+func TestSceneCameras(t *testing.T) {
+	scene := scenes.New()
+	defer scene.Destroy()
+
+	if got := scene.Cameras(); len(got) != 0 {
+		t.Fatalf("Cameras() on an empty scene = %d cameras, want 0", len(got))
+	}
+	first := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	second := scene.NewOrthographicCamera(-1, 1, -1, 1, 0.1, 10)
+	second.SetVisible(false)
+	third := scene.NewPerspectiveCamera(60, 1, 0.1, 100)
+	second.Destroy()
+
+	got := scene.Cameras()
+	want := []scenes.Camera{first, third}
+	if len(got) != len(want) {
+		t.Fatalf("Cameras() = %d cameras, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].ID() != want[i].ID() {
+			t.Errorf("Cameras()[%d] = %v, want %v (creation order, destroyed ones gone)", i, got[i].ID(), want[i].ID())
+		}
+	}
+}
+
+func TestSceneCamerasIncludesHidden(t *testing.T) {
+	scene := scenes.New()
+	defer scene.Destroy()
+	hidden := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	hidden.SetVisible(false)
+
+	if got := scene.Cameras(); len(got) != 1 || got[0].ID() != hidden.ID() {
+		t.Errorf("Cameras() = %v, want the hidden camera", got)
+	}
+}
+
+func TestCameraByName(t *testing.T) {
+	scene := scenes.New()
+	defer scene.Destroy()
+
+	// A group with the same name must not be mistaken for the camera.
+	group := scene.NewGroup()
+	group.SetName("overview")
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	cam.SetName("overview")
+
+	got, ok := scene.CameraByName("overview")
+	if !ok || got.ID() != cam.ID() {
+		t.Errorf(`CameraByName("overview") = %v, %v, want the camera %v`, got.ID(), ok, cam.ID())
+	}
+	if _, ok := scene.CameraByName("closeup"); ok {
+		t.Errorf(`CameraByName("closeup") found a camera, want none`)
+	}
 }

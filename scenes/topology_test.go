@@ -152,8 +152,6 @@ func TestTopologyNonLeafFallback(t *testing.T) {
 	scene, newMesh := topoTestScene(t)
 	oldParent := scene.NewGroup()
 	newParent := scene.NewGroup()
-	scene.Add(oldParent)
-	scene.Add(newParent)
 
 	sub := scene.NewGroup()
 	oldParent.Add(sub)
@@ -182,7 +180,6 @@ func TestTopologyNonLeafFallback(t *testing.T) {
 func TestTopologyDestroyLeafFastPath(t *testing.T) {
 	scene, newMesh := topoTestScene(t)
 	parent := scene.NewGroup()
-	scene.Add(parent)
 	scene.Sync()
 
 	m := newMesh()

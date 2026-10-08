@@ -34,10 +34,8 @@ func edgeScene(t *testing.T) (*pix.Renderer, *scenes.Scene) {
 	white.SetColor(colors.RGBA32F{1, 1, 1, 1})
 	mesh := scene.NewMesh(quad, white)
 	mesh.SetRotationXYZ(0, 0, 0.35)
-	scene.Add(mesh)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2})
 	return r, scene
 }
@@ -230,10 +228,9 @@ func TestMSAABlendsOverTheResolvedScene(t *testing.T) {
 			blue := r.NewBasicMaterial()
 			blue.SetColor(colors.RGBA32F{0, 0, 1, 0.5})
 			blue.SetBlend(materials.BlendAlpha)
-			scene.Add(scene.NewMesh(quad(-0.5), red))
-			scene.Add(scene.NewMesh(quad(0), blue))
+			scene.NewMesh(quad(-0.5), red)
+			scene.NewMesh(quad(0), blue)
 			cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-			scene.Add(cam)
 			cam.SetPosition(glm.Vec3f{0, 0, 2})
 			r.Render(scene)
 

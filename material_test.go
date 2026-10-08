@@ -37,7 +37,6 @@ func TestMaterialClasses(t *testing.T) {
 		m := scene.NewMesh(cube, mat)
 		m.SetPosition(glm.Vec3f{x, 0, 0})
 		m.SetRotationQuat(glm.NewQuat(float32(0.6), glm.Vec3f{0, 1, 0}))
-		scene.Add(m)
 	}
 	place(basic, -1.4)
 	place(phong, 0)
@@ -47,7 +46,6 @@ func TestMaterialClasses(t *testing.T) {
 	scene.AddDirectionalLight(glm.Vec3f{-1, -0.3, -0.6}, colors.RGB32F{1, 1, 1}, 1.0)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 1000)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0.5, 5})
 	cam.LookAt(glm.Vec3f{})
 
@@ -128,9 +126,8 @@ func TestDoubleSidedBackFaceIsLit(t *testing.T) {
 		defer scene.Destroy()
 		scene.SetAmbient(colors.RGB32F{}, 1)
 		scene.AddDirectionalLight(glm.Vec3f{0, 0, -side}, colors.RGB32F{1, 1, 1}, 2)
-		scene.Add(scene.NewMesh(quad, material))
+		scene.NewMesh(quad, material)
 		cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 0, 2 * side})
 		cam.LookAt(glm.Vec3f{})
 		r.Render(scene)
@@ -192,9 +189,8 @@ func TestCullBackHidesTheBackFace(t *testing.T) {
 	renderCenter := func(side float32) uint8 {
 		scene := scenes.New()
 		defer scene.Destroy()
-		scene.Add(scene.NewMesh(quad, material))
+		scene.NewMesh(quad, material)
 		cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 0, 2 * side})
 		cam.LookAt(glm.Vec3f{})
 		r.Render(scene)

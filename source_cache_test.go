@@ -20,11 +20,10 @@ func greenCubeScene(t *testing.T, r *pix.Renderer) *scenes.Scene {
 	geo := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	mat := r.NewBasicMaterial()
 	mat.SetColor(colors.RGBA32F{0, 1, 0, 1})
-	scene.Add(scene.NewMesh(geo, mat))
+	scene.NewMesh(geo, mat)
 	geo.Release()
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
 	return scene
 }

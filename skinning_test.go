@@ -89,12 +89,9 @@ func TestSkinnedMeshBindPose(t *testing.T) {
 	mat.SetCull(materials.CullNone)
 
 	skel := scene.NewSkeleton(twoBoneSkeleton())
-	scene.Add(skel)
-	sm := scene.NewSkinnedMesh(geo, mat, skel)
-	scene.Add(sm)
+	scene.NewSkinnedMesh(geo, mat, skel)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 1, 6})
 	cam.LookAt(glm.Vec3f{})
 
@@ -128,12 +125,9 @@ func TestSkinnedMeshDeforms(t *testing.T) {
 	mat.SetCull(materials.CullNone)
 
 	skel := scene.NewSkeleton(twoBoneSkeleton())
-	scene.Add(skel)
-	sm := scene.NewSkinnedMesh(geo, mat, skel)
-	scene.Add(sm)
+	scene.NewSkinnedMesh(geo, mat, skel)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 1, 6})
 	cam.LookAt(glm.Vec3f{})
 
@@ -171,7 +165,6 @@ func TestSkinnedMeshBoneAttachment(t *testing.T) {
 	defer scene.Destroy()
 
 	skel := scene.NewSkeleton(twoBoneSkeleton())
-	scene.Add(skel)
 
 	prop := scene.NewGroup()
 	skel.Bone(1).Add(prop)
@@ -212,12 +205,9 @@ func TestSkinnedMeshStaysVisibleAwayFromBindPose(t *testing.T) {
 	mat.SetCull(materials.CullNone)
 
 	skel := scene.NewSkeleton(twoBoneSkeleton())
-	scene.Add(skel)
-	sm := scene.NewSkinnedMesh(geo, mat, skel)
-	scene.Add(sm)
+	scene.NewSkinnedMesh(geo, mat, skel)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{20, 1, 6})
 	cam.LookAt(glm.Vec3f{20, 1, 0})
 

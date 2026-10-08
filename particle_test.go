@@ -378,11 +378,9 @@ func TestParticlesDrawBackToFront(t *testing.T) {
 			spawned++
 		}),
 	}, 2)
-	scene.Add(container)
 	container.Update(1.0 / 60)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	for _, view := range []struct {
 		z    float32
 		want [3]byte
@@ -452,11 +450,9 @@ func TestParticleSortOrdersEveryPair(t *testing.T) {
 			spawned++
 		}),
 	}, 100)
-	scene.Add(container)
 	container.Update(1.0 / 60)
 
 	cam := scene.NewOrthographicCamera(-count/2, count/2, -1, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 5})
 	cam.LookAt(glm.Vec3f{0, 0, 0})
 	r.Render(scene)

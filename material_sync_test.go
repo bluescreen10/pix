@@ -36,10 +36,9 @@ func TestMaterialEditBetweenFramesReachesGPU(t *testing.T) {
 	defer cube.Release()
 	mat := r.NewBasicMaterial() // unlit: pixel is the material color, no lighting
 	mat.SetColor(colors.RGBA32F{1, 0, 0, 1})
-	scene.Add(scene.NewMesh(cube, mat))
+	scene.NewMesh(cube, mat)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2})
 
 	red, _, _ := renderCube(t, r, scene, cam)
@@ -71,10 +70,9 @@ func TestMaterialStoreGrowReuploadsEveryRecord(t *testing.T) {
 
 	first := r.NewBasicMaterial()
 	first.SetColor(colors.RGBA32F{1, 0, 0, 1})
-	scene.Add(scene.NewMesh(cube, first))
+	scene.NewMesh(cube, first)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2})
 	if red, _, _ := renderCube(t, r, scene, cam); red < 200 {
 		t.Fatalf("first frame: want red, got r=%d", red)

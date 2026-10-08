@@ -31,17 +31,14 @@ func bigScene(t *testing.T, r *pix.Renderer, mapSize uint32) (*scenes.Scene, sce
 
 	ground := scene.NewMesh(cube, r.NewPBRMaterial())
 	ground.SetScale(glm.Vec3f{radius * 2, radius * 0.01, radius * 2})
-	scene.Add(ground)
 	for _, d := range []float32{2, 5, 15, 40, 100, 250} {
 		p := scene.NewMesh(cube, r.NewPBRMaterial())
 		p.SetPosition(glm.Vec3f{0, d * 0.05, -d})
 		p.SetScale(glm.Vec3f{d * 0.05, d * 0.1, d * 0.05})
 		p.SetCastShadow(true)
-		scene.Add(p)
 	}
 
 	cam := scene.NewPerspectiveCamera(45, 1, radius*0.001, radius*12)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 1.7, 8})
 	cam.LookAt(glm.Vec3f{0, 1.2, -20})
 	return scene, cam, light
@@ -249,7 +246,6 @@ func TestShadowBiasHoldsAsTheLightGrazes(t *testing.T) {
 		defer cube.Release()
 		ground := scene.NewMesh(cube, r.NewPBRMaterial())
 		ground.SetScale(glm.Vec3f{60, 0.2, 60})
-		scene.Add(ground)
 		// A tilted ramp and an upright wall, so several surface angles meet the light at
 		// once and no single constant bias can suit all of them.
 		ramp := scene.NewMesh(cube, r.NewPBRMaterial())
@@ -257,20 +253,16 @@ func TestShadowBiasHoldsAsTheLightGrazes(t *testing.T) {
 		ramp.SetScale(glm.Vec3f{4, 0.3, 6})
 		ramp.SetRotation(glm.Vec3f{0.4, 0, 0.3})
 		ramp.SetCastShadow(true)
-		scene.Add(ramp)
 		wall := scene.NewMesh(cube, r.NewPBRMaterial())
 		wall.SetPosition(glm.Vec3f{4, 1.5, -4})
 		wall.SetScale(glm.Vec3f{0.4, 3, 8})
 		wall.SetCastShadow(true)
-		scene.Add(wall)
 		box := scene.NewMesh(cube, r.NewPBRMaterial())
 		box.SetPosition(glm.Vec3f{0, 1, 2})
 		box.SetScale(glm.Vec3f{1.2, 2, 1.2})
 		box.SetCastShadow(true)
-		scene.Add(box)
 
 		cam := scene.NewPerspectiveCamera(55, 1, 0.3, 200)
-		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{2, 5, 12})
 		cam.LookAt(glm.Vec3f{0, 1, -2})
 

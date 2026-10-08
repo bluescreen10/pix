@@ -160,7 +160,6 @@ func TestLoadTriangle(t *testing.T) {
 	scene.SetAmbient(colors.RGB32F{1, 1, 1}, 1)
 
 	cam := scene.NewPerspectiveCamera(50, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2.5})
 	r.Render(scene)
 

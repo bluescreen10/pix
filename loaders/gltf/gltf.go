@@ -6,8 +6,8 @@
 // becomes a scenes.SkinnedMesh, and glTF animations come back as pix.AnimationClips
 // ready for a scenes.AnimationMixer. Morph targets load onto their geometries, named
 // from the mesh's (or node's) extras.targetNames, starting at the mesh's (or node's)
-// default weights; "weights" channels animate them. CUBICSPLINE samplers play as
-// LINEAR over their value keys.
+// default weights; "weights" channels animate them. Cameras load hidden, at their
+// nodes (see addCamera). CUBICSPLINE samplers play as LINEAR over their value keys.
 package gltf
 
 import (
@@ -38,8 +38,9 @@ import (
 
 // LoadResult is what Load made: how many mesh nodes it added to the scene, the
 // skeletons built from the asset's skins (a SkinnedMesh already references its own —
-// this is for e.g. Skeleton.Pose or attaching props to a named bone), and its animation
-// clips, each ready to hand to an AnimationMixer via mixer.Action(clip).
+// this is for e.g. Skeleton.Pose or attaching props to a named bone), its animation
+// clips, each ready to hand to an AnimationMixer via mixer.Action(clip). The asset's
+// cameras are part of the scene: find them with Scene.Cameras or Scene.CameraByName.
 type LoadResult struct {
 	Added     int
 	Skeletons []scenes.Skeleton
@@ -151,11 +152,12 @@ func (l *loader) build() (int, error) {
 
 	// Build only the nodes reachable from the loaded scene's roots (their subtrees).
 	// glTF files can hold several scenes (e.g. this asset has "Extended" + "Original"
-	// with duplicate nodes) — nodes not in the loaded scene must NOT be created, or
-	// they'd render at identity (origin) since nothing parents them.
+	// with duplicate nodes) — nodes not in the loaded scene must NOT be created: every
+	// node starts in the scene, so they would be drawn too. A root's node is left under
+	// the scene root, where it was created.
 	l.nodes = make([]scenes.Node, len(l.doc.Nodes)) // sparse; only reachable nodes filled
 	for _, ri := range l.roots() {
-		l.scene.Add(l.buildNode(ri))
+		l.buildNode(ri)
 	}
 
 	// Drop the loader's references now that ownership has transferred: each Mesh holds
@@ -181,7 +183,7 @@ func (l *loader) build() (int, error) {
 //     call); non-joint children (rare — e.g. a prop attached to a hand bone) are
 //     built normally and parented under it.
 //   - Anything else becomes a plain group, with a Mesh/SkinnedMesh child per
-//     triangle primitive if it has one.
+//     triangle primitive if it has one, and a Camera child if it has a camera.
 //
 // Returns the node to be parented by the caller.
 func (l *loader) buildNode(idx int) scenes.Node {
@@ -226,6 +228,9 @@ func (l *loader) buildNode(idx int) scenes.Node {
 		if ext := gn.Extensions; ext != nil && ext.MSFTLod != nil {
 			l.applyMSFTLod(meshes, ext.MSFTLod, gn.Extras)
 		}
+	}
+	if gn.Camera != nil {
+		l.addCamera(node, idx)
 	}
 	for _, c := range gn.Children {
 		node.Add(l.buildNode(c))

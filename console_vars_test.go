@@ -182,8 +182,7 @@ func TestConsoleCommandReconfiguresBetweenFrames(t *testing.T) {
 	r.EnableHDR(true)
 	scene := scenes.New()
 	defer scene.Destroy()
-	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
+	scene.NewPerspectiveCamera(45, 1, 0.1, 100)
 
 	enter := input.KeyEvent{Key: input.KeyEnter, Action: input.KeyPress}
 	r.EnableConsole(&typedInput{frames: []typedFrame{

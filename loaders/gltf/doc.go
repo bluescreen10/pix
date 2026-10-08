@@ -1,7 +1,8 @@
 package gltf
 
 // glTF 2.0 JSON document types — the subset the loader consumes: static meshes,
-// morph targets, PBR base color + texture, node hierarchy, skins, and animations.
+// morph targets, PBR base color + texture, node hierarchy, skins, animations, and
+// cameras.
 
 type doc struct {
 	Scene       int          `json:"scene"`
@@ -17,6 +18,7 @@ type doc struct {
 	Buffers     []gltfBuffer `json:"buffers"`
 	Skins       []skin       `json:"skins"`
 	Animations  []animation  `json:"animations"`
+	Cameras     []camera     `json:"cameras"`
 }
 
 type scene struct {
@@ -28,6 +30,7 @@ type node struct {
 	Children    []int     `json:"children"`
 	Mesh        *int      `json:"mesh"`
 	Skin        *int      `json:"skin"`
+	Camera      *int      `json:"camera"`
 	Matrix      []float32 `json:"matrix"`
 	Translation []float32 `json:"translation"`
 	Rotation    []float32 `json:"rotation"`
@@ -248,4 +251,30 @@ type bufferView struct {
 type gltfBuffer struct {
 	URI        string `json:"uri"`
 	ByteLength int    `json:"byteLength"`
+}
+
+// camera is a glTF camera: Type says which of Perspective and Orthographic is set. It
+// looks down its node's -Z axis with +Y up.
+type camera struct {
+	Name         string              `json:"name"`
+	Type         string              `json:"type"` // "perspective" | "orthographic"
+	Perspective  *perspectiveCamera  `json:"perspective"`
+	Orthographic *orthographicCamera `json:"orthographic"`
+}
+
+// perspectiveCamera's YFov is in radians. AspectRatio is width / height, or nil to
+// follow the viewport; Zfar is nil for an infinite far plane.
+type perspectiveCamera struct {
+	AspectRatio *float32 `json:"aspectRatio"`
+	YFov        float32  `json:"yfov"`
+	Znear       float32  `json:"znear"`
+	Zfar        *float32 `json:"zfar"`
+}
+
+// orthographicCamera's XMag and YMag are half the view's width and height.
+type orthographicCamera struct {
+	XMag  float32 `json:"xmag"`
+	YMag  float32 `json:"ymag"`
+	Znear float32 `json:"znear"`
+	Zfar  float32 `json:"zfar"`
 }

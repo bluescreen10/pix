@@ -11,8 +11,8 @@ import (
 )
 
 // TestPipelineAlignmentDetachedMesh pins the parallel-array contract the renderer's
-// batching relies on internally: a mesh created but never added to the scene (or later
-// detached) must have exactly zero effect on how any other mesh renders.
+// batching relies on internally: a mesh detached from the scene must have exactly zero
+// effect on how any other mesh renders.
 //
 // This used to be resolved by a second walk of the payload lists that did not filter
 // the same way the real drawable-collection walk does, so an orphaned mesh shifted
@@ -37,14 +37,12 @@ func TestPipelineAlignmentDetachedMesh(t *testing.T) {
 
 		if withOrphan {
 			basic := r.NewBasicMaterial()
-			scene.NewMesh(geo, basic) // created but never added to the scene root
+			scene.Root().Remove(scene.NewMesh(geo, basic)) // exists, but out of the scene
 		}
 
-		added := scene.NewMesh(geo, phong)
-		scene.Add(added)
+		scene.NewMesh(geo, phong)
 
 		cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 0, 3})
 		r.Render(scene)
 		return append([]byte(nil), r.Pixels()...)
@@ -53,7 +51,7 @@ func TestPipelineAlignmentDetachedMesh(t *testing.T) {
 	without := render(false)
 	with := render(true)
 	if !bytes.Equal(without, with) {
-		t.Fatal("an orphaned (never-added) mesh changed how the attached mesh rendered — " +
+		t.Fatal("an orphaned (detached) mesh changed how the attached mesh rendered — " +
 			"material/pipeline indices likely shifted out of alignment")
 	}
 }
@@ -81,15 +79,12 @@ func TestDrawableFlagsFollowShadowToggle(t *testing.T) {
 	geo := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	ground := scene.NewMesh(geo, r.NewPBRMaterial())
 	ground.SetScale(glm.Vec3f{6, 0.2, 6})
-	scene.Add(ground)
 
 	occluder := scene.NewMesh(geo, r.NewPBRMaterial())
 	occluder.SetPosition(glm.Vec3f{0, 1.5, 0})
 	occluder.SetScale(glm.Vec3f{0.8, 0.8, 0.8})
-	scene.Add(occluder)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 5, 6})
 	cam.LookAt(glm.Vec3f{0, 0, 0})
 
@@ -126,10 +121,8 @@ func TestPipelineFollowsMaterialSwap(t *testing.T) {
 	blue.SetColor(colors.RGBA32F{0, 0, 1, 1})
 
 	mesh := scene.NewMesh(r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1)), red)
-	scene.Add(mesh)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
 	r.Render(scene)
 	px := r.Pixels()
@@ -170,10 +163,8 @@ func TestMaterialSwapWithinOnePool(t *testing.T) {
 	green.SetColor(colors.RGBA32F{0, 1, 0, 1})
 
 	mesh := scene.NewMesh(r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1)), red)
-	scene.Add(mesh)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
 	i := (32*64 + 32) * 4
 

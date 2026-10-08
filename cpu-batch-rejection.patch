@@ -1,0 +1,226 @@
+--- drawlist.go	2026-09-23 08:47:44
++++ /tmp/dl_reject.go	2026-09-23 08:47:44
+@@ -44,6 +44,13 @@
+ 	// no longer supplies it: hysteresis and level boundaries reach here as mesh
+ 	// description, and what the cull shader reads is this side's business.
+ 	lods []gpuLOD
++	// worldBounds is each drawable's bounding sphere in world space (xyz centre, w
++	// radius), refreshed every frame; batchLive marks, for the view most recently
++	// passed to liveBatches, which batches can still draw something. Together they are
++	// what lets a view skip issuing draws for batches it cannot possibly show.
++	worldBounds []glm.Vec4f
++	batchLive   []bool
++	spans       []batchSpan
+ 	// builtRevision is the mesh-table revision the current batch layout was built from.
+ 	builtRevision uint64
+ 	visCap        uint32
+@@ -382,6 +389,106 @@
+ 	return len(d.batches)
+ }
+ 
++// batchSpan is a contiguous run of batches issued as one indirect draw.
++type batchSpan struct {
++	first, count uint32
++}
++
++// updateWorldBounds refreshes every drawable's bounding sphere in world space.
++//
++// Drawable bounds are local, so this applies deliberately the same transform
++// scene_cull.comp does: the CPU's decision about which draws to issue and the GPU's
++// decision about which instances survive have to agree, and the cheapest way to
++// guarantee that is to compute visibility from the same numbers.
++//
++// It runs every frame rather than with the batch layout, because a scene whose objects
++// move keeps its layout and invalidates only its bounds.
++func (d *drawList) updateWorldBounds(p *scenes.FramePacket) {
++	if cap(d.worldBounds) < len(d.drawables) {
++		d.worldBounds = make([]glm.Vec4f, len(d.drawables))
++	}
++	d.worldBounds = d.worldBounds[:len(d.drawables)]
++	for i := range d.drawables {
++		dr := &d.drawables[i]
++		m := transformAt(p, dr.transformID)
++		c := m.Mul4x1(glm.Vec4f{dr.bounds[0], dr.bounds[1], dr.bounds[2], 1})
++		// The largest axis scale, not the average: a non-uniform scale must never
++		// shrink the sphere below the geometry it bounds.
++		sx := glm.Vec3f{m[0], m[1], m[2]}.Length()
++		sy := glm.Vec3f{m[4], m[5], m[6]}.Length()
++		sz := glm.Vec3f{m[8], m[9], m[10]}.Length()
++		d.worldBounds[i] = glm.Vec4f{c[0], c[1], c[2], dr.bounds[3] * max(sx, max(sy, sz))}
++	}
++}
++
++// liveBatches marks which batches can still draw something in the view described by
++// planes, and reports whether any can. castersOnly restricts it to shadow casters, as
++// the cull shader's own castersOnly does.
++//
++// This decides which indirect draws are worth issuing at all. It is NOT a replacement
++// for the GPU cull, which still rejects instance by instance — the point is that a
++// draw for a batch the cull will empty is not free. Metal has no multi-draw-indirect,
++// so every batch is a separate API draw whether or not its instanceCount is zero, and
++// at roughly a microsecond each a scene's worth of empty draws per cascade is the
++// single largest cost in the shadow pass.
++//
++// Conservative is the contract: a batch is live if ANY of its drawables might be
++// visible. It may keep a batch the GPU then empties, but it must never drop one the
++// GPU would have drawn. That is why LOD is ignored here — the level is chosen on the
++// GPU, so every level's drawable has to count.
++func (d *drawList) liveBatches(planes [6]glm.Vec4f, castersOnly bool) bool {
++	if cap(d.batchLive) < len(d.batches) {
++		d.batchLive = make([]bool, len(d.batches))
++	}
++	d.batchLive = d.batchLive[:len(d.batches)]
++	clear(d.batchLive)
++	any := false
++	for i := range d.drawables {
++		dr := &d.drawables[i]
++		if castersOnly && dr.flags&DrawableCastsShadow == 0 {
++			continue
++		}
++		if d.batchLive[dr.batchID] || sphereOutside(planes, d.worldBounds[i]) {
++			continue
++		}
++		d.batchLive[dr.batchID] = true
++		any = true
++	}
++	return any
++}
++
++// liveSpans appends the contiguous runs of live batches within [first, first+count) to
++// out, as marked by the most recent liveBatches.
++//
++// Spans rather than individual batches because a run of neighbours still costs one
++// draw between them all. A view that keeps a scattered subset pays more draws than a
++// view that keeps a compact one, but never more than the count it replaces.
++func (d *drawList) liveSpans(first, count uint32, out []batchSpan) []batchSpan {
++	for i := first; i < first+count; {
++		if !d.batchLive[i] {
++			i++
++			continue
++		}
++		start := i
++		for i < first+count && d.batchLive[i] {
++			i++
++		}
++		out = append(out, batchSpan{first: start, count: i - start})
++	}
++	return out
++}
++
++// sphereOutside reports whether a world-space bounding sphere (xyz centre, w radius)
++// lies wholly beyond one of the frustum planes — the same test scene_cull.comp makes.
++func sphereOutside(planes [6]glm.Vec4f, s glm.Vec4f) bool {
++	for _, p := range planes {
++		if p[0]*s[0]+p[1]*s[1]+p[2]*s[2]+p[3] < -s[3] {
++			return true
++		}
++	}
++	return false
++}
++
+ func (d *drawList) destroy() {
+ 	bufs := []gpu.Buffer{d.worldBuf, d.drawableBuf, d.indirectBuf, d.regionBuf, d.visibleBuf, d.lodTableBuf, d.prevLevelBuf}
+ 	for _, v := range d.shadowViews {
+--- renderer.go	2026-09-23 08:47:44
++++ /tmp/r_reject.go	2026-09-23 08:47:37
+@@ -1006,6 +1006,10 @@
+ 	// way); issueDraws below then filters by pass to route it into the right render
+ 	// pass with the right pipeline set.
+ 	r.fillDrawRoots(dl, drawVP, eye, st.lights.Addr(), r.frame.Time)
++	// Which batches the main camera can show, for every pass below (see liveBatches).
++	// It has to be re-marked here rather than alongside the cull dispatch, because the
++	// shadow views above each overwrite the marks with their own.
++	dl.liveBatches(planes, false)
+ 	gbufferActive := r.hasGBufferRuns(dl)
+ 	// A debug view needs the G-buffer to have actually been filled; with nothing
+ 	// rendering deferred there is nothing to show, so the frame shades normally.
+@@ -1305,13 +1309,15 @@
+ 		dl.matBlend = append(dl.matBlend, blend)
+ 		dl.matPipe = append(dl.matPipe, r.pipelineForPool(pool, pool.Cull(id.Slot), blend))
+ 	}
+-	if dl.builtRevision == p.Meshes.Revision && slices.Equal(dl.matPipe, dl.batchedMatPipe) {
+-		return
++	if dl.builtRevision != p.Meshes.Revision || !slices.Equal(dl.matPipe, dl.batchedMatPipe) {
++		dl.expand(p)
++		dl.rebuild(r.GeometryStore)
++		dl.builtRevision = p.Meshes.Revision
++		dl.batchedMatPipe = append(dl.batchedMatPipe[:0], dl.matPipe...)
+ 	}
+-	dl.expand(p)
+-	dl.rebuild(r.GeometryStore)
+-	dl.builtRevision = p.Meshes.Revision
+-	dl.batchedMatPipe = append(dl.batchedMatPipe[:0], dl.matPipe...)
++	// After the layout, and unconditionally: a scene whose objects move keeps its batch
++	// layout and invalidates only its bounds.
++	dl.updateWorldBounds(p)
+ }
+ 
+ // prepareShadows gives every casting light in the packet the resources it asked for —
+@@ -1703,8 +1709,16 @@
+ 	cmd.SetPipeline(r.shadowPipeline)
+ 	for i, sv := range group {
+ 		v := &dl.shadowViews[first+i]
++		vp := sv.cam.ViewProjection()
++		// Only the batches this view can actually show. A cascade covering a few dozen
++		// units of a large scene keeps almost nothing, and the draws it skips are the
++		// bulk of what the pass used to cost — an indirect draw is a separate API draw
++		// on Metal, charged in full even when the cull left it with no instances.
++		if !dl.liveBatches(glm.FrustumPlanes(vp), true) {
++			continue
++		}
+ 		sr := shadowRoot{
+-			viewProj:  sv.cam.ViewProjection(),
++			viewProj:  vp,
+ 			pos:       r.GeometryStore.PositionsAddr(),
+ 			descs:     r.GeometryStore.DescriptorsAddr(),
+ 			models:    dl.worldBuf.Addr,
+@@ -1713,7 +1727,10 @@
+ 		}
+ 		cmd.SetViewport(float32(sv.x), 0, float32(sv.width), float32(sv.height), 0, 1)
+ 		cmd.SetScissor(sv.x, 0, int32(sv.width), int32(sv.height))
+-		cmd.DrawIndexedIndirect(utils.ToBytes(&sr), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, v.indirectBuf, 0, uint32(dl.batchCount()), indirectSize)
++		dl.spans = dl.liveSpans(0, uint32(dl.batchCount()), dl.spans[:0])
++		for _, s := range dl.spans {
++			cmd.DrawIndexedIndirect(utils.ToBytes(&sr), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, v.indirectBuf, uint64(s.first)*uint64(indirectSize), s.count, indirectSize)
++		}
+ 	}
+ 	cmd.EndRenderPass()
+ }
+@@ -1827,6 +1844,10 @@
+ 		// pass runs the standard one — so its depth would not be that material's. Leave
+ 		// those runs out; they shade as they always did, just without the prepass.
+ 		if key.vertex != nil {
++			continue
++		}
++		dl.spans = dl.liveSpans(run.firstBatch, run.count, dl.spans[:0])
++		if len(dl.spans) == 0 {
+ 			continue
+ 		}
+ 		// Match the shading pass's culling exactly, or this writes depth for faces it
+@@ -1835,7 +1856,9 @@
+ 			cull = key.cull
+ 			cmd.SetPipeline(r.prepassPipelines[min(int(cull), len(r.prepassPipelines)-1)])
+ 		}
+-		cmd.DrawIndexedIndirect(utils.ToBytes(&sr), idx, gpu.IndexUint32, dl.indirectBuf, uint64(run.firstBatch)*uint64(indirectSize), run.count, indirectSize)
++		for _, s := range dl.spans {
++			cmd.DrawIndexedIndirect(utils.ToBytes(&sr), idx, gpu.IndexUint32, dl.indirectBuf, uint64(s.first)*uint64(indirectSize), s.count, indirectSize)
++		}
+ 		drew = true
+ 	}
+ 	cmd.EndRenderPass()
+@@ -1858,8 +1881,14 @@
+ 		if key.pass != p {
+ 			continue
+ 		}
++		dl.spans = dl.liveSpans(run.firstBatch, run.count, dl.spans[:0])
++		if len(dl.spans) == 0 {
++			continue
++		}
+ 		cmd.SetPipeline(r.drawPipelines[run.pipeline])
+-		cmd.DrawIndexedIndirect(utils.ToBytes(&dl.roots[ri]), idx, gpu.IndexUint32, dl.indirectBuf, uint64(run.firstBatch)*uint64(indirectSize), run.count, indirectSize)
++		for _, s := range dl.spans {
++			cmd.DrawIndexedIndirect(utils.ToBytes(&dl.roots[ri]), idx, gpu.IndexUint32, dl.indirectBuf, uint64(s.first)*uint64(indirectSize), s.count, indirectSize)
++		}
+ 	}
+ }
+ 

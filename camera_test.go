@@ -18,12 +18,11 @@ func cameraRigScene(t *testing.T, r *pix.Renderer) (*scenes.Scene, scenes.Group,
 	geo := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	mat := r.NewBasicMaterial()
 	mat.SetColor(colors.RGBA32F{0, 1, 0, 1})
-	scene.Add(scene.NewMesh(geo, mat))
+	scene.NewMesh(geo, mat)
 	geo.Release()
 
 	rig := scene.NewGroup()
 	rig.SetPosition(glm.Vec3f{0, 0, 3})
-	scene.Add(rig)
 	camera := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
 	rig.Add(camera)
 	return scene, rig, camera

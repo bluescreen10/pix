@@ -41,11 +41,9 @@ func TestMaterialTableDedupsAcrossInstances(t *testing.T) {
 	for i := range xforms {
 		xforms[i] = glm.Transform(glm.Vec3f{2, 2, 2}, glm.QuatfIdentity, glm.Vec3f{float32(i)*8 - 4*float32(instances), 0, 0})
 	}
-	im := scene.NewInstancedMesh(geo, mat, xforms)
-	scene.Add(im)
+	scene.NewInstancedMesh(geo, mat, xforms)
 
 	cam := scene.NewPerspectiveCamera(70, 8, 0.1, 200)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 20})
 	r.Render(scene)
 
@@ -100,7 +98,6 @@ func TestMaterialTableKeepsDistinctMaterialsApart(t *testing.T) {
 	place := func(m materials.Material, x float32) {
 		mesh := scene.NewMesh(geo, m)
 		mesh.SetPosition(glm.Vec3f{x, 0, 0})
-		scene.Add(mesh)
 	}
 	// Two meshes on red, one on blue, spread left to right with a gap between them.
 	place(red, -6)
@@ -108,7 +105,6 @@ func TestMaterialTableKeepsDistinctMaterialsApart(t *testing.T) {
 	place(blue, 6)
 
 	cam := scene.NewPerspectiveCamera(35, 3, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 10})
 	r.Render(scene)
 

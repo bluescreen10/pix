@@ -162,8 +162,7 @@ func TestExtractMorphedMesh(t *testing.T) {
 	defer scene.Destroy()
 	geo := morphedTriangle(t, store)
 	mesh := scene.NewMesh(geo, newFakeMaterial())
-	scene.Add(mesh)
-	scene.Add(scene.NewMesh(plainTriangle(t, store), newFakeMaterial()))
+	scene.NewMesh(plainTriangle(t, store), newFakeMaterial())
 
 	var packet scenes.FramePacket
 	scene.Extract(&packet)
@@ -233,16 +232,17 @@ func TestExtractMorphedMesh(t *testing.T) {
 	})
 }
 
-func TestExtractSkipsUnattachedMorphedMesh(t *testing.T) {
+func TestExtractSkipsDetachedMorphedMesh(t *testing.T) {
 	store := newGeometryStore(t)
 	scene := scenes.New()
 	defer scene.Destroy()
-	scene.NewMesh(morphedTriangle(t, store), newFakeMaterial())
+	mesh := scene.NewMesh(morphedTriangle(t, store), newFakeMaterial())
+	scene.Root().Remove(mesh)
 
 	var packet scenes.FramePacket
 	scene.Extract(&packet)
 	if len(packet.Deforms.Data) != 0 {
-		t.Errorf("len(Deforms) = %d for a mesh never added to the scene, want 0", len(packet.Deforms.Data))
+		t.Errorf("len(Deforms) = %d for a mesh removed from the scene, want 0", len(packet.Deforms.Data))
 	}
 }
 
@@ -252,7 +252,6 @@ func TestInstancedMeshSharesMorphWeights(t *testing.T) {
 	defer scene.Destroy()
 	transforms := []glm.Mat4f{glm.Mat4fIdentity, glm.Mat4fIdentity, glm.Mat4fIdentity}
 	field := scene.NewInstancedMesh(morphedTriangle(t, store), newFakeMaterial(), transforms)
-	scene.Add(field)
 	field.SetMorphTargetWeight(0, 1)
 
 	var packet scenes.FramePacket
@@ -291,9 +290,7 @@ func TestSkinnedMeshMorphBoundsFollowWeights(t *testing.T) {
 		InverseBind: []glm.Mat4f{glm.Mat4fIdentity},
 		BindPose:    []scenes.Transform{{Rotation: glm.QuatfIdentity, Scale: glm.Vec3f{1, 1, 1}}},
 	})
-	scene.Add(skeleton)
 	mesh := scene.NewSkinnedMesh(geo, newFakeMaterial(), skeleton)
-	scene.Add(mesh)
 
 	scene.Sync()
 	rest := mesh.BoundingSphere()
@@ -311,7 +308,6 @@ func TestAnimationMixerDrivesMorphWeights(t *testing.T) {
 	scene := scenes.New()
 	defer scene.Destroy()
 	mesh := scene.NewMesh(morphedTriangle(t, store), newFakeMaterial())
-	scene.Add(mesh)
 
 	clip := &scenes.AnimationClip{
 		Name:     "lift",
@@ -338,7 +334,6 @@ func TestAnimationMixerBlendsMorphWeights(t *testing.T) {
 	scene := scenes.New()
 	defer scene.Destroy()
 	mesh := scene.NewMesh(morphedTriangle(t, store), newFakeMaterial())
-	scene.Add(mesh)
 
 	pose := func(name string, weights ...float32) *scenes.AnimationClip {
 		return &scenes.AnimationClip{

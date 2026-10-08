@@ -36,16 +36,13 @@ func occluderScene(t *testing.T, r *pix.Renderer, origin glm.Vec3f) (*scenes.Sce
 	ground := scene.NewMesh(cube, r.NewPBRMaterial())
 	ground.SetPosition(origin)
 	ground.SetScale(glm.Vec3f{6, 0.2, 6})
-	scene.Add(ground)
 
 	occluder := scene.NewMesh(cube, r.NewPBRMaterial())
 	occluder.SetPosition(glm.Vec3f{0, 1.5, 0}.Add(origin))
 	occluder.SetScale(glm.Vec3f{0.8, 0.8, 0.8})
 	occluder.SetCastShadow(true)
-	scene.Add(occluder)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 5, 6}.Add(origin))
 	cam.LookAt(origin)
 	return scene, light

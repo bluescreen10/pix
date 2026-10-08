@@ -57,8 +57,7 @@ func TestLoadSkinnedAnimatedAsset(t *testing.T) {
 	// Render once so the skeleton's Sync-computed bind-pose bounds exist, then
 	// frame it — an all-SkinnedMesh scene must still be frameable (FrameSphere
 	// has to see skinnedMeshes, not just meshes).
-	cam := scene.NewPerspectiveCamera(45, 1, 1, 1000)
-	scene.Add(cam)
+	scene.NewPerspectiveCamera(45, 1, 1, 1000)
 	r.Render(scene)
 	center, radius := scene.FrameSphere(0.9)
 	if radius <= 0 {

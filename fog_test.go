@@ -41,10 +41,9 @@ func TestFogBlendsTowardFogColorWithDistance(t *testing.T) {
 		})
 		mat := ren.NewBasicMaterial()
 		mat.SetColor(colors.RGBA32F{1, 0, 0, 1})
-		scene.Add(scene.NewMesh(geo, mat))
+		scene.NewMesh(geo, mat)
 
 		cam := scene.NewPerspectiveCamera(45, 1, 0.1, 1000)
-		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 0, 10}) // looks down -Z at the origin by default, past the quad
 		ren.Render(scene)
 

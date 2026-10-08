@@ -31,11 +31,9 @@ func TestDebugIDShowsDoubleSidedBackfaces(t *testing.T) {
 	geo := r.GeometryStore.Create(pix.BoxGeometry(10, 10, 10))
 	mat := r.NewBasicMaterial()
 	mat.SetCull(materials.CullNone)
-	box := scene.NewMesh(geo, mat)
-	scene.Add(box)
+	scene.NewMesh(geo, mat)
 
 	cam := scene.NewPerspectiveCamera(90, 1, 0.05, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 0}) // inside the box
 	cam.LookAt(glm.Vec3f{0, 0, -1})
 

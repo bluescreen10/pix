@@ -48,10 +48,8 @@ func environmentScene(t *testing.T, environment *scenes.Environment, material fu
 	if material != nil {
 		sphere := scene.NewMesh(r.NewSphereGeometry(1, 48, 32), material(r))
 		sphere.SetPosition(glm.Vec3f{0, 0, -3})
-		scene.Add(sphere)
 	}
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.LookAt(glm.Vec3f{0, 0, -1})
 	return r, scene
 }

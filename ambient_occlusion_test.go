@@ -51,7 +51,6 @@ func newAOSceneOfSize(t *testing.T, size int) aoScene {
 	t.Cleanup(scene.Destroy)
 	scene.SetAmbient(colors.RGB32F{1, 1, 1}, 1)
 	cam := scene.NewPerspectiveCamera(60, 1, 0.1, 100)
-	scene.Add(cam)
 	return aoScene{r: r, size: size, scene: scene, cam: cam}
 }
 
@@ -65,14 +64,13 @@ func matte(r *pix.Renderer) materials.Material {
 
 // addFloor lays a wide floor at y = 0.
 func (s aoScene) addFloor() {
-	s.scene.Add(s.scene.NewMesh(s.r.NewPlaneGeometry(40, 40, 1, 1), matte(s.r)))
+	s.scene.NewMesh(s.r.NewPlaneGeometry(40, 40, 1, 1), matte(s.r))
 }
 
 // addWall stands a wide wall whose face looks down +z from z.
 func (s aoScene) addWall(z float32) {
 	wall := s.scene.NewMesh(s.r.NewBoxGeometry(40, 20, 1), matte(s.r))
 	wall.SetPosition(glm.Vec3f{0, 10, z - 0.5})
-	s.scene.Add(wall)
 }
 
 // newCornerScene is a floor meeting a wall at a right angle, seen from above and in
@@ -220,9 +218,7 @@ func TestAmbientOcclusionHasNoHalos(t *testing.T) {
 	s := newAOScene(t)
 	wall := s.scene.NewMesh(s.r.NewBoxGeometry(40, 40, 1), matte(s.r))
 	wall.SetPosition(glm.Vec3f{0, 0, -10.5})
-	s.scene.Add(wall)
-	box := s.scene.NewMesh(s.r.NewBoxGeometry(2, 2, 2), matte(s.r))
-	s.scene.Add(box)
+	s.scene.NewMesh(s.r.NewBoxGeometry(2, 2, 2), matte(s.r))
 	s.cam.SetPosition(glm.Vec3f{0, 0, 6})
 	s.cam.LookAt(glm.Vec3f{0, 0, 0})
 
@@ -244,8 +240,7 @@ func TestAmbientOcclusionHasNoHalos(t *testing.T) {
 // and the background shows the clear colour as it would without occlusion.
 func TestAmbientOcclusionLeavesBackgroundAlone(t *testing.T) {
 	s := newAOScene(t)
-	box := s.scene.NewMesh(s.r.NewBoxGeometry(1, 1, 1), matte(s.r))
-	s.scene.Add(box)
+	s.scene.NewMesh(s.r.NewBoxGeometry(1, 1, 1), matte(s.r))
 	s.cam.SetPosition(glm.Vec3f{0, 1, 4})
 	s.cam.LookAt(glm.Vec3f{0, 0, 0})
 	s.r.SetClearColor(colors.RGBA32F{0.2, 0.4, 0.6, 1})
@@ -378,7 +373,6 @@ func TestAmbientOcclusionSkipsTransparentSurfaces(t *testing.T) {
 	quad := s.scene.NewMesh(s.r.NewPlaneGeometry(4, 4, 1, 1), pane)
 	quad.SetRotationXYZ(math.Pi/2, 0, 0)
 	quad.SetPosition(glm.Vec3f{0, 1, 0})
-	s.scene.Add(quad)
 
 	s.renderShaded(false)
 	paneOff := s.linearAtPoint(corner)
@@ -542,7 +536,6 @@ func TestAmbientOcclusionHoldsStillAsTheCameraMoves(t *testing.T) {
 	for i := range 5 {
 		pillar := s.scene.NewMesh(s.r.NewBoxGeometry(0.15, 4, 0.15), matte(s.r))
 		pillar.SetPosition(glm.Vec3f{-2 + float32(i), 2, -3})
-		s.scene.Add(pillar)
 	}
 
 	// changedPixels counts the pixels of view that change by more than a few levels
@@ -617,7 +610,6 @@ func TestAmbientOcclusionSettlesWithAStillCamera(t *testing.T) {
 	s.r.SetAmbientOcclusionSettings(pix.AmbientOcclusionSettings{Radius: aoTestRadius, Intensity: 4})
 	box := s.scene.NewMesh(s.r.NewBoxGeometry(1, 1, 1), matte(s.r))
 	box.SetPosition(glm.Vec3f{1.5, 0.5, -1})
-	s.scene.Add(box)
 	s.r.SetDebugView(pix.DebugAmbientOcclusion)
 	for range 64 {
 		s.r.Render(s.scene)
@@ -677,7 +669,6 @@ func TestAmbientOcclusionLeavesNoTrail(t *testing.T) {
 	s := newCornerScene(t)
 	box := s.scene.NewMesh(s.r.NewBoxGeometry(1, 1, 1), matte(s.r))
 	box.SetPosition(glm.Vec3f{0, 0.5, -1})
-	s.scene.Add(box)
 	beside := glm.Vec3f{0, 0, -0.45}
 	if open := s.opennessAt(beside); open > 0.9 {
 		t.Fatalf("openness beside the box = %.3f, want it occluded to measure the trail by", open)
@@ -708,7 +699,6 @@ func TestAmbientOcclusionASSAO(t *testing.T) {
 
 	box := s.scene.NewMesh(s.r.NewBoxGeometry(1, 1, 1), matte(s.r))
 	box.SetPosition(glm.Vec3f{0, 0.5, -1})
-	s.scene.Add(box)
 	beside := glm.Vec3f{0, 0, -0.45}
 	if near := s.opennessAt(beside); near > 0.9 {
 		t.Fatalf("openness beside the box = %.3f, want it occluded", near)
@@ -753,7 +743,6 @@ func TestAmbientOcclusionASSAOKeepsEdgesSharp(t *testing.T) {
 			// and over the line where the floor meets the wall.
 			plate := s.scene.NewMesh(s.r.NewBoxGeometry(1, 0.6, 0.1), matte(s.r))
 			plate.SetPosition(glm.Vec3f{0, 1.5, 0})
-			s.scene.Add(plate)
 
 			s.r.SetDebugView(pix.DebugAmbientOcclusion)
 			s.renderSettled()
@@ -796,7 +785,6 @@ func TestAmbientOcclusionSeesBehindThinThings(t *testing.T) {
 		s.addWall(cornerZ)
 		post := s.scene.NewMesh(s.r.NewBoxGeometry(0.1, 3, 0.1), matte(s.r))
 		post.SetPosition(glm.Vec3f{0, 1.5, cornerZ + 0.4})
-		s.scene.Add(post)
 		s.cam.SetPosition(glm.Vec3f{1.5, 1.5, cornerZ + 4})
 		s.cam.LookAt(glm.Vec3f{0, 1.5, cornerZ})
 		s.r.SetAmbientOcclusionSettings(pix.AmbientOcclusionSettings{Radius: aoTestRadius, Thickness: thickness})

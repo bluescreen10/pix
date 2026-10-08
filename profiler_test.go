@@ -36,10 +36,8 @@ func TestPassRecordedSeparatesUnrunFromUnmeasured(t *testing.T) {
 	light.SetCastShadow(true)
 	box := scene.NewMesh(r.GeometryStore.Create(pix.BoxGeometry(40, 40, 40)), r.NewPBRMaterial())
 	box.SetPosition(glm.Vec3f{0, 0, -120})
-	scene.Add(box)
 
 	cam := scene.NewPerspectiveCamera(60, 1, 1, 5000)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 0})
 	cam.LookAt(glm.Vec3f{0, 0, -1})
 	for range 4 {
@@ -77,9 +75,8 @@ func TestWaitsAreSeparatedFromCPUTime(t *testing.T) {
 	scene := scenes.New()
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.3, 0.3, 0.3}, 1)
-	scene.Add(scene.NewMesh(r.GeometryStore.Create(pix.BoxGeometry(40, 40, 40)), r.NewPBRMaterial()))
+	scene.NewMesh(r.GeometryStore.Create(pix.BoxGeometry(40, 40, 40)), r.NewPBRMaterial())
 	cam := scene.NewPerspectiveCamera(60, 1, 1, 5000)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 120})
 	for range 8 {
 		r.Render(scene)
@@ -124,12 +121,10 @@ func TestPassTimesAddUpToNoMoreThanTheFrame(t *testing.T) {
 	scene.SetAmbient(colors.RGB32F{0.3, 0.3, 0.3}, 1)
 	light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 2)
 	light.SetCastShadow(true)
-	scene.Add(scene.NewMesh(r.NewPlaneGeometry(40, 40, 1, 1), r.NewPBRMaterial()))
+	scene.NewMesh(r.NewPlaneGeometry(40, 40, 1, 1), r.NewPBRMaterial())
 	box := scene.NewMesh(r.NewBoxGeometry(2, 2, 2), r.NewPBRMaterial())
 	box.SetPosition(glm.Vec3f{0, 1, -4})
-	scene.Add(box)
 	cam := scene.NewPerspectiveCamera(60, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 2, 3})
 	cam.LookAt(glm.Vec3f{0, 0.5, -4})
 	for range 30 {

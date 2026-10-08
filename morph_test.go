@@ -58,7 +58,6 @@ func newMorphTestRenderer(t *testing.T) *pix.Renderer {
 // addMorphTestCamera looks at the origin from 8 units along +Z.
 func addMorphTestCamera(scene *scenes.Scene) {
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 8})
 	cam.LookAt(glm.Vec3f{})
 }
@@ -104,7 +103,6 @@ func TestMorphTargetMovesMesh(t *testing.T) {
 	defer geo.Release()
 	mat := r.NewBasicMaterial()
 	mesh := scene.NewMesh(geo, mat)
-	scene.Add(mesh)
 	addMorphTestCamera(scene)
 
 	r.Render(scene)
@@ -139,7 +137,6 @@ func TestInstancedMeshMorphs(t *testing.T) {
 		glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatfIdentity, glm.Vec3f{0, 2, 0}),
 	}
 	field := scene.NewInstancedMesh(geo, mat, transforms)
-	scene.Add(field)
 	addMorphTestCamera(scene)
 
 	field.SetMorphTargetWeight(0, 1)
@@ -172,9 +169,7 @@ func TestMorphTargetsApplyBeforeSkinning(t *testing.T) {
 		InverseBind: []glm.Mat4f{glm.Mat4fIdentity},
 		BindPose:    []scenes.Transform{{Rotation: glm.QuatfIdentity, Scale: glm.Vec3f{1, 1, 1}}},
 	})
-	scene.Add(skeleton)
 	mesh := scene.NewSkinnedMesh(geo, mat, skeleton)
-	scene.Add(mesh)
 	addMorphTestCamera(scene)
 
 	skeleton.Bone(0).RotateZ(glm.ToRadians(float32(90)))
@@ -195,7 +190,6 @@ func TestMorphOutputSurvivesGeometryStoreGrow(t *testing.T) {
 	defer geo.Release()
 	mat := r.NewBasicMaterial()
 	mesh := scene.NewMesh(geo, mat)
-	scene.Add(mesh)
 	addMorphTestCamera(scene)
 
 	mesh.SetMorphTargetWeight(0, 1)
@@ -247,7 +241,6 @@ func TestMorphTargetTurnsNormals(t *testing.T) {
 	mat.SetRoughness(1)
 	mat.SetCull(materials.CullNone)
 	mesh := scene.NewMesh(geo, mat)
-	scene.Add(mesh)
 	addMorphTestCamera(scene)
 
 	r.Render(scene)

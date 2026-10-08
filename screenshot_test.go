@@ -33,10 +33,9 @@ func shotScene(t *testing.T, w, h uint32) (*pix.Renderer, *scenes.Scene) {
 	t.Cleanup(cube.Release)
 	mat := r.NewPBRMaterial()
 	mat.SetColor(colors.RGBA32F{0.9, 0.2, 0.2, 1})
-	scene.Add(scene.NewMesh(cube, mat))
+	scene.NewMesh(cube, mat)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
 	return r, scene
 }

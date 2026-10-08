@@ -24,9 +24,8 @@ func TestOcclusionMapDarkensOnlyIndirectLight(t *testing.T) {
 	defer scene.Destroy()
 	material := r.NewPBRMaterial()
 	material.SetRoughness(1)
-	scene.Add(scene.NewMesh(r.NewBoxGeometry(4, 4, 1), material))
+	scene.NewMesh(r.NewBoxGeometry(4, 4, 1), material)
 	camera := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(camera)
 	camera.SetPosition(glm.Vec3f{0, 0, 3})
 	camera.LookAt(glm.Vec3f{})
 	// A quarter of the light around it reaches the surface: red 64 of 255.

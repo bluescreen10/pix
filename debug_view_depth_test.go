@@ -36,14 +36,11 @@ func TestDepthDebugPolarity(t *testing.T) {
 	nearGeo := r.GeometryStore.Create(pix.BoxGeometry(10, 10, 10))
 	nearBox := scene.NewMesh(nearGeo, mat)
 	nearBox.SetPosition(glm.Vec3f{-15, 0, -100})
-	scene.Add(nearBox)
 	farGeo := r.GeometryStore.Create(pix.BoxGeometry(2000, 2000, 2000))
 	farBox := scene.NewMesh(farGeo, mat)
 	farBox.SetPosition(glm.Vec3f{15, 0, -20000})
-	scene.Add(farBox)
 
 	cam := scene.NewPerspectiveCamera(60, 1, 30, 360000)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 0})
 	cam.LookAt(glm.Vec3f{0, 0, -1})
 

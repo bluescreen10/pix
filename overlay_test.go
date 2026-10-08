@@ -24,7 +24,6 @@ func TestShowFPS(t *testing.T) {
 	scene := scenes.New()
 	defer scene.Destroy()
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 1000)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
 
 	// Comfortably more frames than the stats' GPU warm-up discards (see profileWarmup), with

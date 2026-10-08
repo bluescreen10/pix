@@ -44,13 +44,10 @@ func TestDebugObjectIDView(t *testing.T) {
 
 	a := scene.NewMesh(geo, mat)
 	a.SetPosition(glm.Vec3f{-1, 0, 0})
-	scene.Add(a)
 	b := scene.NewMesh(geo, mat)
 	b.SetPosition(glm.Vec3f{1, 0, 0})
-	scene.Add(b)
 
 	cam := scene.NewPerspectiveCamera(60, 1, 0.05, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 4})
 	cam.LookAt(glm.Vec3f{0, 0, 0})
 
@@ -80,10 +77,8 @@ func TestDebugTriangleIDView(t *testing.T) {
 	mat := r.NewBasicMaterial()
 	m := scene.NewMesh(geo, mat)
 	m.SetRotationQuat(glm.NewQuat(0.6, glm.Vec3f{1, 1, 0}))
-	scene.Add(m)
 
 	cam := scene.NewPerspectiveCamera(60, 1, 0.05, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2.5})
 	cam.LookAt(glm.Vec3f{0, 0, 0})
 

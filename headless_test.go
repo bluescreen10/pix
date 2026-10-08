@@ -20,7 +20,6 @@ func TestSceneWorksWithoutARenderer(t *testing.T) {
 	scene := scenes.New()
 
 	group := scene.NewGroup()
-	scene.Add(group)
 	group.SetPosition(glm.Vec3f{10, 0, 0})
 
 	child := scene.NewGroup()

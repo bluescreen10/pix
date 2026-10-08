@@ -28,7 +28,6 @@ func fogScene(t *testing.T, fog scenes.Fog) (*pix.Renderer, *scenes.Scene) {
 	scene.SetAmbient(colors.RGB32F{}, 1)
 	scene.SetFog(fog)
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 200)
-	scene.Add(cam)
 	cam.LookAt(glm.Vec3f{0, 0, -1})
 	return r, scene
 }
@@ -46,7 +45,7 @@ func addWall(r *pix.Renderer, scene *scenes.Scene, color colors.RGBA32F, halfSiz
 	material := r.NewBasicMaterial()
 	material.SetColor(color)
 	material.SetCull(materials.CullNone)
-	scene.Add(scene.NewMesh(quad, material))
+	scene.NewMesh(quad, material)
 }
 
 // isNear reports whether a rendered byte is within tolerance of the display encoding

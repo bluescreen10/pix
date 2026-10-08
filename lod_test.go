@@ -52,10 +52,8 @@ func TestMeshLODSelection(t *testing.T) {
 
 	mesh := scene.NewMesh(near, redMat)
 	mesh.AddLOD(far, blueMat, 10)
-	scene.Add(mesh)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.05, 1000)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 5}) // within level 0's [0, 10) range
 	cam.LookAt(glm.Vec3f{0, 0, 0})
 	r.Render(scene)
@@ -103,11 +101,9 @@ func TestInstancedMeshLODSelection(t *testing.T) {
 	}
 	field := scene.NewInstancedMesh(near, redMat, transforms)
 	field.AddLOD(far, blueMat, 10)
-	scene.Add(field)
 
 	// Camera far enough that BOTH instances are past the threshold: both should be blue.
 	cam := scene.NewPerspectiveCamera(60, 1, 0.05, 1000)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 20})
 	cam.LookAt(glm.Vec3f{0, 0, 0})
 	r.Render(scene)
@@ -152,10 +148,8 @@ func TestMeshLODHysteresis(t *testing.T) {
 	mesh := scene.NewMesh(near, redMat)
 	mesh.AddLOD(far, blueMat, 10)
 	mesh.SetLODHysteresis(5) // widened band: level 0 sticky up to 15, level 1 down to 5
-	scene.Add(mesh)
 
-	cam := scene.NewPerspectiveCamera(45, 1, 0.05, 1000)
-	scene.Add(cam) // looks down -Z, at the origin from every position below
+	cam := scene.NewPerspectiveCamera(45, 1, 0.05, 1000) // looks down -Z, at the origin from every position below
 
 	// First frame at distance 5: no prior selection, so it picks level 0 normally.
 	cam.SetPosition(glm.Vec3f{0, 0, 5})

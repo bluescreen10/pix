@@ -46,10 +46,8 @@ func shadeSlope(t *testing.T, quad geometries.GeometryConfig, scale glm.Vec3f) [
 	material.SetRoughness(1)
 	mesh := scene.NewMesh(geometry, material)
 	mesh.SetScale(scale)
-	scene.Add(mesh)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 6, 6})
 	cam.LookAt(glm.Vec3f{0, 0, 0})
 

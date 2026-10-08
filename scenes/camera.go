@@ -40,7 +40,8 @@ func (c *cameraData) projection() glm.Mat4f {
 
 // NewPerspectiveCamera creates a perspective camera node looking down -Z. fov is the
 // vertical field of view in degrees and aspect is width / height. Like every node, it
-// renders only once it is added to the scene.
+// starts in the scene, so it becomes a view of the frame as soon as it is created;
+// SetVisible(false) keeps it out.
 func (s *Scene) NewPerspectiveCamera(fov, aspect, near, far float32) Camera {
 	return s.newCamera(cameraData{fov: fov, aspect: aspect, near: near, far: far})
 }
@@ -83,6 +84,27 @@ func (s *Scene) removeCamera(payloadIdx uint32) {
 	for i := int(payloadIdx); i < len(s.cameras); i++ {
 		s.payload[s.cameras[i].ownerNode] = uint32(i)
 	}
+}
+
+// Cameras returns every camera in the scene, hidden or not, in view order: the order
+// they were created in, which is the order a visible one becomes a view of the frame.
+func (s *Scene) Cameras() []Camera {
+	cameras := make([]Camera, len(s.cameras))
+	for i := range s.cameras {
+		cameras[i] = Camera{s.nodeAt(s.cameras[i].ownerNode)}
+	}
+	return cameras
+}
+
+// CameraByName returns the first camera, in view order, with the given name (see
+// Node.Name), or false if none has it.
+func (s *Scene) CameraByName(name string) (Camera, bool) {
+	for i := range s.cameras {
+		if node := s.cameras[i].ownerNode; s.names[node] == name {
+			return Camera{s.nodeAt(node)}, true
+		}
+	}
+	return Camera{}, false
 }
 
 func (c Camera) data() *cameraData {

@@ -40,7 +40,6 @@ func newMaskedPlate(t *testing.T) maskedPlate {
 	plate.SetColorMap(faint)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	return maskedPlate{r: r, scene: scene, cam: cam, plate: plate}
 }
 
@@ -70,8 +69,7 @@ func TestMaskedMaterialHasNoSurfaceWhereCutOut(t *testing.T) {
 			wall.SetMetallic(0)
 			wallMesh := m.scene.NewMesh(m.r.NewBoxGeometry(10, 10, 0.1), wall)
 			wallMesh.SetPosition(glm.Vec3f{0, 0, -3})
-			m.scene.Add(m.scene.NewMesh(m.r.NewBoxGeometry(2, 2, 0.05), m.plate))
-			m.scene.Add(wallMesh)
+			m.scene.NewMesh(m.r.NewBoxGeometry(2, 2, 0.05), m.plate)
 			m.cam.SetPosition(glm.Vec3f{0, 0, 3})
 			m.cam.LookAt(glm.Vec3f{})
 
@@ -102,10 +100,9 @@ func TestMaskedMaterialCastsNoShadowWhereCutOut(t *testing.T) {
 	floor := m.r.NewPBRMaterial()
 	floor.SetMetallic(0)
 	floor.SetRoughness(1)
-	m.scene.Add(m.scene.NewMesh(m.r.NewPlaneGeometry(20, 20, 1, 1), floor))
+	m.scene.NewMesh(m.r.NewPlaneGeometry(20, 20, 1, 1), floor)
 	plateMesh := m.scene.NewMesh(m.r.NewBoxGeometry(4, 0.05, 4), m.plate)
 	plateMesh.SetPosition(glm.Vec3f{0, 1, 0})
-	m.scene.Add(plateMesh)
 	// Looking at the floor under the plate's edge from below its height, so the plate
 	// itself is out of view.
 	m.cam.SetPosition(glm.Vec3f{0, 0.5, 3})

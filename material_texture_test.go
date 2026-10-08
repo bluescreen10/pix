@@ -105,10 +105,9 @@ func TestEmissiveMap(t *testing.T) {
 	defer red.Release()
 	plate.SetEmissiveMap(red)
 	plate.SetEmissiveMapSampler(r.TextureStore.DefaultSampler())
-	scene.Add(scene.NewMesh(r.NewBoxGeometry(2, 2, 0.1), plate))
+	scene.NewMesh(r.NewBoxGeometry(2, 2, 0.1), plate)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 3})
 	r.Render(scene)
 

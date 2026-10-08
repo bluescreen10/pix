@@ -30,7 +30,6 @@ func decalTestScene(t *testing.T, w, h uint32, size float32) (*Renderer, *scenes
 	defer mat.Release()
 
 	box := scene.NewMesh(geo, mat)
-	scene.Add(box)
 	return r, scene, box
 }
 
@@ -183,7 +182,6 @@ func TestDecalGeometryRenders(t *testing.T) {
 	box.Add(decal)
 
 	cam := scene.NewOrthographicCamera(-1, 1, -1, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 10})
 	cam.LookAt(glm.Vec3f{0, 0, 0})
 	r.Render(scene)

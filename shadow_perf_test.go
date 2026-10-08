@@ -46,10 +46,8 @@ func TestSurfacesFacingAwayAreUnlit(t *testing.T) {
 		defer cube.Release()
 		slab := scene.NewMesh(cube, r.NewPBRMaterial())
 		slab.SetScale(glm.Vec3f{4, 4, 0.2})
-		scene.Add(slab)
 
 		cam := scene.NewPerspectiveCamera(50, 1, 0.1, 50)
-		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 0, 6})
 		cam.LookAt(glm.Vec3f{0, 0, 0})
 		r.Render(scene)
@@ -102,17 +100,14 @@ func BenchmarkFrame(b *testing.B) {
 	defer cube.Release()
 	ground := scene.NewMesh(cube, r.NewPBRMaterial())
 	ground.SetScale(glm.Vec3f{600, 0.4, 600})
-	scene.Add(ground)
 	for i := range 900 {
 		p := scene.NewMesh(cube, r.NewPBRMaterial())
 		p.SetPosition(glm.Vec3f{float32(i%30)*12 - 180, 3 + float32(i%7), -float32(i/30) * 12})
 		p.SetScale(glm.Vec3f{2 + float32(i%3), 6 + float32(i%11), 2 + float32(i%5)})
 		p.SetCastShadow(true)
-		scene.Add(p)
 	}
 
 	cam := scene.NewPerspectiveCamera(55, 1, 0.3, 2000)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 6, 40})
 	cam.LookAt(glm.Vec3f{0, 3, -40})
 
@@ -161,7 +156,6 @@ func TestDepthPrepassDoesNotChangeTheImage(t *testing.T) {
 		defer cube.Release()
 		ground := scene.NewMesh(cube, r.NewPBRMaterial())
 		ground.SetScale(glm.Vec3f{80, 0.4, 80})
-		scene.Add(ground)
 		// Deliberately overlapping from the camera's side, so a prepass has something to
 		// reject and any depth-state mistake shows as missing geometry.
 		for i := range 24 {
@@ -169,11 +163,9 @@ func TestDepthPrepassDoesNotChangeTheImage(t *testing.T) {
 			b.SetPosition(glm.Vec3f{float32(i%5)*3 - 6, 2, -float32(i) * 2})
 			b.SetScale(glm.Vec3f{3, 4, 3})
 			b.SetCastShadow(true)
-			scene.Add(b)
 		}
 
 		cam := scene.NewPerspectiveCamera(55, 1, 0.3, 300)
-		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 8, 22})
 		cam.LookAt(glm.Vec3f{0, 2, -20})
 		r.Render(scene)
@@ -244,17 +236,14 @@ func TestDepthPrepassRespectsCulling(t *testing.T) {
 		// The box, then a single-sided wall in front of it turned away from the camera.
 		box := scene.NewMesh(cube, r.NewPBRMaterial())
 		box.SetPosition(glm.Vec3f{0, 0, -20})
-		scene.Add(box)
 
 		wallMat := r.NewPBRMaterial()
 		wallMat.SetCull(materials.CullBack)
 		wall := scene.NewMesh(quad, wallMat)
 		wall.SetPosition(glm.Vec3f{0, 0, -10})
 		wall.SetRotation(glm.Vec3f{1.5707963, 0, 0}) // facing away from the camera
-		scene.Add(wall)
 
 		cam := scene.NewPerspectiveCamera(50, 1, 0.5, 200)
-		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 0, 10})
 		cam.LookAt(glm.Vec3f{0, 0, -20})
 		r.Render(scene)
@@ -314,7 +303,6 @@ func TestDepthDebugViewIsMaterialIndependent(t *testing.T) {
 		floor := scene.NewMesh(cube, r.NewPBRMaterial())
 		floor.SetPosition(glm.Vec3f{0, -4, 0})
 		floor.SetScale(glm.Vec3f{60, 0.5, 60})
-		scene.Add(floor)
 
 		var mat materials.Material
 		switch box {
@@ -327,11 +315,9 @@ func TestDepthDebugViewIsMaterialIndependent(t *testing.T) {
 			m := scene.NewMesh(cube, mat)
 			m.SetPosition(glm.Vec3f{0, 0, 0})
 			m.SetScale(glm.Vec3f{6, 6, 6})
-			scene.Add(m)
 		}
 
 		cam := scene.NewPerspectiveCamera(50, 1, 0.5, 120)
-		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 2, 18})
 		cam.LookAt(glm.Vec3f{0, 0, 0})
 		r.Render(scene)

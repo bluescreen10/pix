@@ -36,13 +36,10 @@ func TestDepthPrepassMatchesShadingExactly(t *testing.T) {
 	mat := r.NewPBRMaterial()
 	box := scene.NewMesh(r.GeometryStore.Create(pix.BoxGeometry(40, 40, 40)), mat)
 	box.SetPosition(glm.Vec3f{0, 0, -60})
-	scene.Add(box)
 	ground := scene.NewMesh(r.GeometryStore.Create(pix.BoxGeometry(4000, 2, 4000)), mat)
 	ground.SetPosition(glm.Vec3f{0, -60, -400})
-	scene.Add(ground)
 
 	cam := scene.NewPerspectiveCamera(60, 1, 1, 5000)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 0})
 	cam.LookAt(glm.Vec3f{0, 0, -1})
 

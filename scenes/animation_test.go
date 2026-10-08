@@ -14,7 +14,6 @@ func TestAnimationMixerDrivesNode(t *testing.T) {
 	defer scene.Destroy()
 
 	n := scene.NewGroup()
-	scene.Add(n)
 
 	clip := &scenes.AnimationClip{
 		Name:     "move",
@@ -59,7 +58,6 @@ func TestAnimationMixerLoopRepeat(t *testing.T) {
 	defer scene.Destroy()
 
 	n := scene.NewGroup()
-	scene.Add(n)
 
 	clip := &scenes.AnimationClip{
 		Duration: 1,
@@ -92,7 +90,6 @@ func TestAnimationMixerBlendsTwoActions(t *testing.T) {
 	defer scene.Destroy()
 
 	n := scene.NewGroup()
-	scene.Add(n)
 
 	still := func(x float32) *scenes.AnimationClip {
 		return &scenes.AnimationClip{

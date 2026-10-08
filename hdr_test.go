@@ -40,12 +40,11 @@ func postScene(t *testing.T, color colors.RGBA32F, coverage float32) (*pix.Rende
 	})
 	material := r.NewBasicMaterial()
 	material.SetColor(color)
-	scene.Add(scene.NewMesh(quad, material))
+	scene.NewMesh(quad, material)
 
 	// From 2 units away a 45-degree camera sees about ±0.83 of the plane z = 0, so a
 	// coverage of 0.8 fills nearly the frame and 0.2 the middle quarter of it.
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2})
 	return r, scene
 }
@@ -129,7 +128,6 @@ func TestCameraExposureScalesLight(t *testing.T) {
 	defer scene.Destroy()
 	addWall(r, scene, colors.RGBA32F{0.25, 0.25, 0.25, 1}, 1, -2)
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 
 	for _, exposure := range []struct {
 		stops float32

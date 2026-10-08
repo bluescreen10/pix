@@ -65,14 +65,13 @@ func stepScene(t *testing.T) (*pix.Renderer, *scenes.Scene) {
 
 	red := r.NewBasicMaterial()
 	red.SetColor(colors.RGBA32F{1, 0, 0, 1})
-	scene.Add(scene.NewMesh(quad(0), red))
+	scene.NewMesh(quad(0), red)
 	blue := r.NewBasicMaterial()
 	blue.SetColor(colors.RGBA32F{0, 0, 1, 0.5})
 	blue.SetBlend(materials.BlendAlpha)
-	scene.Add(scene.NewMesh(quad(0.5), blue))
+	scene.NewMesh(quad(0.5), blue)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 4})
 	return r, scene
 }
@@ -194,7 +193,6 @@ func TestFrameStepSeesThePreviousViewProj(t *testing.T) {
 	scene := scenes.New()
 	t.Cleanup(scene.Destroy)
 	camera := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(camera)
 	var log []string
 	step := &recordingStep{name: "step", log: &log}
 	r.AddFrameStep(pix.FrameStageStart, step)

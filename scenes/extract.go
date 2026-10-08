@@ -53,12 +53,11 @@ func (s *Scene) Extract(p *FramePacket) {
 // when the scene changed structurally — a mesh added or removed, a material swapped, a
 // node attached or detached.
 //
-// Only nodes attached to the scene are described. Creating a mesh does NOT attach it;
-// scene.Add (or parenting it under something attached) does. An unattached node is
-// never visited by updateTransforms, so its world matrix would still be the identity it
-// was born with: describing it anyway would silently place it at the origin, ignoring
-// every transform set on it. Omitting it makes the mistake obvious — the mesh is simply
-// missing until it is added.
+// Only nodes attached to the scene are described. Every node starts attached, under
+// the root; one is detached only by being removed (Node.Remove) or parented under a
+// detached node. A detached node is never visited by updateTransforms, so its world
+// matrix is stale: describing it anyway would draw it wherever it last was, or at the
+// origin, ignoring every transform set on it since.
 func (s *Scene) rebuildPacketTables() {
 	s.packet.Meshes.Data = s.packet.Meshes.Data[:0]
 	s.packet.LODs.Data = s.packet.LODs.Data[:0]

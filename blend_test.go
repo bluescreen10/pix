@@ -37,18 +37,17 @@ func TestTransparency(t *testing.T) {
 		})
 	}
 
-	// Opaque red behind. Add it LAST to prove the sort still draws opaque first.
+	// Opaque red behind. Create it LAST to prove the sort still draws opaque first.
 	red := r.NewPBRMaterial()
 	red.SetColor(colors.RGBA32F{1, 0, 0, 1})
-	// Transparent blue in front (added first).
+	// Transparent blue in front (created first).
 	blue := r.NewPBRMaterial()
 	blue.SetColor(colors.RGBA32F{0, 0, 1, 0.5})
 	blue.SetBlend(materials.BlendAlpha)
-	scene.Add(scene.NewMesh(quad(0), blue))   // front, transparent, added first
-	scene.Add(scene.NewMesh(quad(-0.5), red)) // behind, opaque, added last
+	scene.NewMesh(quad(0), blue)   // front, transparent, created first
+	scene.NewMesh(quad(-0.5), red) // behind, opaque, created last
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 1000)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2})
 	r.Render(scene)
 
@@ -94,11 +93,10 @@ func TestBlendChangeRebatches(t *testing.T) {
 	red.SetColor(colors.RGBA32F{1, 0, 0, 1})
 	blue := r.NewPBRMaterial()
 	blue.SetColor(colors.RGBA32F{0, 0, 1, 0.5}) // alpha set now, but still opaque-blended
-	scene.Add(scene.NewMesh(quad(-0.5), red))
-	scene.Add(scene.NewMesh(quad(0), blue))
+	scene.NewMesh(quad(-0.5), red)
+	scene.NewMesh(quad(0), blue)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 1000)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2})
 	i := (size/2*size + size/2) * 4
 
@@ -147,11 +145,10 @@ func TestTransparentBehindOpaqueIsHidden(t *testing.T) {
 	blue := r.NewPBRMaterial()
 	blue.SetColor(colors.RGBA32F{0, 0, 1, 0.5})
 	blue.SetBlend(materials.BlendAlpha)
-	scene.Add(scene.NewMesh(quad(0), red))     // front, opaque
-	scene.Add(scene.NewMesh(quad(-0.5), blue)) // behind, transparent
+	scene.NewMesh(quad(0), red)     // front, opaque
+	scene.NewMesh(quad(-0.5), blue) // behind, transparent
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 1000)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2})
 	r.Render(scene)
 
@@ -195,13 +192,11 @@ func TestBlendedMeshesDrawBackToFront(t *testing.T) {
 		material.SetDoubleSided(true)
 		mesh := scene.NewMesh(quad, material)
 		mesh.SetPosition(glm.Vec3f{0, 0, z})
-		scene.Add(mesh)
 	}
 	pane(colors.RGBA32F{1, 0, 0, 0.5}, 0)
 	pane(colors.RGBA32F{0, 0, 1, 0.5}, -0.5)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	for _, view := range []struct {
 		z    float32
 		want [3]byte
@@ -253,12 +248,11 @@ func TestGlassReflectsInFull(t *testing.T) {
 		scene := scenes.New()
 		defer scene.Destroy()
 		scene.AddDirectionalLight(glm.Vec3f{0, 0, -1}, colors.RGB32F{1, 1, 1}, 3)
-		scene.Add(scene.NewMesh(quad(0), surface))
+		scene.NewMesh(quad(0), surface)
 		if backdrop != nil {
-			scene.Add(scene.NewMesh(quad(-0.5), backdrop))
+			scene.NewMesh(quad(-0.5), backdrop)
 		}
 		cam := scene.NewPerspectiveCamera(45, 1, 0.1, 1000)
-		scene.Add(cam)
 		cam.SetPosition(glm.Vec3f{0, 0, 2})
 		r.Render(scene)
 		px := r.Pixels()
@@ -326,9 +320,8 @@ func newGlassShadowScene(t *testing.T) glassShadowScene {
 	floor := r.NewPBRMaterial()
 	floor.SetMetallic(0)
 	floor.SetRoughness(1)
-	scene.Add(scene.NewMesh(r.NewPlaneGeometry(20, 20, 1, 1), floor))
+	scene.NewMesh(r.NewPlaneGeometry(20, 20, 1, 1), floor)
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0.5, 3})
 	cam.LookAt(glm.Vec3f{0, 0, 0})
 	return glassShadowScene{r: r, scene: scene}
@@ -338,7 +331,6 @@ func newGlassShadowScene(t *testing.T) glassShadowScene {
 func (g glassShadowScene) addPlate(material materials.Material) {
 	plate := g.scene.NewMesh(g.r.NewBoxGeometry(4, 0.05, 4), material)
 	plate.SetPosition(glm.Vec3f{0, 1, 0})
-	g.scene.Add(plate)
 }
 
 // floorUnderPlate renders and returns the red of the floor under the plate.
@@ -437,10 +429,9 @@ func TestDoubleSidedBlendedMeshDrawsItsBackFirst(t *testing.T) {
 	material.SetColor(colors.RGBA32F{1, 1, 1, 0.5})
 	material.SetBlend(materials.BlendAlpha)
 	material.SetDoubleSided(true)
-	scene.Add(scene.NewMesh(walls, material))
+	scene.NewMesh(walls, material)
 
 	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{0, 0, 2})
 	cam.LookAt(glm.Vec3f{})
 	r.Render(scene)

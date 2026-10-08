@@ -36,9 +36,8 @@ func groundScene(t *testing.T, newMaterial func(*pix.Renderer) materials.Materia
 	scene.SetAmbient(colors.RGB32F{0.1, 0.1, 0.1}, 1)
 	sun := scene.AddDirectionalLight(glm.Vec3f{0, -1, 0}, colors.RGB32F{1, 1, 1}, 1)
 
-	scene.Add(scene.NewMesh(r.NewPlaneGeometry(40, 40, 1, 1), newMaterial(r)))
+	scene.NewMesh(r.NewPlaneGeometry(40, 40, 1, 1), newMaterial(r))
 	cam := scene.NewOrthographicCamera(-4, 4, -4, 4, 0.1, 100)
-	scene.Add(cam)
 	cam.SetPosition(glm.Vec3f{4, 10, 0.01})
 	cam.LookAt(glm.Vec3f{4, 0, 0})
 	return r, scene, sun

@@ -36,11 +36,10 @@ func TestExtractDescribesObjectsNotDrawRecords(t *testing.T) {
 
 	// A plain mesh; a mesh with one coarser level; a 3-instance mesh with one coarser
 	// level.
-	scene.Add(scene.NewMesh(near, red))
+	scene.NewMesh(near, red)
 
 	lodded := scene.NewMesh(near, red)
 	lodded.AddLOD(far, blue, 10)
-	scene.Add(lodded)
 
 	xforms := []glm.Mat4f{
 		glm.Transform(glm.Vec3f{1, 1, 1}, glm.QuatfIdentity, glm.Vec3f{-2, 0, 0}),
@@ -49,10 +48,9 @@ func TestExtractDescribesObjectsNotDrawRecords(t *testing.T) {
 	}
 	field := scene.NewInstancedMesh(near, blue, xforms)
 	field.AddLOD(far, red, 20)
-	scene.Add(field)
 
-	// Created but never added: must appear in neither the packet nor the draw records.
-	scene.NewMesh(near, red)
+	// Removed from the scene: must appear in neither the packet nor the draw records.
+	scene.Root().Remove(scene.NewMesh(near, red))
 
 	scene.Sync()
 
@@ -61,7 +59,7 @@ func TestExtractDescribesObjectsNotDrawRecords(t *testing.T) {
 
 	// Three attached objects, however many times each is drawn.
 	if len(p.Meshes.Data) != 3 {
-		t.Fatalf("packet describes %d objects, want 3 (the unattached mesh must not appear)",
+		t.Fatalf("packet describes %d objects, want 3 (the detached mesh must not appear)",
 			len(p.Meshes.Data))
 	}
 	// Two coarser levels, one per LOD-tagged object. Level 0 is on the mesh, not here.
@@ -100,7 +98,6 @@ func TestExtractBorrowsTransforms(t *testing.T) {
 	geo := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	defer geo.Release()
 	mesh := scene.NewMesh(geo, r.NewBasicMaterial())
-	scene.Add(mesh)
 	scene.Sync()
 
 	var p scenes.FramePacket
@@ -128,7 +125,7 @@ func TestExtractBorrowsTransforms(t *testing.T) {
 		t.Errorf("extracting an unchanged scene advanced the mesh revision %d -> %d", rev, p.Meshes.Revision)
 	}
 	// Adding an object must advance it.
-	scene.Add(scene.NewMesh(geo, r.NewBasicMaterial()))
+	scene.NewMesh(geo, r.NewBasicMaterial())
 	scene.Extract(&p)
 	if p.Meshes.Revision == rev {
 		t.Error("adding a mesh did not advance the mesh revision")
@@ -154,7 +151,6 @@ func TestExtractIsReadOnly(t *testing.T) {
 	_, scene, config := newParticleTestScene(t)
 	config.Emitters = []scenes.ParticleEmitter{&countEmitter{n: 5}}
 	c := scene.NewParticleContainer(config, 32)
-	scene.Add(c)
 	scene.Sync()
 
 	c.Update(0.1) // queue some births and a dt

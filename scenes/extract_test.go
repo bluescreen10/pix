@@ -28,8 +28,7 @@ func TestExtractFrameBelongsToScene(t *testing.T) {
 
 func TestTransformDirtinessSurvivesSyncUntilExtract(t *testing.T) {
 	scene := scenes.New()
-	group := scene.NewGroup()
-	scene.Add(group)
+	scene.NewGroup()
 	scene.Sync()
 	scene.Sync()
 
