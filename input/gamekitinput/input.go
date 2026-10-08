@@ -1,5 +1,6 @@
 // Package gamekitinput adapts GameKit's ui.Input — a window from any ui backend — to
-// Pix's input interfaces.
+// Pix's input interfaces, and a ui.PointerInput — a window, or a canvas within one —
+// to Pix's mouse input.
 package gamekitinput
 
 import (
@@ -9,12 +10,38 @@ import (
 	"github.com/bluescreen10/pix/input"
 )
 
+var _ input.MouseInput = Pointer{}
 var _ input.MouseInput = (*Input)(nil)
 var _ input.KeyboardInput = (*Input)(nil)
 var _ input.TextInput = (*Input)(nil)
 var _ input.KeyEvents = (*Input)(nil)
 
+// Pointer reads the mouse from one surface. Over a canvas, it sees only the canvas's
+// own presses and scrolling — not those aimed at the controls beside it.
+type Pointer struct {
+	source ui.PointerInput
+}
+
+// NewPointer reads the mouse from source: a ui.Window, or a ui.Canvas.
+func NewPointer(source ui.PointerInput) Pointer {
+	return Pointer{source: source}
+}
+
+func (p Pointer) Pos() (x, y float64) {
+	return p.source.PointerPosition()
+}
+
+func (p Pointer) Scroll() (x, y float64) {
+	return p.source.ScrollOffset()
+}
+
+func (p Pointer) Button(button input.MouseButton) input.MouseButtonAction {
+	return input.MouseButtonAction(p.source.PointerButtonState(pointer.Button(button)))
+}
+
+// Input reads a window's keyboard, text and mouse.
 type Input struct {
+	Pointer
 	source ui.Input
 
 	// Buffered by the source's handlers and drained by Chars/Keys. No mutex: a ui
@@ -30,7 +57,8 @@ type Input struct {
 // New reads input from source, usually a ui.Window. Close stops it listening.
 func New(source ui.Input) *Input {
 	in := &Input{
-		source: source,
+		Pointer: NewPointer(source),
+		source:  source,
 	}
 	in.unsubscribeText = source.OnText(in.bufferChar)
 	in.unsubscribeKey = source.OnKey(in.bufferKey)
@@ -41,18 +69,6 @@ func New(source ui.Input) *Input {
 func (i *Input) Close() {
 	i.unsubscribeText()
 	i.unsubscribeKey()
-}
-
-func (i *Input) Pos() (x, y float64) {
-	return i.source.PointerPosition()
-}
-
-func (i *Input) Scroll() (x, y float64) {
-	return i.source.ScrollOffset()
-}
-
-func (i *Input) Button(button input.MouseButton) input.MouseButtonAction {
-	return input.MouseButtonAction(i.source.PointerButtonState(pointer.Button(button)))
 }
 
 func (i *Input) Key(key input.Key) input.KeyAction {
