@@ -70,6 +70,15 @@ func (g Geometry) Indices() []uint32 {
 	return g.store.indices(g.ref.ID())
 }
 
+// VertexCount returns how many vertices the geometry has (0 once it is no longer
+// alive).
+func (g Geometry) VertexCount() int {
+	if g.store == nil || !g.store.entries.IsAlive(g.ref.ID()) {
+		return 0
+	}
+	return g.store.entries.Value(g.ref.ID()).attrs[AttributePosition].count
+}
+
 // BoundingSphere returns the geometry's local-space bounding sphere.
 func (g Geometry) BoundingSphere() glm.Sphere {
 	return g.boundingSphere

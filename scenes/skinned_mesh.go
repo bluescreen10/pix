@@ -26,6 +26,9 @@ type skinnedMeshData struct {
 	radii       []float32
 	bounds      glm.Sphere
 	ownerNode   uint32
+
+	morph           morphState
+	meshPacketIndex uint32 // see meshData
 }
 
 // SkinnedMesh is a typed node handle for a compute-skinned mesh. It embeds Node for
@@ -105,8 +108,10 @@ func (s *Scene) NewSkinnedMesh(geo geometries.Geometry, mat materials.Material, 
 		radii:       radii,
 		// Seeded from the bind pose so FrameSphere/BoundingSphere are sane before
 		// the first Sync (which is when a pose-driven bounds would first exist).
-		bounds:    skinnedBounds(bindPos, unitScale, radii),
-		ownerNode: id.index,
+		bounds:          skinnedBounds(bindPos, unitScale, radii, 0),
+		ownerNode:       id.index,
+		morph:           newMorphState(geo),
+		meshPacketIndex: invalidIndex,
 	})
 	s.payload[id.index] = payloadIdx
 	s.packetDirty = true

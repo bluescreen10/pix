@@ -530,6 +530,7 @@ func (s *Scene) swapRemoveMesh(payloadIdx uint32) {
 		l.geometry.Release()
 		l.material.Release()
 	}
+	md.deformOutput.Release()
 	last := uint32(len(s.meshes) - 1)
 	if payloadIdx != last {
 		s.meshes[payloadIdx] = s.meshes[last]
@@ -777,6 +778,7 @@ func (s *Scene) Destroy() {
 			l.geometry.Release()
 			l.material.Release()
 		}
+		s.meshes[i].deformOutput.Release()
 	}
 	s.meshes = nil
 	for i := range s.instancedMeshes {
@@ -784,6 +786,7 @@ func (s *Scene) Destroy() {
 			l.geometry.Release()
 			l.material.Release()
 		}
+		s.instancedMeshes[i].deformOutput.Release()
 	}
 	s.instancedMeshes = nil
 	s.instanceTransforms = nil

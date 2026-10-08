@@ -2,6 +2,7 @@ package scenes
 
 import (
 	"github.com/bluescreen10/pix/colors"
+	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 )
 
@@ -38,7 +39,7 @@ func (s *Scene) Extract(p *FramePacket) {
 	// together — the revisions worth separating are the ones with different causes.
 	s.extractViews()
 	s.extractLights()
-	s.extractSkins()
+	s.extractDeforms()
 	s.extractParticles()
 
 	s.packet.Frame++
@@ -64,25 +65,28 @@ func (s *Scene) rebuildPacketTables() {
 
 	for i := range s.meshes {
 		md := &s.meshes[i]
+		md.meshPacketIndex = invalidIndex
 		if s.flags[md.ownerNode]&flagAttached == 0 {
 			continue
 		}
-		s.addMesh(MeshPacket{
+		md.meshPacketIndex = s.addMesh(MeshPacket{
 			ID:            s.objectID(md.ownerNode),
 			Transforms:    IndexRange{First: md.ownerNode, Count: 1},
 			Bounds:        md.bounds,
 			Flags:         s.renderFlags(md.ownerNode),
 			LODHysteresis: md.hysteresis,
-		}, md.lods)
+		}, md.lods, md.deformOutput)
 	}
 
 	for _, sm := range s.skinnedMeshes.Entries() {
 		// Both must be attached: the mesh node puts it in the scene, and the skeleton
 		// root supplies the transform its drawable is rendered with.
+		sm.meshPacketIndex = invalidIndex
 		root := s.skeletons.Value(sm.skeleton).ownerNode
 		if s.flags[sm.ownerNode]&flagAttached == 0 || s.flags[root]&flagAttached == 0 {
 			continue
 		}
+		sm.meshPacketIndex = uint32(len(s.packet.Meshes.Data))
 		s.packet.Meshes.Data = append(s.packet.Meshes.Data, MeshPacket{
 			ID:         s.objectID(sm.ownerNode),
 			Transforms: IndexRange{First: root, Count: 1},
@@ -99,25 +103,30 @@ func (s *Scene) rebuildPacketTables() {
 	instanceBase := uint32(len(s.world))
 	for i := range s.instancedMeshes {
 		im := &s.instancedMeshes[i]
+		im.meshPacketIndex = invalidIndex
 		if s.flags[im.ownerNode]&flagAttached == 0 {
 			continue
 		}
-		s.addMesh(MeshPacket{
+		im.meshPacketIndex = s.addMesh(MeshPacket{
 			ID:            s.objectID(im.ownerNode),
 			Transforms:    IndexRange{First: instanceBase + im.transformBase, Count: im.count},
 			Bounds:        im.bounds,
 			Flags:         s.renderFlags(im.ownerNode),
 			LODHysteresis: im.hysteresis,
-		}, im.lods)
+		}, im.lods, im.deformOutput)
 	}
 }
 
-// addMesh completes mp from its LOD chain and records it. Level 0 goes on the mesh
-// itself and the coarser levels into the shared LOD table, which is why this is worth
-// a helper: Mesh and InstancedMesh differ in how they are transformed and in nothing
-// else, so only the part above varies.
-func (s *Scene) addMesh(mp MeshPacket, lods []lodLevel) {
+// addMesh completes mp from its LOD chain and records it, returning its index in the
+// mesh table. Level 0 goes on the mesh itself and the coarser levels into the shared
+// LOD table, which is why this is worth a helper: Mesh and InstancedMesh differ in how
+// they are transformed and in nothing else, so only the part above varies. A morphing
+// mesh draws its deformOutput in place of its level-0 geometry.
+func (s *Scene) addMesh(mp MeshPacket, lods []lodLevel, deformOutput geometries.Geometry) uint32 {
 	mp.Geometry = lods[0].geometry.ID()
+	if deformOutput.IsValid() {
+		mp.Geometry = deformOutput.ID()
+	}
 	mp.Material = lods[0].material.ID()
 	mp.LODRange = IndexRange{First: uint32(len(s.packet.LODs.Data))}
 	for _, l := range lods[1:] {
@@ -129,6 +138,7 @@ func (s *Scene) addMesh(mp MeshPacket, lods []lodLevel) {
 		mp.LODRange.Count++
 	}
 	s.packet.Meshes.Data = append(s.packet.Meshes.Data, mp)
+	return uint32(len(s.packet.Meshes.Data) - 1)
 }
 
 // objectID is a node's identity as a packet object: stable while the node lives, and
@@ -242,21 +252,70 @@ func applyShadowSettings(lp *LightPacket, sh *LightShadow) {
 	lp.ShadowBias = sh.bias
 }
 
-// extractSkins refills the published skin table. Like lights, skinned meshes are few
-// and polled rather than tracked; unlike lights, the palettes they index were already
-// recomputed by Scene.Sync, so this only records ranges into that table.
-func (s *Scene) extractSkins() {
-	out := s.packet.Skins.Data[:0]
+// extractDeforms refills the published deform and morph weight tables, and copies
+// each deformed mesh's current bounds into its mesh table entry. Like lights,
+// deformed meshes are few and polled rather than tracked; the palettes skinned meshes
+// index were already recomputed by Scene.Sync, so this only records ranges into that
+// table.
+func (s *Scene) extractDeforms() {
+	s.packet.Deforms.Data = s.packet.Deforms.Data[:0]
+	s.packet.MorphWeights.Data = s.packet.MorphWeights.Data[:0]
+
+	for i := range s.meshes {
+		md := &s.meshes[i]
+		if !md.morph.hasTargets() || md.meshPacketIndex == invalidIndex {
+			continue
+		}
+		geo := md.lods[0].geometry
+		s.addDeform(DeformPacket{
+			Source:      geo.ID(),
+			Output:      md.deformOutput.ID(),
+			Mesh:        md.meshPacketIndex,
+			VertexCount: uint32(geo.VertexCount()),
+		}, &md.morph, md.bounds)
+	}
+	for i := range s.instancedMeshes {
+		im := &s.instancedMeshes[i]
+		if !im.morph.hasTargets() || im.meshPacketIndex == invalidIndex {
+			continue
+		}
+		geo := im.lods[0].geometry
+		s.addDeform(DeformPacket{
+			Source:      geo.ID(),
+			Output:      im.deformOutput.ID(),
+			Mesh:        im.meshPacketIndex,
+			VertexCount: uint32(geo.VertexCount()),
+		}, &im.morph, im.bounds)
+	}
 	for _, sm := range s.skinnedMeshes.Entries() {
+		if sm.meshPacketIndex == invalidIndex {
+			continue
+		}
 		sk := s.skeletons.Value(sm.skeleton)
-		out = append(out, SkinPacket{
+		s.addDeform(DeformPacket{
 			Source:      sm.srcGeometry.ID(),
 			Output:      sm.outputGeo.ID(),
+			Mesh:        sm.meshPacketIndex,
 			Joints:      IndexRange{First: sk.jointBase, Count: uint32(len(sk.bones))},
 			VertexCount: sm.vertCount,
-		})
+		}, &sm.morph, sm.bounds)
 	}
-	s.packet.Skins.Data = out
+}
+
+// addDeform completes dp with the mesh's nonzero morph weights and records it, and
+// brings the mesh's published bounds up to date.
+func (s *Scene) addDeform(dp DeformPacket, morph *morphState, bounds glm.Sphere) {
+	dp.MorphRevision = morph.revision
+	dp.MorphWeights.First = uint32(len(s.packet.MorphWeights.Data))
+	for target, weight := range morph.weights {
+		if weight == 0 {
+			continue
+		}
+		s.packet.MorphWeights.Data = append(s.packet.MorphWeights.Data, MorphWeight{Target: uint32(target), Weight: weight})
+		dp.MorphWeights.Count++
+	}
+	s.packet.Deforms.Data = append(s.packet.Deforms.Data, dp)
+	s.packet.Meshes.Data[dp.Mesh].Bounds = bounds
 }
 
 // newParticleID mints the next stable particle-system identity.

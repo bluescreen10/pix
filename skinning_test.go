@@ -190,3 +190,42 @@ func TestSkinnedMeshBoneAttachment(t *testing.T) {
 		t.Fatalf("prop world X = %v, want 5 (bone 1's new local X, since bone 0/root are at origin)", after[12])
 	}
 }
+
+// TestSkinnedMeshStaysVisibleAwayFromBindPose moves the whole rig far from where its
+// bind pose stood and looks only at where it went. The cull tests each drawable's
+// bounds, so the quad is drawn only if its posed bounds reached the GPU — bounds
+// taken once from the bind pose would cull it.
+func TestSkinnedMeshStaysVisibleAwayFromBindPose(t *testing.T) {
+	r, err := pix.NewOffscreenRenderer(64, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
+
+	scene := scenes.New()
+	defer scene.Destroy()
+
+	geo := r.GeometryStore.Create(riggedQuad())
+	defer geo.Release()
+	mat := r.NewBasicMaterial()
+	mat.SetCull(materials.CullNone)
+
+	skel := scene.NewSkeleton(twoBoneSkeleton())
+	scene.Add(skel)
+	sm := scene.NewSkinnedMesh(geo, mat, skel)
+	scene.Add(sm)
+
+	cam := scene.NewPerspectiveCamera(45, 1, 0.1, 100)
+	scene.Add(cam)
+	cam.SetPosition(glm.Vec3f{20, 1, 6})
+	cam.LookAt(glm.Vec3f{20, 1, 0})
+
+	r.Render(scene)
+	skel.Bone(0).SetPosition(glm.Vec3f{20, 0, 0})
+	r.Render(scene)
+
+	if n := countLitPixels(r.Capture()); n == 0 {
+		t.Fatal("skinned quad moved 20 units by its root bone drew no pixels where it went, want it visible")
+	}
+}

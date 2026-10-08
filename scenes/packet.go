@@ -67,13 +67,16 @@ type FramePacket struct {
 	Lights      Table[LightPacket]
 	Environment EnvironmentPacket
 
-	// Skins is one entry per skinned mesh and Joints the flat palette they index. The
-	// producer poses the skeleton; the renderer runs the vertex skinning and owns the
+	// Deforms is one entry per mesh whose drawn vertices the renderer computes —
+	// morphed, skinned, or both. Joints is the flat palette skinned entries index and
+	// MorphWeights the flat weight list morphed entries index. The producer poses the
+	// skeleton and sets the weights; the renderer runs the deformation and owns the
 	// geometry it writes into. Joint matrices are plain CPU data here — the buffer they
 	// end up in belongs to the renderer, which is why extraction computes them into a
 	// slice rather than straight into device memory as it once did.
-	Skins  Table[SkinPacket]
-	Joints Table[glm.Mat4f]
+	Deforms      Table[DeformPacket]
+	Joints       Table[glm.Mat4f]
+	MorphWeights Table[MorphWeight]
 
 	// Particles is one entry per simulated system, carrying both its persistent
 	// description and this frame's simulation step. Newborns is the flat table the
@@ -113,16 +116,39 @@ type ParticlePacket struct {
 	Epoch uint64
 }
 
-// SkinPacket is one skinned mesh's dispatch description: which geometry to read, which
-// to write, the joint palette to read it with, and how many vertices that is.
-type SkinPacket struct {
-	Source geometries.ID // Bind-pose positions, attributes and skin weights.
-	Output geometries.ID // Where the skinned result is written.
+// DeformPacket is one deformed mesh's dispatch description: which geometry to read,
+// which to write, the morph weights and joint palette to deform it with, and how many
+// vertices that is. Morph targets apply first, to the bind pose; skinning then poses
+// the result.
+type DeformPacket struct {
+	Source geometries.ID // Bind-pose positions, attributes, skin weights and morph targets.
+	Output geometries.ID // Where the deformed result is written.
+	// Mesh is the index in FramePacket.Meshes of the mesh drawing Output. A deformed
+	// mesh's Bounds there follow its pose and weights, so they can change on any frame
+	// without the mesh table's revision changing.
+	Mesh uint32
 	// Joints is this skeleton's palette range in FramePacket.Joints, in skeleton-local
 	// space (rootWorldInv * boneWorld * invBind) — so the mesh's own draw transform is
-	// the skeleton root's, and moving a character rigidly changes no joint at all.
-	Joints      IndexRange
-	VertexCount uint32
+	// the skeleton root's, and moving a character rigidly changes no joint at all. An
+	// empty range means the mesh is not skinned.
+	Joints IndexRange
+	// MorphWeights is the range of FramePacket.MorphWeights this mesh blends its
+	// targets with. Only nonzero weights are listed, so an empty range means the
+	// output is the source unchanged.
+	MorphWeights IndexRange
+	VertexCount  uint32
+	// MorphRevision changes whenever the mesh's morph weights do. An unskinned mesh
+	// whose MorphRevision has not changed since its output was last written still has
+	// a valid output, unless the geometry store moved it (see
+	// geometries.Store.LayoutRevision). A skinned mesh is posed every frame regardless.
+	MorphRevision uint64
+}
+
+// MorphWeight is one morph target's weight: Target indexes the source geometry's
+// morph targets.
+type MorphWeight struct {
+	Target uint32
+	Weight float32
 }
 
 // LightID identifies a light across frames. The renderer keys its shadow resources on
@@ -351,7 +377,8 @@ type MeshPacket struct {
 	Geometry geometries.ID
 	Material materials.ID
 	// Bounds is in local space, transformed by each entry in Transforms. Every LOD
-	// level shares it: a coarser level approximates the same object.
+	// level shares it: a coarser level approximates the same object. A mesh listed in
+	// FramePacket.Deforms has bounds that follow its deformation from frame to frame.
 	Bounds glm.Sphere
 	Flags  RenderFlags
 	// LODRange spans this mesh's COARSER levels in FramePacket.LODs, in order. An

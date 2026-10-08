@@ -164,7 +164,8 @@ func (s *Scene) updateSkinning() {
 	}
 	for _, sm := range s.skinnedMeshes.Entries() {
 		sk := s.skeletons.Value(sm.skeleton)
-		sm.bounds = skinnedBounds(sk.jointPos, sk.jointScale, sm.radii)
+		morphDisplacement := maxMorphDisplacement(sm.srcGeometry, sm.morph.weights)
+		sm.bounds = skinnedBounds(sk.jointPos, sk.jointScale, sm.radii, morphDisplacement)
 	}
 }
 
@@ -190,8 +191,9 @@ func maxColumnLength(m glm.Mat4f) float32 {
 // current pose: center is the mean position of joints it actually uses (radii[i] <
 // 0 marks an unused joint — see computeJointRadii), radius covers every used
 // joint's current position plus its bind-space influence radius scaled by the
-// joint's current pose scale.
-func skinnedBounds(pos []glm.Vec3f, scale []float32, radii []float32) glm.Sphere {
+// joint's current pose scale. morphDisplacement is how far morph targets can move a
+// vertex from its bind position, so it widens every joint's radius alike.
+func skinnedBounds(pos []glm.Vec3f, scale []float32, radii []float32, morphDisplacement float32) glm.Sphere {
 	var center glm.Vec3f
 	n := 0
 	for i, r := range radii {
@@ -210,7 +212,7 @@ func skinnedBounds(pos []glm.Vec3f, scale []float32, radii []float32) glm.Sphere
 		if r < 0 || i >= len(pos) {
 			continue
 		}
-		d := pos[i].Sub(center).Length() + r*scale[i]
+		d := pos[i].Sub(center).Length() + (r+morphDisplacement)*scale[i]
 		if d > radius {
 			radius = d
 		}

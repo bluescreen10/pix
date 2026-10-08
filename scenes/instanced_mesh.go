@@ -30,6 +30,12 @@ type instancedMeshData struct {
 	count         uint32
 
 	ownerNode uint32
+
+	// Every instance shares one set of morph weights and so one deformOutput — see
+	// meshData for both, and for meshPacketIndex.
+	morph           morphState
+	deformOutput    geometries.Geometry
+	meshPacketIndex uint32
 }
 
 func (m InstancedMesh) data() *instancedMeshData {
@@ -60,6 +66,9 @@ func (m InstancedMesh) Count() int {
 // content (rocks, trees, props) rather than the grass-blade-count case.
 func (m InstancedMesh) AddLOD(geo geometries.Geometry, mat materials.Material, minDistance float32) InstancedMesh {
 	md := m.data()
+	if md.morph.hasTargets() {
+		panic("pix: InstancedMesh.AddLOD is not supported on a mesh with morph targets")
+	}
 	if len(md.lods) >= maxLODLevels {
 		panic("pix: InstancedMesh.AddLOD: at most maxLODLevels levels are supported")
 	}
@@ -99,11 +108,14 @@ func (s *Scene) NewInstancedMesh(geo geometries.Geometry, mat materials.Material
 	transformBase := uint32(len(s.instanceTransforms))
 	s.instanceTransforms = append(s.instanceTransforms, transforms...)
 	s.instancedMeshes = append(s.instancedMeshes, instancedMeshData{
-		lods:          []lodLevel{{geometry: geo.Copy(), material: mat.Copy()}},
-		bounds:        geo.BoundingSphere(),
-		transformBase: transformBase,
-		count:         uint32(len(transforms)),
-		ownerNode:     id.index,
+		lods:            []lodLevel{{geometry: geo.Copy(), material: mat.Copy()}},
+		bounds:          geo.BoundingSphere(),
+		transformBase:   transformBase,
+		count:           uint32(len(transforms)),
+		ownerNode:       id.index,
+		morph:           newMorphState(geo),
+		deformOutput:    newMorphOutput(geo),
+		meshPacketIndex: invalidIndex,
 	})
 	s.payload[id.index] = payloadIdx
 	s.packetDirty = true
@@ -116,6 +128,7 @@ func (s *Scene) swapRemoveInstancedMesh(payloadIdx uint32) {
 		l.geometry.Release()
 		l.material.Release()
 	}
+	d.deformOutput.Release()
 	last := uint32(len(s.instancedMeshes) - 1)
 	if payloadIdx != last {
 		s.instancedMeshes[payloadIdx] = s.instancedMeshes[last]

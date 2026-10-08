@@ -27,13 +27,21 @@ type Mesh struct{ Node }
 
 // meshData is the per-mesh payload stored in Scene.meshes. lods[0] is always the mesh
 // created by NewMesh; AddLOD appends coarser levels. bounds is shared by every level
-// (see AddLOD's doc comment). lodGroupID is 0 until AddLOD is first called — it then
-// indexes Scene.lods, shared by every one of this mesh's level records.
+// (see AddLOD's doc comment), and grows with the morph target weights.
+//
+// A mesh whose geometry has morph targets draws deformOutput instead of its geometry
+// (see Geometry.CreateDeformOutput); for any other mesh deformOutput is the zero
+// Geometry. meshPacketIndex is where rebuildPacketTables put the mesh in the packet's
+// mesh table, or invalidIndex if it was left out.
 type meshData struct {
 	lods       []lodLevel
 	hysteresis float32
 	bounds     glm.Sphere
 	ownerNode  uint32
+
+	morph           morphState
+	deformOutput    geometries.Geometry
+	meshPacketIndex uint32
 }
 
 func (m Mesh) data() *meshData {
@@ -79,6 +87,9 @@ func (m Mesh) BoundingSphere() glm.Sphere {
 // being frustum-culled early. See the LOD spec (project memory) for the full design.
 func (m Mesh) AddLOD(geo geometries.Geometry, mat materials.Material, minDistance float32) Mesh {
 	md := m.data()
+	if md.morph.hasTargets() {
+		panic("pix: Mesh.AddLOD is not supported on a mesh with morph targets")
+	}
 	if len(md.lods) >= maxLODLevels {
 		panic("pix: Mesh.AddLOD: at most maxLODLevels levels are supported")
 	}
@@ -103,14 +114,18 @@ func (m Mesh) SetLODHysteresis(h float32) Mesh {
 }
 
 // NewMesh creates a mesh node from a geometry + material (both renderer-owned). The
-// scene takes its own references (Copy), so the caller may Release theirs.
+// scene takes its own references (Copy), so the caller may Release theirs. A geometry
+// with morph targets starts with every weight at 0.
 func (s *Scene) NewMesh(geo geometries.Geometry, mat materials.Material) Mesh {
 	id := s.allocNode(kindMesh)
 	payloadIdx := uint32(len(s.meshes))
 	s.meshes = append(s.meshes, meshData{
-		lods:      []lodLevel{{geometry: geo.Copy(), material: mat.Copy()}},
-		bounds:    geo.BoundingSphere(),
-		ownerNode: id.index,
+		lods:            []lodLevel{{geometry: geo.Copy(), material: mat.Copy()}},
+		bounds:          geo.BoundingSphere(),
+		ownerNode:       id.index,
+		morph:           newMorphState(geo),
+		deformOutput:    newMorphOutput(geo),
+		meshPacketIndex: invalidIndex,
 	})
 	s.payload[id.index] = payloadIdx
 	s.packetDirty = true

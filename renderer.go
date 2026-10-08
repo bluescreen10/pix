@@ -1372,6 +1372,7 @@ func (r *Renderer) extract(scene scenes.Producer) (*renderState, frameViews) {
 	views := r.extractViews(p, st)
 	r.extractLights(p, st)
 	r.collectDrawables(p, st)
+	r.updateDeformedBounds(p, st)
 	r.extractParticles(p, st)
 
 	// Everything the packet describes is now renderer-owned — its particle births are
@@ -1638,6 +1639,29 @@ func (r *Renderer) collectDrawables(p *scenes.FramePacket, st *renderState) {
 	orderBatches(&st.layout, r.GeometryStore)
 	r.uploadLayout(st)
 	st.layout.meshRevision = p.Meshes.Revision
+}
+
+// updateDeformedBounds copies each deformed mesh's current bounds into its drawables.
+// A pose or a morph weight moves a mesh's bounds without changing the layout, so the
+// rebuild above does not see it; left alone, the cull would test the bounds the mesh
+// had when the layout was built and drop it once it moved past them.
+func (r *Renderer) updateDeformedBounds(p *scenes.FramePacket, st *renderState) {
+	layout := &st.layout
+	for _, deform := range p.Deforms.Data {
+		if int(deform.Mesh)+1 >= len(layout.meshFirstDrawable) {
+			continue
+		}
+		first, end := layout.meshFirstDrawable[deform.Mesh], layout.meshFirstDrawable[deform.Mesh+1]
+		bounds := p.Meshes.Data[deform.Mesh].Bounds
+		if first == end || layout.drawables[first].bounds == bounds {
+			continue
+		}
+		drawables := layout.drawables[first:end]
+		for i := range drawables {
+			drawables[i].bounds = bounds
+		}
+		st.drawableBuf.Write(utils.ToBytesSlice(drawables), uint64(first)*uint64(drawableSize))
+	}
 }
 
 // uploadLayout writes the layout's tables into the buffers the GPU reads them from. The
@@ -2018,10 +2042,13 @@ func (r *Renderer) encodeSkinning(st *renderState, cmd gpu.CommandBuffer) {
 // slice reused across frames.
 func (r *Renderer) skinCommands(p *scenes.FramePacket) []skinCmd {
 	r.skinScratch = r.skinScratch[:0]
-	for _, skin := range p.Skins.Data {
+	for _, deform := range p.Deforms.Data {
+		if deform.Joints.Count == 0 {
+			continue
+		}
 		r.skinScratch = append(r.skinScratch, skinCmd{
-			srcDesc: skin.Source.Slot, dstDesc: skin.Output.Slot,
-			jointBase: skin.Joints.First, vertexCount: skin.VertexCount,
+			srcDesc: deform.Source.Slot, dstDesc: deform.Output.Slot,
+			jointBase: deform.Joints.First, vertexCount: deform.VertexCount,
 		})
 	}
 	return r.skinScratch

@@ -25,6 +25,12 @@ type drawLayout struct {
 	drawables []gpuDrawable
 	batches   []batch
 
+	// meshFirstDrawable[i] is the first of the packet's mesh i's drawables, which run
+	// up to meshFirstDrawable[i+1]: buildDrawables emits each mesh's records together,
+	// and nothing reorders them afterwards. It is how a deformed mesh's bounds, which
+	// change without the layout changing, find the records to update.
+	meshFirstDrawable []uint32
+
 	// template is the GPU's view of the batch order: each batch's indirect arguments,
 	// copied fresh into every view's indirect buffer before its cull. firstInstance is
 	// also the base of the batch's region in the visible buffer — the cull writes a
@@ -226,6 +232,7 @@ func isLayoutStale(p *scenes.FramePacket, layout *drawLayout) bool {
 func buildDrawables(p *scenes.FramePacket, layout *drawLayout, materialStore *materials.Store) {
 	layout.drawables = layout.drawables[:0]
 	layout.batches = layout.batches[:0]
+	layout.meshFirstDrawable = layout.meshFirstDrawable[:0]
 	// Index 0 is reserved and never read: a drawable's lodID of 0 means "not LOD-tagged".
 	layout.lods = append(layout.lods[:0], gpuLOD{})
 
@@ -241,6 +248,7 @@ func buildDrawables(p *scenes.FramePacket, layout *drawLayout, materialStore *ma
 	batchOf := make(map[key]uint32)
 
 	for meshIndex, mesh := range p.Meshes.Entries() {
+		layout.meshFirstDrawable = append(layout.meshFirstDrawable, uint32(len(layout.drawables)))
 		lodID := uint32(0)
 		if mesh.LODRange.Count > 0 {
 			lodID = uint32(len(layout.lods))
@@ -308,6 +316,7 @@ func buildDrawables(p *scenes.FramePacket, layout *drawLayout, materialStore *ma
 			}
 		}
 	}
+	layout.meshFirstDrawable = append(layout.meshFirstDrawable, uint32(len(layout.drawables)))
 }
 
 // lodConfig builds one mesh's LOD entry. boundaries[i] is where level i ends and level
