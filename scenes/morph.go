@@ -69,6 +69,21 @@ func morphedBounds(geo geometries.Geometry, weights []float32) glm.Sphere {
 	return bounds
 }
 
+// setMorphTargetWeights sets the morph target weights of whichever kind of mesh node
+// is; any other kind of node has none, and is left alone.
+func (s *Scene) setMorphTargetWeights(node NodeID, weights []float32) {
+	s.validate(node)
+	n := Node{scene: s, id: node}
+	switch s.kind[node.index] {
+	case kindMesh:
+		Mesh{n}.SetMorphTargetWeights(weights)
+	case kindInstancedMesh:
+		InstancedMesh{n}.SetMorphTargetWeights(weights)
+	case kindSkinnedMesh:
+		SkinnedMesh{n}.SetMorphTargetWeights(weights)
+	}
+}
+
 // MorphTargetCount returns how many morph targets the mesh's geometry has.
 func (m Mesh) MorphTargetCount() int {
 	return len(m.data().morph.weights)

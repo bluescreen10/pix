@@ -51,6 +51,23 @@ func plainTriangle(t *testing.T, store *geometries.Store) geometries.Geometry {
 	return geo
 }
 
+// skinnedTriangle is a triangle fully weighted to joint 0.
+func skinnedTriangle(t *testing.T, store *geometries.Store) geometries.Geometry {
+	t.Helper()
+	positions := []glm.Vec3f{{-1, -1, 0}, {1, -1, 0}, {0, 1, 0}}
+	joints := []glm.Vec4[uint16]{{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}}
+	weights := []glm.Vec4f{{1, 0, 0, 0}, {1, 0, 0, 0}, {1, 0, 0, 0}}
+	geo := store.Create(geometries.GeometryConfig{
+		Attributes: []geometries.Attribute{
+			geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, positions),
+			geometries.NewAttribute(geometries.AttributeSkinIndex, geometries.Uint16x4, joints),
+			geometries.NewAttribute(geometries.AttributeSkinWeight, geometries.Float32x4, weights),
+		},
+	})
+	t.Cleanup(geo.Release)
+	return geo
+}
+
 func TestMeshMorphTargetWeights(t *testing.T) {
 	store := newGeometryStore(t)
 	scene := scenes.New()
@@ -286,5 +303,59 @@ func TestSkinnedMeshMorphBoundsFollowWeights(t *testing.T) {
 
 	if want := rest.Radius + 3; stretched.Radius != want {
 		t.Errorf("BoundingSphere().Radius = %v at weight 1, want %v (rest %v plus the target's 3)", stretched.Radius, want, rest.Radius)
+	}
+}
+
+func TestAnimationMixerDrivesMorphWeights(t *testing.T) {
+	store := newGeometryStore(t)
+	scene := scenes.New()
+	defer scene.Destroy()
+	mesh := scene.NewMesh(morphedTriangle(t, store), newFakeMaterial())
+	scene.Add(mesh)
+
+	clip := &scenes.AnimationClip{
+		Name:     "lift",
+		Duration: 2,
+		Tracks: []scenes.Track{{
+			Target:  mesh,
+			Channel: scenes.ChannelMorphWeights,
+			Interp:  scenes.InterpLinear,
+			Times:   []float32{0, 2},
+			Values:  []float32{0, 1, 1, 0},
+		}},
+	}
+	mixer := scene.NewAnimationMixer(mesh)
+	mixer.Action(clip).SetLoop(scenes.LoopOnce).Play()
+
+	mixer.Update(0.5)
+	if got := mesh.MorphTargetWeights(); got[0] != 0.25 || got[1] != 0.75 {
+		t.Errorf("MorphTargetWeights() at t=0.5 = %v, want [0.25 0.75]", got)
+	}
+}
+
+func TestAnimationMixerBlendsMorphWeights(t *testing.T) {
+	store := newGeometryStore(t)
+	scene := scenes.New()
+	defer scene.Destroy()
+	mesh := scene.NewMesh(morphedTriangle(t, store), newFakeMaterial())
+	scene.Add(mesh)
+
+	pose := func(name string, weights ...float32) *scenes.AnimationClip {
+		return &scenes.AnimationClip{
+			Name:     name,
+			Duration: 1,
+			Tracks: []scenes.Track{{
+				Target: mesh, Channel: scenes.ChannelMorphWeights, Interp: scenes.InterpStep,
+				Times: []float32{0}, Values: weights,
+			}},
+		}
+	}
+	mixer := scene.NewAnimationMixer(mesh)
+	mixer.Action(pose("lifted", 1, 0)).SetWeight(3).Play()
+	mixer.Action(pose("widened", 0, 1)).SetWeight(1).Play()
+
+	mixer.Update(0)
+	if got := mesh.MorphTargetWeights(); got[0] != 0.75 || got[1] != 0.25 {
+		t.Errorf("MorphTargetWeights() blending 3:1 = %v, want [0.75 0.25]", got)
 	}
 }

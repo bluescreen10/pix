@@ -150,14 +150,18 @@ func (a *AnimationAction) advance(dt float32) {
 	}
 }
 
-// mixAccum is one node's per-frame blend accumulator: position/scale as a
-// weighted sum, rotation as an incremental weighted slerp (three.js's approach).
+// mixAccum is one node's per-frame blend accumulator: position/scale and morph
+// weights as a weighted sum, rotation as an incremental weighted slerp (three.js's
+// approach).
 type mixAccum struct {
 	node             NodeID
 	posSum, scaleSum glm.Vec3f
 	posW, scaleW     float32
 	rot              glm.Quatf
 	rotW             float32
+
+	morphWeightSums []float32
+	morphW          float32
 }
 
 // AnimationMixer plays AnimationActions against a scene's node transforms,
@@ -197,8 +201,9 @@ func (m *AnimationMixer) StopAll() {
 }
 
 // Update advances every playing action's local time by dt, blends their tracks
-// per touched node (weighted sum for position/scale, weighted slerp for
-// rotation), and applies the result via SetPosition/SetRotationQuat/SetScale —
+// per touched node (weighted sum for position/scale/morph weights, weighted slerp
+// for rotation), and applies the result via SetPosition/SetRotationQuat/SetScale/
+// SetMorphTargetWeights —
 // which is what marks the node dirty for the next updateTransforms. A node with
 // zero total weight this frame is left untouched (it keeps its last-applied
 // value rather than reverting to bind pose — a v1 simplification).
@@ -222,6 +227,8 @@ func (m *AnimationMixer) Update(dt float32) {
 	// no allocation, unlike deleting and re-inserting map entries every frame.
 	for _, en := range m.accum {
 		en.posSum, en.scaleSum, en.posW, en.scaleW, en.rotW = glm.Vec3f{}, glm.Vec3f{}, 0, 0, 0
+		clear(en.morphWeightSums)
+		en.morphW = 0
 	}
 
 	for _, a := range active {
@@ -254,6 +261,19 @@ func (m *AnimationMixer) Update(dt float32) {
 					en.rot = glm.Slerp(en.rot, v, w/(en.rotW+w))
 				}
 				en.rotW += w
+			case ChannelMorphWeights:
+				n := tr.morphTargetCount()
+				if n == 0 {
+					continue
+				}
+				if en.morphWeightSums == nil {
+					en.morphWeightSums = make([]float32, n)
+				}
+				if len(en.morphWeightSums) != n {
+					continue // a second track disagreeing on the target count
+				}
+				tr.addMorphWeights(a.time, &a.cursors[i], w, en.morphWeightSums)
+				en.morphW += w
 			}
 		}
 	}
@@ -268,6 +288,12 @@ func (m *AnimationMixer) Update(dt float32) {
 		}
 		if en.rotW > 0 {
 			n.SetRotationQuat(en.rot)
+		}
+		if en.morphW > 0 {
+			for j := range en.morphWeightSums {
+				en.morphWeightSums[j] /= en.morphW
+			}
+			m.scene.setMorphTargetWeights(en.node, en.morphWeightSums)
 		}
 	}
 }

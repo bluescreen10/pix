@@ -9,6 +9,9 @@ const (
 	ChannelPosition Channel = iota
 	ChannelRotation
 	ChannelScale
+	// ChannelMorphWeights animates every morph target weight of a Mesh, InstancedMesh
+	// or SkinnedMesh at once.
+	ChannelMorphWeights
 )
 
 // Interp is a Track's keyframe interpolation mode.
@@ -24,7 +27,7 @@ const (
 // AnimationClip (see loaders/gltf) already has the node in hand from building the
 // scene graph, so there is no name-based re-targeting step (yet) between a clip
 // and the mixer that plays it. Values is 3 floats per key for Position/Scale, 4
-// (a quaternion, xyzw) for Rotation.
+// (a quaternion, xyzw) for Rotation, and one per morph target for MorphWeights.
 type Track struct {
 	Target  SceneNode
 	Channel Channel
@@ -102,4 +105,30 @@ func (tr *Track) sampleQuat(t float32, cursor *int) glm.Quatf {
 	}
 	b := glm.Quatf{tr.Values[(i+1)*4], tr.Values[(i+1)*4+1], tr.Values[(i+1)*4+2], tr.Values[(i+1)*4+3]}
 	return glm.Slerp(a, b, frac)
+}
+
+// addMorphWeights evaluates a MorphWeights track at time t and adds the weights,
+// scaled by blendWeight, into sums — which has one entry per morph target.
+func (tr *Track) addMorphWeights(t float32, cursor *int, blendWeight float32, sums []float32) {
+	i, frac := tr.keyAt(t, cursor)
+	n := len(sums)
+	a := tr.Values[i*n : (i+1)*n]
+	if frac == 0 || tr.Interp == InterpStep || (i+2)*n > len(tr.Values) {
+		for j, v := range a {
+			sums[j] += blendWeight * v
+		}
+		return
+	}
+	b := tr.Values[(i+1)*n : (i+2)*n]
+	for j := range sums {
+		sums[j] += blendWeight * (a[j] + (b[j]-a[j])*frac)
+	}
+}
+
+// morphTargetCount is how many weights each of a MorphWeights track's keys holds.
+func (tr *Track) morphTargetCount() int {
+	if len(tr.Times) == 0 {
+		return 0
+	}
+	return len(tr.Values) / len(tr.Times)
 }

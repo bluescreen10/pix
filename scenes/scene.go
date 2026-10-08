@@ -646,6 +646,46 @@ func (s *Scene) FindByName(name string) (Node, bool) {
 	return Node{}, false
 }
 
+// MeshByName returns a mesh with the given name (see Node.Name), or false if none has
+// it. If several do, which one it returns is unspecified. A linear scan of the
+// scene's meshes, like FindByName: for finding a mesh after loading an asset, not
+// for a per-frame path.
+func (s *Scene) MeshByName(name string) (Mesh, bool) {
+	for i := range s.meshes {
+		if node := s.meshes[i].ownerNode; s.names[node] == name {
+			return Mesh{s.nodeAt(node)}, true
+		}
+	}
+	return Mesh{}, false
+}
+
+// SkinnedMeshByName returns a skinned mesh with the given name, or false if none has
+// it — see MeshByName.
+func (s *Scene) SkinnedMeshByName(name string) (SkinnedMesh, bool) {
+	for _, sm := range s.skinnedMeshes.Entries() {
+		if s.names[sm.ownerNode] == name {
+			return SkinnedMesh{s.nodeAt(sm.ownerNode)}, true
+		}
+	}
+	return SkinnedMesh{}, false
+}
+
+// InstancedMeshByName returns an instanced mesh with the given name, or false if
+// none has it — see MeshByName.
+func (s *Scene) InstancedMeshByName(name string) (InstancedMesh, bool) {
+	for i := range s.instancedMeshes {
+		if node := s.instancedMeshes[i].ownerNode; s.names[node] == name {
+			return InstancedMesh{s.nodeAt(node)}, true
+		}
+	}
+	return InstancedMesh{}, false
+}
+
+// nodeAt returns a handle to the live node in slot.
+func (s *Scene) nodeAt(slot uint32) Node {
+	return Node{scene: s, id: NodeID{index: slot, gen: s.generation[slot]}}
+}
+
 // FrameSphere returns a robust center and radius for the mesh nodes' world-space
 // bounds (median center, percentile-of-center-distances). Values outside the
 // percentile range [0, 1] are clamped. Run Sync first.
