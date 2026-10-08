@@ -1,7 +1,7 @@
 package gltf
 
 // glTF 2.0 JSON document types — the subset the loader consumes: static meshes,
-// PBR base color + texture, node hierarchy, skins, and animations.
+// morph targets, PBR base color + texture, node hierarchy, skins, and animations.
 
 type doc struct {
 	Scene       int          `json:"scene"`
@@ -24,16 +24,18 @@ type scene struct {
 }
 
 type node struct {
-	Name        string          `json:"name"`
-	Children    []int           `json:"children"`
-	Mesh        *int            `json:"mesh"`
-	Skin        *int            `json:"skin"`
-	Matrix      []float32       `json:"matrix"`
-	Translation []float32       `json:"translation"`
-	Rotation    []float32       `json:"rotation"`
-	Scale       []float32       `json:"scale"`
-	Extensions  *nodeExtensions `json:"extensions"`
-	Extras      *nodeExtras     `json:"extras"`
+	Name        string    `json:"name"`
+	Children    []int     `json:"children"`
+	Mesh        *int      `json:"mesh"`
+	Skin        *int      `json:"skin"`
+	Matrix      []float32 `json:"matrix"`
+	Translation []float32 `json:"translation"`
+	Rotation    []float32 `json:"rotation"`
+	Scale       []float32 `json:"scale"`
+	// Weights overrides the mesh's default morph target weights for this node.
+	Weights    []float32       `json:"weights"`
+	Extensions *nodeExtensions `json:"extensions"`
+	Extras     *nodeExtras     `json:"extras"`
 }
 
 // nodeExtensions carries the MSFT_lod extension (see
@@ -56,8 +58,12 @@ type msftLod struct {
 // over. See buildNode's MSFT_lod handling for how these are turned into pix's
 // distance-based AddLOD thresholds (screen coverage and world-space distance aren't
 // the same unit — see that comment for the conversion used).
+//
+// TargetNames names the node's mesh's morph targets. The usual place for them is the
+// mesh's own extras (see meshExtras), but some exporters put them on the node.
 type nodeExtras struct {
 	MSFTScreenCoverage []float32 `json:"MSFT_screencoverage"`
+	TargetNames        []string  `json:"targetNames"`
 }
 
 // skin is a glTF skin: joints[i] is a node index, and inverseBindMatrices[i] (a
@@ -95,16 +101,29 @@ type animSampler struct {
 	Interpolation string `json:"interpolation"` // "LINEAR" | "STEP" | "CUBICSPLINE"
 }
 
+// mesh is a glTF mesh. Weights are its morph targets' default weights, shared by
+// every primitive: each primitive has the same number of targets, in the same order.
 type mesh struct {
 	Name       string      `json:"name"`
 	Primitives []primitive `json:"primitives"`
+	Weights    []float32   `json:"weights"`
+	Extras     *meshExtras `json:"extras"`
 }
 
+// meshExtras carries the morph target names: not part of the glTF core, but the
+// convention exporters (Blender among them) follow.
+type meshExtras struct {
+	TargetNames []string `json:"targetNames"`
+}
+
+// primitive is one draw of a mesh. Each of Targets is one morph target, mapping
+// "POSITION", "NORMAL" and "TANGENT" to accessors of per-vertex deltas.
 type primitive struct {
-	Attributes map[string]int `json:"attributes"`
-	Indices    *int           `json:"indices"`
-	Material   *int           `json:"material"`
-	Mode       *int           `json:"mode"`
+	Attributes map[string]int   `json:"attributes"`
+	Indices    *int             `json:"indices"`
+	Material   *int             `json:"material"`
+	Mode       *int             `json:"mode"`
+	Targets    []map[string]int `json:"targets"`
 }
 
 type material struct {
@@ -190,12 +209,33 @@ type sampler struct {
 	WrapT     int `json:"wrapT"`
 }
 
+// accessor is a typed view of buffer data. Normalized integer components map to
+// [0,1] (unsigned) or [-1,1] (signed). Sparse, if present, overrides some elements
+// of the view, or of zeros when there is no buffer view.
 type accessor struct {
-	BufferView    *int   `json:"bufferView"`
-	ByteOffset    int    `json:"byteOffset"`
-	ComponentType int    `json:"componentType"`
-	Count         int    `json:"count"`
-	Type          string `json:"type"`
+	BufferView    *int            `json:"bufferView"`
+	ByteOffset    int             `json:"byteOffset"`
+	ComponentType int             `json:"componentType"`
+	Normalized    bool            `json:"normalized"`
+	Count         int             `json:"count"`
+	Type          string          `json:"type"`
+	Sparse        *accessorSparse `json:"sparse"`
+}
+
+// accessorSparse lists Count elements replaced in an accessor: Indices gives which
+// (as UNSIGNED_BYTE, UNSIGNED_SHORT or UNSIGNED_INT), Values their new values, in the
+// accessor's own component type.
+type accessorSparse struct {
+	Count   int `json:"count"`
+	Indices struct {
+		BufferView    int `json:"bufferView"`
+		ByteOffset    int `json:"byteOffset"`
+		ComponentType int `json:"componentType"`
+	} `json:"indices"`
+	Values struct {
+		BufferView int `json:"bufferView"`
+		ByteOffset int `json:"byteOffset"`
+	} `json:"values"`
 }
 
 type bufferView struct {

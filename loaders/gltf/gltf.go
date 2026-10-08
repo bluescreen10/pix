@@ -4,8 +4,10 @@
 // are supported: a glTF skin becomes a scenes.Skeleton (its joint nodes become
 // scenes.Bone nodes, not plain groups — see Load), a mesh referencing that skin
 // becomes a scenes.SkinnedMesh, and glTF animations come back as pix.AnimationClips
-// ready for a scenes.AnimationMixer. CUBICSPLINE interpolation and morph-target
-// ("weights") channels are not supported (channels using either are skipped).
+// ready for a scenes.AnimationMixer. Morph targets load onto their geometries, named
+// from the mesh's (or node's) extras.targetNames, starting at the mesh's (or node's)
+// default weights; "weights" channels animate them. CUBICSPLINE samplers play as
+// LINEAR over their value keys.
 package gltf
 
 import (
@@ -127,10 +129,22 @@ type loader struct {
 	jointBoneIdx map[int]int
 	attachNode   []int
 	attachSkin   map[int]int // reverse of attachNode: glTF node index -> skin index
+
+	// morphedMeshes maps a glTF node index to the scene meshes its primitives with
+	// morph targets became: what an animation of the node's weights drives.
+	morphedMeshes map[int][]morphedMesh
+}
+
+// morphedMesh is a scene mesh with morph targets, plain or skinned.
+type morphedMesh interface {
+	scenes.SceneNode
+	MorphTargetCount() int
+	SetMorphTargetWeights(weights []float32)
 }
 
 func (l *loader) build() (int, error) {
 	l.texCache = map[texKey]textures.Texture{}
+	l.morphedMeshes = map[int][]morphedMesh{}
 	l.prepareTextures(l.materialTextures())
 	l.loadMaterials()
 	l.loadSkins()
@@ -208,7 +222,7 @@ func (l *loader) buildNode(idx int) scenes.Node {
 	setLocal(node, gn)
 	node.SetName(gn.Name)
 	if gn.Mesh != nil {
-		meshes := l.addMesh(node, *gn.Mesh, gn.Skin)
+		meshes := l.addMesh(node, idx)
 		if ext := gn.Extensions; ext != nil && ext.MSFTLod != nil {
 			l.applyMSFTLod(meshes, ext.MSFTLod, gn.Extras)
 		}
@@ -314,16 +328,27 @@ func (l *loader) roots() []int {
 
 // addMesh creates a Mesh (or, when a primitive carries skin data and the node
 // references a skin, a SkinnedMesh bound to that skin's scenes.Skeleton) child per
-// triangle primitive of meshIdx, parented under parent. Returns the plain (non-
-// skinned) Mesh handles it created, in primitive order — used by applyMSFTLod, which
-// only ever expects exactly one.
-func (l *loader) addMesh(parent scenes.Node, meshIdx int, skinIdx *int) []scenes.Mesh {
-	gm := l.doc.Meshes[meshIdx]
+// triangle primitive of the node's mesh, parented under parent. Primitives with morph
+// targets start at the node's default weights and are recorded in morphedMeshes, for
+// the node's weight animations to drive. Each mesh takes the glTF mesh's name, or the
+// node's if the mesh has none. Returns the plain (non-skinned) Mesh handles
+// it created, in primitive order — used by applyMSFTLod, which only ever expects
+// exactly one.
+func (l *loader) addMesh(parent scenes.Node, nodeIdx int) []scenes.Mesh {
+	gn := l.doc.Nodes[nodeIdx]
+	gm := l.doc.Meshes[*gn.Mesh]
 	var skel scenes.Skeleton
-	hasSkel := skinIdx != nil && *skinIdx >= 0 && *skinIdx < len(l.skeletons)
+	hasSkel := gn.Skin != nil && *gn.Skin >= 0 && *gn.Skin < len(l.skeletons)
 	if hasSkel {
-		skel = l.skeletons[*skinIdx]
+		skel = l.skeletons[*gn.Skin]
 	}
+	names := targetNames(gm, gn)
+	weights := defaultMorphWeights(gm, gn)
+	meshName := gm.Name
+	if meshName == "" {
+		meshName = gn.Name
+	}
+
 	var meshes []scenes.Mesh
 	for _, prim := range gm.Primitives {
 		mode := 4
@@ -337,19 +362,30 @@ func (l *loader) addMesh(parent scenes.Node, meshIdx int, skinIdx *int) []scenes
 		if len(data.Attributes) == 0 {
 			continue
 		}
+		vertexCount := len(geometries.AttributeData[glm.Vec3f](data.Attributes[0]))
+		data.MorphTargets = l.morphTargets(prim, vertexCount, names)
 		geo := l.renderer.GeometryStore.Create(data)
 		mat := l.materialFor(prim.Material)
+		var morphed morphedMesh
 		if hasSkel && skinned {
 			sm := l.scene.NewSkinnedMesh(geo, mat, skel)
 			geo.Release() // the mesh holds its own copy
-			sm.SetName(gm.Name)
+			sm.SetName(meshName)
 			parent.Add(sm)
+			morphed = sm
 		} else {
 			m := l.scene.NewMesh(geo, mat)
 			geo.Release()
-			m.SetName(gm.Name)
+			m.SetName(meshName)
 			parent.Add(m)
 			meshes = append(meshes, m)
+			morphed = m
+		}
+		if len(data.MorphTargets) > 0 {
+			if len(weights) == len(data.MorphTargets) {
+				morphed.SetMorphTargetWeights(weights)
+			}
+			l.morphedMeshes[nodeIdx] = append(l.morphedMeshes[nodeIdx], morphed)
 		}
 		l.added++
 	}
@@ -586,9 +622,10 @@ func (l *loader) readJoints(idx int) []glm.Vec4[uint16] {
 
 // loadAnimations builds a scenes.AnimationClip per glTF animation. Must run after
 // the scene graph traversal (build's node loop) — a track's Target is resolved
-// directly to the already-built scene node/bone, not a name. Channels targeting
-// an unbuilt node (unreachable from the loaded scene) or the "weights" (morph
-// target) path are skipped; CUBICSPLINE samplers are treated as LINEAR over their
+// directly to the already-built scene node/bone, not a name — or, for a "weights"
+// channel, to the node's morphed meshes. Channels targeting an unbuilt node
+// (unreachable from the loaded scene) are skipped; CUBICSPLINE samplers are treated
+// as LINEAR over their
 // value keys (the in/out tangents are ignored) — not spec-exact, but avoids
 // silently misreading the 3x-wider CUBICSPLINE output layout as flat keys.
 func (l *loader) loadAnimations() []*scenes.AnimationClip {
@@ -599,19 +636,8 @@ func (l *loader) loadAnimations() []*scenes.AnimationClip {
 			if ch.Target.Node == nil || ch.Sampler < 0 || ch.Sampler >= len(ga.Samplers) {
 				continue
 			}
-			target, ok := l.animTarget(*ch.Target.Node)
+			targets, channel, ok := l.animTargets(*ch.Target.Node, ch.Target.Path)
 			if !ok {
-				continue
-			}
-			var channel scenes.Channel
-			switch ch.Target.Path {
-			case "translation":
-				channel = scenes.ChannelPosition
-			case "rotation":
-				channel = scenes.ChannelRotation
-			case "scale":
-				channel = scenes.ChannelScale
-			default: // "weights" (morph targets) — not supported
 				continue
 			}
 			sampler := ga.Samplers[ch.Sampler]
@@ -620,47 +646,86 @@ func (l *loader) loadAnimations() []*scenes.AnimationClip {
 				interp = scenes.InterpStep
 			}
 			times := castTo[float32](l.accessorBytes(sampler.Input))
-			values := l.animValues(sampler, channel, len(times))
+			values := l.animValues(sampler, floatsPerKey(channel, targets), len(times))
 			if len(times) == 0 || len(values) == 0 {
 				continue
 			}
 			if last := times[len(times)-1]; last > clip.Duration {
 				clip.Duration = last
 			}
-			clip.Tracks = append(clip.Tracks, scenes.Track{
-				Target: target, Channel: channel, Interp: interp, Times: times, Values: values,
-			})
+			// A node's weights drive every primitive of its mesh; the tracks share
+			// their keys.
+			for _, target := range targets {
+				clip.Tracks = append(clip.Tracks, scenes.Track{
+					Target: target, Channel: channel, Interp: interp, Times: times, Values: values,
+				})
+			}
 		}
 		clips = append(clips, clip)
 	}
 	return clips
 }
 
-// animValues reads a sampler's output accessor into a flat []float32 (3 floats
-// per key for Position/Scale, 4 for Rotation), extracting only the value (middle
-// third) of each key when the sampler is CUBICSPLINE.
-func (l *loader) animValues(sampler animSampler, channel scenes.Channel, keyCount int) []float32 {
-	raw := l.accessorBytes(sampler.Output)
-	stride := 3
-	if channel == scenes.ChannelRotation {
-		stride = 4
+// animTargets resolves a channel's target node and path to the scene nodes its
+// tracks drive and the channel they animate: the node itself for its transform, or
+// its mesh's morphed primitives for "weights". false if there is nothing to drive.
+func (l *loader) animTargets(nodeIdx int, path string) ([]scenes.SceneNode, scenes.Channel, bool) {
+	var channel scenes.Channel
+	switch path {
+	case "translation":
+		channel = scenes.ChannelPosition
+	case "rotation":
+		channel = scenes.ChannelRotation
+	case "scale":
+		channel = scenes.ChannelScale
+	case "weights":
+		meshes := l.morphedMeshes[nodeIdx]
+		targets := make([]scenes.SceneNode, len(meshes))
+		for i, m := range meshes {
+			targets[i] = m
+		}
+		return targets, scenes.ChannelMorphWeights, len(targets) > 0
+	default:
+		return nil, 0, false
 	}
+	target, ok := l.animTarget(nodeIdx)
+	if !ok {
+		return nil, 0, false
+	}
+	return []scenes.SceneNode{target}, channel, true
+}
+
+// floatsPerKey is how many floats one key of a channel holds.
+func floatsPerKey(channel scenes.Channel, targets []scenes.SceneNode) int {
+	switch channel {
+	case scenes.ChannelRotation:
+		return 4
+	case scenes.ChannelMorphWeights:
+		return targets[0].(morphedMesh).MorphTargetCount()
+	}
+	return 3
+}
+
+// animValues reads a sampler's output accessor into a flat []float32 of
+// floatsPerKey floats per key, extracting only the value (middle third) of each
+// key when the sampler is CUBICSPLINE. Outputs may be quantized integers (see
+// accessorFloats).
+func (l *loader) animValues(sampler animSampler, floatsPerKey, keyCount int) []float32 {
+	all := l.accessorFloats(sampler.Output)
 	if sampler.Interpolation == "CUBICSPLINE" {
-		all := castTo[float32](raw)
-		if len(all) != keyCount*stride*3 {
+		if len(all) != keyCount*floatsPerKey*3 {
 			return nil
 		}
-		out := make([]float32, keyCount*stride)
+		out := make([]float32, keyCount*floatsPerKey)
 		for i := range keyCount {
-			copy(out[i*stride:], all[i*stride*3+stride:i*stride*3+stride*2])
+			copy(out[i*floatsPerKey:], all[i*floatsPerKey*3+floatsPerKey:i*floatsPerKey*3+floatsPerKey*2])
 		}
 		return out
 	}
-	out := castTo[float32](raw)
-	if len(out) != keyCount*stride {
+	if len(all) != keyCount*floatsPerKey {
 		return nil
 	}
-	return out
+	return all
 }
 
 // animTarget resolves a glTF node index to the scene handle its track should
@@ -1059,9 +1124,48 @@ func (l *loader) resolveURI(uri string) ([]byte, error) {
 	return os.ReadFile(filepath.Join(l.baseDir, uri))
 }
 
+// accessorBytes returns an accessor's elements tightly packed, with any sparse
+// overrides applied. The result may alias the loaded buffer, so it must not be
+// modified.
 func (l *loader) accessorBytes(idx int) []byte {
 	acc := l.doc.Accessors[idx]
 	elemSize := componentSize(acc.ComponentType) * typeComponents(acc.Type)
+	dense := l.denseAccessorBytes(acc, elemSize)
+	if acc.Sparse == nil {
+		return dense
+	}
+	return l.applySparse(acc, elemSize, dense)
+}
+
+// applySparse returns a copy of dense with the accessor's sparse elements replaced.
+func (l *loader) applySparse(acc accessor, elemSize int, dense []byte) []byte {
+	out := append([]byte(nil), dense...)
+	sparse := acc.Sparse
+	indexView := l.doc.BufferViews[sparse.Indices.BufferView]
+	indices := l.buffers[indexView.Buffer][indexView.ByteOffset+sparse.Indices.ByteOffset:]
+	valueView := l.doc.BufferViews[sparse.Values.BufferView]
+	values := l.buffers[valueView.Buffer][valueView.ByteOffset+sparse.Values.ByteOffset:]
+	for i := range sparse.Count {
+		var element int
+		switch sparse.Indices.ComponentType {
+		case 5121: // UNSIGNED_BYTE
+			element = int(indices[i])
+		case 5123: // UNSIGNED_SHORT
+			element = int(binary.LittleEndian.Uint16(indices[i*2:]))
+		default: // 5125 UNSIGNED_INT
+			element = int(binary.LittleEndian.Uint32(indices[i*4:]))
+		}
+		if element >= acc.Count {
+			continue
+		}
+		copy(out[element*elemSize:(element+1)*elemSize], values[i*elemSize:])
+	}
+	return out
+}
+
+// denseAccessorBytes returns an accessor's buffer view elements tightly packed, or
+// zeros when it has no buffer view.
+func (l *loader) denseAccessorBytes(acc accessor, elemSize int) []byte {
 	if acc.BufferView == nil {
 		return make([]byte, acc.Count*elemSize)
 	}
