@@ -10,6 +10,9 @@ const (
 	AttributeUV
 	AttributeSkinIndex  // skeleton-relative joint indices, per vertex (up to 4)
 	AttributeSkinWeight // per-joint blend weights, per vertex (normalized at pack time)
+	// AttributeTangent is xyz tangent plus w handedness (±1). Stored for CPU queries
+	// but not uploaded: nothing renders tangents yet.
+	AttributeTangent
 	attributeCount
 )
 
@@ -37,6 +40,7 @@ var canonicalDataType = [attributeCount]DataType{
 	AttributeUV:         Float32x2,
 	AttributeSkinIndex:  Uint16x4,
 	AttributeSkinWeight: Float32x4,
+	AttributeTangent:    Float32x4,
 }
 
 // Attribute is one named vertex stream, built with NewAttribute.
@@ -67,9 +71,10 @@ func AttributeData[T any](a Attribute) []T {
 }
 
 // GeometryConfig is a geometry's source data: a set of vertex attributes (Position
-// required, others optional and matching the position count), and an optional index
-// list (nil → generated 0..n-1).
+// required, others optional and matching the position count), an optional index
+// list (nil → generated 0..n-1), and optional morph targets over the same vertices.
 type GeometryConfig struct {
-	Attributes []Attribute
-	Indices    []uint32
+	Attributes   []Attribute
+	Indices      []uint32
+	MorphTargets []MorphTarget
 }

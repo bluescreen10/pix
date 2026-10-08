@@ -18,7 +18,9 @@ struct GeoDesc {
     uint indexBase;
     uint indexCount;
     uint flags;
-    uint pad;
+    uint skinBase;
+    uint morphBase;
+    uint morphTargetCount;
 };
 struct ParticleRecord {
     vec3  position;

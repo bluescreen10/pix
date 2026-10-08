@@ -89,15 +89,15 @@ func (g Geometry) ID() ID {
 	return ID{Slot: g.ref.ID(), Gen: g.ref.Gen()}
 }
 
-// skinOutput allocates a derived output geometry that receives this geometry's
-// compute-skinned vertex data (see Store.createSkinOutput), and returns a
-// fresh single-ref handle to it. g must carry skin index/weight attributes.
-// Package-internal — used by Scene.NewSkinnedMesh.
-func (g Geometry) SkinOutput() Geometry {
+// CreateDeformOutput allocates a geometry that the renderer fills with this
+// geometry's vertices after morphing and skinning, and returns a fresh single-ref
+// handle to it. It shares this geometry's indices and has no CPU-side data of its
+// own. g must carry skin attributes, morph targets, or both.
+func (g Geometry) CreateDeformOutput() Geometry {
 	if g.store == nil {
-		panic("render: SkinOutput on a geometry with no owning store")
+		panic("render: CreateDeformOutput on a geometry with no owning store")
 	}
-	id, gen := g.store.createSkinOutput(g.ref.ID())
+	id, gen := g.store.createDeformOutput(g.ref.ID())
 	return Geometry{
 		ref:            ref.New(id, gen, g.store.dispose, g.store.validate),
 		store:          g.store,

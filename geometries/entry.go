@@ -27,8 +27,8 @@ type vertexSkin struct {
 // bytes are reconstructed on demand. It holds each present stream's suballocation
 // and the local bounds.
 //
-// derived marks a geometry with no CPU-side attribute bytes at all: a compute-
-// skinning output range (see createSkinOutput), sized to mirror a source geometry's
+// derived marks a geometry with no CPU-side attribute bytes at all: a deform
+// output range (see createDeformOutput), sized to mirror a source geometry's
 // vertex count but filled by the GPU every frame instead of uploaded once. Its
 // position/attribute presence is tracked directly (derivedHasAttr) rather than
 // through has()/hasVertexAttrs(), which read attrs[].count — a derived entry only
@@ -36,6 +36,7 @@ type vertexSkin struct {
 type entry struct {
 	attrs          [attributeCount]Attribute
 	indices        []uint32
+	morphTargets   []morphTargetEntry
 	derived        bool
 	derivedHasAttr bool
 	allocs         [streamCount]mem.Allocation
@@ -92,6 +93,8 @@ func (e *entry) streamPresent(stream int) bool {
 		return !e.derived // a derived (skin output) entry reuses its source's index range
 	case streamSkin:
 		return !e.derived && e.hasSkin()
+	case streamMorph:
+		return !e.derived && len(e.morphTargets) > 0
 	}
 	return false
 }
@@ -125,6 +128,8 @@ func (e *entry) bytes(stream int) []byte {
 		return e.packAttributes()
 	case streamSkin:
 		return e.packSkin()
+	case streamMorph:
+		return e.packMorphTargets()
 	}
 	return nil
 }

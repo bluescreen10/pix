@@ -37,7 +37,9 @@ struct GeoDesc {
     uint indexBase;
     uint indexCount;
     uint flags;
-    uint pad;
+    uint skinBase;
+    uint morphBase;
+    uint morphTargetCount;
 };
 
 layout(buffer_reference, scalar) readonly buffer PosBuf { float v[]; };

@@ -10,7 +10,7 @@
 // Compute pre-skinning. One thread per vertex: blend up to 4 joint matrices and
 // write the result into a persistent per-SkinnedMesh output range in the shared
 // position/attribute streams (allocated once at SkinnedMesh creation — see
-// geometrySystem.createSkinOutput in geometry.go). Output is in skeleton-local
+// Store.createDeformOutput in geometries/store.go). Output is in skeleton-local
 // space (joints already carry rootWorldInv * boneWorld * invBind — see
 // Scene.updateSkinning), so the drawable's own transformID (the skeleton root node)
 // applies the remaining world transform exactly like static geometry:
@@ -25,6 +25,8 @@ struct GeoDesc {
     uint indexCount;
     uint flags;
     uint skinBase;
+    uint morphBase;
+    uint morphTargetCount;
 };
 
 layout(buffer_reference, scalar) buffer PosBuf { float v[]; };

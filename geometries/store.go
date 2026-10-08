@@ -23,18 +23,21 @@ const (
 	streamAttr
 	streamIndex
 	streamSkin
+	streamMorph
 	streamCount
 )
 
 // streamElemSize is the byte size of one addressable element of each stream, used
 // to turn a TLSF byte offset into the element base stored in the descriptor.
 // Positions are addressed as floats (base in f32 units) so the vertex shader can
-// pull an x/y/z triple; attributes and skin records as 16-byte records; indices as u32.
+// pull an x/y/z triple; attribute, skin and morph records as 16-byte records; indices
+// as u32.
 var streamElemSize = [streamCount]uint32{
 	streamPos:   4,
 	streamAttr:  16,
 	streamIndex: 4,
 	streamSkin:  16,
+	streamMorph: 16,
 }
 
 // Attribute-presence flags stored in geometryDesc.Flags (mirrors the GLSL).
@@ -48,14 +51,16 @@ const (
 const initialStreamBytes uint32 = 1 << 16
 
 // geometryDesc links a geometry id to its data in the shared streams. Bases are
-// element offsets (byteOffset / streamElemSize). 24 bytes; matches the GLSL GeoDesc.
+// element offsets (byteOffset / streamElemSize). 32 bytes; matches the GLSL GeoDesc.
 type geometryDesc struct {
-	PositionBase  uint32
-	AttributeBase uint32
-	IndexBase     uint32
-	IndexCount    uint32
-	Flags         uint32
-	SkinBase      uint32
+	PositionBase     uint32
+	AttributeBase    uint32
+	IndexBase        uint32
+	IndexCount       uint32
+	Flags            uint32
+	SkinBase         uint32
+	MorphBase        uint32
+	MorphTargetCount uint32
 }
 
 func (d *geometryDesc) setBase(stream int, base uint32) {
@@ -68,6 +73,8 @@ func (d *geometryDesc) setBase(stream int, base uint32) {
 		d.IndexBase = base
 	case streamSkin:
 		d.SkinBase = base
+	case streamMorph:
+		d.MorphBase = base
 	}
 }
 
@@ -94,6 +101,10 @@ type Store struct {
 	descBuf   gpu.Buffer
 	descDirty bool
 
+	// layoutRevision counts stream grows. A grow moves every geometry, and re-uploads
+	// only the ones with CPU bytes — see LayoutRevision.
+	layoutRevision uint64
+
 	// Stream buffers live in MemoryDevice, so alloc/grow cannot write them
 	// directly; they enqueue pendingWrite entries that Sync drains through the
 	// uploader (stage + CopyBuffer). pendingWriteMu guards the queue because
@@ -119,6 +130,7 @@ func NewStore(backend gpu.Backend) *Store {
 	g.streams[streamAttr] = g.newStream("Vertex Attributes", initialStreamBytes)
 	g.streams[streamIndex] = g.newStream("Vertex Indices", initialStreamBytes)
 	g.streams[streamSkin] = g.newStream("Vertex Skin", initialStreamBytes)
+	g.streams[streamMorph] = g.newStream("Vertex Morph Targets", initialStreamBytes)
 	g.descBuf = backend.Alloc(descSize, gpu.MemoryDevice, "Geometry Descriptors")
 	return g
 }
@@ -150,6 +162,15 @@ func (g *Store) DescriptorsAddr() uint64 {
 // (joint indices + weights). Changes when the stream grows, like the others.
 func (g *Store) SkinAddr() uint64 {
 	return g.streams[streamSkin].buf.Addr
+}
+
+// LayoutRevision changes whenever a stream grows. A grow moves every geometry to a
+// new buffer but restores only data the store holds on the CPU: a deform output
+// (see Geometry.CreateDeformOutput) comes back with undefined contents. A caller that
+// skips rewriting an output whose inputs did not change must rewrite every output
+// once this changes.
+func (g *Store) LayoutRevision() uint64 {
+	return g.layoutRevision
 }
 
 // IndexBuffer returns the shared index stream as a hardware index buffer, for
@@ -222,6 +243,7 @@ func (g *Store) alloc(cfg GeometryConfig) (id, gen uint32) {
 	if e.has(AttributeSkinIndex) != e.has(AttributeSkinWeight) {
 		panic("render: geometry must have both skin index and skin weight attributes, or neither")
 	}
+	e.morphTargets = newMorphTargetEntries(cfg.MorphTargets, n)
 
 	e.indices = cfg.Indices
 	if len(e.indices) == 0 {
@@ -235,6 +257,7 @@ func (g *Store) alloc(cfg GeometryConfig) (id, gen uint32) {
 	var d geometryDesc
 	d.Flags = e.flags()
 	d.IndexCount = uint32(len(e.indices))
+	d.MorphTargetCount = uint32(len(e.morphTargets))
 
 	// Suballocate + upload each present stream. Growth repacks existing geometries
 	// only (this entry is not yet in the slab), so it's safe here.
@@ -325,9 +348,9 @@ func (g *Store) growStream(stream int, minCap uint32) {
 		if !e.streamPresent(stream) {
 			continue
 		}
-		// A derived (compute-skinning output) entry has no CPU bytes to repack from
-		// — its content is rewritten by the GPU every frame regardless — so just
-		// re-suballocate at the same size and move on.
+		// A derived (deform output) entry has no CPU bytes to repack from, so it is
+		// only re-suballocated at the same size; its contents are lost, which is
+		// what bumping layoutRevision below tells the renderer.
 		if e.derived {
 			old := e.allocs[stream]
 			alloc, err := ns.tlsf.Alloc(old.Size())
@@ -349,24 +372,25 @@ func (g *Store) growStream(stream int, minCap uint32) {
 	}
 	g.backend.Free(s.buf)
 	g.descDirty = true
+	g.layoutRevision++
 }
 
-// createSkinOutput allocates a derived geometry that receives compute-skinned
-// vertex output: its own position range, and (if the source carries one) its own
-// attribute range, both sized to the source's vertex count — but no CPU bytes and
-// no index stream of its own, since it reuses the source's index range verbatim
-// (skinning never changes topology). FlagSkinned is cleared on the output
-// descriptor: once skinned, the data is plain triangles again.
-func (g *Store) createSkinOutput(srcID uint32) (id, gen uint32) {
+// createDeformOutput allocates a derived geometry that receives a source's morphed
+// and/or skinned vertices: its own position range, and (if the source carries one)
+// its own attribute range, both sized to the source's vertex count — but no CPU bytes
+// and no index stream of its own, since it reuses the source's index range verbatim
+// (deformation never changes topology). The output descriptor has no skin and no
+// morph targets: once deformed, the data is plain triangles again.
+func (g *Store) createDeformOutput(srcID uint32) (id, gen uint32) {
 	if !g.entries.IsAlive(srcID) {
-		panic("render: createSkinOutput on a dead geometry")
+		panic("render: CreateDeformOutput on a dead geometry")
 	}
 	src := g.entries.Value(srcID)
+	if !src.hasSkin() && len(src.morphTargets) == 0 {
+		panic("render: CreateDeformOutput on a geometry with neither skin attributes nor morph targets")
+	}
 	srcDesc := g.descs[srcID]
 	n := src.attrs[AttributePosition].count
-	if n == 0 {
-		panic("render: createSkinOutput on an empty geometry")
-	}
 
 	var e entry
 	e.derived = true

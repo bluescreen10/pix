@@ -98,7 +98,7 @@ func (s *Scene) NewSkinnedMesh(geo geometries.Geometry, mat materials.Material, 
 	id := s.allocNode(kindSkinnedMesh)
 	payloadIdx, _ := s.skinnedMeshes.Alloc(skinnedMeshData{
 		srcGeometry: geo.Copy(),
-		outputGeo:   geo.SkinOutput(),
+		outputGeo:   geo.CreateDeformOutput(),
 		material:    mat.Copy(),
 		skeleton:    skelIdx,
 		vertCount:   uint32(len(positions)),
