@@ -39,8 +39,8 @@ func ForBackend(backend any, code []byte) []byte {
 //go:embed build/scene_cull.comp.metalbin
 var metalSceneCull []byte
 
-//go:embed build/scene_skin.comp.metalbin
-var metalSceneSkin []byte
+//go:embed build/scene_deform.comp.metalbin
+var metalSceneDeform []byte
 
 //go:embed build/scene_draw.vert.metalbin
 var metalSceneDraw []byte
@@ -189,7 +189,7 @@ var metalVariants = []struct{ spirv, metal []byte }{
 	{FXAA, metalFXAA},
 	{Halftone, metalHalftone},
 	{SceneCull, metalSceneCull},
-	{SceneSkin, metalSceneSkin},
+	{SceneDeform, metalSceneDeform},
 	{SceneDraw, metalSceneDraw},
 	{SceneDepthVert, metalSceneDepthVert},
 	{SceneDepthMaskedVert, metalSceneDepthMaskedVert},

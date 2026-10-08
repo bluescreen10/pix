@@ -162,20 +162,48 @@ type maskedDepthRoot struct {
 	_            uint32
 }
 
-// skinCmd is one SkinnedMesh's compute-skinning dispatch, built by
-// Renderer.skinCommands(): srcDesc is the source geometry's descriptor id (positions,
-// attributes, skin records), dstDesc is its persistent compute-output geometry's
-// descriptor id, jointBase is its skeleton's offset into the scene's joint buffer,
-// and vertexCount sizes the dispatch.
-type skinCmd struct {
-	srcDesc, dstDesc, jointBase, vertexCount uint32
+// deformVariant is which deformations a deform pipeline applies, compiled in through
+// scene_deform.comp's specialization constants. With neither, the pipeline copies the
+// source unchanged — what a morphed mesh with every weight at 0 draws.
+type deformVariant struct {
+	isMorphed bool
+	isSkinned bool
 }
 
-// skinRoot matches SkinRoot in scene_skin.comp (scalar; pointers, then plain
-// fields). One per skinned mesh per frame — see Renderer.encodeSkinning.
-type skinRoot struct {
-	pos, attr, skin, descs, joints           uint64
-	srcDesc, dstDesc, jointBase, vertexCount uint32
+func (v deformVariant) constants() map[string]float64 {
+	return map[string]float64{
+		"MORPHED": constantOf(v.isMorphed),
+		"SKINNED": constantOf(v.isSkinned),
+	}
+}
+
+// deformVariants is every deformVariant, each built into its own pipeline.
+var deformVariants = []deformVariant{
+	{isMorphed: false, isSkinned: false},
+	{isMorphed: true, isSkinned: false},
+	{isMorphed: false, isSkinned: true},
+	{isMorphed: true, isSkinned: true},
+}
+
+// deformCmd is one deformed mesh's dispatch, built by Renderer.deformCommands:
+// srcDesc is the source geometry's descriptor id (positions, attributes, skin records,
+// morph targets), dstDesc its persistent output geometry's, jointBase its skeleton's
+// offset into the joint buffer, morphWeightBase/morphWeightCount its range of the morph
+// weight buffer, and vertexCount sizes the dispatch.
+type deformCmd struct {
+	variant                           deformVariant
+	srcDesc, dstDesc, jointBase       uint32
+	morphWeightBase, morphWeightCount uint32
+	vertexCount                       uint32
+}
+
+// deformRoot matches PC in scene_deform.comp (scalar; pointers, then plain fields).
+// One per deformed mesh per frame — see Renderer.encodeDeforms.
+type deformRoot struct {
+	pos, attr, skin, morph, descs, joints, morphWeights uint64
+	srcDesc, dstDesc, jointBase                         uint32
+	morphWeightBase, morphWeightCount                   uint32
+	vertexCount                                         uint32
 }
 
 var (

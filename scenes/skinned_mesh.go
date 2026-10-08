@@ -78,7 +78,7 @@ func (m SkinnedMesh) BoundingSphere() glm.Sphere {
 // AttributeSkinIndex/AttributeSkinWeight (indices relative to skel's joint order).
 // The renderer allocates geo a persistent compute-skinning output range (a derived
 // geometry, sized to geo's vertex count, reusing geo's index range) that is
-// refilled every frame from skel's current pose — see Renderer.encodeSkinning.
+// refilled every frame from skel's current pose — see Renderer.encodeDeforms.
 // The scene takes its own references to geo/mat (Copy), so the caller may Release
 // theirs. Destroy every SkinnedMesh bound to a Skeleton before destroying the
 // Skeleton itself — a SkinnedMesh does not hold a reference on its skeleton, so

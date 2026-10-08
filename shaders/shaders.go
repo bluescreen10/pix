@@ -35,7 +35,7 @@ import _ "embed"
 // --- scene pipeline ---
 
 //go:generate go run ../cmd/shadercompile -i src/scene_cull.comp.glsl -o spv:build/scene_cull.comp.spv -o metallib:build/scene_cull.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_skin.comp.glsl -o spv:build/scene_skin.comp.spv -o metallib:build/scene_skin.comp.metalbin
+//go:generate go run ../cmd/shadercompile -i src/scene_deform.comp.glsl -o spv:build/scene_deform.comp.spv -o metallib:build/scene_deform.comp.metalbin
 //go:generate go run ../cmd/shadercompile -i src/scene_draw.vert.glsl -o spv:build/scene_draw.vert.spv -o metallib:build/scene_draw.vert.metalbin
 //go:generate go run ../cmd/shadercompile -i src/scene_depth.vert.glsl -o spv:build/scene_depth.vert.spv -o metallib:build/scene_depth.vert.metalbin
 //go:generate go run ../cmd/shadercompile -i src/scene_depth.vert.glsl -D USE_MASK -o spv:build/scene_depth_masked.vert.spv -o metallib:build/scene_depth_masked.vert.metalbin
@@ -131,8 +131,8 @@ var OcclusionApply []byte
 //go:embed build/scene_cull.comp.spv
 var SceneCull []byte
 
-//go:embed build/scene_skin.comp.spv
-var SceneSkin []byte
+//go:embed build/scene_deform.comp.spv
+var SceneDeform []byte
 
 //go:embed build/scene_draw.vert.spv
 var SceneDraw []byte

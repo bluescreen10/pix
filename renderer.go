@@ -70,18 +70,20 @@ type Renderer struct {
 	uploader *uploader
 
 	cullPipeline           gpu.Pipeline
-	skinPipeline           gpu.Pipeline // compute pre-skinning (scene_skin.comp) — see encodeSkinning
 	particleUpdatePipeline gpu.Pipeline // compute particle simulation (particle_update.comp) — see encodeParticleSimulation
 	// particleSortKeysPipeline and particleSortStepPipeline sort a container's particles
 	// back to front (particle_sort_keys.comp, particle_sort_step.comp) — see
 	// encodeParticleSorting.
 	particleSortKeysPipeline gpu.Pipeline
 	particleSortStepPipeline gpu.Pipeline
-	// skinScratch and shadowViews collect the frame's skinning jobs and shadow views
-	// (see skinCommands, collectShadowViews); reused every frame rather than
+	// deformPipelines morph and skin meshes (scene_deform.comp), one per deformVariant
+	// — see encodeDeforms.
+	deformPipelines map[deformVariant]gpu.Pipeline
+	// deformScratch and shadowViews collect the frame's deform jobs and shadow views
+	// (see deformCommands, collectShadowViews); reused every frame rather than
 	// reallocated.
-	skinScratch []skinCmd
-	shadowViews []view
+	deformScratch []deformCmd
+	shadowViews   []view
 	// Draw pipelines, one per distinct material pipeline key (shaders + cull + blend).
 	// drawPipelineKeys is parallel so pipelineFor can dedup and buildPipelines can
 	// rebuild them all when the target format changes.
@@ -1369,6 +1371,7 @@ func (r *Renderer) extract(scene scenes.Producer) (*renderState, frameViews) {
 
 	// 3b–3f. Re-sync each part of the state that the packet describes.
 	r.extractTransforms(p, st)
+	r.extractMorphWeights(p, st)
 	views := r.extractViews(p, st)
 	r.extractLights(p, st)
 	r.collectDrawables(p, st)
@@ -1411,6 +1414,14 @@ func (r *Renderer) extractTransforms(p *scenes.FramePacket, st *renderState) {
 	if joints := p.Joints.Data; len(joints) > 0 {
 		r.growBuffer(&st.jointBuf, uint64(len(joints))*matrixSize, "joints")
 		st.jointBuf.Write(utils.ToBytesSlice(joints), 0)
+	}
+}
+
+// extractMorphWeights uploads the nonzero morph weights the deform pass reads.
+func (r *Renderer) extractMorphWeights(p *scenes.FramePacket, st *renderState) {
+	if weights := p.MorphWeights.Data; len(weights) > 0 {
+		r.growBuffer(&st.morphWeightBuf, uint64(len(weights))*uint64(unsafe.Sizeof(weights[0])), "morph-weights")
+		st.morphWeightBuf.Write(utils.ToBytesSlice(weights), 0)
 	}
 }
 
@@ -1993,7 +2004,7 @@ func (r *Renderer) encodeEnvironment(st *renderState, cmd gpu.CommandBuffer) {
 	st.environment.revision = environment.Revision
 }
 
-// encodeCompute runs everything the frame computes before it draws. Skinning writes
+// encodeCompute runs everything the frame computes before it draws. Deformation writes
 // positions, the particle kernel particle records and the particle sort their draw
 // order, all read by later vertex stages; the cull reads only bounds the CPU supplied.
 // So one barrier after them all covers everything — the sort orders itself after the
@@ -2004,7 +2015,7 @@ func (r *Renderer) encodeCompute(st *renderState, views frameViews, cmd gpu.Comm
 	}
 
 	r.profiler.beginPass(GPUPassCull, cmd)
-	r.encodeSkinning(st, cmd)
+	r.encodeDeforms(st, cmd)
 	r.encodeCulling(st, views, cmd)
 	r.encodeParticleSimulation(st, cmd)
 	r.encodeParticleSorting(st, views, cmd)
@@ -2012,46 +2023,91 @@ func (r *Renderer) encodeCompute(st *renderState, views frameViews, cmd gpu.Comm
 	r.profiler.endPass(GPUPassCull, cmd)
 }
 
-// encodeSkinning dispatches one compute-skinning job per skinned mesh, sized to its
-// vertex count (see scene_skin.comp). Every skinned mesh is skinned whether visible or
-// not — a v1 simplification that a scene with many off-screen characters pays for.
-func (r *Renderer) encodeSkinning(st *renderState, cmd gpu.CommandBuffer) {
-	jobs := r.skinCommands(&r.frame)
+// encodeDeforms dispatches one deform job per deformed mesh whose output needs writing,
+// sized to its vertex count (see scene_deform.comp). Every skinned mesh is posed
+// whether visible or not — a v1 simplification that a scene with many off-screen
+// characters pays for.
+func (r *Renderer) encodeDeforms(st *renderState, cmd gpu.CommandBuffer) {
+	jobs := r.deformCommands(&r.frame, st)
 	if len(jobs) == 0 {
 		return
 	}
 
-	cmd.SetPipeline(r.skinPipeline)
-	for _, job := range jobs {
-		root := skinRoot{
-			pos:         r.GeometryStore.PositionsAddr(),
-			attr:        r.GeometryStore.AttributesAddr(),
-			skin:        r.GeometryStore.SkinAddr(),
-			descs:       r.GeometryStore.DescriptorsAddr(),
-			joints:      st.jointBuf.Addr,
-			srcDesc:     job.srcDesc,
-			dstDesc:     job.dstDesc,
-			jointBase:   job.jointBase,
-			vertexCount: job.vertexCount,
+	var bound deformVariant
+	for i, job := range jobs {
+		if i == 0 || job.variant != bound {
+			cmd.SetPipeline(r.deformPipelines[job.variant])
+			bound = job.variant
+		}
+		root := deformRoot{
+			pos:              r.GeometryStore.PositionsAddr(),
+			attr:             r.GeometryStore.AttributesAddr(),
+			skin:             r.GeometryStore.SkinAddr(),
+			morph:            r.GeometryStore.MorphAddr(),
+			descs:            r.GeometryStore.DescriptorsAddr(),
+			joints:           st.jointBuf.Addr,
+			morphWeights:     st.morphWeightBuf.Addr,
+			srcDesc:          job.srcDesc,
+			dstDesc:          job.dstDesc,
+			jointBase:        job.jointBase,
+			morphWeightBase:  job.morphWeightBase,
+			morphWeightCount: job.morphWeightCount,
+			vertexCount:      job.vertexCount,
 		}
 		cmd.Dispatch(utils.ToBytes(&root), (job.vertexCount+63)/64, 1, 1)
 	}
 }
 
-// skinCommands builds this frame's skinning jobs, one per skinned mesh, into a scratch
-// slice reused across frames.
-func (r *Renderer) skinCommands(p *scenes.FramePacket) []skinCmd {
-	r.skinScratch = r.skinScratch[:0]
+// deformCommands builds this frame's deform jobs into a scratch slice reused across
+// frames. A skinned mesh gets a job every frame. An unskinned, morphed mesh gets one
+// only when its output is stale: its weights changed since the output was written, or
+// the geometry store grew and discarded every output's contents.
+func (r *Renderer) deformCommands(p *scenes.FramePacket, st *renderState) []deformCmd {
+	if layoutRevision := r.GeometryStore.LayoutRevision(); layoutRevision != st.deformLayoutRevision {
+		clear(st.deformOutputs)
+		st.deformLayoutRevision = layoutRevision
+	}
+
+	r.deformScratch = r.deformScratch[:0]
 	for _, deform := range p.Deforms.Data {
-		if deform.Joints.Count == 0 {
-			continue
+		isSkinned := deform.Joints.Count > 0
+		if !isSkinned {
+			if isDeformOutputCurrent(deform, st) {
+				continue
+			}
+			recordDeformOutput(deform, st)
 		}
-		r.skinScratch = append(r.skinScratch, skinCmd{
-			srcDesc: deform.Source.Slot, dstDesc: deform.Output.Slot,
-			jointBase: deform.Joints.First, vertexCount: deform.VertexCount,
+		r.deformScratch = append(r.deformScratch, deformCmd{
+			variant:          deformVariant{isMorphed: deform.MorphWeights.Count > 0, isSkinned: isSkinned},
+			srcDesc:          deform.Source.Slot,
+			dstDesc:          deform.Output.Slot,
+			jointBase:        deform.Joints.First,
+			morphWeightBase:  deform.MorphWeights.First,
+			morphWeightCount: deform.MorphWeights.Count,
+			vertexCount:      deform.VertexCount,
 		})
 	}
-	return r.skinScratch
+	return r.deformScratch
+}
+
+// isDeformOutputCurrent reports whether an unskinned deform's output was last written
+// from the weights it has now.
+func isDeformOutputCurrent(deform scenes.DeformPacket, st *renderState) bool {
+	slot := int(deform.Output.Slot)
+	if slot >= len(st.deformOutputs) {
+		return false
+	}
+	return st.deformOutputs[slot] == deformOutput{gen: deform.Output.Gen, morphRevision: deform.MorphRevision}
+}
+
+// recordDeformOutput notes that an unskinned deform's output is being written from
+// its current weights.
+func recordDeformOutput(deform scenes.DeformPacket, st *renderState) {
+	slot := int(deform.Output.Slot)
+	if slot >= len(st.deformOutputs) {
+		st.deformOutputs = append(st.deformOutputs, make([]deformOutput, slot+1-len(st.deformOutputs))...)
+	}
+	st.deformOutputs[slot] = deformOutput{gen: deform.Output.Gen, morphRevision: deform.MorphRevision}
 }
 
 // encodeCulling culls every view: the main camera and each shadow camera.
@@ -4174,7 +4230,9 @@ func frustumCornersWorld(viewProj glm.Mat4f) [8]glm.Vec3f {
 func (r *Renderer) buildPipelines() {
 	if r.pipelinesReady {
 		r.backend.DestroyPipeline(r.cullPipeline)
-		r.backend.DestroyPipeline(r.skinPipeline)
+		for _, p := range r.deformPipelines {
+			r.backend.DestroyPipeline(p)
+		}
 		r.backend.DestroyPipeline(r.particleUpdatePipeline)
 		r.backend.DestroyPipeline(r.particleSortKeysPipeline)
 		r.backend.DestroyPipeline(r.particleSortStepPipeline)
@@ -4199,7 +4257,13 @@ func (r *Renderer) buildPipelines() {
 		}
 	}
 	r.cullPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.SceneCull), Entry: "main", Label: "scene-cull"})
-	r.skinPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.SceneSkin), Entry: "main", Label: "scene-skin"})
+	r.deformPipelines = make(map[deformVariant]gpu.Pipeline, len(deformVariants))
+	for _, variant := range deformVariants {
+		r.deformPipelines[variant] = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{
+			Shader: shaders.ForBackend(r.backend, shaders.SceneDeform), Entry: "main", Label: "scene-deform",
+			Constants: variant.constants(),
+		})
+	}
 	r.particleUpdatePipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleUpdate), Entry: "main", Label: "particle-update"})
 	r.particleSortKeysPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleSortKeys), Entry: "main", Label: "particle-sort-keys"})
 	r.particleSortStepPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleSortStep), Entry: "main", Label: "particle-sort-step"})
@@ -4786,7 +4850,7 @@ func (r *Renderer) ReleaseSource(id scenes.SourceID) {
 
 // releaseState frees everything one source's state holds.
 func (r *Renderer) releaseState(st *renderState) {
-	buffers := []gpu.Buffer{st.worldBuf, st.drawableBuf, st.lodTableBuf, st.jointBuf, st.prevLevelBuf,
+	buffers := []gpu.Buffer{st.worldBuf, st.drawableBuf, st.lodTableBuf, st.jointBuf, st.morphWeightBuf, st.prevLevelBuf,
 		st.mainCull.indirectBuf, st.mainCull.visibleBuf}
 	for _, cull := range st.shadowCulls {
 		buffers = append(buffers, cull.indirectBuf, cull.visibleBuf)
@@ -4821,7 +4885,9 @@ func (r *Renderer) Destroy() {
 	r.profiler.disableGPUProfiling(r.backend)
 	if r.pipelinesReady {
 		r.backend.DestroyPipeline(r.cullPipeline)
-		r.backend.DestroyPipeline(r.skinPipeline)
+		for _, p := range r.deformPipelines {
+			r.backend.DestroyPipeline(p)
+		}
 		r.backend.DestroyPipeline(r.particleUpdatePipeline)
 		r.backend.DestroyPipeline(r.particleSortKeysPipeline)
 		r.backend.DestroyPipeline(r.particleSortStepPipeline)

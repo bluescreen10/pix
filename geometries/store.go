@@ -173,6 +173,13 @@ func (g *Store) LayoutRevision() uint64 {
 	return g.layoutRevision
 }
 
+// MorphAddr returns the current device address of the shared morph target stream
+// (per-vertex position and normal deltas). Changes when the stream grows, like the
+// others.
+func (g *Store) MorphAddr() uint64 {
+	return g.streams[streamMorph].buf.Addr
+}
+
 // IndexBuffer returns the shared index stream as a hardware index buffer, for
 // DrawIndexed / DrawIndexedIndirect. A geometry's firstIndex is its IndexBase.
 func (g *Store) IndexBuffer() gpu.Buffer {
