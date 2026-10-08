@@ -78,7 +78,7 @@ func (g *Store) morphTargets(id uint32) []morphTargetEntry {
 	if !g.entries.IsAlive(id) {
 		return nil
 	}
-	return g.entries.Value(id).morphTargets
+	return g.vertexEntry(id).morphTargets
 }
 
 // newMorphTargetEntries checks targets against the geometry's vertex count and

@@ -180,12 +180,21 @@ func TestMorphTargetsApplyBeforeSkinning(t *testing.T) {
 
 // TestMorphOutputSurvivesGeometryStoreGrow holds a morphed square's weights still while
 // the geometry store grows. A grow discards every deform output's contents, so the
-// renderer must rewrite the output even though the weights did not change.
+// renderer must rewrite the output even though the weights did not change; and it
+// moves every geometry, so the output must follow the index range it borrows from its
+// source. A filler geometry freed ahead of the square leaves a hole the grow's repack
+// closes — without it, the square's data would land where it was and a stale range
+// would still happen to be right.
 func TestMorphOutputSurvivesGeometryStoreGrow(t *testing.T) {
 	r := newMorphTestRenderer(t)
 	scene := scenes.New()
 	defer scene.Destroy()
 
+	filler := r.GeometryStore.Create(geometries.GeometryConfig{
+		Attributes: []geometries.Attribute{
+			geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, make([]glm.Vec3f, 1024)),
+		},
+	})
 	geo := r.GeometryStore.Create(morphSquare(shiftRight()))
 	defer geo.Release()
 	mat := r.NewBasicMaterial()
@@ -196,6 +205,7 @@ func TestMorphOutputSurvivesGeometryStoreGrow(t *testing.T) {
 	r.Render(scene)
 	expectSquareIn(t, r.Capture(), "before the grow", rightRegion, centerRegion)
 
+	filler.Release()
 	layoutRevision := r.GeometryStore.LayoutRevision()
 	// 4 MiB of positions, more than the position stream holds after the renderer's
 	// own geometry.

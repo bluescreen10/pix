@@ -1642,7 +1642,8 @@ func (r *Renderer) prepareVolumetricFog(fog scenes.FogState) {
 // describes the scene, and does nothing otherwise — rebuilding walks every drawable in
 // the scene, so a steady frame must not pay for it.
 func (r *Renderer) collectDrawables(p *scenes.FramePacket, st *renderState) {
-	if !isLayoutStale(p, &st.layout) {
+	geometryLayoutRevision := r.GeometryStore.LayoutRevision()
+	if !isLayoutStale(p, &st.layout, geometryLayoutRevision) {
 		return
 	}
 
@@ -1650,6 +1651,7 @@ func (r *Renderer) collectDrawables(p *scenes.FramePacket, st *renderState) {
 	orderBatches(&st.layout, r.GeometryStore)
 	r.uploadLayout(st)
 	st.layout.meshRevision = p.Meshes.Revision
+	st.layout.geometryLayoutRevision = geometryLayoutRevision
 }
 
 // updateDeformedBounds copies each deformed mesh's current bounds into its drawables.

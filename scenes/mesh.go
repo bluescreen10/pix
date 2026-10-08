@@ -6,21 +6,6 @@ import (
 	"github.com/bluescreen10/pix/materials"
 )
 
-// maxLODLevels is the most levels a single LOD group (Mesh, InstancedMesh, or later
-// SkinnedMesh) can have — bounded by gpuLOD's fixed-size boundaries array.
-const maxLODLevels = 4
-
-// lodLevel is one entry in a LOD chain: geometry/material shown once the camera is
-// farther than minDistance. Level 0's minDistance is always 0 (implicit — never
-// set explicitly, the zero value is already correct) since it's the closest level;
-// there is no separate "end" distance for a level — it runs until the next level's
-// own minDistance takes over, and the last level has no upper bound at all.
-type lodLevel struct {
-	geometry    geometries.Geometry
-	material    materials.Material
-	minDistance float32
-}
-
 // Mesh is a typed node handle for a renderable mesh (geometry + material at a node).
 // It embeds Node, so all hierarchy and transform methods are available directly.
 type Mesh struct{ Node }
@@ -84,19 +69,14 @@ func (m Mesh) BoundingSphere() glm.Sphere {
 // geometry and material vary per level. A coarser level's own geometry extent is
 // assumed to fit within the base level's bounds (true for the simplified-mesh /
 // billboard-impostor case this is meant for); a level that's actually larger risks
-// being frustum-culled early. See the LOD spec (project memory) for the full design.
+// being frustum-culled early.
+//
+// On a mesh with morph targets, a level made with CreateLOD from the mesh's geometry
+// is morphed with it; any other level is drawn as it is, and must have no morph
+// targets of its own (panics otherwise).
 func (m Mesh) AddLOD(geo geometries.Geometry, mat materials.Material, minDistance float32) Mesh {
 	md := m.data()
-	if md.morph.hasTargets() {
-		panic("pix: Mesh.AddLOD is not supported on a mesh with morph targets")
-	}
-	if len(md.lods) >= maxLODLevels {
-		panic("pix: Mesh.AddLOD: at most maxLODLevels levels are supported")
-	}
-	if minDistance <= md.lods[len(md.lods)-1].minDistance {
-		panic("pix: Mesh.AddLOD levels must be added in increasing minDistance order")
-	}
-	md.lods = append(md.lods, lodLevel{geometry: geo.Copy(), material: mat.Copy(), minDistance: minDistance})
+	md.lods = appendLODLevel(md.lods, geo, mat, minDistance, md.deformOutput)
 	m.scene.packetDirty = true
 	return m
 }

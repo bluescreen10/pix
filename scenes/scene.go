@@ -535,10 +535,7 @@ func (s *Scene) destroyNode(id NodeID) {
 
 func (s *Scene) swapRemoveMesh(payloadIdx uint32) {
 	md := &s.meshes[payloadIdx]
-	for _, l := range md.lods {
-		l.geometry.Release()
-		l.material.Release()
-	}
+	releaseLODs(md.lods)
 	md.deformOutput.Release()
 	last := uint32(len(s.meshes) - 1)
 	if payloadIdx != last {
@@ -823,26 +820,19 @@ func partitionFloat32(v []float32, lo, hi int) int {
 // Destroy releases the geometry and material references retained by the scene.
 func (s *Scene) Destroy() {
 	for i := range s.meshes {
-		for _, l := range s.meshes[i].lods {
-			l.geometry.Release()
-			l.material.Release()
-		}
+		releaseLODs(s.meshes[i].lods)
 		s.meshes[i].deformOutput.Release()
 	}
 	s.meshes = nil
 	for i := range s.instancedMeshes {
-		for _, l := range s.instancedMeshes[i].lods {
-			l.geometry.Release()
-			l.material.Release()
-		}
+		releaseLODs(s.instancedMeshes[i].lods)
 		s.instancedMeshes[i].deformOutput.Release()
 	}
 	s.instancedMeshes = nil
 	s.instanceTransforms = nil
 	for _, sm := range s.skinnedMeshes.Entries() {
-		sm.srcGeometry.Release()
-		sm.outputGeo.Release()
-		sm.material.Release()
+		releaseLODs(sm.lods)
+		sm.deformOutput.Release()
 	}
 	for _, l := range s.dirLights {
 		l.SetMask(LightMask{})

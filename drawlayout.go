@@ -45,8 +45,12 @@ type drawLayout struct {
 	// region, each rounded up to regionAlign.
 	visibleCapacity uint32
 
-	// meshRevision is the packet mesh-table revision this layout was built from.
-	meshRevision uint64
+	// meshRevision is the packet mesh-table revision this layout was built from, and
+	// geometryLayoutRevision the geometry store's layout revision at the time: the
+	// template copies each batch's index range out of the store, and a store grow
+	// moves every one (see geometries.Store.LayoutRevision).
+	meshRevision           uint64
+	geometryLayoutRevision uint64
 }
 
 // batch is one indirect command: the drawables sharing raster state and a geometry.
@@ -192,20 +196,22 @@ func meshCenter(mesh scenes.MeshPacket, p *scenes.FramePacket) glm.Vec3f {
 	return sum.Scale(1 / float32(mesh.Transforms.Count))
 }
 
-// isLayoutStale reports whether a layout still describes the scene the packet holds.
+// isLayoutStale reports whether a layout no longer describes the scene the packet
+// holds, as stored in the geometry store at geometryLayoutRevision.
 //
-// Two things can invalidate it. The mesh table may have changed — objects added or
-// removed, a material swapped — which the packet's revision reports. Or a material
+// Three things can invalidate it. The mesh table may have changed — objects added or
+// removed, a material swapped — which the packet's revision reports. A material
 // already in the layout may have changed cull or blend mode, which moves it to a
-// different batch while leaving the mesh table untouched.
+// different batch while leaving the mesh table untouched. Or the geometry store may
+// have grown, moving the index ranges the batches' commands were built with.
 //
 // The second is checked per POOL, not per material: cull and blend are the only raster
 // state a material owns, and one counter per pool covers all of them (see
 // materials.Pool.RasterRevision). Adjacent batches of a span share a pool and were
 // formed at the same revision, so only the first of each needs checking — which keeps
 // this proportional to the raster states in play rather than to objects on screen.
-func isLayoutStale(p *scenes.FramePacket, layout *drawLayout) bool {
-	if layout.meshRevision != p.Meshes.Revision {
+func isLayoutStale(p *scenes.FramePacket, layout *drawLayout, geometryLayoutRevision uint64) bool {
+	if layout.meshRevision != p.Meshes.Revision || layout.geometryLayoutRevision != geometryLayoutRevision {
 		return true
 	}
 	for first := range rasterSpans(layout.batches) {

@@ -85,15 +85,13 @@ func (s *Scene) rebuildPacketTables() {
 		if s.flags[sm.ownerNode]&flagAttached == 0 || s.flags[root]&flagAttached == 0 {
 			continue
 		}
-		sm.meshPacketIndex = uint32(len(s.packet.Meshes.Data))
-		s.packet.Meshes.Data = append(s.packet.Meshes.Data, MeshPacket{
-			ID:         s.objectID(sm.ownerNode),
-			Transforms: IndexRange{First: root, Count: 1},
-			Geometry:   sm.outputGeo.ID(),
-			Material:   sm.material.ID(),
-			Bounds:     sm.bounds,
-			Flags:      s.renderFlags(sm.ownerNode),
-		})
+		sm.meshPacketIndex = s.addMesh(MeshPacket{
+			ID:            s.objectID(sm.ownerNode),
+			Transforms:    IndexRange{First: root, Count: 1},
+			Bounds:        sm.bounds,
+			Flags:         s.renderFlags(sm.ownerNode),
+			LODHysteresis: sm.hysteresis,
+		}, sm.lods, sm.deformOutput)
 	}
 
 	// Instance transforms are addressed as if they sit right after every node's world
@@ -118,9 +116,10 @@ func (s *Scene) rebuildPacketTables() {
 
 // addMesh completes mp from its LOD chain and records it, returning its index in the
 // mesh table. Level 0 goes on the mesh itself and the coarser levels into the shared
-// LOD table, which is why this is worth a helper: Mesh and InstancedMesh differ in how
-// they are transformed and in nothing else, so only the part above varies. A morphing
-// mesh draws its deformOutput in place of its level-0 geometry.
+// LOD table, which is why this is worth a helper: Mesh, InstancedMesh and SkinnedMesh differ in how
+// they are transformed and in nothing else, so only the part above varies. A deformed
+// mesh draws its deformOutput in place of its level-0 geometry, and each coarser level
+// sharing its vertices over that output (see lodLevel.drawnGeometry).
 func (s *Scene) addMesh(mp MeshPacket, lods []lodLevel, deformOutput geometries.Geometry) uint32 {
 	mp.Geometry = lods[0].geometry.ID()
 	if deformOutput.IsValid() {
@@ -130,7 +129,7 @@ func (s *Scene) addMesh(mp MeshPacket, lods []lodLevel, deformOutput geometries.
 	mp.LODRange = IndexRange{First: uint32(len(s.packet.LODs.Data))}
 	for _, l := range lods[1:] {
 		s.packet.LODs.Data = append(s.packet.LODs.Data, LODLevel{
-			Geometry:    l.geometry.ID(),
+			Geometry:    l.drawnGeometry().ID(),
 			Material:    l.material.ID(),
 			MinDistance: l.minDistance,
 		})
@@ -292,8 +291,8 @@ func (s *Scene) extractDeforms() {
 		}
 		sk := s.skeletons.Value(sm.skeleton)
 		s.addDeform(DeformPacket{
-			Source:      sm.srcGeometry.ID(),
-			Output:      sm.outputGeo.ID(),
+			Source:      sm.lods[0].geometry.ID(),
+			Output:      sm.deformOutput.ID(),
 			Mesh:        sm.meshPacketIndex,
 			Joints:      IndexRange{First: sk.jointBase, Count: uint32(len(sk.bones))},
 			VertexCount: sm.vertCount,

@@ -66,16 +66,7 @@ func (m InstancedMesh) Count() int {
 // content (rocks, trees, props) rather than the grass-blade-count case.
 func (m InstancedMesh) AddLOD(geo geometries.Geometry, mat materials.Material, minDistance float32) InstancedMesh {
 	md := m.data()
-	if md.morph.hasTargets() {
-		panic("pix: InstancedMesh.AddLOD is not supported on a mesh with morph targets")
-	}
-	if len(md.lods) >= maxLODLevels {
-		panic("pix: InstancedMesh.AddLOD: at most maxLODLevels levels are supported")
-	}
-	if minDistance <= md.lods[len(md.lods)-1].minDistance {
-		panic("pix: InstancedMesh.AddLOD levels must be added in increasing minDistance order")
-	}
-	md.lods = append(md.lods, lodLevel{geometry: geo.Copy(), material: mat.Copy(), minDistance: minDistance})
+	md.lods = appendLODLevel(md.lods, geo, mat, minDistance, md.deformOutput)
 	m.scene.packetDirty = true
 	return m
 }
@@ -124,10 +115,7 @@ func (s *Scene) NewInstancedMesh(geo geometries.Geometry, mat materials.Material
 
 func (s *Scene) swapRemoveInstancedMesh(payloadIdx uint32) {
 	d := &s.instancedMeshes[payloadIdx]
-	for _, l := range d.lods {
-		l.geometry.Release()
-		l.material.Release()
-	}
+	releaseLODs(d.lods)
 	d.deformOutput.Release()
 	last := uint32(len(s.instancedMeshes) - 1)
 	if payloadIdx != last {

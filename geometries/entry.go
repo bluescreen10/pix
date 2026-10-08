@@ -33,15 +33,30 @@ type vertexSkin struct {
 // position/attribute presence is tracked directly (derivedHasAttr) rather than
 // through has()/hasVertexAttrs(), which read attrs[].count — a derived entry only
 // sets AttributePosition's count (for sizing) and carries no other attribute data.
+//
+// vertexOwner is set on a level of detail (see CreateLOD): it has an index range of its
+// own and draws vertexOwner's vertices, holding a reference that keeps them alive. Its
+// attrs and morphTargets stay empty — the vertex data is the owner's (see
+// Store.vertexEntry). indexOwner is the reverse, set on a deform output: vertices of
+// its own, drawn with indexOwner's index range. Either way the descriptor holds copies
+// of the owner's bases, which a stream grow refreshes (see refreshSharedRanges).
 type entry struct {
 	attrs          [attributeCount]Attribute
 	indices        []uint32
 	morphTargets   []morphTargetEntry
 	derived        bool
 	derivedHasAttr bool
+	vertexOwner    Geometry
+	indexOwner     Geometry
 	allocs         [streamCount]mem.Allocation
 
 	boundingSphere glm.Sphere
+}
+
+// sharesVertices reports whether e is a level of detail drawing another geometry's
+// vertices.
+func (e *entry) sharesVertices() bool {
+	return e.vertexOwner.store != nil
 }
 
 // has reports whether an attribute is present (non-empty).
@@ -83,7 +98,7 @@ func (e *entry) hasSkin() bool {
 func (e *entry) streamPresent(stream int) bool {
 	switch stream {
 	case streamPos:
-		return true
+		return !e.sharesVertices()
 	case streamAttr:
 		if e.derived {
 			return e.derivedHasAttr

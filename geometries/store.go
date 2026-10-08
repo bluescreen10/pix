@@ -209,7 +209,7 @@ func (g *Store) GenerationAt(id uint32) uint32 {
 
 // dispose/validate let a ref own a slot in this store.
 func (g *Store) dispose(id uint32) {
-	g.Free(id)
+	g.free(id)
 }
 
 func (g *Store) validate(id, gen uint32) bool {
@@ -288,9 +288,12 @@ func (g *Store) alloc(cfg GeometryConfig) (id, gen uint32) {
 	return id, gen
 }
 
-// Free releases a geometry id; its suballocations return to the TLSF pools and the
-// slot's generation is bumped so existing handles become detectably stale.
-func (g *Store) Free(id uint32) {
+// free releases a geometry id once its last reference is released; its
+// suballocations return to the TLSF pools and the slot's generation is bumped so
+// existing handles become detectably stale. Unexported because references are the
+// only safe way to free: a level of detail holds one on the vertices it draws, which
+// freeing them directly would pull out from under it.
+func (g *Store) free(id uint32) {
 	if !g.entries.IsAlive(id) {
 		return
 	}
@@ -300,10 +303,14 @@ func (g *Store) Free(id uint32) {
 			g.streams[s].tlsf.Free(e.allocs[s])
 		}
 	}
+	vertexOwner, indexOwner := e.vertexOwner, e.indexOwner
 	*e = entry{}
 	g.entries.Free(id)
 	g.descs[id] = geometryDesc{}
 	g.descDirty = true
+	// Last, with this slot already gone: releasing an owner may free it in turn.
+	vertexOwner.Release()
+	indexOwner.Release()
 }
 
 // allocIn suballocates bytes in a stream, growing (and repacking) if it's full.
@@ -378,6 +385,7 @@ func (g *Store) growStream(stream int, minCap uint32) {
 		g.descs[id].setBase(stream, alloc.Offset()/streamElemSize[stream])
 	}
 	g.backend.Free(s.buf)
+	g.refreshSharedRanges()
 	g.descDirty = true
 	g.layoutRevision++
 }
@@ -387,12 +395,14 @@ func (g *Store) growStream(stream int, minCap uint32) {
 // its own attribute range, both sized to the source's vertex count — but no CPU bytes
 // and no index stream of its own, since it reuses the source's index range verbatim
 // (deformation never changes topology). The output descriptor has no skin and no
-// morph targets: once deformed, the data is plain triangles again.
-func (g *Store) createDeformOutput(srcID uint32) (id, gen uint32) {
+// morph targets: once deformed, the data is plain triangles again. It holds a
+// reference to the source, whose index range it draws with.
+func (g *Store) createDeformOutput(source Geometry) (id, gen uint32) {
+	srcID := source.ref.ID()
 	if !g.entries.IsAlive(srcID) {
 		panic("render: CreateDeformOutput on a dead geometry")
 	}
-	src := g.entries.Value(srcID)
+	src := g.vertexEntry(srcID)
 	if !src.hasSkin() && len(src.morphTargets) == 0 {
 		panic("render: CreateDeformOutput on a geometry with neither skin attributes nor morph targets")
 	}
@@ -401,6 +411,7 @@ func (g *Store) createDeformOutput(srcID uint32) (id, gen uint32) {
 
 	var e entry
 	e.derived = true
+	e.indexOwner = source.Copy()
 	e.attrs[AttributePosition].count = n // sizing only; no data
 	e.derivedHasAttr = src.hasVertexAttrs()
 

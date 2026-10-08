@@ -164,7 +164,7 @@ func (s *Scene) updateSkinning() {
 	}
 	for _, sm := range s.skinnedMeshes.Entries() {
 		sk := s.skeletons.Value(sm.skeleton)
-		morphDisplacement := maxMorphDisplacement(sm.srcGeometry, sm.morph.weights)
+		morphDisplacement := maxMorphDisplacement(sm.lods[0].geometry, sm.morph.weights)
 		sm.bounds = skinnedBounds(sk.jointPos, sk.jointScale, sm.radii, morphDisplacement)
 	}
 }

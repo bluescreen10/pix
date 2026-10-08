@@ -76,7 +76,7 @@ func (g Geometry) VertexCount() int {
 	if g.store == nil || !g.store.entries.IsAlive(g.ref.ID()) {
 		return 0
 	}
-	return g.store.entries.Value(g.ref.ID()).attrs[AttributePosition].count
+	return g.store.vertexEntry(g.ref.ID()).attrs[AttributePosition].count
 }
 
 // BoundingSphere returns the geometry's local-space bounding sphere.
@@ -106,7 +106,7 @@ func (g Geometry) CreateDeformOutput() Geometry {
 	if g.store == nil {
 		panic("render: CreateDeformOutput on a geometry with no owning store")
 	}
-	id, gen := g.store.createDeformOutput(g.ref.ID())
+	id, gen := g.store.createDeformOutput(g)
 	return Geometry{
 		ref:            ref.New(id, gen, g.store.dispose, g.store.validate),
 		store:          g.store,
@@ -131,7 +131,7 @@ func (g *Store) attribute(id uint32, t AttributeType) *Attribute {
 	if !g.entries.IsAlive(id) || t >= attributeCount {
 		return nil
 	}
-	e := g.entries.Value(id)
+	e := g.vertexEntry(id)
 	if !e.has(t) {
 		return nil
 	}
@@ -141,12 +141,13 @@ func (g *Store) attribute(id uint32, t AttributeType) *Attribute {
 // setAttribute replaces a present attribute's bytes in place and re-uploads the
 // affected stream. The element size and count must match the existing attribute
 // (so the suballocation still fits); adding a new attribute or resizing is not
-// supported — use Store.Create for that.
+// supported — use Store.Create for that. On a level of detail it changes the shared
+// vertices, which every level of them draws.
 func (g *Store) setAttribute(id uint32, t AttributeType, data []byte, count int) {
 	if !g.entries.IsAlive(id) || t >= attributeCount {
 		return
 	}
-	e := g.entries.Value(id)
+	e := g.vertexEntry(id)
 	if !e.has(t) {
 		panic(fmt.Sprintf("render: SetAttributeData on absent attribute %d (use Store.Create to add it)", t))
 	}

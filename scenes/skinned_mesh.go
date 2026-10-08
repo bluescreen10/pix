@@ -11,21 +11,22 @@ import (
 // shouldn't make a joint contribute to computeJointRadii's bind-space radius.
 const skinWeightEpsilon = 1e-4
 
-// skinnedMeshData is the per-SkinnedMesh payload. srcGeometry is kept alive (a ref)
-// because it carries the CPU-side skin index/weight bytes the compute pass reads
-// every frame (via its descriptor, not through this handle); outputGeo is the
-// derived, compute-filled geometry that actually gets drawn. radii[j] is joint j's
-// bind-space influence radius (negative = joint unused by this mesh — see
-// computeJointRadii); bounds is recomputed every Sync in skeleton-local space.
+// skinnedMeshData is the per-SkinnedMesh payload. lods[0] is the mesh as created: its
+// geometry carries the skin the compute pass reads every frame (through its
+// descriptor, not through this handle); deformOutput is the compute-filled geometry
+// level 0 is drawn from, and coarser levels sharing its vertices are drawn over it too
+// (see appendLODLevel). radii[j] is joint j's bind-space influence radius (negative =
+// joint unused by this mesh — see computeJointRadii); bounds is recomputed every Sync
+// in skeleton-local space.
 type skinnedMeshData struct {
-	srcGeometry geometries.Geometry
-	outputGeo   geometries.Geometry
-	material    materials.Material
-	skeleton    uint32 // slab id into Scene.skeletons
-	vertCount   uint32
-	radii       []float32
-	bounds      glm.Sphere
-	ownerNode   uint32
+	lods         []lodLevel
+	hysteresis   float32
+	deformOutput geometries.Geometry
+	skeleton     uint32 // slab id into Scene.skeletons
+	vertCount    uint32
+	radii        []float32
+	bounds       glm.Sphere
+	ownerNode    uint32
 
 	morph           morphState
 	meshPacketIndex uint32 // see meshData
@@ -40,25 +41,49 @@ func (m SkinnedMesh) data() *skinnedMeshData {
 	return m.scene.skinnedMeshes.Value(m.scene.payload[m.slot()])
 }
 
-// SourceGeometry returns the mesh's un-skinned source geometry (the one carrying
-// skin index/weight attributes).
+// SourceGeometry returns the mesh's (level-0) un-skinned source geometry, the one
+// carrying skin index/weight attributes.
 func (m SkinnedMesh) SourceGeometry() geometries.Geometry {
-	return m.data().srcGeometry
+	return m.data().lods[0].geometry
 }
 
-// Material returns the mesh's material handle.
+// Material returns the mesh's (level-0) material handle.
 func (m SkinnedMesh) Material() materials.Material {
-	return m.data().material
+	return m.data().lods[0].material
 }
 
-// SetMaterial swaps the mesh's material (the cached materialID changes, so the
-// scene's drawables are rebuilt).
+// SetMaterial swaps the mesh's level-0 material (the cached materialID changes, so
+// the scene's drawables are rebuilt). Coarser LOD levels keep their own materials.
 func (m SkinnedMesh) SetMaterial(mat materials.Material) {
 	md := m.data()
 	newRef := mat.Copy()
-	md.material.Release()
-	md.material = newRef
+	md.lods[0].material.Release()
+	md.lods[0].material = newRef
 	m.scene.packetDirty = true
+}
+
+// AddLOD appends a coarser level, shown once the camera is farther than minDistance
+// from the mesh — see Mesh.AddLOD for the rules every LOD chain follows. A level made
+// with CreateLOD from the mesh's source geometry is skinned (and morphed) with it,
+// for no more compute than level 0 already costs: it draws fewer of the same skinned
+// vertices. Any other level is drawn as it is, unposed, so it must have no skin or
+// morph targets of its own (panics otherwise) — an impostor, say.
+func (m SkinnedMesh) AddLOD(geo geometries.Geometry, mat materials.Material, minDistance float32) SkinnedMesh {
+	md := m.data()
+	md.lods = appendLODLevel(md.lods, geo, mat, minDistance, md.deformOutput)
+	m.scene.packetDirty = true
+	return m
+}
+
+// SetLODHysteresis sets the sticky band (world units) used to resist flip-flopping
+// between adjacent levels — see Mesh.SetLODHysteresis.
+func (m SkinnedMesh) SetLODHysteresis(h float32) SkinnedMesh {
+	md := m.data()
+	md.hysteresis = h
+	if len(md.lods) > 1 {
+		m.scene.packetDirty = true
+	}
+	return m
 }
 
 // Skeleton returns the skeleton this mesh is bound to.
@@ -100,12 +125,11 @@ func (s *Scene) NewSkinnedMesh(geo geometries.Geometry, mat materials.Material, 
 
 	id := s.allocNode(kindSkinnedMesh)
 	payloadIdx, _ := s.skinnedMeshes.Alloc(skinnedMeshData{
-		srcGeometry: geo.Copy(),
-		outputGeo:   geo.CreateDeformOutput(),
-		material:    mat.Copy(),
-		skeleton:    skelIdx,
-		vertCount:   uint32(len(positions)),
-		radii:       radii,
+		lods:         []lodLevel{{geometry: geo.Copy(), material: mat.Copy()}},
+		deformOutput: geo.CreateDeformOutput(),
+		skeleton:     skelIdx,
+		vertCount:    uint32(len(positions)),
+		radii:        radii,
 		// Seeded from the bind pose so FrameSphere/BoundingSphere are sane before
 		// the first Sync (which is when a pose-driven bounds would first exist).
 		bounds:          skinnedBounds(bindPos, unitScale, radii, 0),
@@ -120,9 +144,8 @@ func (s *Scene) NewSkinnedMesh(geo geometries.Geometry, mat materials.Material, 
 
 func (s *Scene) freeSkinnedMesh(payloadIdx uint32) {
 	sm := s.skinnedMeshes.Value(payloadIdx)
-	sm.srcGeometry.Release()
-	sm.outputGeo.Release()
-	sm.material.Release()
+	releaseLODs(sm.lods)
+	sm.deformOutput.Release()
 	s.skinnedMeshes.Free(payloadIdx)
 }
 

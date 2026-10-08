@@ -142,20 +142,6 @@ func TestMeshMorphBoundsFollowWeights(t *testing.T) {
 	}
 }
 
-func TestMeshAddLODWithMorphTargetsPanics(t *testing.T) {
-	store := newGeometryStore(t)
-	scene := scenes.New()
-	defer scene.Destroy()
-	mesh := scene.NewMesh(morphedTriangle(t, store), newFakeMaterial())
-
-	defer func() {
-		if recover() == nil {
-			t.Errorf("AddLOD on a mesh with morph targets did not panic")
-		}
-	}()
-	mesh.AddLOD(plainTriangle(t, store), newFakeMaterial(), 10)
-}
-
 func TestExtractMorphedMesh(t *testing.T) {
 	store := newGeometryStore(t)
 	scene := scenes.New()
