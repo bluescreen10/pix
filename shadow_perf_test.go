@@ -32,7 +32,6 @@ func TestSurfacesFacingAwayAreUnlit(t *testing.T) {
 		defer r.Destroy()
 		r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 		r.EnableShadows(shadows)
-		r.SetShadows(pix.ShadowCascaded{Levels: 3})
 
 		scene := scenes.New()
 		defer scene.Destroy()
@@ -41,6 +40,7 @@ func TestSurfacesFacingAwayAreUnlit(t *testing.T) {
 		scene.SetAmbient(colors.RGB32F{0, 0, 0}, 1)
 		light := scene.AddDirectionalLight(lightDir, colors.RGB32F{1, 1, 1}, 3)
 		light.SetCastShadow(true)
+		light.Shadow().SetCascades(3)
 
 		cube := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 		defer cube.Release()
@@ -90,13 +90,13 @@ func BenchmarkFrame(b *testing.B) {
 	defer r.Destroy()
 	r.ShowFPS(true) // what drives the GPU timestamps
 	r.EnableShadows(true)
-	r.SetShadows(pix.ShadowCascaded{Levels: 4})
 
 	scene := scenes.New()
 	defer scene.Destroy()
 	scene.SetAmbient(colors.RGB32F{0.3, 0.3, 0.35}, 1)
 	light := scene.AddDirectionalLight(glm.Vec3f{-0.5, -1, -0.35}, colors.RGB32F{1, 0.96, 0.9}, 2)
 	light.SetCastShadow(true)
+	light.Shadow().SetCascades(4)
 
 	cube := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 	defer cube.Release()
@@ -149,13 +149,13 @@ func TestDepthPrepassDoesNotChangeTheImage(t *testing.T) {
 		r.SetClearColor(colors.RGBA32F{0.5, 0.6, 0.8, 1})
 		r.EnableShadows(true)
 		r.EnableDepthPrepass(prepass)
-		r.SetShadows(pix.ShadowCascaded{Levels: 3})
 
 		scene := scenes.New()
 		defer scene.Destroy()
 		scene.SetAmbient(colors.RGB32F{0.2, 0.2, 0.25}, 1)
 		light := scene.AddDirectionalLight(glm.Vec3f{-0.4, -1, -0.3}, colors.RGB32F{1, 1, 1}, 3)
 		light.SetCastShadow(true)
+		light.Shadow().SetCascades(3)
 
 		cube := r.GeometryStore.Create(pix.BoxGeometry(1, 1, 1))
 		defer cube.Release()
@@ -228,13 +228,13 @@ func TestDepthPrepassRespectsCulling(t *testing.T) {
 		r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
 		r.EnableShadows(true)
 		r.EnableDepthPrepass(prepass)
-		r.SetShadows(pix.ShadowCascaded{Levels: 3})
 
 		scene := scenes.New()
 		defer scene.Destroy()
 		scene.SetAmbient(colors.RGB32F{0.5, 0.5, 0.5}, 1)
 		light := scene.AddDirectionalLight(glm.Vec3f{0, -1, -0.4}, colors.RGB32F{1, 1, 1}, 2)
 		light.SetCastShadow(true)
+		light.Shadow().SetCascades(3)
 
 		quad := r.GeometryStore.Create(pix.PlaneGeometry(40, 40, 1, 1))
 		defer quad.Release()

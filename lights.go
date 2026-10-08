@@ -37,19 +37,19 @@ type gpuDirLight struct {
 	dir   [4]float32 // xyz = travel direction; w unused
 	color [4]float32 // rgb; w = intensity
 	// shadowVP is world → light clip, the same matrix the depth pass rendered with, one
-	// per cascade. Every algorithm but ShadowCascaded fills only the first and leaves
-	// cascades at 1, which collapses the lookup's cascade selection to index 0.
-	shadowVP [MaxShadowCascades]glm.Mat4f
-	// shadowSplit[i] is the view distance cascade i covers out to; shadowBias[i] is the
+	// per cascade. A light with a single cascade fills only the first, which collapses
+	// the lookup's cascade selection to index 0.
+	shadowVP [scenes.MaxShadowCascades]glm.Mat4f
+	// shadowSplit[i] is the view depth cascade i covers out to; shadowBias[i] is the
 	// constant part of that cascade's depth bias, in its own normalized depth units.
-	shadowSplit [MaxShadowCascades]float32
-	shadowBias  [MaxShadowCascades]float32
+	shadowSplit [scenes.MaxShadowCascades]float32
+	shadowBias  [scenes.MaxShadowCascades]float32
 	// shadowTexel[i] is how much world space one of that cascade's texels covers, and
 	// shadowDepthScale[i] converts a world depth offset into its normalized depth. The
 	// lit shader needs both to size the offsets that depend on the surface normal, which
 	// the fit cannot know. Zero disables those, which is what the warps want.
-	shadowTexel      [MaxShadowCascades]float32
-	shadowDepthScale [MaxShadowCascades]float32
+	shadowTexel      [scenes.MaxShadowCascades]float32
+	shadowDepthScale [scenes.MaxShadowCascades]float32
 	shadowMap        uint32 // bindless heap index of the depth map, or noShadowMap
 	cascades         uint32 // how many of shadowVP/shadowSplit/shadowBias are filled
 	// mapSide is one cascade square's resolution in texels, which a wide kernel needs in
@@ -144,7 +144,7 @@ type gpuLights struct {
 	// position finds its own (see clusterGrid).
 	clusters          uint64
 	clusterViewProj   glm.Mat4f
-	clusterDepth      glm.Vec4f
+	viewDepthPlane    glm.Vec4f
 	clusterSliceScale float32
 	clusterSliceBias  float32
 	dirs              [MaxDirLights]gpuDirLight
@@ -224,7 +224,7 @@ func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPack
 	var next gpuLights
 	next.clusters = clusters.cells.Addr
 	next.clusterViewProj = clusters.viewProj
-	next.clusterDepth = clusters.depthPlane
+	next.viewDepthPlane = clusters.depthPlane
 	next.clusterSliceScale = clusters.sliceScale
 	next.clusterSliceBias = clusters.sliceBias
 	next.ambient = env.Ambient.RGBA(1)
@@ -282,21 +282,13 @@ func (l *Lights) rebuild(env scenes.EnvironmentPacket, lights []scenes.LightPack
 				gl.shadowMap = s.m.Index()
 				gl.mapSide = max(s.size(), 1)
 				gl.filter = filter
-				if n := len(s.cascades); n > 0 {
-					gl.cascades = uint32(n)
-					for i, c := range s.cascades {
-						gl.shadowVP[i] = c.cam.ViewProjection()
-						gl.shadowSplit[i] = c.far
-						gl.shadowBias[i] = c.fit.bias
-						gl.shadowTexel[i] = c.fit.texel
-						gl.shadowDepthScale[i] = c.fit.depthScale
-					}
-				} else {
-					gl.cascades = 1
-					gl.shadowVP[0] = s.cam.ViewProjection()
-					gl.shadowBias[0] = s.ndcBias
-					gl.shadowTexel[0] = s.fit.texel
-					gl.shadowDepthScale[0] = s.fit.depthScale
+				gl.cascades = uint32(len(s.cascades))
+				for i, c := range s.cascades {
+					gl.shadowVP[i] = c.cam.ViewProjection()
+					gl.shadowSplit[i] = c.far
+					gl.shadowBias[i] = c.fit.bias
+					gl.shadowTexel[i] = c.fit.texel
+					gl.shadowDepthScale[i] = c.fit.depthScale
 				}
 			}
 			next.dirs[next.numDir] = gl

@@ -22,6 +22,9 @@ const (
 	MatOcclusionMap uint32 = 1 << 5
 	// MatEmissiveMap: emissive map bound (PBR; sampled .rgb, sRGB).
 	MatEmissiveMap uint32 = 1 << 6
+	// MatIgnoresAlpha: the colour's alpha is ignored, and the surface is all there
+	// (PBR; see PBRMaterial.SetIgnoresAlpha).
+	MatIgnoresAlpha uint32 = 1 << 7
 )
 
 // CullMode selects which triangle faces are discarded. CullNone is double-sided.

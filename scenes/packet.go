@@ -162,12 +162,40 @@ type LightPacket struct {
 	ShadowSize  uint32  // Requested resolution per side; 0 means the renderer's default.
 	ShadowBias  float32 // Extra depth offset in WORLD units, on top of a derived term.
 
+	// Directional: how the shadow covers the view (see DirectionalShadow). Method is
+	// how the map is laid over it and Splits where each cascade but the last ends, as
+	// fractions of the distance. How many cascades and how far they reach are read
+	// through ShadowCascades and ShadowDistance, which fill in the defaults.
+	ShadowMethod   ShadowMethod
+	shadowCascades int
+	shadowDistance float32
+	ShadowSplits   [MaxShadowCascades - 1]float32
+
 	// Directional: the light's mask (see LightMask), as the values a renderer needs —
 	// the texture's bindless index, the world size of one repeat, and its offset. A
 	// MaskSize of 0 means the light has no mask.
 	MaskTexture uint32
 	MaskSize    float32
 	MaskOffset  glm.Vec3f
+}
+
+// ShadowCascades is how many slices a directional light's shadow is split into: the
+// light's own count clamped to [1, MaxShadowCascades], or DefaultShadowCascades when it
+// states none.
+func (l LightPacket) ShadowCascades() int {
+	if l.shadowCascades <= 0 {
+		return DefaultShadowCascades
+	}
+	return min(l.shadowCascades, MaxShadowCascades)
+}
+
+// ShadowDistance is how far from the eye a directional light's shadow reaches, in world
+// units, or DefaultShadowDistance when the light states none.
+func (l LightPacket) ShadowDistance() float32 {
+	if l.shadowDistance <= 0 {
+		return DefaultShadowDistance
+	}
+	return l.shadowDistance
 }
 
 // EnvironmentPacket is the scene-wide lighting environment.

@@ -20,16 +20,3 @@ func bindColor(c *console.Console, name string, get func() colors.RGBA32F, set f
 			return nil
 		})
 }
-
-// cascadeSettings is the renderer's cascade configuration, or the defaults when it is
-// not currently fitting cascades. The console edits one field at a time, so every
-// setter needs the rest of the settings to carry forward.
-func cascadeSettings(r *Renderer) ShadowCascaded {
-	if c, ok := r.Shadows().(ShadowCascaded); ok {
-		if c.Levels <= 0 {
-			c.Levels = c.levels()
-		}
-		return c
-	}
-	return ShadowCascaded{Levels: DefaultShadowCascades}
-}

@@ -807,7 +807,10 @@ func (l *loader) loadMaterials() {
 		m.SetMetallic(1)
 		m.SetRoughness(1)
 		// alphaMode BLEND → transparent (src-alpha over); MASK → opaque where alpha
-		// reaches alphaCutoff, and no surface elsewhere.
+		// reaches alphaCutoff, and no surface elsewhere; OPAQUE, the default → alpha
+		// ignored. Only BLEND takes alpha as how much of the surface is there: glass
+		// declared OPAQUE, with a colour map whose alpha is 0, is still whole glass.
+		m.SetIgnoresAlpha(gm.AlphaMode != "BLEND")
 		switch gm.AlphaMode {
 		case "BLEND":
 			m.SetBlend(materials.BlendAlpha)

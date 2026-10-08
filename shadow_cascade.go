@@ -5,7 +5,7 @@
 // This is the alternative to warping the map, which the perspective shadow map family
 // does instead. A warp redistributes one map's texels, which buys a factor of a few and
 // costs the texel grid, since the warp changes shape with the camera and leaves nothing
-// to snap to. A cascade is just fitUniform over a short range, so snapping still works,
+// to snap to. A cascade is an ordinary orthographic fit over a short range, so snapping still works,
 // quality near the viewer is set by the near slice's width rather than the scene's size,
 // and nothing depends on the angle between the light and the view — which is what makes
 // the dueling frustum a non-problem here rather than a case to detect and fall back on.
@@ -13,31 +13,11 @@ package pix
 
 import (
 	"github.com/bluescreen10/pix/glm"
-	"github.com/chewxy/math32"
+	"github.com/bluescreen10/pix/scenes"
 )
 
-// MaxShadowCascades is the most slices a directional light can be split into. The lit
-// shaders carry one matrix and one bias per cascade per light, so this bounds the light
-// table rather than anything about the fit.
-const MaxShadowCascades = 4
-
-// DefaultShadowCascades is how many slices ShadowCascaded uses when nothing says
-// otherwise.
-const DefaultShadowCascades = 4
-
-// defaultShadowNear is the fallback distance the split starts from when the camera's own
-// near plane is uselessly close, expressed as a fraction of the covered range.
-//
-// A logarithmic split divides its range into equal ratios, so where it starts matters as
-// much as where it ends: a near plane set a thousandth of the scene radius spends the
-// first cascade on empty space and forces every later boundary outward to compensate.
-// This is a poor substitute for knowing where geometry actually begins — it scales with
-// the far distance, which the near field does not — so Renderer.SetShadowNear overrides
-// it, and on any scene being tuned for quality it should.
-const defaultShadowNear float32 = 1.0 / 500
-
 // cascadeLevel is one fitted slice: the camera it renders with, the depth bias that fit
-// implies, and the view distance it covers out to, which is what the lit shaders select
+// implies, and the view depth it covers out to, which is what the lit shaders select
 // on.
 type cascadeLevel struct {
 	cam Camera
@@ -45,27 +25,28 @@ type cascadeLevel struct {
 	far float32
 }
 
-// cascadeSplits fills out[i] with the view distance cascade i covers out to, the last
-// being the whole slice's far distance.
+// cascadeSplits fills out[i] with the view depth cascade i covers out to, the last
+// being far exactly, so nothing falls past the last cascade. fractions are where each
+// cascade but the last ends, as fractions of [near, far] (see
+// scenes.DirectionalShadow.Splits).
 //
-// The split is logarithmic: each cascade covers the same RATIO of depth, which is what
-// gives each of them comparable texels per screen pixel, since a screen pixel's world
-// footprint also grows in proportion to distance. The textbook version blends in a
-// uniform split to keep the logarithmic one off a too-close near plane; the caller's
-// choice of near addresses that directly instead, and the blend does not survive a long
-// range — over the 2000:1 a scene a few hundred units deep produces, even a twentieth of
-// a uniform split contributes more than the entire logarithmic term and drags the first
-// boundary out past the whole near field.
+// The splits are fixed fractions of a fixed distance, not derived from the scene. That
+// keeps every slice the same depth from frame to frame, and a slice's bounding sphere
+// then depends only on the camera's lens — not where it stands or looks — so the
+// texel size holds still and snapping the center to the texel grid is all it takes to
+// keep edges from crawling.
 //
-// That ratio is also the quality story: density falls by exactly it at every boundary,
-// so covering [near, far] in n cascades costs a (far/near)^(1/n) cliff at each one.
-func cascadeSplits(near, far float32, out []float32) {
+// The fractions are the caller's, so they are guarded rather than trusted: a split that
+// does not advance would leave a slice no depth to fit.
+func cascadeSplits(near, far float32, fractions [scenes.MaxShadowCascades - 1]float32, out []float32) {
 	n := len(out)
-	near = max(near, 1e-4)
-	for i := range out {
-		out[i] = near * math32.Pow(far/near, float32(i+1)/float32(n))
+	previous := near
+	for i := range n - 1 {
+		split := near + glm.Clamp(fractions[i], 0, 1)*(far-near)
+		out[i] = max(split, previous*(1+1e-3))
+		previous = out[i]
 	}
-	out[n-1] = far // exactly, so nothing falls past the last cascade
+	out[n-1] = far
 }
 
 // sliceCorners re-cuts a fit's frustum corners to the range [near, far], measured along

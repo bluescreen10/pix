@@ -255,6 +255,27 @@ func TestLoadGlassVolumeDefaults(t *testing.T) {
 	}
 }
 
+// TestLoadAlphaMode: only alphaMode BLEND takes a material's alpha as how much of its
+// surface is there; OPAQUE, the default, ignores it, and so does MASK, once its cut-off
+// has decided where the surface is.
+func TestLoadAlphaMode(t *testing.T) {
+	for _, tc := range []struct {
+		material string
+		ignores  bool
+	}{
+		{`{}`, true},
+		{`{"alphaMode": "OPAQUE"}`, true},
+		{`{"alphaMode": "MASK"}`, true},
+		{`{"alphaMode": "BLEND"}`, false},
+	} {
+		t.Run(tc.material, func(t *testing.T) {
+			if got := loadTriangleMaterial(t, tc.material, "").IgnoresAlpha(); got != tc.ignores {
+				t.Errorf("IgnoresAlpha() = %v, want %v", got, tc.ignores)
+			}
+		})
+	}
+}
+
 // TestLoadEmissive: a material's emissive factor, scaled by KHR_materials_emissive_
 // strength, becomes its emissive colour, and its emissive texture its emissive map.
 func TestLoadEmissive(t *testing.T) {

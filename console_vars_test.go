@@ -43,11 +43,6 @@ func TestBuiltinVarsDriveRendererState(t *testing.T) {
 		t.Error("set shadows off did not disable shadows")
 	}
 
-	c.Exec("set shadow.distance 42.5")
-	if got := r.ShadowDistance(); got != 42.5 {
-		t.Errorf("shadow.distance = %v, want 42.5", got)
-	}
-
 	r.ShowFPS(false)
 	c.Exec("set stats on")
 	if !r.StatsVisible() {
@@ -64,11 +59,8 @@ func TestBuiltinVarsDriveRendererState(t *testing.T) {
 	}
 }
 
-// TestShadowAlgorithmVarRoundTrips covers the enum path: the algorithm is addressed by
-// name (the same shape as `debug`), so a valid name must move the renderer and a
-// nonsense one must be refused without disturbing what is already set.
-// TestShadowFilterVarRoundTrips: the filter is the other enum the console owns, and it
-// has the same failure mode — a typo must report what is valid rather than silently
+// TestShadowFilterVarRoundTrips: the filter is an enum the console owns, addressed by
+// name, and it has the usual failure mode — a typo must report what is valid rather than silently
 // leaving the kernel alone.
 func TestShadowFilterVarRoundTrips(t *testing.T) {
 	r, c := consoleFor(t)
@@ -84,74 +76,6 @@ func TestShadowFilterVarRoundTrips(t *testing.T) {
 	c.Exec("set shadow.filter nonsense")
 	if got := r.ShadowFilter(); got != pix.ShadowFilterSoft {
 		t.Errorf("an unknown filter name changed the setting to %v", got)
-	}
-}
-
-func TestShadowAlgorithmVarRoundTrips(t *testing.T) {
-	r, c := consoleFor(t)
-
-	isCascaded := func() bool {
-		_, ok := r.Shadows().(pix.ShadowCascaded)
-		return ok
-	}
-
-	c.Exec("set shadow.algorithm cascaded")
-	if !isCascaded() {
-		t.Fatalf("shadow.algorithm = %T, want cascaded", r.Shadows())
-	}
-	c.Exec("shadow.algorithm")
-	if got := lastConsoleLine(c); !strings.Contains(got, "cascaded") {
-		t.Errorf("reading it back said %q, want it to report cascaded", got)
-	}
-
-	c.Exec("set shadow.algorithm nonsense")
-	if !isCascaded() {
-		t.Errorf("a bad name changed the algorithm to %T", r.Shadows())
-	}
-	if got := lastConsoleLine(c); !strings.Contains(got, "unknown algorithm") {
-		t.Errorf("error line = %q, want it to name the problem", got)
-	}
-
-	c.Exec("set shadow.algorithm uniform")
-	if _, ok := r.Shadows().(pix.ShadowUniform); !ok {
-		t.Errorf("shadow.algorithm = %T, want uniform", r.Shadows())
-	}
-}
-
-// TestShadowStepsVarRoundTrips: the boundaries are what a scene actually gets tuned on,
-// so the console has to take them as a list, report them back, and refuse a list that
-// does not increase — a non-advancing step would leave a slice with no depth to fit.
-func TestShadowStepsVarRoundTrips(t *testing.T) {
-	r, c := consoleFor(t)
-
-	c.Exec("set shadow.steps 8,25,80")
-	cs, ok := r.Shadows().(pix.ShadowCascaded)
-	if !ok {
-		t.Fatalf("setting steps left the fit as %T", r.Shadows())
-	}
-	if len(cs.Steps) != 3 || cs.Steps[0] != 8 || cs.Steps[2] != 80 {
-		t.Fatalf("steps came back as %v", cs.Steps)
-	}
-	if cs.AutoSteps {
-		t.Error("setting steps explicitly left AutoSteps on")
-	}
-	c.Exec("shadow.steps")
-	if got := lastConsoleLine(c); !strings.Contains(got, "8,25,80") {
-		t.Errorf("reading it back said %q", got)
-	}
-
-	c.Exec("set shadow.steps 30,10")
-	if cs := r.Shadows().(pix.ShadowCascaded); len(cs.Steps) != 3 {
-		t.Errorf("a decreasing list was accepted: %v", cs.Steps)
-	}
-	if got := lastConsoleLine(c); !strings.Contains(got, "increase") {
-		t.Errorf("error line = %q, want it to name the problem", got)
-	}
-
-	// Clearing goes back to derived boundaries.
-	c.Exec("set shadow.steps auto")
-	if cs := r.Shadows().(pix.ShadowCascaded); !cs.AutoSteps {
-		t.Error("clearing the steps did not return to deriving them")
 	}
 }
 
@@ -199,7 +123,7 @@ func TestBuiltinsAreListedBeforeAnyAppBinding(t *testing.T) {
 	_, c := consoleFor(t)
 	c.Exec("list")
 	listing := strings.Join(c.Lines(), "\n")
-	for _, want := range []string{"shadows", "shadow.distance", "depthprepass", "stats", "clear.color"} {
+	for _, want := range []string{"shadows", "shadow.filter", "depthprepass", "stats", "clear.color"} {
 		if !strings.Contains(listing, want) {
 			t.Errorf("list did not mention %q:\n%s", want, listing)
 		}

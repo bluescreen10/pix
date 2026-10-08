@@ -70,6 +70,7 @@ const uint MAT_ROUGH_MAP = 8u;
 const uint MAT_TRANS_MAP = 16u;
 const uint MAT_OCCLUSION_MAP = 32u;
 const uint MAT_EMISSIVE_MAP = 64u;
+const uint MAT_IGNORES_ALPHA = 128u;
 
 // Material mirrors materials.PBRMaterial's record (132 bytes). Each map carries its own
 // sampler.
@@ -134,7 +135,9 @@ vec3 perturbNormal(vec3 N, vec3 mapN) {
 // blending but has nowhere to live in the G-buffer (opaque only).
 Surface materialSurface(Material m, out float baseAlpha) {
     vec4 base = sampleBase(m.color, m.flags, m.colorMap, m.colorSampler);
-    baseAlpha = base.a;
+    // An opaque material's alpha is not how much of it is there (see
+    // materials.PBRMaterial.SetIgnoresAlpha); glass made of one would vanish by it.
+    baseAlpha = (m.flags & MAT_IGNORES_ALPHA) != 0u ? 1.0 : base.a;
 
     Surface s;
     s.model = MODEL_PBR;
@@ -277,13 +280,13 @@ vec3 environmentLight(LightBuf L, Surface s, Shading sh) {
 
 // shadeSurface accumulates every light in the table onto a Surface and returns the
 // LINEAR result (ambient + direct + emissive) — the caller encodes it once — and in
-// indirect its ambient (or environment) share. viewDist is how far the surface is from
-// the eye; diffuseScale scales its diffuse light, as in shadingOf. receives lets the
-// forward path honour a drawable's receive-shadow flag.
+// indirect its ambient (or environment) share. diffuseScale scales its diffuse light,
+// as in shadingOf. receives lets the forward path honour a drawable's receive-shadow
+// flag.
 // (The light table is read from the push constants rather than passed in: a buffer_reference
 // can't cross a function parameter without dropping its readonly qualifier, and both
 // passes that compile this function expose it as pc.lights.)
-vec3 shadeSurface(Surface s, Shading sh, vec3 worldPos, float viewDist, float diffuseScale, uint shadowSamp, bool receives, out vec3 indirect) {
+vec3 shadeSurface(Surface s, Shading sh, vec3 worldPos, float diffuseScale, uint shadowSamp, bool receives, out vec3 indirect) {
     LightBuf L = pc.lights;
     // Indirect light first: it is all that needs the Surface beyond its Shading, which is
     // then free before the light loops, which hold a lot else.
@@ -306,8 +309,7 @@ vec3 shadeSurface(Surface s, Shading sh, vec3 worldPos, float viewDist, float di
         // — up to nine texture fetches for a result about to be multiplied by zero — and
         // roughly half the fragments in a closed scene face away from any given light.
         if (dot(sh.normal, Ldir) <= 0.0) continue;
-        // Every directional light selects its cascade on viewDist.
-        float shadow = receives ? dirShadowFactor(L, i, worldPos, sh.normal, viewDist, shadowSamp) : 1.0;
+        float shadow = receives ? dirShadowFactor(L, i, worldPos, sh.normal, shadowSamp) : 1.0;
         vec3 radiance = L.dirs[i].color.rgb * L.dirs[i].color.w * dirMask(L, i, worldPos);
         lo += shadow * cookTorrance(sh, Ldir, radiance);
     }
@@ -399,7 +401,7 @@ void main() {
     if (!TRANSMISSION) {
         vec3 indirect;
         Shading sh = shadingOf(s, V, 1.0, 1.0);
-        vec3 unfogged = shadeSurface(s, sh, vWorldPos, viewDist, 1.0, pc.shadowSampler, receives, indirect);
+        vec3 unfogged = shadeSurface(s, sh, vWorldPos, 1.0, pc.shadowSampler, receives, indirect);
         Fog fog = fogAt(viewDist, pc.lights.fogColor, pc.lights.fogParams);
         vec3 lit = applyFog(unfogged, fog);
         outColor = vec4(lit, outputAlpha(lit, indirect, fog, baseAlpha)); // linear: the target encodes it for display
@@ -439,7 +441,7 @@ void main() {
 
     vec3 indirect;
     Shading sh = shadingOf(s, V, 1.0 - transmission, specularScale);
-    vec3 unfogged = shadeSurface(s, sh, vWorldPos, viewDist, 1.0 - transmission, pc.shadowSampler, receives, indirect);
+    vec3 unfogged = shadeSurface(s, sh, vWorldPos, 1.0 - transmission, pc.shadowSampler, receives, indirect);
     Fog fog = fogAt(viewDist, pc.lights.fogColor, pc.lights.fogParams);
     if (transmission <= 0.0) {
         vec3 lit = applyFog(unfogged, fog);

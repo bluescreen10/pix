@@ -60,6 +60,118 @@ func (s *LightShadow) SetBias(bias float32) {
 	s.bias = bias
 }
 
+// MaxShadowCascades is the most slices a directional light's shadow can be split into.
+// A renderer carries one matrix per cascade per light, so this bounds what it has to
+// reserve rather than anything about the fit.
+const MaxShadowCascades = 4
+
+// ShadowMethod is how a directional light's shadow map is laid over the part of the
+// view it covers.
+type ShadowMethod uint8
+
+const (
+	// ShadowUniform fits an orthographic camera around each cascade's slice of the
+	// view, snapped to the map's texel grid. Texel density is constant across a
+	// cascade, which wastes resolution on its far end but is stable: the snapping means
+	// shadow edges do not crawl as the camera moves. The default.
+	ShadowUniform ShadowMethod = iota
+)
+
+// DefaultShadowCascades, DefaultShadowDistance and DefaultShadowSplits are what a
+// directional light's shadow starts with: two cascades over the first 100 units of the
+// view, the first ending at a tenth of it. The later splits, at a fifth and at half,
+// take effect when more cascades are asked for.
+const (
+	DefaultShadowCascades         = 2
+	DefaultShadowDistance float32 = 100
+)
+
+var DefaultShadowSplits = [MaxShadowCascades - 1]float32{0.1, 0.2, 0.5}
+
+// DirectionalShadow is a directional light's shadow settings: the resolution and bias
+// every light has, plus how its shadow covers the view. A directional light has no
+// position to project from, so a renderer fits a shadow camera to the view every frame;
+// these say how far that fit reaches and how it is sliced.
+//
+// The view out to Distance is split into Cascades slices, each fitted with a map of its
+// own, so the slice nearest the viewer gets a whole map over a few units instead of
+// sharing one with the horizon. A single cascade is one map over the whole distance.
+type DirectionalShadow struct {
+	LightShadow
+	method   ShadowMethod
+	cascades int
+	distance float32
+	splits   [MaxShadowCascades - 1]float32
+}
+
+func newDirectionalShadow() *DirectionalShadow {
+	return &DirectionalShadow{
+		LightShadow: LightShadow{size: DefaultShadowSize},
+		cascades:    DefaultShadowCascades,
+		distance:    DefaultShadowDistance,
+		splits:      DefaultShadowSplits,
+	}
+}
+
+// Method is how the shadow map is laid over the view.
+func (s *DirectionalShadow) Method() ShadowMethod {
+	return s.method
+}
+
+// SetMethod sets how the shadow map is laid over the view; see ShadowMethod. A value
+// that names no method sets ShadowUniform.
+func (s *DirectionalShadow) SetMethod(method ShadowMethod) {
+	if method > ShadowUniform {
+		method = ShadowUniform
+	}
+	s.method = method
+}
+
+// Cascades is how many slices the view is split into.
+func (s *DirectionalShadow) Cascades() int {
+	return s.cascades
+}
+
+// SetCascades sets how many slices the view is split into, clamped to
+// [1, MaxShadowCascades]. Each one costs a depth pass, and its map is a square of Size
+// beside the others.
+func (s *DirectionalShadow) SetCascades(count int) {
+	s.cascades = min(max(count, 1), MaxShadowCascades)
+}
+
+// Distance is how far from the eye, along the view, the shadow reaches.
+func (s *DirectionalShadow) Distance() float32 {
+	return s.distance
+}
+
+// SetDistance sets how far from the eye, along the view, the shadow reaches, in world
+// units; nothing beyond it is shadowed. A shorter distance gives every cascade a
+// shorter slice and so sharper shadows. A renderer never reaches past the camera's own
+// far plane. Zero or less is ignored.
+func (s *DirectionalShadow) SetDistance(distance float32) {
+	if distance <= 0 {
+		return
+	}
+	s.distance = distance
+}
+
+// Splits are where each cascade but the last ends, as fractions of the distance,
+// innermost first. Only the first Cascades()-1 are used: two cascades split at the
+// first, four at all three.
+func (s *DirectionalShadow) Splits() [MaxShadowCascades - 1]float32 {
+	return s.splits
+}
+
+// SetSplits sets where each cascade but the last ends, as fractions of the distance,
+// innermost first; see Splits.
+//
+// Texel density drops at each split by roughly the ratio between the slices either side
+// of it, so the first split is the one that matters most: it decides how much of the
+// view gets the sharpest map.
+func (s *DirectionalShadow) SetSplits(splits [MaxShadowCascades - 1]float32) {
+	s.splits = splits
+}
+
 // DirectionalLight is a distant light with parallel rays (a sun). Direction is the
 // direction the light travels (e.g. {0,-1,0} for a downward sun). Fields are exported
 // and may be changed at any time; the scene re-derives the GPU light table each frame.
@@ -67,7 +179,7 @@ type DirectionalLight struct {
 	Direction glm.Vec3f
 	Color     colors.RGB32F
 	Intensity float32
-	shadow    *LightShadow
+	shadow    *DirectionalShadow
 	mask      LightMask
 	id        LightID
 }
@@ -120,12 +232,12 @@ func (l *DirectionalLight) ID() LightID {
 	return l.id
 }
 
-// SetCastShadow toggles shadow casting. Turning it on creates the Shadow with an
-// orthographic camera; turning it off drops it.
+// SetCastShadow toggles shadow casting. Turning it on creates the Shadow with the
+// default settings; turning it off drops it.
 func (l *DirectionalLight) SetCastShadow(on bool) {
 	if on {
 		if l.shadow == nil {
-			l.shadow = newLightShadow()
+			l.shadow = newDirectionalShadow()
 		}
 		return
 	}
@@ -133,7 +245,7 @@ func (l *DirectionalLight) SetCastShadow(on bool) {
 }
 
 // Shadow returns the light's shadow settings, or nil if it does not cast shadows.
-func (l *DirectionalLight) Shadow() *LightShadow {
+func (l *DirectionalLight) Shadow() *DirectionalShadow {
 	return l.shadow
 }
 

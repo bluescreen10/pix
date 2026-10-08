@@ -15,7 +15,7 @@ import (
 // for lights whose shadow camera is perspective and bounded by the light's range (spot,
 // point). Their depth range is local to the light, so a constant behaves consistently —
 // unlike a directional light's orthographic range, which spans the scene and must have
-// its bias derived from the fit (see fitDirectionalShadow).
+// its bias derived from the fit (see orthoBias).
 const defaultLocalShadowBias float32 = 0.0015
 
 // pointFace is one cube face of a point light's shadow: a perspective camera aimed
@@ -25,24 +25,19 @@ type pointFace struct {
 	m   textures.Texture
 }
 
-// shadowResource is one casting light's depth-map state. Directional and spot lights
-// use cam/m; point lights render six cube faces instead and use faces.
+// shadowResource is one casting light's depth-map state. A spot light uses cam/m; a
+// directional light renders its cascades into m; a point light renders six cube faces
+// instead and uses faces.
 type shadowResource struct {
 	cam Camera
 	m   textures.Texture
 
-	// ndcBias is the light's world-space bias plus a term derived from the map's texel
-	// footprint, converted into the shadow camera's normalized depth units, which is
-	// what the comparison actually needs. Recomputed whenever the fit changes: an
-	// orthographic shadow camera's depth range spans the scene, so a constant in NDC is
-	// a wildly different world distance from one scene to the next.
+	// ndcBias is a spot or point light's bias, converted into its shadow camera's
+	// normalized depth units, which is what the comparison actually needs. A
+	// directional light carries one per cascade instead (see cascadeLevel).
 	ndcBias float32
-	// fit carries the angle-dependent scales an orthographic fit leaves to the shader.
-	// Zero for the warps, which bias by their own rules and want no normal offset.
-	fit orthoFit
-	// cascades are the fitted slices when the algorithm is ShadowCascaded, innermost
-	// first, sharing one map laid out side by side. Empty for every other algorithm,
-	// which fits cam alone.
+	// cascades are a directional light's fitted slices, innermost first, sharing one
+	// map laid out side by side. Empty for every other light.
 	cascades []cascadeLevel
 	// width and height are the resolution the map was created at, so a settings change
 	// can be noticed and the map reallocated. They differ from each other for a cascade
@@ -53,20 +48,6 @@ type shadowResource struct {
 	// seen marks the resource as referenced by the current frame's light table, so
 	// resources for lights that went away can be retired.
 	seen bool
-}
-
-// updateOrthoBias recomputes ndcBias for an orthographic (directional) shadow camera
-// whose fitted box is radius wide and whose depth range is depthRange, both in world
-// units. Acne scales with how much world space a single shadow texel covers, so that
-// is the natural unit for the derived term; the light's own bias adds an explicit
-// world-space offset.
-//
-// The division is the whole point: an orthographic shadow camera's depth range spans
-// the scene, so a bias expressed directly in normalized depth silently becomes a
-// wildly different world distance from one scene to the next.
-func (s *shadowResource) updateOrthoBias(radius, depthRange, bias float32) {
-	s.fit = orthoBias(radius, depthRange, s.width, bias)
-	s.ndcBias = s.fit.bias
 }
 
 // orthoFit is what an orthographic fit hands back: the constant part of its depth bias,
@@ -86,9 +67,15 @@ type orthoFit struct {
 	depthScale float32
 }
 
-// orthoBias derives the above from a fitted box, split out from the resource so a
-// cascade can ask for one per slice: each covers a different range and so implies a
-// different texel footprint.
+// orthoBias derives the above from a fitted box whose half-width is radius and whose
+// depth range is depthRange, both in world units. Each cascade asks for its own: each
+// covers a different range and so implies a different texel footprint.
+//
+// Acne scales with how much world space a single shadow texel covers, so that is the
+// natural unit for the derived term; the light's own bias adds an explicit world-space
+// offset. The division is the whole point: an orthographic shadow camera's depth range
+// spans the scene, so a bias expressed directly in normalized depth silently becomes a
+// wildly different world distance from one scene to the next.
 func orthoBias(radius, depthRange float32, size uint32, bias float32) orthoFit {
 	if depthRange <= 0 || size == 0 {
 		return orthoFit{}
@@ -166,17 +153,6 @@ func cascadeAtlas(size, count uint32) (width, height uint32) {
 	return size * count, size
 }
 
-// orthoCamera returns this resource's orthographic camera, creating it (or replacing a
-// camera of another kind, left behind by a different shadow algorithm) as needed. The
-// renderer chooses the projection, not the light: which one a shadow needs follows from
-// how the renderer intends to render it, and the fit is recomputed every frame anyway.
-func (s *shadowResource) orthoCamera() Camera {
-	if _, ok := s.cam.(*orthographicCamera); !ok {
-		s.cam = newOrthographicCamera(-10, 10, -10, 10, 0.1, 100)
-	}
-	return s.cam
-}
-
 // ensurePerspective gives a spot light its camera, matching the cone.
 func (s *shadowResource) ensurePerspective(angle, rng float32) {
 	if s.cam == nil {
@@ -240,12 +216,12 @@ type ShadowView struct {
 	Camera Camera
 	Map    textures.Texture
 	Faces  []pointFace
-	// Cascades is one camera per slice when the light was fitted with ShadowCascaded,
-	// innermost first, all rendering into Map side by side. Empty otherwise, and Camera
-	// is then the only fit. When it is not empty Camera is its innermost slice, so a
-	// caller that only wants "the shadow camera" still gets a useful one.
+	// Cascades is a directional light's camera per slice, innermost first, all
+	// rendering into Map side by side; empty for any other light. Camera is then its
+	// innermost slice, so a caller that only wants "the shadow camera" still gets a
+	// useful one.
 	Cascades []Camera
-	// Splits[i] is the view distance Cascades[i] covers out to, which is where the lit
+	// Splits[i] is the view depth Cascades[i] covers out to, which is where the lit
 	// shader stops using it. Same length as Cascades.
 	Splits []float32
 }

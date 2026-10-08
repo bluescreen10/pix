@@ -48,17 +48,18 @@ float phase(float cosTheta, float g) {
     return (1.0 - g2) / (4.0 * pow(max(1.0 + g2 - 2.0 * g * cosTheta, 1e-4), 1.5));
 }
 
-// dirShadow is how much of directional light li reaches p: the cascade covering a point
-// viewDist from the eye, without the offsets a surface needs to keep from shadowing
-// itself — fog has no surface.
-float dirShadow(LightBuf L, uint li, vec3 p, float viewDist, uint shadowSamp) {
+// dirShadow is how much of directional light li reaches p: the cascade covering p's view
+// depth (see dirShadowFactor), without the offsets a surface needs to keep from
+// shadowing itself — fog has no surface.
+float dirShadow(LightBuf L, uint li, vec3 p, uint shadowSamp) {
     if (L.dirs[li].shadowMap == NO_SHADOW) {
         return 1.0;
     }
+    float depth = viewDepth(L, p);
     uint n = max(L.dirs[li].cascades, 1u);
     uint i = n - 1u;
     for (uint c = 0u; c < n; c++) {
-        if (viewDist <= L.dirs[li].shadowSplit[c]) {
+        if (depth <= L.dirs[li].shadowSplit[c]) {
             i = c;
             break;
         }
@@ -92,7 +93,7 @@ void main() {
     for (uint i = 0u; i < L.numDir; i++) {
         vec3 travel = normalize(L.dirs[i].dir.xyz);
         vec3 radiance = L.dirs[i].color.rgb * L.dirs[i].color.w * dirMask(L, i, p);
-        inscattered += radiance * phase(dot(travel, -ray), pc.anisotropy) * dirShadow(L, i, p, d, pc.shadowSampler);
+        inscattered += radiance * phase(dot(travel, -ray), pc.anisotropy) * dirShadow(L, i, p, pc.shadowSampler);
     }
     // Point and spot lights: only those the froxel's light cluster lists. The cluster
     // grid and the fog volume both lie over the main view, so a froxel finds its cell as

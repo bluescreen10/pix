@@ -123,17 +123,25 @@ layout(buffer_reference, scalar) readonly buffer LightBuf {
     PointShadows pointShadows;
     SpotShadows spotShadows;
     EnvironmentIrradiance envIrradiance;
-    // clusters is the main view's cells; clusterViewProj and clusterDepth find the cell
-    // a world position falls in — its tile through the view's projection, its slice
+    // clusters is the main view's cells; clusterViewProj and viewDepthPlane find the
+    // cell a world position falls in — its tile through the view's projection, its slice
     // from its depth along the view, sliced as log(depth) * clusterSliceScale +
-    // clusterSliceBias (see lightCluster).
+    // clusterSliceBias (see lightCluster). viewDepthPlane is the main view's depth
+    // plane, which is what cascade selection measures too (see viewDepth).
     LightClusters clusters;
     mat4 clusterViewProj;
-    vec4 clusterDepth;
+    vec4 viewDepthPlane;
     float clusterSliceScale;
     float clusterSliceBias;
     DirLight dirs[MAX_DIR];
 };
+
+// viewDepth is how far worldPos lies in front of the main view's eye, measured along the
+// view direction rather than toward the point: the depth a perspective projection
+// divides by.
+float viewDepth(LightBuf L, vec3 worldPos) {
+    return dot(L.viewDepthPlane.xyz, worldPos) + L.viewDepthPlane.w;
+}
 
 // lightCluster returns the cluster worldPos falls in: where its cell starts in
 // LightBuf.clusters. Positions off the
@@ -145,7 +153,7 @@ uint lightCluster(LightBuf L, vec3 worldPos) {
     vec2 uv = clip.xy / max(clip.w, 1e-6) * 0.5 + 0.5;
     uvec2 tile = uvec2(clamp(uv, vec2(0.0), vec2(1.0)) * vec2(CLUSTER_X, CLUSTER_Y));
     tile = min(tile, uvec2(CLUSTER_X - 1u, CLUSTER_Y - 1u));
-    float depth = dot(L.clusterDepth.xyz, worldPos) + L.clusterDepth.w;
+    float depth = viewDepth(L, worldPos);
     float slice = log(max(depth, 1e-6)) * L.clusterSliceScale + L.clusterSliceBias;
     uint z = uint(clamp(slice, 0.0, float(CLUSTER_Z - 1u)));
     return ((z * CLUSTER_Y + tile.y) * CLUSTER_X + tile.x) * CLUSTER_STRIDE;
@@ -352,9 +360,15 @@ const float shadowCascadeBlend = 0.1;
 // copying one into a local — which is what naming it as a parameter or assigning it to a
 // variable does — costs more register traffic than the lookup it is there to perform.
 // Reading the two or three fields actually wanted straight out of the buffer is free by
-// comparison. The buffer itself is passed as a reference, which is a 64-bit handle. viewDist is how far the fragment is from the eye, which is what the split
-// distances are measured in, and N is the surface normal, which sizes the offsets that
-// keep the surface from shadowing itself.
+// comparison. The buffer itself is passed as a reference, which is a 64-bit handle. N is
+// the surface normal, which sizes the offsets that keep the surface from shadowing
+// itself.
+//
+// Cascades are selected on the fragment's view DEPTH, not its distance from the eye.
+// Each cascade is fitted to a slice of the frustum cut by planes square to the view, so
+// depth is what tells which slice a fragment is in. Distance overstates it away from
+// the screen's centre — by half again in a 60 degree view's corners — which sent the
+// sides of the screen to the next, coarser cascade early.
 //
 // The cascades are ordered innermost first and the last one's split is the whole fitted
 // range, so the first split that reaches past the fragment is the tightest map covering
@@ -368,12 +382,13 @@ const float shadowCascadeBlend = 0.1;
 // place either side of the line. Fading over the last tenth of the range spreads that
 // step over enough pixels to disappear, at the cost of a second lookup for the fragments
 // inside the band.
-float dirShadowFactor(LightBuf L, uint li, vec3 worldPos, vec3 N, float viewDist, uint shadowSamp) {
+float dirShadowFactor(LightBuf L, uint li, vec3 worldPos, vec3 N, uint shadowSamp) {
     if (!SHADOWS || L.dirs[li].shadowMap == NO_SHADOW) return 1.0;
+    float depth = viewDepth(L, worldPos);
     uint n = max(L.dirs[li].cascades, 1u);
     uint i = n - 1u;
     for (uint c = 0u; c < n; c++) {
-        if (viewDist <= L.dirs[li].shadowSplit[c]) { i = c; break; }
+        if (depth <= L.dirs[li].shadowSplit[c]) { i = c; break; }
     }
 
     vec2 off = shadowOffsets(N, -L.dirs[li].dir.xyz);
@@ -385,7 +400,7 @@ float dirShadowFactor(LightBuf L, uint li, vec3 worldPos, vec3 N, float viewDist
     float near = (i == 0u) ? 0.0 : L.dirs[li].shadowSplit[i - 1u];
     float band = (L.dirs[li].shadowSplit[i] - near) * shadowCascadeBlend;
     if (band <= 0.0) return sh;
-    float t = clamp((viewDist - (L.dirs[li].shadowSplit[i] - band)) / band, 0.0, 1.0);
+    float t = clamp((depth - (L.dirs[li].shadowSplit[i] - band)) / band, 0.0, 1.0);
     if (t <= 0.0) return sh;
 
     return mix(sh, sampleCascade(L, li, i + 1u, n, worldPos, N, off, shadowSamp), t);

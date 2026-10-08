@@ -199,7 +199,13 @@ func (s *Scene) extractLights() {
 			lp.MaskSize = l.mask.Size
 			lp.MaskOffset = l.mask.Offset
 		}
-		applyShadowSettings(&lp, l.shadow)
+		if l.shadow != nil {
+			applyShadowSettings(&lp, &l.shadow.LightShadow)
+			lp.ShadowMethod = l.shadow.method
+			lp.shadowCascades = l.shadow.cascades
+			lp.shadowDistance = l.shadow.distance
+			lp.ShadowSplits = l.shadow.splits
+		}
 		out = append(out, lp)
 	}
 	for _, l := range s.pointLights {

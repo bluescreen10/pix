@@ -67,7 +67,7 @@ void main() {
         // Nothing reaches a surface turned away from the light, so neither the shading
         // nor the shadow lookup that would scale it is worth paying for.
         if (dot(N, Ldir) <= 0.0) continue;
-        float sh = receives ? dirShadowFactor(L, i, vWorldPos, N, viewDist, shadowSamp) : 1.0;
+        float sh = receives ? dirShadowFactor(L, i, vWorldPos, N, shadowSamp) : 1.0;
         vec3 radiance = L.dirs[i].color.rgb * L.dirs[i].color.w * dirMask(L, i, vWorldPos);
         lit += sh * blinnPhong(N, V, Ldir, radiance, albedo, m.specular, m.shininess);
     }

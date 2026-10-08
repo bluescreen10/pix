@@ -61,6 +61,9 @@ type PBRMaterial struct {
 	// alphaCutoff makes the material masked: where its colour's alpha falls below it,
 	// there is no surface (see Masked). 0 keeps every texel.
 	alphaCutoff float32
+	// ignoresAlpha makes the surface whole wherever it is drawn, whatever its colour's
+	// alpha (see SetIgnoresAlpha).
+	ignoresAlpha bool
 
 	// The volume behind a transmissive surface (see SetIOR, SetThickness and
 	// SetAttenuation).
@@ -126,7 +129,7 @@ func (m *PBRMaterial) Bytes() []byte {
 		flags: MapFlag(m.colorMap, MatColorMap) | MapFlag(m.normalMap, MatNormalMap) |
 			MapFlag(m.metallicMap, MatMetalMap) | MapFlag(m.roughnessMap, MatRoughMap) |
 			MapFlag(m.transmissionMap, MatTransMap) | MapFlag(m.occlusionMap, MatOcclusionMap) |
-			MapFlag(m.emissiveMap, MatEmissiveMap),
+			MapFlag(m.emissiveMap, MatEmissiveMap) | ignoresAlphaFlag(m.ignoresAlpha),
 		colorMap: MapIndex(m.colorMap), colorSampler: m.colorSampler,
 		normalMap: MapIndex(m.normalMap), normalSampler: m.normalSampler,
 		metallicMap: MapIndex(m.metallicMap), metallicSampler: m.metallicSampler,
@@ -458,6 +461,30 @@ func (m *PBRMaterial) AlphaCutoff() float32 {
 func (m *PBRMaterial) SetAlphaCutoff(cutoff float32) {
 	m.alphaCutoff = cutoff
 	m.dirty()
+}
+
+// IgnoresAlpha reports whether the material ignores its colour's alpha (see
+// SetIgnoresAlpha).
+func (m *PBRMaterial) IgnoresAlpha() bool {
+	return m.ignoresAlpha
+}
+
+// SetIgnoresAlpha makes the surface whole wherever it is drawn, whatever its colour's
+// alpha — the colour map's times the colour's own: glTF's alphaMode OPAQUE, whose alpha
+// "is ignored". Otherwise alpha is how much of the surface is there, which a blended
+// material and glass are drawn by. A material with an alpha cut-off still cuts its
+// surface out by alpha (see SetAlphaCutoff), and is whole where it does not.
+func (m *PBRMaterial) SetIgnoresAlpha(ignores bool) {
+	m.ignoresAlpha = ignores
+	m.dirty()
+}
+
+// ignoresAlphaFlag is MatIgnoresAlpha when ignores is set, and no flag otherwise.
+func ignoresAlphaFlag(ignores bool) uint32 {
+	if ignores {
+		return MatIgnoresAlpha
+	}
+	return 0
 }
 
 // AlphaMask implements Masked: the material cuts its surface out by its colour's alpha
