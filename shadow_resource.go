@@ -7,7 +7,6 @@ package pix
 import (
 	"github.com/bluescreen10/gamekit/gpu"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/scenes"
 	"github.com/bluescreen10/pix/textures"
 )
 
@@ -123,15 +122,6 @@ func (s *shadowResource) ensureCascades(count int) {
 			cam: newOrthographicCamera(-10, 10, -10, 10, 0.1, 100),
 		})
 	}
-}
-
-// requestedSize is the resolution to allocate for a light, honouring its setting and
-// falling back to the default when it asks for none.
-func requestedSize(l scenes.LightPacket) uint32 {
-	if l.ShadowSize == 0 {
-		return scenes.DefaultShadowSize
-	}
-	return l.ShadowSize
 }
 
 // maxShadowMapWidth bounds the shadow atlas so it cannot be asked for a texture wider

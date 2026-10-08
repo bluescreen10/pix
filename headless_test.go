@@ -55,7 +55,7 @@ func TestSceneWorksWithoutARenderer(t *testing.T) {
 	// The light's SETTINGS cross the boundary; its shadow map does not exist yet and
 	// will not until a renderer allocates one.
 	lp := p.Lights.Data[0]
-	if lp.Kind != scenes.LightDirectional || !lp.CastsShadow || lp.ShadowSize != 2048 {
+	if lp.Kind != scenes.LightDirectional || !lp.CastsShadow || lp.ShadowSize() != 2048 {
 		t.Errorf("light packet = %+v, want a directional caster at 2048", lp)
 	}
 	if p.Environment.Ambient != (colors.RGB32F{0.1, 0.1, 0.1}) {

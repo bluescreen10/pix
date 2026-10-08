@@ -90,11 +90,14 @@ func TestDirectionalShadowReachesThePacket(t *testing.T) {
 	}
 }
 
-// TestLightPacketShadowDefaults: a packet that states no cascade count or distance —
-// a light that does not cast, or a producer that leaves them alone — reads back the
-// defaults rather than zero cascades over zero units.
+// TestLightPacketShadowDefaults: a packet that states no map size, cascade count or
+// distance — a light that does not cast, or a producer that leaves them alone — reads
+// back the defaults rather than an empty map split into zero cascades over zero units.
 func TestLightPacketShadowDefaults(t *testing.T) {
 	var lp scenes.LightPacket
+	if got := lp.ShadowSize(); got != scenes.DefaultShadowSize {
+		t.Errorf("ShadowSize() = %d, want %d", got, scenes.DefaultShadowSize)
+	}
 	if got := lp.ShadowCascades(); got != scenes.DefaultShadowCascades {
 		t.Errorf("ShadowCascades() = %d, want %d", got, scenes.DefaultShadowCascades)
 	}

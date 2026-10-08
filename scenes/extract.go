@@ -238,7 +238,7 @@ func applyShadowSettings(lp *LightPacket, sh *LightShadow) {
 		return
 	}
 	lp.CastsShadow = true
-	lp.ShadowSize = sh.size
+	lp.shadowSize = sh.size
 	lp.ShadowBias = sh.bias
 }
 

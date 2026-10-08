@@ -159,7 +159,7 @@ type LightPacket struct {
 	// produced is the renderer's call — it may have no map allocated yet, or shadows
 	// may be disabled globally.
 	CastsShadow bool
-	ShadowSize  uint32  // Requested resolution per side; 0 means the renderer's default.
+	shadowSize  uint32  // Requested resolution per side; read through ShadowSize.
 	ShadowBias  float32 // Extra depth offset in WORLD units, on top of a derived term.
 
 	// Directional: how the shadow covers the view (see DirectionalShadow). Method is
@@ -177,6 +177,15 @@ type LightPacket struct {
 	MaskTexture uint32
 	MaskSize    float32
 	MaskOffset  glm.Vec3f
+}
+
+// ShadowSize is the resolution per side the light's shadow map is requested at, or
+// DefaultShadowSize when the light states none.
+func (l LightPacket) ShadowSize() uint32 {
+	if l.shadowSize == 0 {
+		return DefaultShadowSize
+	}
+	return l.shadowSize
 }
 
 // ShadowCascades is how many slices a directional light's shadow is split into: the

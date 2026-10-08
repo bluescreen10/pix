@@ -1481,7 +1481,7 @@ func (r *Renderer) fitShadows(mainView scenes.ViewPacket, p *scenes.FramePacket,
 			case scenes.LightDirectional:
 				// One square per cascade, laid out along the width: four 1024 cascades
 				// are a single 4096x1024 texture, each rendered through its own scissor.
-				width, height := cascadeAtlas(requestedSize(light), uint32(light.ShadowCascades()))
+				width, height := cascadeAtlas(light.ShadowSize(), uint32(light.ShadowCascades()))
 				sh.ensureMap(r.TextureStore, width, height)
 				fit := r.shadowFitFor(mainView, center, radius, light.ShadowDistance())
 				switch light.ShadowMethod {
@@ -1490,7 +1490,7 @@ func (r *Renderer) fitShadows(mainView scenes.ViewPacket, p *scenes.FramePacket,
 				}
 			case scenes.LightSpot:
 				sh.ensurePerspective(light.Angle, light.Range)
-				sh.ensureMap(r.TextureStore, requestedSize(light), requestedSize(light))
+				sh.ensureMap(r.TextureStore, light.ShadowSize(), light.ShadowSize())
 				aimSpotShadow(sh, light)
 			}
 		}
@@ -4016,7 +4016,7 @@ func (r *Renderer) fitCascades(s *shadowResource, l scenes.LightPacket, fit shad
 // aimPointShadow allocates (once) and re-aims a point light's six cube-face shadow
 // cameras from the light's current position and range.
 func (r *Renderer) aimPointShadow(s *shadowResource, l scenes.LightPacket) {
-	s.ensureFaceMaps(r.TextureStore, requestedSize(l))
+	s.ensureFaceMaps(r.TextureStore, l.ShadowSize())
 	s.updateLocalBias(l.Range, l.ShadowBias)
 	for i := range s.faces {
 		f := &s.faces[i]
