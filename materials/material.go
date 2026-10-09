@@ -25,6 +25,22 @@ const (
 	// MatIgnoresAlpha: the colour's alpha is ignored, and the surface is all there
 	// (PBR; see PBRMaterial.SetIgnoresAlpha).
 	MatIgnoresAlpha uint32 = 1 << 7
+	// MatSpecularIntensityMap: specular intensity map bound (PBR; sampled .a).
+	MatSpecularIntensityMap uint32 = 1 << 8
+	// MatSpecularColorMap: specular colour map bound (PBR; sampled .rgb, sRGB).
+	MatSpecularColorMap uint32 = 1 << 9
+	// MatClearcoatMap: clear coat map bound (PBR; sampled .r).
+	MatClearcoatMap uint32 = 1 << 10
+	// MatClearcoatRoughnessMap: clear coat roughness map bound (PBR; sampled .g).
+	MatClearcoatRoughnessMap uint32 = 1 << 11
+	// MatClearcoatNormalMap: clear coat normal map bound (PBR).
+	MatClearcoatNormalMap uint32 = 1 << 12
+	// MatSheenColorMap: sheen colour map bound (PBR; sampled .rgb, sRGB).
+	MatSheenColorMap uint32 = 1 << 13
+	// MatSheenRoughnessMap: sheen roughness map bound (PBR; sampled .a).
+	MatSheenRoughnessMap uint32 = 1 << 14
+	// MatAnisotropyMap: anisotropy map bound (PBR; direction in .rg, strength in .b).
+	MatAnisotropyMap uint32 = 1 << 15
 )
 
 // CullMode selects which triangle faces are discarded. CullNone is double-sided.
@@ -75,11 +91,12 @@ type Shader struct {
 
 // AlphaMask is how a material cuts its surface out: where Map's alpha, times Alpha, falls
 // below Cutoff there is no surface — not when shaded, nor in the shadow maps or the
-// depth prepass. Map is the material's colour map, or a zero Texture for none. A cut-off
-// of 0 cuts nothing out.
+// depth prepass. Map is the material's colour map, or a zero Texture for none, read at
+// the UV set UV. A cut-off of 0 cuts nothing out.
 type AlphaMask struct {
 	Map     textures.Texture
 	Sampler uint32
+	UV      UVSet
 	Alpha   float32
 	Cutoff  float32
 }
@@ -101,17 +118,19 @@ type Masked interface {
 	AlphaMask() AlphaMask
 }
 
-// ToBytes is the mask as the first half of an entry of a pool's mask table: AlphaMask in
-// shaders/src/alpha_mask.glsl.
+// ToBytes is the mask as the first part of an entry of a pool's mask table: AlphaMask in
+// shaders/src/alpha_mask.glsl, 20 bytes.
 func (m AlphaMask) ToBytes() []byte {
 	entry := struct {
 		mapIndex uint32
 		sampler  uint32
+		uv       uint32
 		alpha    float32
 		cutoff   float32
 	}{
 		mapIndex: MapIndex(m.Map),
 		sampler:  m.Sampler,
+		uv:       uint32(m.UV),
 		alpha:    m.Alpha,
 		cutoff:   m.Cutoff,
 	}
@@ -120,10 +139,12 @@ func (m AlphaMask) ToBytes() []byte {
 
 // TransmissionMask is how much light a surface lets through, texel by texel: Factor,
 // times the red channel of Map where one is bound — where KHR_materials_transmission
-// keeps it. Map is a zero Texture for none. A factor of 0 lets nothing through.
+// keeps it. Map is a zero Texture for none, read at the UV set UV. A factor of 0 lets
+// nothing through.
 type TransmissionMask struct {
 	Map     textures.Texture
 	Sampler uint32
+	UV      UVSet
 	Factor  float32
 }
 
@@ -143,25 +164,44 @@ type Transmissive interface {
 	TransmissionMask() TransmissionMask
 }
 
-// ToBytes is the mask as the second half of an entry of a pool's mask table:
-// TransmissionMask in shaders/src/alpha_mask.glsl.
+// ToBytes is the mask as the second part of an entry of a pool's mask table:
+// TransmissionMask in shaders/src/alpha_mask.glsl, 16 bytes.
 func (m TransmissionMask) ToBytes() []byte {
 	entry := struct {
 		mapIndex uint32
 		sampler  uint32
+		uv       uint32
 		factor   float32
-		_        uint32
 	}{
 		mapIndex: MapIndex(m.Map),
 		sampler:  m.Sampler,
+		uv:       uint32(m.UV),
 		factor:   m.Factor,
 	}
 	return unsafe.Slice((*byte)(unsafe.Pointer(&entry)), unsafe.Sizeof(entry))
 }
 
-// maskEntrySize is the size of one entry of a pool's mask table: an AlphaMask's 16 bytes,
-// then a TransmissionMask's 16.
-const maskEntrySize = 32
+// maskEntrySize is the size of one entry of a pool's mask table: an AlphaMask's 20 bytes,
+// a TransmissionMask's 16, the UVTransform of each UVSet the masks' maps are read
+// through, 32, and 12 of padding, which rounds it to whole 16-byte rows. Mask in
+// shaders/src/alpha_mask.glsl.
+const maskEntrySize = 80
+
+// Features is a set of the optional parts of a material type's fragment shader, as the
+// bits of the FEATURES specialization constant material_common.glsl declares. What each
+// bit means is the material type's own business — PBRMaterial's are FeatureClearcoat and
+// the others beside it. The renderer compiles a pipeline for each set its draws use, so
+// a part that none of a draw's materials uses costs that draw nothing; the price is
+// that materials of one pool using different sets draw in separate batches.
+type Features uint32
+
+// Featured is implemented by materials whose fragment shader has optional parts. A
+// material that implements it reports the parts it uses now, and calls its pool's
+// MarkDirty whenever that changes, as for any change to its record. One that does not
+// uses none: its shader is compiled with FEATURES 0.
+type Featured interface {
+	Features() Features
+}
 
 // ID names one material by value: which pool holds its record, its slot in that pool,
 // and the slot's generation. It is the whole of what a renderer needs to find a

@@ -30,13 +30,22 @@
 // IDs below 16 are the renderer's (see material_common.glsl).
 layout(constant_id = 2) const bool TRANSMISSION = true;
 
+// The optional parts of this shader, as FEATURES bits (materials.FeatureClearcoat and
+// those beside it). A part the pipeline's materials do not use is compiled out.
+const uint FEATURE_CLEARCOAT = 1u;
+const uint FEATURE_SHEEN = 2u;
+const uint FEATURE_ANISOTROPY = 4u;
+const bool CLEARCOAT = (FEATURES & FEATURE_CLEARCOAT) != 0u;
+const bool SHEEN = (FEATURES & FEATURE_SHEEN) != 0u;
+const bool ANISOTROPY = (FEATURES & FEATURE_ANISOTROPY) != 0u;
+
 // This model's id and its interpretation of Surface.material (the model-defined
 // G-buffer slot). Every pass goes through these two helpers, so the packing is stated
 // once: another shading model packs its own parameters into the same channels.
 const uint MODEL_PBR = 0u;
 
-vec4 pbrPack(float metallic, float roughness, float occlusion, float dielectricF0) {
-    return vec4(metallic, roughness, occlusion, dielectricF0);
+vec4 pbrPack(float metallic, float roughness, float occlusion) {
+    return vec4(metallic, roughness, occlusion, 0.0);
 }
 
 float pbrMetallic(Surface s) { return s.material.r; }
@@ -44,14 +53,16 @@ float pbrRoughness(Surface s) { return s.material.g; }
 // pbrOcclusion is how much of the light around it reaches the surface, by its occlusion
 // map: what ambient and environment light are scaled by.
 float pbrOcclusion(Surface s) { return s.material.b; }
-// pbrDielectricF0 is how much of the light meeting it head-on the surface reflects
-// where it is not metal, by its index of refraction: 0.04 for the usual 1.5.
-float pbrDielectricF0(Surface s) { return s.material.a; }
-
 // pbrF0 is how much of the light meeting it head-on the surface reflects, in colour:
 // its dielectric reflectance, or where it is metal, its albedo.
 vec3 pbrF0(Surface s) {
-    return mix(vec3(pbrDielectricF0(s)), s.albedo, pbrMetallic(s));
+    return mix(s.specular.rgb, s.albedo, pbrMetallic(s));
+}
+
+// pbrF90 is how much of the light meeting it at a grazing angle the surface reflects:
+// all of it, unless a dielectric's specular intensity lowers it.
+float pbrF90(Surface s) {
+    return mix(s.specular.a, 1.0, pbrMetallic(s));
 }
 
 // ---------------------------------------------------------------------------
@@ -71,8 +82,16 @@ const uint MAT_TRANS_MAP = 16u;
 const uint MAT_OCCLUSION_MAP = 32u;
 const uint MAT_EMISSIVE_MAP = 64u;
 const uint MAT_IGNORES_ALPHA = 128u;
+const uint MAT_SPECULAR_INTENSITY_MAP = 256u;
+const uint MAT_SPECULAR_COLOR_MAP = 512u;
+const uint MAT_CLEARCOAT_MAP = 1024u;
+const uint MAT_CLEARCOAT_ROUGHNESS_MAP = 2048u;
+const uint MAT_CLEARCOAT_NORMAL_MAP = 4096u;
+const uint MAT_SHEEN_COLOR_MAP = 8192u;
+const uint MAT_SHEEN_ROUGHNESS_MAP = 16384u;
+const uint MAT_ANISOTROPY_MAP = 32768u;
 
-// Material mirrors materials.PBRMaterial's record (132 bytes). Each map carries its own
+// Material mirrors materials.PBRMaterial's record (284 bytes). Each map carries its own
 // sampler.
 struct Material {
     vec4 color;
@@ -104,37 +123,114 @@ struct Material {
     vec3 attenuationColor;
     uint emissiveMap;
     uint emissiveSampler;
+    // uv2Maps flags the maps that read the mesh's second set of texture coordinates.
+    uint uv2Maps;
+    // KHR_materials_specular: how much a dielectric reflects, besides its ior.
+    // dielectricSpecular is what a dielectric reflects head-on (rgb) and at a grazing
+    // angle (a), before the specular maps (see PBRMaterial.dielectricSpecular).
+    vec4 dielectricSpecular;
+    uint specularIntensityMap;
+    uint specularIntensitySampler;
+    uint specularColorMap;
+    uint specularColorSampler;
+    // KHR_materials_clearcoat: a clear coat over the surface.
+    float clearcoat;
+    float clearcoatRoughness;
+    uint clearcoatMap;
+    uint clearcoatSampler;
+    uint clearcoatRoughnessMap;
+    uint clearcoatRoughnessSampler;
+    uint clearcoatNormalMap;
+    uint clearcoatNormalSampler;
+    // KHR_materials_sheen: a sheen over the surface.
+    vec3 sheenColor;
+    float sheenRoughness;
+    uint sheenColorMap;
+    uint sheenColorSampler;
+    uint sheenRoughnessMap;
+    uint sheenRoughnessSampler;
+    // KHR_materials_anisotropy: how far, and along which direction, highlights
+    // stretch. anisotropyDirection is the rotation's cosine and sine.
+    float anisotropy;
+    vec2 anisotropyDirection;
+    uint anisotropyMap;
+    uint anisotropySampler;
+    // The transforms of the mesh's two sets of texture coordinates (see materialUVs).
+    UVTransform uv1Transform;
+    UVTransform uv2Transform;
 };
 layout(buffer_reference, scalar) readonly buffer MatBuf { Material v[]; };
 
-// tex samples a bindless heap texture at this fragment's UV with the given sampler.
-vec4 tex(uint index, uint samp) {
-    return texture(sampler2D(gTextures[nonuniformEXT(index)], gSamplers[nonuniformEXT(samp)]), vUV);
+// tex samples a bindless heap texture at uv with the given sampler.
+vec4 tex(uint index, uint samp, vec2 uv) {
+    return texture(sampler2D(gTextures[nonuniformEXT(index)], gSamplers[nonuniformEXT(samp)]), uv);
 }
 
-// perturbNormal applies a tangent-space normal (mapN in [-1,1]) to the geometric
-// normal N using a cotangent frame derived from screen-space derivatives — no vertex
-// TANGENT attribute required (Christian Schüler's derivative maps).
-vec3 perturbNormal(vec3 N, vec3 mapN) {
+// cotangentFrame is the frame of the texture's u and v directions on the surface around
+// normal N, with N, derived from the screen-space derivatives of uv and of the
+// position — no vertex TANGENT attribute required (Christian Schüler's derivative
+// maps). Its u and v are scaled alike, so that it keeps a map's directions as drawn.
+mat3 cotangentFrame(vec3 N, vec2 uv) {
     vec3 dp1 = dFdx(vWorldPos);
     vec3 dp2 = dFdy(vWorldPos);
-    vec2 duv1 = dFdx(vUV);
-    vec2 duv2 = dFdy(vUV);
+    vec2 duv1 = dFdx(uv);
+    vec2 duv2 = dFdy(uv);
     vec3 dp2perp = cross(dp2, N);
     vec3 dp1perp = cross(N, dp1);
     vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
     vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
     float invmax = inversesqrt(max(dot(T, T), dot(B, B)));
-    mat3 TBN = mat3(T * invmax, B * invmax, N);
-    return normalize(TBN * mapN);
+    return mat3(T * invmax, B * invmax, N);
+}
+
+// perturbNormal applies a tangent-space normal (mapN in [-1,1]) to the geometric
+// normal N, in the cotangent frame of uv, the coordinates the map was sampled at.
+vec3 perturbNormal(vec3 N, vec3 mapN, vec2 uv) {
+    return normalize(cotangentFrame(N, uv) * mapN);
+}
+
+// readsSameUV reports whether the maps flagged mapFlag and otherFlag read the same set of
+// texture coordinates, by uv2Maps (see mapUV).
+bool readsSameUV(uint uv2Maps, uint mapFlag, uint otherFlag) {
+    return ((uv2Maps & mapFlag) != 0u) == ((uv2Maps & otherFlag) != 0u);
+}
+
+// sampleNormalMap returns the tangent-space normal a normal map holds at uv.
+//
+// Z is reconstructed rather than sampled: a tangent-space normal is a unit vector, so
+// the third component carries no independent information. This is what lets normal
+// maps be stored two-channel (pix.TextureNormal -> RG8, and BC5 later), and it is
+// equally correct for an RGBA8 normal map, whose blue channel holds exactly this value.
+vec3 sampleNormalMap(uint index, uint samp, vec2 uv) {
+    vec2 nxy = tex(index, samp, uv).rg * 2.0 - 1.0;
+    float nz = sqrt(clamp(1.0 - dot(nxy, nxy), 0.0, 1.0));
+    return vec3(nxy, nz);
+}
+
+// antiAliasedRoughness widens roughness by how much normal varies across the pixel. A
+// pixel covering a curved or bumpy patch of a smooth surface sees every normal in it, and
+// a highlight narrower than that spread lands in one pixel of a frame and the next pixel
+// of the next: smooth, finely curved surfaces sparkle and crawl. Widening the lobe by the
+// spread draws the highlight the whole patch would show (Tokuyoshi and Kaplanyan's
+// filtering, with their constants: the screen-space variance scale and the most it may
+// add). The spread adds to GGX's alpha squared, the lobe's variance, not to roughness:
+// added to roughness it widens the lobe by its square, and a mirror-smooth sphere a few
+// hundred pixels across keeps a highlight no pixel catches.
+float antiAliasedRoughness(float roughness, vec3 normal) {
+    vec3 du = dFdx(normal);
+    vec3 dv = dFdy(normal);
+    float variance = 0.25 * (dot(du, du) + dot(dv, dv));
+    float widening = min(2.0 * variance, 0.18);
+    float alpha = roughness * roughness;
+    return sqrt(sqrt(clamp(alpha * alpha + widening, 0.0, 1.0)));
 }
 
 // materialSurface resolves this fragment's Surface from the material record: base
 // color (× vertex color × color map), the map-modulated metallic/roughness, and the
 // perturbed world normal. baseAlpha is returned separately — it drives forward's
 // blending but has nowhere to live in the G-buffer (opaque only).
-Surface materialSurface(Material m, out float baseAlpha) {
-    vec4 base = sampleBase(m.color, m.flags, m.colorMap, m.colorSampler);
+Surface materialSurface(Material m, MaterialUVs uvs, out float baseAlpha) {
+    vec4 base = sampleBase(m.color, m.flags, m.colorMap, m.colorSampler, mapUV(uvs, m.uv2Maps, MAT_COLOR_MAP));
     // An opaque material's alpha is not how much of it is there (see
     // materials.PBRMaterial.SetIgnoresAlpha); glass made of one would vanish by it.
     baseAlpha = (m.flags & MAT_IGNORES_ALPHA) != 0u ? 1.0 : base.a;
@@ -144,52 +240,59 @@ Surface materialSurface(Material m, out float baseAlpha) {
     s.albedo = base.rgb;
     s.emissive = m.emissive.rgb;
     if ((m.flags & MAT_EMISSIVE_MAP) != 0u) {
-        s.emissive *= tex(m.emissiveMap, m.emissiveSampler).rgb;
+        s.emissive *= tex(m.emissiveMap, m.emissiveSampler, mapUV(uvs, m.uv2Maps, MAT_EMISSIVE_MAP)).rgb;
     }
 
     // Metalness, roughness and occlusion are often one texture's blue, green and red
     // (glTF's occlusion-roughness-metallic packing), bound to all three maps: a map
-    // with the texture and sampler of one already read reuses its texel.
+    // with the texture, sampler and set of coordinates of one already read reuses its
+    // texel.
     float metallic = m.metallic;
     vec4 metalTexel = vec4(1.0);
     bool hasMetalMap = (m.flags & MAT_METAL_MAP) != 0u;
     if (hasMetalMap) {
-        metalTexel = tex(m.metalMap, m.metalSampler);
+        metalTexel = tex(m.metalMap, m.metalSampler, mapUV(uvs, m.uv2Maps, MAT_METAL_MAP));
         metallic *= metalTexel.b;
     }
     float roughness = m.roughness;
     vec4 roughTexel = vec4(1.0);
     bool hasRoughMap = (m.flags & MAT_ROUGH_MAP) != 0u;
     if (hasRoughMap) {
-        bool isMetalMap = hasMetalMap && m.roughMap == m.metalMap && m.roughSampler == m.metalSampler;
-        roughTexel = isMetalMap ? metalTexel : tex(m.roughMap, m.roughSampler);
+        bool isMetalMap = hasMetalMap && m.roughMap == m.metalMap && m.roughSampler == m.metalSampler &&
+                          readsSameUV(m.uv2Maps, MAT_ROUGH_MAP, MAT_METAL_MAP);
+        roughTexel = isMetalMap ? metalTexel : tex(m.roughMap, m.roughSampler, mapUV(uvs, m.uv2Maps, MAT_ROUGH_MAP));
         roughness *= roughTexel.g;
     }
     float occlusion = 1.0;
     if ((m.flags & MAT_OCCLUSION_MAP) != 0u) {
-        bool isMetalMap = hasMetalMap && m.occlusionMap == m.metalMap && m.occlusionSampler == m.metalSampler;
-        bool isRoughMap = hasRoughMap && m.occlusionMap == m.roughMap && m.occlusionSampler == m.roughSampler;
-        vec4 occlusionTexel = isMetalMap ? metalTexel : (isRoughMap ? roughTexel : tex(m.occlusionMap, m.occlusionSampler));
+        bool isMetalMap = hasMetalMap && m.occlusionMap == m.metalMap && m.occlusionSampler == m.metalSampler &&
+                          readsSameUV(m.uv2Maps, MAT_OCCLUSION_MAP, MAT_METAL_MAP);
+        bool isRoughMap = hasRoughMap && m.occlusionMap == m.roughMap && m.occlusionSampler == m.roughSampler &&
+                          readsSameUV(m.uv2Maps, MAT_OCCLUSION_MAP, MAT_ROUGH_MAP);
+        vec4 occlusionTexel = isMetalMap ? metalTexel : (isRoughMap ? roughTexel : tex(m.occlusionMap, m.occlusionSampler, mapUV(uvs, m.uv2Maps, MAT_OCCLUSION_MAP)));
         occlusion = mix(1.0, occlusionTexel.r, m.occlusionStrength);
     }
-    // KHR_materials_ior: reflectance head-on is ((ior - 1) / (ior + 1))^2.
-    float ratio = (m.ior - 1.0) / (m.ior + 1.0);
-    s.material = pbrPack(metallic, roughness, occlusion, ratio * ratio);
+    s.material = pbrPack(metallic, roughness, occlusion);
+
+    // What a dielectric reflects (KHR_materials_ior and KHR_materials_specular), as the
+    // material works it out, times its maps: the intensity map scales both, the colour
+    // map tints the head-on reflectance.
+    s.specular = m.dielectricSpecular;
+    if ((m.flags & MAT_SPECULAR_INTENSITY_MAP) != 0u) {
+        s.specular *= tex(m.specularIntensityMap, m.specularIntensitySampler, mapUV(uvs, m.uv2Maps, MAT_SPECULAR_INTENSITY_MAP)).a;
+    }
+    if ((m.flags & MAT_SPECULAR_COLOR_MAP) != 0u) {
+        s.specular.rgb = min(s.specular.rgb * tex(m.specularColorMap, m.specularColorSampler, mapUV(uvs, m.uv2Maps, MAT_SPECULAR_COLOR_MAP)).rgb, vec3(1.0));
+    }
 
     // A back face is drawn only for a double-sided surface, which is lit on the side
     // it is seen from. perturbNormal builds its frame around this normal, so the
     // normal map turns over with it.
     s.normal = gl_FrontFacing ? normalize(vNormal) : -normalize(vNormal);
     if ((m.flags & MAT_NORMAL_MAP) != 0u) {
-        // Z is reconstructed rather than sampled: a tangent-space normal is a unit
-        // vector, so the third component carries no independent information. This
-        // is what lets normal maps be stored two-channel (pix.TextureNormal -> RG8,
-        // and BC5 later), and it is equally correct for an RGBA8 normal map, whose
-        // blue channel holds exactly this value.
-        vec2 nxy = tex(m.normalMap, m.normalSampler).rg * 2.0 - 1.0;
-        float nz = sqrt(clamp(1.0 - dot(nxy, nxy), 0.0, 1.0));
-        s.normal = perturbNormal(s.normal, vec3(nxy, nz));
+        s.normal = perturbNormal(s.normal, sampleNormalMap(m.normalMap, m.normalSampler, mapUV(uvs, m.uv2Maps, MAT_NORMAL_MAP)), mapUV(uvs, m.uv2Maps, MAT_NORMAL_MAP));
     }
+    s.material.g = antiAliasedRoughness(pbrRoughness(s), s.normal);
     return s;
 }
 
@@ -206,8 +309,10 @@ struct Shading {
     vec3 normal;
     vec3 V;
     float NdotV;
-    // f0 is how much of the light meeting it head-on the surface reflects (pbrF0).
+    // f0 and f90 are how much of the light meeting it head-on, and at a grazing angle,
+    // the surface reflects (pbrF0, pbrF90).
     vec3 f0;
+    float f90;
     // alpha is GGX's alpha, the perceptual roughness squared, and alpha2 its square.
     float alpha;
     float alpha2;
@@ -215,7 +320,63 @@ struct Shading {
     // take their share (see shadeSurface); specularScale scales the reflection.
     vec3 diffuseAlbedo;
     float specularScale;
+    // dfg is the split-sum pair (scale, bias) of the surface's roughness seen from V
+    // (see environmentBRDF); specularCompensation is what its specular reflection is
+    // multiplied by to make up for the light a single GGX bounce loses.
+    vec2 dfg;
+    vec3 specularCompensation;
+
+    // clearcoat is how much of a clear coat covers the surface, 0 for none (see
+    // addClearcoat). The coat has its own normal, NdotV and GGX alpha, and
+    // clearcoatBaseScale is what of the light leaving the surface under it gets through:
+    // what the coat does not reflect, seen from V.
+    float clearcoat;
+    vec3 clearcoatNormal;
+    float clearcoatNdotV;
+    float clearcoatRoughness;
+    float clearcoatAlpha;
+    float clearcoatBaseScale;
+
+    // sheenColor is the colour of a sheen over the surface, black for none (see
+    // addSheen), and sheenRoughness how far it spreads. sheenBaseScale is what of the
+    // light leaving the surface under it gets through.
+    vec3 sheenColor;
+    float sheenRoughness;
+    float sheenBaseScale;
+
+    // anisotropy is how far the surface's highlights stretch along anisotropyT, 0 for
+    // not at all (see addAnisotropy); anisotropyB is across it. GGX's alpha along each
+    // is anisotropyAlphaT and alpha.
+    float anisotropy;
+    vec3 anisotropyT;
+    vec3 anisotropyB;
+    float anisotropyAlphaT;
 };
+
+// CLEARCOAT_F0 is what the clear coat reflects head-on: a dielectric of index 1.5.
+const float CLEARCOAT_F0 = 0.04;
+
+// approximateDFG is the split-sum pair environmentBRDF reads from its table, fitted
+// analytically (Karis, "Physically Based Shading on Mobile"): for a scene with no
+// environment, which has no table, and a few instructions where the table would be a
+// fetch.
+vec2 approximateDFG(float NdotV, float roughness) {
+    const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+    vec4 r = roughness * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
+    return vec2(-1.04, 1.04) * a004 + r.zw;
+}
+
+// specularCompensationOf is what to multiply a GGX reflection by so it reflects all the
+// light a rough surface does. GGX counts light reflected once off the microfacets; what
+// bounces between them before it leaves is lost, and a rough white metal reflecting a
+// white environment comes out a third darker than the white it should be. dfg.x +
+// dfg.y is the share a single bounce keeps of what a perfect reflector reflects
+// (Fdez-Agüera's multiple-scattering compensation, in Filament's form).
+vec3 specularCompensationOf(vec2 dfg, vec3 f0) {
+    return 1.0 + f0 * (1.0 / max(dfg.x + dfg.y, 1e-4) - 1.0);
+}
 
 // shadingOf works out the Shading of s seen from V. diffuseScale attenuates the
 // diffuse light, for glass, whose light passes through instead, and specularScale
@@ -227,10 +388,22 @@ Shading shadingOf(Surface s, vec3 V, float diffuseScale, float specularScale) {
     sh.V = V;
     sh.NdotV = max(dot(s.normal, V), 0.0);
     sh.f0 = pbrF0(s);
+    sh.f90 = pbrF90(s);
     sh.alpha = pbrRoughness(s) * pbrRoughness(s);
     sh.alpha2 = sh.alpha * sh.alpha;
     sh.diffuseAlbedo = s.albedo * (1.0 - pbrMetallic(s)) * diffuseScale;
     sh.specularScale = specularScale;
+    if (hasEnvironment(pc.lights)) {
+        sh.dfg = environmentBRDF(pc.lights, sh.NdotV, pbrRoughness(s));
+    } else {
+        sh.dfg = approximateDFG(sh.NdotV, pbrRoughness(s));
+    }
+    sh.specularCompensation = specularCompensationOf(sh.dfg, sh.f0);
+    sh.clearcoat = 0.0;
+    sh.clearcoatBaseScale = 1.0;
+    sh.sheenColor = vec3(0.0);
+    sh.sheenBaseScale = 1.0;
+    sh.anisotropy = 0.0;
     return sh;
 }
 
@@ -241,8 +414,149 @@ float schlickWeight(float cosTheta) {
     return x2 * x2 * x;
 }
 
-vec3 fresnelSchlick(float cosTheta, vec3 f0) {
-    return f0 + (1.0 - f0) * schlickWeight(cosTheta);
+vec3 fresnelSchlick(float cosTheta, vec3 f0, float f90) {
+    return f0 + (f90 - f0) * schlickWeight(cosTheta);
+}
+
+// addClearcoat covers sh with m's clear coat (KHR_materials_clearcoat). The coat
+// lies over the surface's geometric normal, not its normal-mapped one: a lacquer fills
+// the bumps under it, unless the coat has a normal map of its own.
+void addClearcoat(inout Shading sh, Material m, MaterialUVs uvs) {
+    float clearcoat = m.clearcoat;
+    if ((m.flags & MAT_CLEARCOAT_MAP) != 0u) {
+        clearcoat *= tex(m.clearcoatMap, m.clearcoatSampler, mapUV(uvs, m.uv2Maps, MAT_CLEARCOAT_MAP)).r;
+    }
+    float roughness = m.clearcoatRoughness;
+    if ((m.flags & MAT_CLEARCOAT_ROUGHNESS_MAP) != 0u) {
+        roughness *= tex(m.clearcoatRoughnessMap, m.clearcoatRoughnessSampler, mapUV(uvs, m.uv2Maps, MAT_CLEARCOAT_ROUGHNESS_MAP)).g;
+    }
+    vec3 normal = gl_FrontFacing ? normalize(vNormal) : -normalize(vNormal);
+    if ((m.flags & MAT_CLEARCOAT_NORMAL_MAP) != 0u) {
+        normal = perturbNormal(normal, sampleNormalMap(m.clearcoatNormalMap, m.clearcoatNormalSampler, mapUV(uvs, m.uv2Maps, MAT_CLEARCOAT_NORMAL_MAP)), mapUV(uvs, m.uv2Maps, MAT_CLEARCOAT_NORMAL_MAP));
+    }
+
+    sh.clearcoat = clearcoat;
+    sh.clearcoatNormal = normal;
+    sh.clearcoatNdotV = max(dot(normal, sh.V), 0.0);
+    sh.clearcoatRoughness = antiAliasedRoughness(roughness, normal);
+    // Clamped so a mirror coat still spreads a point light into a highlight of some
+    // size; at alpha 0 the distribution is infinitely narrow and the light vanishes.
+    sh.clearcoatAlpha = max(sh.clearcoatRoughness * sh.clearcoatRoughness, 0.002);
+    float reflected = CLEARCOAT_F0 + (1.0 - CLEARCOAT_F0) * schlickWeight(sh.clearcoatNdotV);
+    sh.clearcoatBaseScale = 1.0 - clearcoat * reflected;
+}
+
+// addAnisotropy stretches sh's highlights along m's direction of anisotropy
+// (KHR_materials_anisotropy): its map's direction, or the texture's u, turned by its
+// rotation, in the frame of the anisotropy map's coordinates around the surface's
+// normal.
+void addAnisotropy(inout Shading sh, Material m, MaterialUVs uvs) {
+    float strength = m.anisotropy;
+    vec2 direction = vec2(1.0, 0.0);
+    if ((m.flags & MAT_ANISOTROPY_MAP) != 0u) {
+        vec3 texel = tex(m.anisotropyMap, m.anisotropySampler, mapUV(uvs, m.uv2Maps, MAT_ANISOTROPY_MAP)).rgb;
+        direction = texel.rg * 2.0 - 1.0;
+        strength *= texel.b;
+    }
+    vec2 rotation = m.anisotropyDirection;
+    direction = vec2(rotation.x * direction.x - rotation.y * direction.y, rotation.y * direction.x + rotation.x * direction.y);
+
+    vec3 T = cotangentFrame(sh.normal, mapUV(uvs, m.uv2Maps, MAT_ANISOTROPY_MAP)) * vec3(direction, 0.0);
+    T = normalize(T - sh.normal * dot(sh.normal, T));
+    sh.anisotropy = strength;
+    sh.anisotropyT = T;
+    sh.anisotropyB = cross(sh.normal, T);
+    sh.anisotropyAlphaT = mix(sh.alpha, 1.0, strength * strength);
+}
+
+// anisotropicSpecular returns the GGX specular term — distribution times visibility,
+// before Fresnel — of light arriving from L, with the lobe stretched along sh's
+// direction of anisotropy (the anisotropic GGX of KHR_materials_anisotropy).
+float anisotropicSpecular(Shading sh, vec3 L, vec3 H, float NdotL, float NdotH) {
+    float alphaT = sh.anisotropyAlphaT;
+    float alphaB = max(sh.alpha, 1e-3);
+    float a2 = alphaT * alphaB;
+    vec3 f = vec3(alphaB * dot(sh.anisotropyT, H), alphaT * dot(sh.anisotropyB, H), a2 * NdotH);
+    float w2 = a2 / max(dot(f, f), 1e-7);
+    float distribution = a2 * w2 * w2 / PI;
+
+    float towardV = NdotL * length(vec3(alphaT * dot(sh.anisotropyT, sh.V), alphaB * dot(sh.anisotropyB, sh.V), sh.NdotV));
+    float towardL = sh.NdotV * length(vec3(alphaT * dot(sh.anisotropyT, L), alphaB * dot(sh.anisotropyB, L), NdotL));
+    float visibility = clamp(0.5 / max(towardV + towardL, 1e-5), 0.0, 1.0);
+    return distribution * visibility;
+}
+
+// anisotropicReflectionDirection is the direction an anisotropic surface reflects the
+// environment from: off a normal bent toward the stretch, so the reflection smears along
+// it, as brushed metal's does — the more, the stronger the anisotropy and the rougher
+// the surface (three.js's bent normal).
+vec3 anisotropicReflectionDirection(Shading sh, float roughness) {
+    vec3 bent = normalize(cross(cross(sh.anisotropyB, sh.V), sh.anisotropyB));
+    float a = 1.0 - sh.anisotropy * (1.0 - roughness);
+    a *= a;
+    bent = normalize(mix(bent, sh.normal, a * a));
+    return reflect(-sh.V, bent);
+}
+
+// addSheen gives sh m's sheen (KHR_materials_sheen).
+void addSheen(inout Shading sh, Material m, MaterialUVs uvs) {
+    vec3 color = m.sheenColor;
+    if ((m.flags & MAT_SHEEN_COLOR_MAP) != 0u) {
+        color *= tex(m.sheenColorMap, m.sheenColorSampler, mapUV(uvs, m.uv2Maps, MAT_SHEEN_COLOR_MAP)).rgb;
+    }
+    float roughness = m.sheenRoughness;
+    if ((m.flags & MAT_SHEEN_ROUGHNESS_MAP) != 0u) {
+        roughness *= tex(m.sheenRoughnessMap, m.sheenRoughnessSampler, mapUV(uvs, m.uv2Maps, MAT_SHEEN_ROUGHNESS_MAP)).a;
+    }
+    sh.sheenColor = color;
+    // Below about 0.07 the distribution's exponent grows past what float holds.
+    sh.sheenRoughness = clamp(roughness, 0.07, 1.0);
+    // What the sheen reflects, averaged over the angles light meets it at: 0.157 of its
+    // brightest channel (three.js's fit of the sheen's directional albedo).
+    sh.sheenBaseScale = 1.0 - 0.157 * max(color.r, max(color.g, color.b));
+}
+
+// sheenSpecular returns the radiance one light, arriving from L with radiance, reflects
+// off the sheen toward the eye: Estevez and Kulla's "Charlie" distribution of fibres,
+// with Neubelt and Pettineo's visibility.
+vec3 sheenSpecular(Shading sh, vec3 L, vec3 radiance) {
+    vec3 H = normalize(sh.V + L);
+    float NdotL = max(dot(sh.normal, L), 0.0);
+    float NdotH = max(dot(sh.normal, H), 0.0);
+
+    float alpha = sh.sheenRoughness * sh.sheenRoughness;
+    float invAlpha = 1.0 / alpha;
+    float sin2h = max(1.0 - NdotH * NdotH, 0.0078125);
+    float distribution = (2.0 + invAlpha) * pow(sin2h, invAlpha * 0.5) / (2.0 * PI);
+    float visibility = clamp(1.0 / (4.0 * (NdotL + sh.NdotV - NdotL * sh.NdotV)), 0.0, 1.0);
+    return sh.sheenColor * (distribution * visibility * NdotL) * radiance;
+}
+
+// sheenReflectance is the share of the light around it a white sheen reflects toward V:
+// the sheen's directional albedo, fitted (three.js's IBLSheenBRDF).
+float sheenReflectance(float NdotV, float roughness) {
+    float r2 = roughness * roughness;
+    float a = roughness < 0.25 ? -339.2 * r2 + 161.4 * roughness - 25.9 : -8.48 * r2 + 14.3 * roughness - 9.95;
+    float b = roughness < 0.25 ? 44.0 * r2 - 23.7 * roughness + 3.26 : 1.97 * r2 - 3.27 * roughness + 0.72;
+    float dg = exp(a * NdotV + b) + (roughness < 0.25 ? 0.0 : 0.1 * (roughness - 0.25));
+    return clamp(dg / PI, 0.0, 1.0);
+}
+
+// clearcoatSpecular returns the radiance one light, arriving from L with radiance,
+// reflects off the clear coat toward the eye: the same GGX lobe as cookTorrance's, over
+// the coat's normal and roughness, with no diffuse.
+vec3 clearcoatSpecular(Shading sh, vec3 L, vec3 radiance) {
+    vec3 H = normalize(sh.V + L);
+    float NdotL = max(dot(sh.clearcoatNormal, L), 0.0);
+    float NdotH = max(dot(sh.clearcoatNormal, H), 0.0);
+    float VdotH = max(dot(sh.V, H), 0.0);
+
+    float alpha2 = sh.clearcoatAlpha * sh.clearcoatAlpha;
+    float d = NdotH * NdotH * (alpha2 - 1.0) + 1.0;
+    float distribution = alpha2 / max(PI * d * d, 1e-5);
+    float visibility = smithVisibility(sh.clearcoatNdotV, NdotL, sh.clearcoatAlpha);
+    float fresnel = CLEARCOAT_F0 + (1.0 - CLEARCOAT_F0) * schlickWeight(VdotH);
+    return vec3(distribution * visibility * fresnel * NdotL) * radiance;
 }
 
 // cookTorrance returns the radiance one light, arriving from L with radiance, leaves the
@@ -254,14 +568,26 @@ vec3 cookTorrance(Shading sh, vec3 L, vec3 radiance) {
     float NdotH = max(dot(sh.normal, H), 0.0);
     float VdotH = max(dot(sh.V, H), 0.0);
 
-    float d = NdotH * NdotH * (sh.alpha2 - 1.0) + 1.0;
-    float distribution = sh.alpha2 / max(PI * d * d, 1e-5);
-    float visibility = smithVisibility(sh.NdotV, NdotL, sh.alpha);
-    vec3 fresnel = fresnelSchlick(VdotH, sh.f0);
+    float lobe;
+    if (ANISOTROPY && sh.anisotropy > 0.0) {
+        lobe = anisotropicSpecular(sh, L, H, NdotL, NdotH);
+    } else {
+        float d = NdotH * NdotH * (sh.alpha2 - 1.0) + 1.0;
+        float distribution = sh.alpha2 / max(PI * d * d, 1e-5);
+        lobe = distribution * smithVisibility(sh.NdotV, NdotL, sh.alpha);
+    }
+    vec3 fresnel = fresnelSchlick(VdotH, sh.f0, sh.f90);
 
-    vec3 specular = distribution * visibility * fresnel * sh.specularScale;
+    vec3 specular = lobe * fresnel * sh.specularCompensation * sh.specularScale;
     vec3 diffuse = (vec3(1.0) - fresnel) * sh.diffuseAlbedo * (1.0 / PI);
-    return (diffuse + specular) * radiance * NdotL;
+    vec3 lit = (diffuse + specular) * radiance * NdotL;
+    if (SHEEN) {
+        lit = lit * sh.sheenBaseScale + sheenSpecular(sh, L, radiance);
+    }
+    if (CLEARCOAT && sh.clearcoat > 0.0) {
+        lit = lit * sh.clearcoatBaseScale + sh.clearcoat * clearcoatSpecular(sh, L, radiance);
+    }
+    return lit;
 }
 
 // environmentLight is what a surface takes from the scene's environment, in place of
@@ -271,9 +597,12 @@ vec3 cookTorrance(Shading sh, vec3 L, vec3 radiance) {
 // cookTorrance.
 vec3 environmentLight(LightBuf L, Surface s, Shading sh) {
     float rough = pbrRoughness(s);
-    vec2 brdf = environmentBRDF(L, sh.NdotV, rough);
-    vec3 reflected = sh.f0 * brdf.x + brdf.y;
-    vec3 specular = environmentSpecular(L, reflect(-sh.V, sh.normal), rough) * reflected * sh.specularScale;
+    vec3 reflected = sh.f0 * sh.dfg.x + sh.f90 * sh.dfg.y;
+    vec3 direction = reflect(-sh.V, sh.normal);
+    if (ANISOTROPY && sh.anisotropy > 0.0) {
+        direction = anisotropicReflectionDirection(sh, rough);
+    }
+    vec3 specular = environmentSpecular(L, direction, rough) * reflected * sh.specularCompensation * sh.specularScale;
     vec3 diffuse = (vec3(1.0) - reflected) * sh.diffuseAlbedo * environmentDiffuse(L, sh.normal);
     return diffuse + specular;
 }
@@ -298,8 +627,29 @@ vec3 shadeSurface(Surface s, Shading sh, vec3 worldPos, float diffuseScale, uint
     // occlusion, measured on screen, then takes its share of what is left (see
     // outputAlpha in material_common.glsl).
     ambient *= pbrOcclusion(s);
+    vec3 emissive = s.emissive;
+    if (SHEEN) {
+        // The sheen reflects the light around it, the environment's or the flat ambient
+        // colour, as diffuse light does: from all of the hemisphere.
+        vec3 around = hasEnvironment(L) ? environmentDiffuse(L, sh.normal) : L.ambient.rgb;
+        vec3 sheen = around * sh.sheenColor * sheenReflectance(sh.NdotV, sh.sheenRoughness);
+        ambient = ambient * sh.sheenBaseScale + sheen * pbrOcclusion(s);
+        emissive *= sh.sheenBaseScale;
+    }
+    if (CLEARCOAT && sh.clearcoat > 0.0) {
+        // What the coat reflects of the environment, and what of the light from the
+        // surface under it — its own glow included — the coat lets through. Under a flat
+        // ambient colour the coat reflects nothing, as the surface under it does not.
+        ambient *= sh.clearcoatBaseScale;
+        emissive *= sh.clearcoatBaseScale;
+        if (hasEnvironment(L)) {
+            vec2 brdf = environmentBRDF(L, sh.clearcoatNdotV, sh.clearcoatRoughness);
+            vec3 reflection = environmentSpecular(L, reflect(-sh.V, sh.clearcoatNormal), sh.clearcoatRoughness);
+            ambient += sh.clearcoat * reflection * (CLEARCOAT_F0 * brdf.x + brdf.y) * pbrOcclusion(s);
+        }
+    }
     indirect = ambient;
-    vec3 lo = ambient + s.emissive;
+    vec3 lo = ambient + emissive;
 
     for (uint i = 0u; i < L.numDir; i++) {
         vec3 Ldir = normalize(-L.dirs[i].dir.xyz);
@@ -350,7 +700,7 @@ vec3 shadeSurface(Surface s, Shading sh, vec3 worldPos, float diffuseScale, uint
 float fresnelReflectance(Surface s, vec3 V) {
     float f0 = dot(pbrF0(s), vec3(0.2126, 0.7152, 0.0722));
     float ndv = abs(dot(s.normal, V));
-    return f0 + (1.0 - f0) * schlickWeight(ndv);
+    return f0 + (pbrF90(s) - f0) * schlickWeight(ndv);
 }
 
 // sceneBehind is the light from behind the surface that comes through it toward the
@@ -392,7 +742,8 @@ void main() {
     discardCutOut();
     Material m = MatBuf(pc.materials).v[vMat];
     float baseAlpha;
-    Surface s = materialSurface(m, baseAlpha);
+    MaterialUVs uvs = materialUVs(m.uv1Transform, m.uv2Transform);
+    Surface s = materialSurface(m, uvs, baseAlpha);
     vec3 toEye = pc.eye.xyz - vWorldPos;
     float viewDist = length(toEye);
     vec3 V = toEye / viewDist;
@@ -401,6 +752,15 @@ void main() {
     if (!TRANSMISSION) {
         vec3 indirect;
         Shading sh = shadingOf(s, V, 1.0, 1.0);
+        if (ANISOTROPY) {
+            addAnisotropy(sh, m, uvs);
+        }
+        if (SHEEN) {
+            addSheen(sh, m, uvs);
+        }
+        if (CLEARCOAT) {
+            addClearcoat(sh, m, uvs);
+        }
         vec3 unfogged = shadeSurface(s, sh, vWorldPos, 1.0, pc.shadowSampler, receives, indirect);
         Fog fog = fogAt(viewDist, pc.lights.fogColor, pc.lights.fogParams);
         vec3 lit = applyFog(unfogged, fog);
@@ -416,7 +776,7 @@ void main() {
     // from going uniformly transparent: without it a cabinet with glass panes turns
     // the whole cabinet into a ghost.
     float transmission = m.transmission;
-    if ((m.flags & MAT_TRANS_MAP) != 0u) transmission *= tex(m.transMap, m.transSampler).r;
+    if ((m.flags & MAT_TRANS_MAP) != 0u) transmission *= tex(m.transMap, m.transSampler, mapUV(uvs, m.uv2Maps, MAT_TRANS_MAP)).r;
 
     // reflectance is what one surface of the glass reflects of the light meeting it, and
     // passedShare what comes through of the light from behind: what the surface
@@ -441,6 +801,15 @@ void main() {
 
     vec3 indirect;
     Shading sh = shadingOf(s, V, 1.0 - transmission, specularScale);
+    if (ANISOTROPY) {
+        addAnisotropy(sh, m, uvs);
+    }
+    if (SHEEN) {
+        addSheen(sh, m, uvs);
+    }
+    if (CLEARCOAT) {
+        addClearcoat(sh, m, uvs);
+    }
     vec3 unfogged = shadeSurface(s, sh, vWorldPos, 1.0 - transmission, pc.shadowSampler, receives, indirect);
     Fog fog = fogAt(viewDist, pc.lights.fogColor, pc.lights.fogParams);
     if (transmission <= 0.0) {

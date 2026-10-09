@@ -72,6 +72,14 @@ layout(push_constant, scalar) uniform PC {
 
 const uint FLAG_NORMAL = 1u;
 const uint FLAG_UV = 2u;
+const uint FLAG_UV2 = 16u;
+
+// attributeRecordWords is how many 4-byte words one vertex's attribute record takes:
+// 6 for a geometry with a second set of texture coordinates (FLAG_UV2), 4 otherwise
+// (geometries.attributeRecordWords).
+uint attributeRecordWords(uint flags) {
+    return (flags & FLAG_UV2) != 0u ? 6u : 4u;
+}
 const uint FLAG_COLOR = 4u;
 
 // decodeNormal unpacks glm.Unorm10x3 and remaps it back to [-1,1]; encodeNormal is its
@@ -121,11 +129,13 @@ void main() {
     GeoDesc src = pc.descs.v[pc.srcDesc];
     GeoDesc dst = pc.descs.v[pc.dstDesc];
     bool hasNormal = (src.flags & FLAG_NORMAL) != 0u;
-    bool hasAttributes = (src.flags & (FLAG_NORMAL | FLAG_UV | FLAG_COLOR)) != 0u;
+    bool hasAttributes = (src.flags & (FLAG_NORMAL | FLAG_UV | FLAG_COLOR | FLAG_UV2)) != 0u;
+    // The output has the source's flags, so its records are the same size.
+    uint recordWords = attributeRecordWords(src.flags);
 
     uint spb = src.positionBase + vi * 3u;
     vec3 p = vec3(pc.pos.v[spb], pc.pos.v[spb + 1u], pc.pos.v[spb + 2u]);
-    uint sab = src.attributeBase * 4u + vi * 4u;
+    uint sab = src.attributeBase * 4u + vi * recordWords;
     uint normalWord = hasAttributes ? pc.attr.v[sab] : 0u;
     vec3 n = hasNormal ? decodeNormal(normalWord) : vec3(0.0);
 
@@ -155,16 +165,17 @@ void main() {
     pc.pos.v[dpb + 1u] = p.y;
     pc.pos.v[dpb + 2u] = p.z;
 
-    // Attributes: the normal is re-encoded if anything turned it; color/uv (if present)
-    // copy through unchanged — deformation never touches them.
+    // Attributes: the normal is re-encoded if anything turned it; color and both sets
+    // of texture coordinates (if present) copy through unchanged — deformation never
+    // touches them.
     if (hasAttributes) {
-        uint dab = dst.attributeBase * 4u + vi * 4u;
+        uint dab = dst.attributeBase * 4u + vi * recordWords;
         if (hasNormal && (MORPHED || SKINNED)) {
             normalWord = encodeNormal(normalize(n));
         }
         pc.attr.v[dab] = normalWord;
-        pc.attr.v[dab + 1u] = pc.attr.v[sab + 1u];
-        pc.attr.v[dab + 2u] = pc.attr.v[sab + 2u];
-        pc.attr.v[dab + 3u] = pc.attr.v[sab + 3u];
+        for (uint w = 1u; w < recordWords; w++) {
+            pc.attr.v[dab + w] = pc.attr.v[sab + w];
+        }
     }
 }

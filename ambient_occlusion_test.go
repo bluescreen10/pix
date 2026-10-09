@@ -58,7 +58,7 @@ func newAOSceneOfSize(t *testing.T, size int) aoScene {
 // the light that reaches it.
 func matte(r *pix.Renderer) materials.Material {
 	material := r.NewBlinnPhongMaterial()
-	material.SetSpecular(0)
+	material.SetSpecular(colors.RGB32F{})
 	return material
 }
 

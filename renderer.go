@@ -3334,7 +3334,10 @@ func (r *Renderer) drawBatches(batches batchRange, root drawRoot, isAmbientOcclu
 		if b.isMasked {
 			root.masks = b.pool.MasksAddr()
 		}
-		variant := fragmentVariant{isMasked: b.isMasked, isTransmissive: b.isTransmissive, isAmbientOcclusionEnabled: isAmbientOcclusionEnabled}
+		variant := fragmentVariant{
+			isMasked: b.isMasked, isTransmissive: b.isTransmissive, isUVTransformed: b.isUVTransformed,
+			isAmbientOcclusionEnabled: isAmbientOcclusionEnabled, features: b.features,
+		}
 		cmd.SetPipeline(r.drawPipelines[r.pipelineForPool(b.pool, b.cull, b.blend, variant, samples)])
 		cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, views.main.cull.indirectBuf, uint64(first)*uint64(indirectSize), uint32(count), indirectSize)
 	}
@@ -3361,7 +3364,7 @@ func (r *Renderer) drawBackToFront(batches batchRange, st *renderState, views fr
 		b := &st.layout.batches[entry.batch]
 		root.materials = b.pool.RecordsAddr()
 		// Not masked: this pass leaves root.masks 0, and so cuts nothing out.
-		variant := fragmentVariant{isTransmissive: b.isTransmissive}
+		variant := fragmentVariant{isTransmissive: b.isTransmissive, isUVTransformed: b.isUVTransformed, features: b.features}
 		drawCulling := func(cull materials.CullMode) {
 			if pipeline := r.pipelineForPool(b.pool, cull, b.blend, variant, r.afterOpaqueSamples()); pipeline != boundPipeline {
 				cmd.SetPipeline(r.drawPipelines[pipeline])
@@ -3407,7 +3410,11 @@ func (r *Renderer) drawParticles(st *renderState, views frameViews, cmd gpu.Comm
 		if pp.Sort == scenes.ParticleSortBackToFront {
 			root.order = ps.orderBuf.Addr
 		}
-		variant := fragmentVariant{isTransmissive: pool.IsTransmissiveAt(pp.Material.Slot)}
+		variant := fragmentVariant{
+			isTransmissive:  pool.IsTransmissiveAt(pp.Material.Slot),
+			isUVTransformed: pool.IsUVTransformedAt(pp.Material.Slot),
+			features:        pool.FeaturesAt(pp.Material.Slot),
+		}
 		pipeline := r.pipelineForPool(pool, pool.CullAt(pp.Material.Slot), pool.BlendAt(pp.Material.Slot), variant, r.afterOpaqueSamples())
 		cmd.SetPipeline(r.drawPipelines[pipeline])
 		cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, ps.indirectBuf, 0, 1, indirectSize)
@@ -4371,13 +4378,20 @@ type fragmentVariant struct {
 	// its colour ambient occlusion leaves alone (see outputAlpha in
 	// material_common.glsl): the opaque pass, while ambient occlusion is on.
 	isAmbientOcclusionEnabled bool
+	// isUVTransformed keeps the UV transforms: the draw's materials move the mesh's
+	// texture coordinates (see materials.Pool.IsUVTransformedAt).
+	isUVTransformed bool
+	// features is the optional parts of its shader the draw's materials use (see
+	// materials.Featured).
+	features materials.Features
 }
 
-// fragmentVariantCount is how many fragmentVariant values there are, one per
-// combination of its flags.
-const fragmentVariantCount = 8
+// fragmentVariantCount is how many fragmentVariant values there are for one set of
+// features, one per combination of its flags.
+const fragmentVariantCount = 16
 
-// index numbers a variant from 0 to fragmentVariantCount-1.
+// index numbers a variant from 0 to fragmentVariantCount-1, among those with its set of
+// features.
 func (v fragmentVariant) index() int {
 	index := 0
 	if v.isMasked {
@@ -4389,6 +4403,9 @@ func (v fragmentVariant) index() int {
 	if v.isAmbientOcclusionEnabled {
 		index |= 4
 	}
+	if v.isUVTransformed {
+		index |= 8
+	}
 	return index
 }
 
@@ -4398,6 +4415,8 @@ func (v fragmentVariant) constants() map[string]float64 {
 		"MASKED":            constantOf(v.isMasked),
 		"TRANSMISSION":      constantOf(v.isTransmissive),
 		"AMBIENT_OCCLUSION": constantOf(v.isAmbientOcclusionEnabled),
+		"UV_TRANSFORM":      constantOf(v.isUVTransformed),
+		"FEATURES":          float64(v.features),
 	}
 }
 
@@ -4542,13 +4561,29 @@ func (r *Renderer) pipelineFor(k materialPipeline) uint32 {
 // poolPipelines is every draw pipeline the instances of one material pool can select
 // between. A pool is keyed by a Shader that never changes for its lifetime, so the
 // only things that vary within it are the per-instance cull and blend modes, and the
-// variant of its fragment shader a draw needs. A few values each, so the entire space
-// is a fixed table indexed directly — no hashing, no scan, no map — filled lazily
-// because most pools use a few of the cells.
+// variant of its fragment shader a draw needs. Apart from its features a variant takes
+// a few values, so for each set of features the space is a fixed table indexed
+// directly, filled lazily because most pools use a few of the cells. The sets of
+// features a pool's materials use are a handful at most, found by a short scan.
 type poolPipelines struct {
-	// table holds each pipeline's index plus one, so that the zero value, 0, is a
+	// featureSets[i] is the set of features tables[i] holds pipelines for.
+	featureSets []materials.Features
+	// tables hold each pipeline's index plus one, so that the zero value, 0, is a
 	// pipeline not built yet.
-	table [2][3][4][fragmentVariantCount]uint32 // [multisampled][cull][blend][variant]
+	tables [][2][3][4][fragmentVariantCount]uint32 // [features][multisampled][cull][blend][variant]
+}
+
+// tableFor returns the table of pipelines for the set of features, adding an empty one
+// the first time it is asked for.
+func (pp *poolPipelines) tableFor(features materials.Features) *[2][3][4][fragmentVariantCount]uint32 {
+	for i, set := range pp.featureSets {
+		if set == features {
+			return &pp.tables[i]
+		}
+	}
+	pp.featureSets = append(pp.featureSets, features)
+	pp.tables = append(pp.tables, [2][3][4][fragmentVariantCount]uint32{})
+	return &pp.tables[len(pp.tables)-1]
 }
 
 // pipelineForPool resolves the draw pipeline for one material of a pool, given that
@@ -4570,7 +4605,7 @@ func (r *Renderer) pipelineForPool(p *materials.Pool, cull materials.CullMode, b
 		multisampled = 1
 	}
 
-	cell := &pp.table[multisampled][cull][blend][variant.index()]
+	cell := &pp.tableFor(variant.features)[multisampled][cull][blend][variant.index()]
 	if *cell != 0 {
 		return *cell - 1
 	}

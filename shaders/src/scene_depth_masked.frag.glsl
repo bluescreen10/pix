@@ -27,15 +27,16 @@ layout(push_constant, scalar) uniform PC {
     uint pad1;
 } pc;
 
-layout(location = 0) in vec2 vUV;
+layout(location = 0) in vec2 vUV1;
 layout(location = 1) flat in uint vMat;
+layout(location = 2) in vec2 vUV2;
 
 void main() {
     Mask mask = MaskBuf(pc.masks).v[vMat];
-    if (isCutOut(mask.alpha, vUV)) {
+    if (isCutOut(mask.alpha, maskUV(mask, mask.alpha.uvSet, vUV1, vUV2))) {
         discard;
     }
-    if (pc.isShadowPass != 0u && letsLightThrough(mask.transmission, vUV)) {
+    if (pc.isShadowPass != 0u && letsLightThrough(mask.transmission, maskUV(mask, mask.transmission.uvSet, vUV1, vUV2))) {
         discard;
     }
 }

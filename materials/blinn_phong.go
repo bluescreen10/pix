@@ -9,7 +9,9 @@ import (
 	"github.com/bluescreen10/pix/textures"
 )
 
-// BlinnPhongMaterial is ambient + diffuse (N·L) + Blinn-Phong specular.
+// BlinnPhongMaterial is ambient + Lambert diffuse + a normalized Blinn-Phong highlight
+// with Schlick Fresnel. Diffuse divides by π as PBRMaterial's does, so one light lights
+// both alike.
 //
 // The material is its own GPU record: these fields are the source of truth and Bytes
 // serializes them on demand. Every setter must call dirty(), or the change is never
@@ -18,8 +20,12 @@ type BlinnPhongMaterial struct {
 	pool *Pool
 	ref  ref.Ref
 
-	emissive  colors.RGB32F
-	specular  float32
+	emissive colors.RGB32F
+
+	// specular is the colour of the highlight head-on, F0: around 0.04 for a plastic,
+	// the metal's own colour for a metal. shininess is the Blinn-Phong exponent; the
+	// higher, the tighter the highlight.
+	specular  colors.RGB32F
 	shininess float32
 
 	// Bound maps. The material holds the reference that keeps each texture alive; the
@@ -29,35 +35,47 @@ type BlinnPhongMaterial struct {
 	colorMap     textures.Texture
 	colorSampler uint32
 
+	// uvTransforms moves each set of the mesh's texture coordinates before the maps
+	// reading it are sampled (see SetUVTransform); uv2Maps flags the maps that read UV2.
+	uvTransforms [2]UVTransform
+	uv2Maps      uint32
+
 	// alphaCutoff makes the material masked: where its colour's alpha falls below it,
 	// there is no surface (see Masked). 0 keeps every texel.
 	alphaCutoff float32
 }
 
 // NewBlinnPhongMaterial creates a Blinn-Phong material with an unbound color map.
-// Defaults to white with a soft highlight.
+// Defaults to white with a soft grey highlight.
 func NewBlinnPhongMaterial(store *Store) *BlinnPhongMaterial {
 	st := store.Pool(Shader{Fragment: shaders.BlinnPhongFragment}, "BlinnPhong Material")
-	m := &BlinnPhongMaterial{color: colors.RGBA32F{1, 1, 1, 1}, specular: 0.3, shininess: 32, colorSampler: store.DefaultSampler()}
+	m := &BlinnPhongMaterial{
+		color:        colors.RGBA32F{1, 1, 1, 1},
+		specular:     colors.RGB32F{0.25, 0.25, 0.25},
+		shininess:    32,
+		colorSampler: store.DefaultSampler(),
+		uvTransforms: [2]UVTransform{NoUVTransform, NoUVTransform},
+	}
 	m.pool = st
 	m.ref = st.Create(m)
 	return m
 }
 
-// Bytes implements Instance: the 64-byte record matching the Material struct
+// Bytes implements Instance: the 96-byte record matching the Material struct
 // in shaders/src/scene_lit.frag.glsl. Field order and padding here ARE the GPU layout —
 // changing either without changing the shader silently misreads every material.
 func (m *BlinnPhongMaterial) Bytes() []byte {
 	rec := struct {
 		color        colors.RGBA32F
 		emissive     colors.RGB32F
-		_            float32 // the shader declares vec4; the 4th channel is unused
-		specular     float32
 		shininess    float32
+		specular     colors.RGB32F
 		colorMap     uint32
 		colorSampler uint32
 		flags        uint32
-		_, _, _      uint32
+		uv2Maps      uint32
+		_            uint32
+		uvTransforms [2]UVTransform
 	}{
 		color:        m.color,
 		emissive:     m.emissive,
@@ -66,6 +84,8 @@ func (m *BlinnPhongMaterial) Bytes() []byte {
 		colorMap:     MapIndex(m.colorMap),
 		colorSampler: m.colorSampler,
 		flags:        MapFlag(m.colorMap, MatColorMap),
+		uv2Maps:      m.uv2Maps,
+		uvTransforms: m.uvTransforms,
 	}
 	return unsafe.Slice((*byte)(unsafe.Pointer(&rec)), unsafe.Sizeof(rec))
 }
@@ -90,12 +110,14 @@ func (m *BlinnPhongMaterial) SetColor(color colors.RGBA32F) {
 	m.dirty()
 }
 
-func (m *BlinnPhongMaterial) Specular() float32 {
+// Specular is the colour of the highlight seen head-on; Fresnel brightens it toward
+// white at grazing angles.
+func (m *BlinnPhongMaterial) Specular() colors.RGB32F {
 	return m.specular
 }
 
-func (m *BlinnPhongMaterial) SetSpecular(specular float32) {
-	m.specular = specular
+func (m *BlinnPhongMaterial) SetSpecular(color colors.RGB32F) {
+	m.specular = color
 	m.dirty()
 }
 
@@ -109,8 +131,7 @@ func (m *BlinnPhongMaterial) SetShininess(shininess float32) {
 }
 
 // Emissive is the light the surface emits on its own, added after lighting. It has no
-// alpha: emitted light is not a coverage, and the record's fourth channel is padding
-// the shader never reads.
+// alpha: emitted light is not a coverage.
 func (m *BlinnPhongMaterial) Emissive() colors.RGB32F {
 	return m.emissive
 }
@@ -141,6 +162,18 @@ func (m *BlinnPhongMaterial) ColorMapSampler() uint32 {
 
 func (m *BlinnPhongMaterial) SetColorMapSampler(sampler uint32) {
 	m.colorSampler = sampler
+	m.dirty()
+}
+
+// ColorMapUV is the set of texture coordinates the colour map reads.
+func (m *BlinnPhongMaterial) ColorMapUV() UVSet {
+	return uvSetOf(m.uv2Maps, MatColorMap)
+}
+
+// SetColorMapUV sets which of the mesh's sets of texture coordinates the colour map reads:
+// UV1, the default, or UV2.
+func (m *BlinnPhongMaterial) SetColorMapUV(set UVSet) {
+	m.uv2Maps = withUVSet(m.uv2Maps, MatColorMap, set)
 	m.dirty()
 }
 
@@ -211,6 +244,20 @@ func (m *BlinnPhongMaterial) ID() ID {
 	return m.pool.IDOf(m.ref)
 }
 
+// UVTransform is how the material moves the mesh's set of texture coordinates set
+// before the maps reading it sample them (see UVTransform).
+func (m *BlinnPhongMaterial) UVTransform(set UVSet) UVTransform {
+	return m.uvTransforms[set]
+}
+
+// SetUVTransform sets how the material moves the mesh's set of texture coordinates set
+// before the maps reading it sample them, the alpha its surface is cut out by among
+// them. NoUVTransform leaves them as they are.
+func (m *BlinnPhongMaterial) SetUVTransform(set UVSet, transform UVTransform) {
+	m.uvTransforms[set] = transform
+	m.dirty()
+}
+
 // AlphaCutoff is the alpha below which the material has no surface; 0, the default,
 // keeps all of it.
 func (m *BlinnPhongMaterial) AlphaCutoff() float32 {
@@ -229,5 +276,5 @@ func (m *BlinnPhongMaterial) SetAlphaCutoff(cutoff float32) {
 // AlphaMask implements Masked: the material cuts its surface out by its colour's alpha
 // once it has a cut-off.
 func (m *BlinnPhongMaterial) AlphaMask() AlphaMask {
-	return AlphaMask{Map: m.colorMap, Sampler: m.colorSampler, Alpha: m.color[3], Cutoff: m.alphaCutoff}
+	return AlphaMask{Map: m.colorMap, Sampler: m.colorSampler, UV: m.ColorMapUV(), Alpha: m.color[3], Cutoff: m.alphaCutoff}
 }

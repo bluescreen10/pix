@@ -88,6 +88,16 @@ func (c *OrbitControls) SetTarget(target glm.Vec3f) {
 	c.desiredTarget = target
 }
 
+// ResetTarget points the controls at target at once, rather than easing there as
+// SetTarget does. The camera stays where it is, and orbits at its distance from target.
+// Use it to place the controls at the start, or after teleporting what they follow: the
+// orbit's radius is measured from the target, so easing from a far-off one, the origin
+// included, swings the camera out to that distance.
+func (c *OrbitControls) ResetTarget(target glm.Vec3f) {
+	c.target = target
+	c.desiredTarget = target
+}
+
 // SetPitch sets the target pitch. Positive pitch looks down from above the target,
 // negative from below; 0 is level. Clamped to ±1.5 rad while orbiting.
 func (c *OrbitControls) SetPitch(pitch float32) {

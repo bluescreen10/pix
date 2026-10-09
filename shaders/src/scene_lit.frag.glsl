@@ -11,37 +11,52 @@
 
 layout(location = 0) out vec4 outColor;
 
-// Material mirrors pix.blinnPhongRecord (64 bytes).
+// Material mirrors materials.BlinnPhongMaterial's record (96 bytes).
 struct Material {
     vec4 color;
-    vec4 emissive;
-    float specular;
+    vec3 emissive;
     float shininess;
+    vec3 specular;
     uint colorMap;
     uint samp;
     uint flags;
-    uint pad0;
-    uint pad1;
-    uint pad2;
+    uint uv2Maps;
+    uint pad0;    UVTransform uv1Transform;
+    UVTransform uv2Transform;
 };
 layout(buffer_reference, scalar) readonly buffer MatBuf { Material v[]; };
 
-vec3 blinnPhong(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float specStrength, float shininess) {
-    float diff = max(dot(N, L), 0.0);
+const float PI = 3.14159265359;
+
+// blinnPhong returns the radiance one light, arriving from L with radiance, leaves the
+// surface with toward the eye: Lambert diffuse and a normalized Blinn-Phong highlight,
+// both scaled by N·L. The highlight's (shininess / 2 + 1) / PI normalization keeps its
+// energy as it narrows, so a shinier surface gets a smaller, brighter highlight rather
+// than a smaller, dimmer one; Schlick's Fresnel on the specular colour brightens it at
+// grazing angles. Diffuse divides by PI, as the PBR material's does, so the same light
+// lights both material classes alike.
+vec3 blinnPhong(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, vec3 specularColor, float shininess) {
+    float NdotL = max(dot(N, L), 0.0);
     vec3 H = normalize(L + V);
-    float spec = pow(max(dot(N, H), 0.0), shininess) * specStrength;
-    // Gate the highlight on the light actually reaching the surface. Without this a
-    // light BEHIND a surface still puts a specular glint on it whenever the half vector
-    // happens to line up, which is wrong on its own account and also means the whole
-    // term cannot be skipped when the light is behind — and skipping it is what lets the
-    // shadow lookup be skipped with it.
-    return radiance * (albedo * diff + vec3(spec) * step(0.0, dot(N, L)));
+    float NdotH = max(dot(N, H), 0.0);
+    float VdotH = max(dot(V, H), 0.0);
+
+    float x = 1.0 - VdotH;
+    float x2 = x * x;
+    vec3 fresnel = specularColor + (1.0 - specularColor) * (x2 * x2 * x);
+    // Blinn-Phong's implicit visibility term is the constant 1/4.
+    float distribution = (shininess * 0.5 + 1.0) / PI * pow(NdotH, shininess);
+    vec3 specular = fresnel * (0.25 * distribution);
+
+    vec3 diffuse = albedo / PI;
+    return radiance * NdotL * (diffuse + specular);
 }
 
 void main() {
     discardCutOut();
     Material m = MatBuf(pc.materials).v[vMat];
-    vec4 base = sampleBase(m.color, m.flags, m.colorMap, m.samp);
+    MaterialUVs uvs = materialUVs(m.uv1Transform, m.uv2Transform);
+    vec4 base = sampleBase(m.color, m.flags, m.colorMap, m.samp, mapUV(uvs, m.uv2Maps, MAT_COLOR_MAP));
     vec3 albedo = base.rgb;
 
     LightBuf L = pc.lights;

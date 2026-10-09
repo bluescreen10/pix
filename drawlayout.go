@@ -55,8 +55,9 @@ type drawLayout struct {
 
 // batch is one indirect command: the drawables sharing raster state and a geometry.
 //
-// Raster state is a material pool, a cull and a blend mode, and whether its materials
-// are masked or transmissive — exactly what selects a pipeline (see fragmentVariant) —
+// Raster state is a material pool, a cull and a blend mode, whether its materials are
+// masked or transmissive, and the optional shader features they use — exactly what
+// selects a pipeline (see fragmentVariant) —
 // so every material in a batch draws through the same one. The material
 // itself is not part of the key: each drawable carries its own record slot.
 type batch struct {
@@ -70,7 +71,13 @@ type batch struct {
 	// materials.Transmissive), and so reads the scene copy as it draws: a frame copies
 	// the scene only when a batch would (see isSceneCopyNeeded).
 	isTransmissive bool
-	geometryID     uint32
+	// isUVTransformed is whether the batch's material moves the mesh's texture
+	// coordinates (see materials.Pool.IsUVTransformedAt).
+	isUVTransformed bool
+	// features is the optional parts of its pool's shader the batch's material uses (see
+	// materials.Featured).
+	features   materials.Features
+	geometryID uint32
 	// mesh is, for a blended batch, the index in the packet's mesh table of the one mesh
 	// it draws: each blended mesh gets batches of its own, so it can take its place in
 	// the back-to-front order (see sortBackToFront). Opaque batches leave it 0.
@@ -90,7 +97,8 @@ type batch struct {
 // hasRasterOf reports whether two batches share raster state, and so draw through the
 // same pipeline.
 func (b *batch) hasRasterOf(other *batch) bool {
-	return b.pool == other.pool && b.cull == other.cull && b.blend == other.blend && b.isMasked == other.isMasked && b.isTransmissive == other.isTransmissive
+	return b.pool == other.pool && b.cull == other.cull && b.blend == other.blend && b.isMasked == other.isMasked &&
+		b.isTransmissive == other.isTransmissive && b.isUVTransformed == other.isUVTransformed && b.features == other.features
 }
 
 // rasterSpans yields each span of adjacent batches sharing raster state, as its first
@@ -243,13 +251,15 @@ func buildDrawables(p *scenes.FramePacket, layout *drawLayout, materialStore *ma
 	layout.lods = append(layout.lods[:0], gpuLOD{})
 
 	type key struct {
-		pool           *materials.Pool
-		cull           materials.CullMode
-		blend          materials.BlendMode
-		isMasked       bool
-		isTransmissive bool
-		geometry       uint32
-		mesh           uint32
+		pool            *materials.Pool
+		cull            materials.CullMode
+		blend           materials.BlendMode
+		isMasked        bool
+		isTransmissive  bool
+		isUVTransformed bool
+		features        materials.Features
+		geometry        uint32
+		mesh            uint32
 	}
 	batchOf := make(map[key]uint32)
 
@@ -279,12 +289,14 @@ func buildDrawables(p *scenes.FramePacket, layout *drawLayout, materialStore *ma
 
 				pool := materialStore.PoolAt(material.PoolID)
 				k := key{
-					pool:           pool,
-					cull:           pool.CullAt(material.Slot),
-					blend:          pool.BlendAt(material.Slot),
-					isMasked:       pool.IsMaskedAt(material.Slot),
-					isTransmissive: pool.IsTransmissiveAt(material.Slot),
-					geometry:       geometry.Slot,
+					pool:            pool,
+					cull:            pool.CullAt(material.Slot),
+					blend:           pool.BlendAt(material.Slot),
+					isMasked:        pool.IsMaskedAt(material.Slot),
+					isTransmissive:  pool.IsTransmissiveAt(material.Slot),
+					isUVTransformed: pool.IsUVTransformedAt(material.Slot),
+					features:        pool.FeaturesAt(material.Slot),
+					geometry:        geometry.Slot,
 				}
 				// A blended mesh is drawn on its own, so that it can be drawn in its
 				// place back to front; opaque meshes share batches freely.
@@ -296,14 +308,16 @@ func buildDrawables(p *scenes.FramePacket, layout *drawLayout, materialStore *ma
 					batchID = uint32(len(layout.batches))
 					batchOf[k] = batchID
 					layout.batches = append(layout.batches, batch{
-						pool:           k.pool,
-						cull:           k.cull,
-						blend:          k.blend,
-						isMasked:       k.isMasked,
-						isTransmissive: k.isTransmissive,
-						geometryID:     k.geometry,
-						mesh:           k.mesh,
-						poolRevision:   pool.RasterRevision(),
+						pool:            k.pool,
+						cull:            k.cull,
+						blend:           k.blend,
+						isMasked:        k.isMasked,
+						isTransmissive:  k.isTransmissive,
+						isUVTransformed: k.isUVTransformed,
+						features:        k.features,
+						geometryID:      k.geometry,
+						mesh:            k.mesh,
+						poolRevision:    pool.RasterRevision(),
 					})
 				}
 				layout.batches[batchID].instanceCount++
@@ -371,7 +385,13 @@ func orderBatches(layout *drawLayout, geometryStore *geometries.Store) {
 		if x.isMasked != y.isMasked {
 			return !x.isMasked
 		}
-		return !x.isTransmissive && y.isTransmissive
+		if x.isTransmissive != y.isTransmissive {
+			return !x.isTransmissive
+		}
+		if x.isUVTransformed != y.isUVTransformed {
+			return !x.isUVTransformed
+		}
+		return x.features < y.features
 	})
 
 	remap := make([]uint32, len(layout.batches))

@@ -28,6 +28,11 @@ type BasicMaterial struct {
 	colorMap     textures.Texture
 	colorSampler uint32
 
+	// uvTransforms moves each set of the mesh's texture coordinates before the maps
+	// reading it are sampled (see SetUVTransform); uv2Maps flags the maps that read UV2.
+	uvTransforms [2]UVTransform
+	uv2Maps      uint32
+
 	// alphaCutoff makes the material masked: where its colour's alpha falls below it,
 	// there is no surface (see Masked). 0 keeps every texel.
 	alphaCutoff float32
@@ -36,13 +41,13 @@ type BasicMaterial struct {
 // NewBasicMaterial creates an unlit material with an unbound color map.
 func NewBasicMaterial(store *Store) *BasicMaterial {
 	st := store.Pool(Shader{Fragment: shaders.BasicFragment}, "Basic Material")
-	m := &BasicMaterial{color: colors.RGBA32F{1, 1, 1, 1}, colorSampler: store.DefaultSampler()}
+	m := &BasicMaterial{color: colors.RGBA32F{1, 1, 1, 1}, colorSampler: store.DefaultSampler(), uvTransforms: [2]UVTransform{NoUVTransform, NoUVTransform}}
 	m.pool = st
 	m.ref = st.Create(m)
 	return m
 }
 
-// Bytes implements Instance: the 48-byte record matching the Material struct
+// Bytes implements Instance: the 80-byte record matching the Material struct
 // in shaders/src/scene_basic.frag.glsl. Field order and padding here ARE the GPU
 // layout — changing either without changing the shader silently misreads every
 // material.
@@ -54,13 +59,16 @@ func (m *BasicMaterial) Bytes() []byte {
 		colorMap     uint32
 		colorSampler uint32
 		flags        uint32
-		_            uint32
+		uv2Maps      uint32
+		uvTransforms [2]UVTransform
 	}{
 		color:        m.color,
 		emissive:     m.emissive,
 		colorMap:     MapIndex(m.colorMap),
 		colorSampler: m.colorSampler,
 		flags:        MapFlag(m.colorMap, MatColorMap),
+		uv2Maps:      m.uv2Maps,
+		uvTransforms: m.uvTransforms,
 	}
 	return unsafe.Slice((*byte)(unsafe.Pointer(&rec)), unsafe.Sizeof(rec))
 }
@@ -118,6 +126,18 @@ func (m *BasicMaterial) ColorMapSampler() uint32 {
 
 func (m *BasicMaterial) SetColorMapSampler(sampler uint32) {
 	m.colorSampler = sampler
+	m.dirty()
+}
+
+// ColorMapUV is the set of texture coordinates the colour map reads.
+func (m *BasicMaterial) ColorMapUV() UVSet {
+	return uvSetOf(m.uv2Maps, MatColorMap)
+}
+
+// SetColorMapUV sets which of the mesh's sets of texture coordinates the colour map reads:
+// UV1, the default, or UV2.
+func (m *BasicMaterial) SetColorMapUV(set UVSet) {
+	m.uv2Maps = withUVSet(m.uv2Maps, MatColorMap, set)
 	m.dirty()
 }
 
@@ -188,6 +208,20 @@ func (m *BasicMaterial) ID() ID {
 	return m.pool.IDOf(m.ref)
 }
 
+// UVTransform is how the material moves the mesh's set of texture coordinates set
+// before the maps reading it sample them (see UVTransform).
+func (m *BasicMaterial) UVTransform(set UVSet) UVTransform {
+	return m.uvTransforms[set]
+}
+
+// SetUVTransform sets how the material moves the mesh's set of texture coordinates set
+// before the maps reading it sample them, the alpha its surface is cut out by among
+// them. NoUVTransform leaves them as they are.
+func (m *BasicMaterial) SetUVTransform(set UVSet, transform UVTransform) {
+	m.uvTransforms[set] = transform
+	m.dirty()
+}
+
 // AlphaCutoff is the alpha below which the material has no surface; 0, the default,
 // keeps all of it.
 func (m *BasicMaterial) AlphaCutoff() float32 {
@@ -206,5 +240,5 @@ func (m *BasicMaterial) SetAlphaCutoff(cutoff float32) {
 // AlphaMask implements Masked: the material cuts its surface out by its colour's alpha
 // once it has a cut-off.
 func (m *BasicMaterial) AlphaMask() AlphaMask {
-	return AlphaMask{Map: m.colorMap, Sampler: m.colorSampler, Alpha: m.color[3], Cutoff: m.alphaCutoff}
+	return AlphaMask{Map: m.colorMap, Sampler: m.colorSampler, UV: m.ColorMapUV(), Alpha: m.color[3], Cutoff: m.alphaCutoff}
 }

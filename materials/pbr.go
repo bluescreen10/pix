@@ -1,12 +1,24 @@
 package materials
 
 import (
+	"math"
 	"unsafe"
 
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/ref"
 	"github.com/bluescreen10/pix/shaders"
 	"github.com/bluescreen10/pix/textures"
+)
+
+// The optional parts of the PBR shader (see Features).
+const (
+	// FeatureClearcoat shades a clear coat over the surface (see SetClearcoat).
+	FeatureClearcoat Features = 1 << iota
+	// FeatureSheen shades a sheen over the surface (see SetSheenColor).
+	FeatureSheen
+	// FeatureAnisotropy stretches the surface's highlights along one direction (see
+	// SetAnisotropy).
+	FeatureAnisotropy
 )
 
 // PBRMaterial is a metallic-roughness physically-based material (Cook-Torrance) with
@@ -58,6 +70,45 @@ type PBRMaterial struct {
 	occlusionMap      textures.Texture
 	occlusionSampler  uint32
 
+	// How much a dielectric reflects, beside what its index of refraction says
+	// (KHR_materials_specular; see SetSpecularIntensity and SetSpecularColor).
+	specularIntensity        float32
+	specularIntensityMap     textures.Texture
+	specularIntensitySampler uint32
+	specularColor            colors.RGB32F
+	specularColorMap         textures.Texture
+	specularColorSampler     uint32
+
+	// A clear coat over the surface (KHR_materials_clearcoat; see SetClearcoat).
+	clearcoat                 float32
+	clearcoatMap              textures.Texture
+	clearcoatSampler          uint32
+	clearcoatRoughness        float32
+	clearcoatRoughnessMap     textures.Texture
+	clearcoatRoughnessSampler uint32
+	clearcoatNormalMap        textures.Texture
+	clearcoatNormalSampler    uint32
+
+	// A sheen over the surface (KHR_materials_sheen; see SetSheenColor).
+	sheenColor            colors.RGB32F
+	sheenColorMap         textures.Texture
+	sheenColorSampler     uint32
+	sheenRoughness        float32
+	sheenRoughnessMap     textures.Texture
+	sheenRoughnessSampler uint32
+
+	// How far, and along which direction, highlights stretch (KHR_materials_anisotropy;
+	// see SetAnisotropy).
+	anisotropy         float32
+	anisotropyRotation float32
+	anisotropyMap      textures.Texture
+	anisotropySampler  uint32
+
+	// uvTransforms moves each set of the mesh's texture coordinates before the maps
+	// reading it are sampled (see SetUVTransform); uv2Maps flags the maps that read UV2.
+	uvTransforms [2]UVTransform
+	uv2Maps      uint32
+
 	// alphaCutoff makes the material masked: where its colour's alpha falls below it,
 	// there is no surface (see Masked). 0 keeps every texel.
 	alphaCutoff float32
@@ -82,14 +133,19 @@ func NewPBRMaterial(store *Store) *PBRMaterial {
 		ior: 1.5, attenuationColor: colors.RGB32F{1, 1, 1},
 		colorSampler: sampler, normalSampler: sampler, metallicSampler: sampler,
 		roughnessSampler: sampler, transmissionSampler: sampler, occlusionSampler: sampler,
-		emissiveSampler: sampler,
+		emissiveSampler: sampler, uvTransforms: [2]UVTransform{NoUVTransform, NoUVTransform},
+		specularIntensity: 1, specularColor: colors.RGB32F{1, 1, 1},
+		specularIntensitySampler: sampler, specularColorSampler: sampler,
+		clearcoatSampler: sampler, clearcoatRoughnessSampler: sampler, clearcoatNormalSampler: sampler,
+		sheenColorSampler: sampler, sheenRoughnessSampler: sampler,
+		anisotropySampler: sampler,
 	}
 	m.pool = st
 	m.ref = st.Create(m)
 	return m
 }
 
-// Bytes implements Instance: the 132-byte record matching the Material struct
+// Bytes implements Instance: the 284-byte record matching the Material struct
 // in shaders/src/scene_pbr.frag.glsl. Field order and padding here ARE the GPU layout —
 // changing either without changing the shader silently misreads every material.
 func (m *PBRMaterial) Bytes() []byte {
@@ -120,6 +176,36 @@ func (m *PBRMaterial) Bytes() []byte {
 		attenuationColor    colors.RGB32F
 		emissiveMap         uint32
 		emissiveSampler     uint32
+		uv2Maps             uint32
+
+		dielectricSpecular       [4]float32
+		specularIntensityMap     uint32
+		specularIntensitySampler uint32
+		specularColorMap         uint32
+		specularColorSampler     uint32
+
+		clearcoat                 float32
+		clearcoatRoughness        float32
+		clearcoatMap              uint32
+		clearcoatSampler          uint32
+		clearcoatRoughnessMap     uint32
+		clearcoatRoughnessSampler uint32
+		clearcoatNormalMap        uint32
+		clearcoatNormalSampler    uint32
+
+		sheenColor            colors.RGB32F
+		sheenRoughness        float32
+		sheenColorMap         uint32
+		sheenColorSampler     uint32
+		sheenRoughnessMap     uint32
+		sheenRoughnessSampler uint32
+
+		anisotropy          float32
+		anisotropyDirection [2]float32
+		anisotropyMap       uint32
+		anisotropySampler   uint32
+
+		uvTransforms [2]UVTransform
 	}{
 		color:        m.color,
 		emissive:     m.emissive,
@@ -129,7 +215,12 @@ func (m *PBRMaterial) Bytes() []byte {
 		flags: MapFlag(m.colorMap, MatColorMap) | MapFlag(m.normalMap, MatNormalMap) |
 			MapFlag(m.metallicMap, MatMetalMap) | MapFlag(m.roughnessMap, MatRoughMap) |
 			MapFlag(m.transmissionMap, MatTransMap) | MapFlag(m.occlusionMap, MatOcclusionMap) |
-			MapFlag(m.emissiveMap, MatEmissiveMap) | ignoresAlphaFlag(m.ignoresAlpha),
+			MapFlag(m.emissiveMap, MatEmissiveMap) | ignoresAlphaFlag(m.ignoresAlpha) |
+			MapFlag(m.specularIntensityMap, MatSpecularIntensityMap) |
+			MapFlag(m.specularColorMap, MatSpecularColorMap) | MapFlag(m.clearcoatMap, MatClearcoatMap) |
+			MapFlag(m.clearcoatRoughnessMap, MatClearcoatRoughnessMap) |
+			MapFlag(m.clearcoatNormalMap, MatClearcoatNormalMap) | MapFlag(m.sheenColorMap, MatSheenColorMap) |
+			MapFlag(m.sheenRoughnessMap, MatSheenRoughnessMap) | MapFlag(m.anisotropyMap, MatAnisotropyMap),
 		colorMap: MapIndex(m.colorMap), colorSampler: m.colorSampler,
 		normalMap: MapIndex(m.normalMap), normalSampler: m.normalSampler,
 		metallicMap: MapIndex(m.metallicMap), metallicSampler: m.metallicSampler,
@@ -140,6 +231,28 @@ func (m *PBRMaterial) Bytes() []byte {
 		ior: m.ior, thickness: m.thickness,
 		attenuationDistance: m.attenuationDistance, attenuationColor: m.attenuationColor,
 		emissiveMap: MapIndex(m.emissiveMap), emissiveSampler: m.emissiveSampler,
+		uv2Maps: m.uv2Maps,
+
+		dielectricSpecular:   m.dielectricSpecular(),
+		specularIntensityMap: MapIndex(m.specularIntensityMap), specularIntensitySampler: m.specularIntensitySampler,
+		specularColorMap: MapIndex(m.specularColorMap), specularColorSampler: m.specularColorSampler,
+
+		clearcoat:          m.clearcoat,
+		clearcoatRoughness: m.clearcoatRoughness,
+		clearcoatMap:       MapIndex(m.clearcoatMap), clearcoatSampler: m.clearcoatSampler,
+		clearcoatRoughnessMap: MapIndex(m.clearcoatRoughnessMap), clearcoatRoughnessSampler: m.clearcoatRoughnessSampler,
+		clearcoatNormalMap: MapIndex(m.clearcoatNormalMap), clearcoatNormalSampler: m.clearcoatNormalSampler,
+
+		sheenColor:     m.sheenColor,
+		sheenRoughness: m.sheenRoughness,
+		sheenColorMap:  MapIndex(m.sheenColorMap), sheenColorSampler: m.sheenColorSampler,
+		sheenRoughnessMap: MapIndex(m.sheenRoughnessMap), sheenRoughnessSampler: m.sheenRoughnessSampler,
+
+		anisotropy:          m.anisotropy,
+		anisotropyDirection: anisotropyDirection(m.anisotropyRotation),
+		anisotropyMap:       MapIndex(m.anisotropyMap), anisotropySampler: m.anisotropySampler,
+
+		uvTransforms: m.uvTransforms,
 	}
 	return unsafe.Slice((*byte)(unsafe.Pointer(&rec)), unsafe.Sizeof(rec))
 }
@@ -153,6 +266,37 @@ func (m *PBRMaterial) Dispose() {
 	m.transmissionMap.Release()
 	m.occlusionMap.Release()
 	m.emissiveMap.Release()
+	m.specularIntensityMap.Release()
+	m.specularColorMap.Release()
+	m.clearcoatMap.Release()
+	m.clearcoatRoughnessMap.Release()
+	m.clearcoatNormalMap.Release()
+	m.sheenColorMap.Release()
+	m.sheenRoughnessMap.Release()
+	m.anisotropyMap.Release()
+}
+
+// dielectricSpecular is what the surface reflects where it is not metal, before its
+// specular maps: head-on, in its first three, by its index of refraction (0.04 for the
+// usual 1.5) tinted by its specular colour, and at a grazing angle, in its fourth, its
+// specular intensity — which scales the head-on reflectance too (KHR_materials_ior and
+// KHR_materials_specular). It depends on nothing that varies across the surface, so it
+// is worked out here, once, rather than per fragment.
+func (m *PBRMaterial) dielectricSpecular() [4]float32 {
+	ratio := (m.ior - 1) / (m.ior + 1)
+	var specular [4]float32
+	for i, c := range m.specularColor {
+		specular[i] = min(ratio*ratio*c, 1) * m.specularIntensity
+	}
+	specular[3] = m.specularIntensity
+	return specular
+}
+
+// anisotropyDirection is the rotation's cosine and sine, as the shader turns the
+// direction of anisotropy by them: worked out here once rather than per fragment.
+func anisotropyDirection(rotation float32) [2]float32 {
+	sin, cos := math.Sincos(float64(rotation))
+	return [2]float32{float32(cos), float32(sin)}
 }
 
 // dirty marks the record for re-upload in the next Sync. Every setter must call it;
@@ -299,6 +443,421 @@ func (m *PBRMaterial) SetEmissiveMapSampler(sampler uint32) {
 	m.dirty()
 }
 
+// EmissiveMapUV is the set of texture coordinates the emissive map reads.
+func (m *PBRMaterial) EmissiveMapUV() UVSet {
+	return uvSetOf(m.uv2Maps, MatEmissiveMap)
+}
+
+// SetEmissiveMapUV sets which of the mesh's sets of texture coordinates the emissive map reads:
+// UV1, the default, or UV2.
+func (m *PBRMaterial) SetEmissiveMapUV(set UVSet) {
+	m.uv2Maps = withUVSet(m.uv2Maps, MatEmissiveMap, set)
+	m.dirty()
+}
+
+// SpecularIntensity is how much of its specular reflection a dielectric keeps (see
+// SetSpecularIntensity).
+func (m *PBRMaterial) SpecularIntensity() float32 {
+	return m.specularIntensity
+}
+
+// SetSpecularIntensity scales how much a dielectric reflects, at every angle: 1, the
+// default, reflects what its index of refraction says, 0 nothing — a surface with no
+// highlight and no reflection, all diffuse. What it does not reflect it scatters
+// diffusely. It does not affect metal (KHR_materials_specular's specularFactor).
+func (m *PBRMaterial) SetSpecularIntensity(intensity float32) {
+	m.specularIntensity = intensity
+	m.dirty()
+}
+
+// SpecularIntensityMap returns the bound specular intensity map.
+func (m *PBRMaterial) SpecularIntensityMap() textures.Texture {
+	return m.specularIntensityMap
+}
+
+// SetSpecularIntensityMap binds a map whose ALPHA channel scales SpecularIntensity per
+// texel (glTF's specularTexture). The material takes its own reference.
+func (m *PBRMaterial) SetSpecularIntensityMap(texture textures.Texture) {
+	newRef := texture.Copy()
+	m.specularIntensityMap.Release()
+	m.specularIntensityMap = newRef
+	m.dirty()
+}
+
+// SetSpecularIntensityMapSampler sets the heap index of the sampler used for the
+// specular intensity map.
+func (m *PBRMaterial) SetSpecularIntensityMapSampler(sampler uint32) {
+	m.specularIntensitySampler = sampler
+	m.dirty()
+}
+
+// SpecularIntensityMapUV is the set of texture coordinates the specular intensity map reads.
+func (m *PBRMaterial) SpecularIntensityMapUV() UVSet {
+	return uvSetOf(m.uv2Maps, MatSpecularIntensityMap)
+}
+
+// SetSpecularIntensityMapUV sets which of the mesh's sets of texture coordinates the specular intensity map reads:
+// UV1, the default, or UV2.
+func (m *PBRMaterial) SetSpecularIntensityMapUV(set UVSet) {
+	m.uv2Maps = withUVSet(m.uv2Maps, MatSpecularIntensityMap, set)
+	m.dirty()
+}
+
+// SpecularColor tints a dielectric's reflection seen head-on (see SetSpecularColor).
+func (m *PBRMaterial) SpecularColor() colors.RGB32F {
+	return m.specularColor
+}
+
+// SetSpecularColor tints what a dielectric reflects seen head-on; toward grazing angles
+// its reflection turns white, as every surface's does. White, the default, leaves it
+// untinted. It does not affect metal, whose reflection is its colour
+// (KHR_materials_specular's specularColorFactor).
+func (m *PBRMaterial) SetSpecularColor(color colors.RGB32F) {
+	m.specularColor = color
+	m.dirty()
+}
+
+// SpecularColorMap returns the bound specular colour map.
+func (m *PBRMaterial) SpecularColorMap() textures.Texture {
+	return m.specularColorMap
+}
+
+// SetSpecularColorMap binds a map, in sRGB colour, that multiplies SpecularColor per
+// texel (glTF's specularColorTexture). The material takes its own reference.
+func (m *PBRMaterial) SetSpecularColorMap(texture textures.Texture) {
+	newRef := texture.Copy()
+	m.specularColorMap.Release()
+	m.specularColorMap = newRef
+	m.dirty()
+}
+
+// SetSpecularColorMapSampler sets the heap index of the sampler used for the specular
+// colour map.
+func (m *PBRMaterial) SetSpecularColorMapSampler(sampler uint32) {
+	m.specularColorSampler = sampler
+	m.dirty()
+}
+
+// SpecularColorMapUV is the set of texture coordinates the specular colour map reads.
+func (m *PBRMaterial) SpecularColorMapUV() UVSet {
+	return uvSetOf(m.uv2Maps, MatSpecularColorMap)
+}
+
+// SetSpecularColorMapUV sets which of the mesh's sets of texture coordinates the specular colour map reads:
+// UV1, the default, or UV2.
+func (m *PBRMaterial) SetSpecularColorMapUV(set UVSet) {
+	m.uv2Maps = withUVSet(m.uv2Maps, MatSpecularColorMap, set)
+	m.dirty()
+}
+
+// Clearcoat is how much of a clear lacquer covers the surface (see SetClearcoat).
+func (m *PBRMaterial) Clearcoat() float32 {
+	return m.clearcoat
+}
+
+// SetClearcoat covers the surface with a clear, thin, reflective layer — car paint,
+// varnished wood, a lacquered box: 0, the default, none, 1 a whole coat. The coat has
+// its own roughness and normal (see SetClearcoatRoughness and SetClearcoatNormalMap),
+// reflects like a dielectric of index 1.5, and what it reflects does not reach the
+// surface under it (KHR_materials_clearcoat's clearcoatFactor).
+//
+// Shading the coat is a second specular reflection for every light, which the
+// material's pipeline compiles in only while some material drawn with it has a coat
+// (see FeatureClearcoat).
+func (m *PBRMaterial) SetClearcoat(clearcoat float32) {
+	m.clearcoat = clearcoat
+	m.dirty()
+}
+
+// ClearcoatRoughness is how rough the clear coat is (see SetClearcoatRoughness).
+func (m *PBRMaterial) ClearcoatRoughness() float32 {
+	return m.clearcoatRoughness
+}
+
+// SetClearcoatRoughness sets how rough the clear coat is, from 0, a mirror — the
+// default — to 1 (KHR_materials_clearcoat's clearcoatRoughnessFactor).
+func (m *PBRMaterial) SetClearcoatRoughness(roughness float32) {
+	m.clearcoatRoughness = roughness
+	m.dirty()
+}
+
+// ClearcoatMap returns the bound clear coat map.
+func (m *PBRMaterial) ClearcoatMap() textures.Texture {
+	return m.clearcoatMap
+}
+
+// SetClearcoatMap binds a map whose RED channel scales Clearcoat per texel (glTF's clearcoatTexture). The material takes its own reference.
+func (m *PBRMaterial) SetClearcoatMap(texture textures.Texture) {
+	newRef := texture.Copy()
+	m.clearcoatMap.Release()
+	m.clearcoatMap = newRef
+	m.dirty()
+}
+
+// SetClearcoatMapSampler sets the heap index of the sampler used for the clear coat map.
+func (m *PBRMaterial) SetClearcoatMapSampler(sampler uint32) {
+	m.clearcoatSampler = sampler
+	m.dirty()
+}
+
+// ClearcoatMapUV is the set of texture coordinates the clear coat map reads.
+func (m *PBRMaterial) ClearcoatMapUV() UVSet {
+	return uvSetOf(m.uv2Maps, MatClearcoatMap)
+}
+
+// SetClearcoatMapUV sets which of the mesh's sets of texture coordinates the clear coat map reads:
+// UV1, the default, or UV2.
+func (m *PBRMaterial) SetClearcoatMapUV(set UVSet) {
+	m.uv2Maps = withUVSet(m.uv2Maps, MatClearcoatMap, set)
+	m.dirty()
+}
+
+// ClearcoatRoughnessMap returns the bound clear coat roughness map.
+func (m *PBRMaterial) ClearcoatRoughnessMap() textures.Texture {
+	return m.clearcoatRoughnessMap
+}
+
+// SetClearcoatRoughnessMap binds a map whose GREEN channel scales ClearcoatRoughness per texel (glTF's
+// clearcoatRoughnessTexture). The material takes its own reference.
+func (m *PBRMaterial) SetClearcoatRoughnessMap(texture textures.Texture) {
+	newRef := texture.Copy()
+	m.clearcoatRoughnessMap.Release()
+	m.clearcoatRoughnessMap = newRef
+	m.dirty()
+}
+
+// SetClearcoatRoughnessMapSampler sets the heap index of the sampler used for the clear coat roughness map.
+func (m *PBRMaterial) SetClearcoatRoughnessMapSampler(sampler uint32) {
+	m.clearcoatRoughnessSampler = sampler
+	m.dirty()
+}
+
+// ClearcoatRoughnessMapUV is the set of texture coordinates the clear coat roughness map reads.
+func (m *PBRMaterial) ClearcoatRoughnessMapUV() UVSet {
+	return uvSetOf(m.uv2Maps, MatClearcoatRoughnessMap)
+}
+
+// SetClearcoatRoughnessMapUV sets which of the mesh's sets of texture coordinates the clear coat roughness map reads:
+// UV1, the default, or UV2.
+func (m *PBRMaterial) SetClearcoatRoughnessMapUV(set UVSet) {
+	m.uv2Maps = withUVSet(m.uv2Maps, MatClearcoatRoughnessMap, set)
+	m.dirty()
+}
+
+// ClearcoatNormalMap returns the bound clear coat normal map.
+func (m *PBRMaterial) ClearcoatNormalMap() textures.Texture {
+	return m.clearcoatNormalMap
+}
+
+// SetClearcoatNormalMap binds a tangent-space normal map for the clear coat alone (glTF's
+// clearcoatNormalTexture). Without one the coat is smooth over the surface's own
+// normal map: a lacquer fills the bumps under it. The material takes its own reference.
+func (m *PBRMaterial) SetClearcoatNormalMap(texture textures.Texture) {
+	newRef := texture.Copy()
+	m.clearcoatNormalMap.Release()
+	m.clearcoatNormalMap = newRef
+	m.dirty()
+}
+
+// SetClearcoatNormalMapSampler sets the heap index of the sampler used for the clear coat normal map.
+func (m *PBRMaterial) SetClearcoatNormalMapSampler(sampler uint32) {
+	m.clearcoatNormalSampler = sampler
+	m.dirty()
+}
+
+// ClearcoatNormalMapUV is the set of texture coordinates the clear coat normal map reads.
+func (m *PBRMaterial) ClearcoatNormalMapUV() UVSet {
+	return uvSetOf(m.uv2Maps, MatClearcoatNormalMap)
+}
+
+// SetClearcoatNormalMapUV sets which of the mesh's sets of texture coordinates the clear coat normal map reads:
+// UV1, the default, or UV2.
+func (m *PBRMaterial) SetClearcoatNormalMapUV(set UVSet) {
+	m.uv2Maps = withUVSet(m.uv2Maps, MatClearcoatNormalMap, set)
+	m.dirty()
+}
+
+// SheenColor is the colour of the sheen over the surface (see SetSheenColor).
+func (m *PBRMaterial) SheenColor() colors.RGB32F {
+	return m.sheenColor
+}
+
+// SetSheenColor gives the surface a sheen of the given colour: the soft glow at grazing
+// angles of cloth and velvet, whose fibres catch the light edge-on. Black, the default,
+// is none (KHR_materials_sheen's sheenColorFactor). What the sheen reflects does not
+// reach the surface under it.
+//
+// Shading the sheen is a further reflection for every light, which the material's
+// pipeline compiles in only while some material drawn with it has one (see
+// FeatureSheen).
+func (m *PBRMaterial) SetSheenColor(color colors.RGB32F) {
+	m.sheenColor = color
+	m.dirty()
+}
+
+// SheenRoughness is how far the sheen spreads (see SetSheenRoughness).
+func (m *PBRMaterial) SheenRoughness() float32 {
+	return m.sheenRoughness
+}
+
+// SetSheenRoughness sets how far the sheen spreads from the grazing angles: 0, the
+// default, a thin rim, 1 a soft glow over most of the surface
+// (KHR_materials_sheen's sheenRoughnessFactor).
+func (m *PBRMaterial) SetSheenRoughness(roughness float32) {
+	m.sheenRoughness = roughness
+	m.dirty()
+}
+
+// SheenColorMap returns the bound sheen colour map.
+func (m *PBRMaterial) SheenColorMap() textures.Texture {
+	return m.sheenColorMap
+}
+
+// SetSheenColorMap binds a map, in sRGB colour, that multiplies SheenColor per texel (glTF's
+// sheenColorTexture). The material takes its own reference.
+func (m *PBRMaterial) SetSheenColorMap(texture textures.Texture) {
+	newRef := texture.Copy()
+	m.sheenColorMap.Release()
+	m.sheenColorMap = newRef
+	m.dirty()
+}
+
+// SetSheenColorMapSampler sets the heap index of the sampler used for the sheen colour map.
+func (m *PBRMaterial) SetSheenColorMapSampler(sampler uint32) {
+	m.sheenColorSampler = sampler
+	m.dirty()
+}
+
+// SheenColorMapUV is the set of texture coordinates the sheen colour map reads.
+func (m *PBRMaterial) SheenColorMapUV() UVSet {
+	return uvSetOf(m.uv2Maps, MatSheenColorMap)
+}
+
+// SetSheenColorMapUV sets which of the mesh's sets of texture coordinates the sheen colour map reads:
+// UV1, the default, or UV2.
+func (m *PBRMaterial) SetSheenColorMapUV(set UVSet) {
+	m.uv2Maps = withUVSet(m.uv2Maps, MatSheenColorMap, set)
+	m.dirty()
+}
+
+// SheenRoughnessMap returns the bound sheen roughness map.
+func (m *PBRMaterial) SheenRoughnessMap() textures.Texture {
+	return m.sheenRoughnessMap
+}
+
+// SetSheenRoughnessMap binds a map whose ALPHA channel scales SheenRoughness per texel (glTF's
+// sheenRoughnessTexture). The material takes its own reference.
+func (m *PBRMaterial) SetSheenRoughnessMap(texture textures.Texture) {
+	newRef := texture.Copy()
+	m.sheenRoughnessMap.Release()
+	m.sheenRoughnessMap = newRef
+	m.dirty()
+}
+
+// SetSheenRoughnessMapSampler sets the heap index of the sampler used for the sheen roughness map.
+func (m *PBRMaterial) SetSheenRoughnessMapSampler(sampler uint32) {
+	m.sheenRoughnessSampler = sampler
+	m.dirty()
+}
+
+// SheenRoughnessMapUV is the set of texture coordinates the sheen roughness map reads.
+func (m *PBRMaterial) SheenRoughnessMapUV() UVSet {
+	return uvSetOf(m.uv2Maps, MatSheenRoughnessMap)
+}
+
+// SetSheenRoughnessMapUV sets which of the mesh's sets of texture coordinates the sheen roughness map reads:
+// UV1, the default, or UV2.
+func (m *PBRMaterial) SetSheenRoughnessMapUV(set UVSet) {
+	m.uv2Maps = withUVSet(m.uv2Maps, MatSheenRoughnessMap, set)
+	m.dirty()
+}
+
+// Anisotropy is how much the surface's highlights stretch along one direction (see
+// SetAnisotropy).
+func (m *PBRMaterial) Anisotropy() float32 {
+	return m.anisotropy
+}
+
+// SetAnisotropy stretches the surface's highlights and reflections along one direction
+// across it, as brushed metal's stretch across its brushing and hair's along its
+// strands: 0, the default, not at all, 1 as far as they go. They stretch along the
+// texture's u direction, turned by AnisotropyRotation (KHR_materials_anisotropy's
+// anisotropyStrength).
+//
+// The stretched reflection is a costlier one for every light, which the material's
+// pipeline compiles in only while some material drawn with it has one (see
+// FeatureAnisotropy).
+func (m *PBRMaterial) SetAnisotropy(anisotropy float32) {
+	m.anisotropy = anisotropy
+	m.dirty()
+}
+
+// AnisotropyRotation is the angle, in radians, from the texture's u direction to the
+// one highlights stretch along (see SetAnisotropyRotation).
+func (m *PBRMaterial) AnisotropyRotation() float32 {
+	return m.anisotropyRotation
+}
+
+// SetAnisotropyRotation turns the direction highlights stretch along from the texture's
+// u direction toward its v direction by rotation radians (KHR_materials_anisotropy's
+// anisotropyRotation).
+func (m *PBRMaterial) SetAnisotropyRotation(rotation float32) {
+	m.anisotropyRotation = rotation
+	m.dirty()
+}
+
+// AnisotropyMap returns the bound anisotropy map.
+func (m *PBRMaterial) AnisotropyMap() textures.Texture {
+	return m.anisotropyMap
+}
+
+// SetAnisotropyMap binds a map of the direction highlights stretch along, texel by
+// texel, in its RED and GREEN channels — a direction in the texture's own u and v,
+// mapped from [-1, 1] to [0, 1], which AnisotropyRotation then turns — and in its BLUE
+// channel what scales Anisotropy (glTF's anisotropyTexture). Upload it as linear data.
+// The material takes its own reference.
+func (m *PBRMaterial) SetAnisotropyMap(texture textures.Texture) {
+	newRef := texture.Copy()
+	m.anisotropyMap.Release()
+	m.anisotropyMap = newRef
+	m.dirty()
+}
+
+// SetAnisotropyMapSampler sets the heap index of the sampler used for the anisotropy
+// map.
+func (m *PBRMaterial) SetAnisotropyMapSampler(sampler uint32) {
+	m.anisotropySampler = sampler
+	m.dirty()
+}
+
+// AnisotropyMapUV is the set of texture coordinates the anisotropy map reads.
+func (m *PBRMaterial) AnisotropyMapUV() UVSet {
+	return uvSetOf(m.uv2Maps, MatAnisotropyMap)
+}
+
+// SetAnisotropyMapUV sets which of the mesh's sets of texture coordinates the anisotropy map reads:
+// UV1, the default, or UV2.
+func (m *PBRMaterial) SetAnisotropyMapUV(set UVSet) {
+	m.uv2Maps = withUVSet(m.uv2Maps, MatAnisotropyMap, set)
+	m.dirty()
+}
+
+// Features implements Featured: the optional parts of the PBR shader this material
+// uses.
+func (m *PBRMaterial) Features() Features {
+	var features Features
+	if m.clearcoat > 0 {
+		features |= FeatureClearcoat
+	}
+	if m.sheenColor != (colors.RGB32F{}) {
+		features |= FeatureSheen
+	}
+	if m.anisotropy > 0 {
+		features |= FeatureAnisotropy
+	}
+	return features
+}
+
 // The bound textures (or a zero handle).
 func (m *PBRMaterial) ColorMap() textures.Texture {
 	return m.colorMap
@@ -323,6 +882,18 @@ func (m *PBRMaterial) SetColorMapSampler(sampler uint32) {
 	m.dirty()
 }
 
+// ColorMapUV is the set of texture coordinates the colour map reads.
+func (m *PBRMaterial) ColorMapUV() UVSet {
+	return uvSetOf(m.uv2Maps, MatColorMap)
+}
+
+// SetColorMapUV sets which of the mesh's sets of texture coordinates the colour map reads:
+// UV1, the default, or UV2.
+func (m *PBRMaterial) SetColorMapUV(set UVSet) {
+	m.uv2Maps = withUVSet(m.uv2Maps, MatColorMap, set)
+	m.dirty()
+}
+
 func (m *PBRMaterial) NormalMap() textures.Texture {
 	return m.normalMap
 }
@@ -341,6 +912,18 @@ func (m *PBRMaterial) NormalMapSampler() uint32 {
 
 func (m *PBRMaterial) SetNormalMapSampler(sampler uint32) {
 	m.normalSampler = sampler
+	m.dirty()
+}
+
+// NormalMapUV is the set of texture coordinates the normal map reads.
+func (m *PBRMaterial) NormalMapUV() UVSet {
+	return uvSetOf(m.uv2Maps, MatNormalMap)
+}
+
+// SetNormalMapUV sets which of the mesh's sets of texture coordinates the normal map reads:
+// UV1, the default, or UV2.
+func (m *PBRMaterial) SetNormalMapUV(set UVSet) {
+	m.uv2Maps = withUVSet(m.uv2Maps, MatNormalMap, set)
 	m.dirty()
 }
 
@@ -366,6 +949,18 @@ func (m *PBRMaterial) SetMetallicMapSampler(sampler uint32) {
 	m.dirty()
 }
 
+// MetallicMapUV is the set of texture coordinates the metallic map reads.
+func (m *PBRMaterial) MetallicMapUV() UVSet {
+	return uvSetOf(m.uv2Maps, MatMetalMap)
+}
+
+// SetMetallicMapUV sets which of the mesh's sets of texture coordinates the metallic map reads:
+// UV1, the default, or UV2.
+func (m *PBRMaterial) SetMetallicMapUV(set UVSet) {
+	m.uv2Maps = withUVSet(m.uv2Maps, MatMetalMap, set)
+	m.dirty()
+}
+
 func (m *PBRMaterial) RoughnessMap() textures.Texture {
 	return m.roughnessMap
 }
@@ -385,6 +980,18 @@ func (m *PBRMaterial) RoughnessMapSampler() uint32 {
 
 func (m *PBRMaterial) SetRoughnessMapSampler(sampler uint32) {
 	m.roughnessSampler = sampler
+	m.dirty()
+}
+
+// RoughnessMapUV is the set of texture coordinates the roughness map reads.
+func (m *PBRMaterial) RoughnessMapUV() UVSet {
+	return uvSetOf(m.uv2Maps, MatRoughMap)
+}
+
+// SetRoughnessMapUV sets which of the mesh's sets of texture coordinates the roughness map reads:
+// UV1, the default, or UV2.
+func (m *PBRMaterial) SetRoughnessMapUV(set UVSet) {
+	m.uv2Maps = withUVSet(m.uv2Maps, MatRoughMap, set)
 	m.dirty()
 }
 
@@ -408,6 +1015,18 @@ func (m *PBRMaterial) SetTransmissionMap(texture textures.Texture) {
 // transmission map.
 func (m *PBRMaterial) SetTransmissionMapSampler(sampler uint32) {
 	m.transmissionSampler = sampler
+	m.dirty()
+}
+
+// TransmissionMapUV is the set of texture coordinates the transmission map reads.
+func (m *PBRMaterial) TransmissionMapUV() UVSet {
+	return uvSetOf(m.uv2Maps, MatTransMap)
+}
+
+// SetTransmissionMapUV sets which of the mesh's sets of texture coordinates the transmission map reads:
+// UV1, the default, or UV2.
+func (m *PBRMaterial) SetTransmissionMapUV(set UVSet) {
+	m.uv2Maps = withUVSet(m.uv2Maps, MatTransMap, set)
 	m.dirty()
 }
 
@@ -437,6 +1056,18 @@ func (m *PBRMaterial) SetOcclusionMapSampler(sampler uint32) {
 	m.dirty()
 }
 
+// OcclusionMapUV is the set of texture coordinates the occlusion map reads.
+func (m *PBRMaterial) OcclusionMapUV() UVSet {
+	return uvSetOf(m.uv2Maps, MatOcclusionMap)
+}
+
+// SetOcclusionMapUV sets which of the mesh's sets of texture coordinates the occlusion map reads:
+// UV1, the default, or UV2.
+func (m *PBRMaterial) SetOcclusionMapUV(set UVSet) {
+	m.uv2Maps = withUVSet(m.uv2Maps, MatOcclusionMap, set)
+	m.dirty()
+}
+
 // OcclusionStrength is how far the occlusion map darkens: 0 not at all, 1 fully, the
 // default (glTF's occlusionTexture.strength).
 func (m *PBRMaterial) OcclusionStrength() float32 {
@@ -445,6 +1076,20 @@ func (m *PBRMaterial) OcclusionStrength() float32 {
 
 func (m *PBRMaterial) SetOcclusionStrength(strength float32) {
 	m.occlusionStrength = strength
+	m.dirty()
+}
+
+// UVTransform is how the material moves the mesh's set of texture coordinates set
+// before the maps reading it sample them (see UVTransform).
+func (m *PBRMaterial) UVTransform(set UVSet) UVTransform {
+	return m.uvTransforms[set]
+}
+
+// SetUVTransform sets how the material moves the mesh's set of texture coordinates set
+// before the maps reading it sample them, the alpha its surface is cut out by among
+// them. NoUVTransform leaves them as they are.
+func (m *PBRMaterial) SetUVTransform(set UVSet, transform UVTransform) {
+	m.uvTransforms[set] = transform
 	m.dirty()
 }
 
@@ -490,13 +1135,13 @@ func ignoresAlphaFlag(ignores bool) uint32 {
 // AlphaMask implements Masked: the material cuts its surface out by its colour's alpha
 // once it has a cut-off.
 func (m *PBRMaterial) AlphaMask() AlphaMask {
-	return AlphaMask{Map: m.colorMap, Sampler: m.colorSampler, Alpha: m.color[3], Cutoff: m.alphaCutoff}
+	return AlphaMask{Map: m.colorMap, Sampler: m.colorSampler, UV: m.ColorMapUV(), Alpha: m.color[3], Cutoff: m.alphaCutoff}
 }
 
 // TransmissionMask implements Transmissive: the surface lets light through wherever its
 // transmission, times its transmission map, reaches half, and casts no shadow there.
 func (m *PBRMaterial) TransmissionMask() TransmissionMask {
-	return TransmissionMask{Map: m.transmissionMap, Sampler: m.transmissionSampler, Factor: m.transmission}
+	return TransmissionMask{Map: m.transmissionMap, Sampler: m.transmissionSampler, UV: m.TransmissionMapUV(), Factor: m.transmission}
 }
 
 // --- Material ---

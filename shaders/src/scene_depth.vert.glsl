@@ -11,12 +11,10 @@
 // the view's for the prepass.
 //
 // Built twice. Plain, it reads positions alone: the pass writes depth and nothing else,
-// and has no fragment stage. With these defined, it also hands the fragment stage what
-// a masked material is cut out by (see scene_depth_masked.frag and materials.Masked):
-//
-//   USE_UV        the vertex's texture coordinate, from the attribute buffer.
-//   USE_MATERIAL  the drawable's material slot, and its pool's mask table.
-//   USE_MASK      both: everything the masked fragment stage reads.
+// and has no fragment stage. With USE_MASK defined, it also hands the fragment stage
+// what a masked material is cut out by (see scene_depth_masked.frag and
+// materials.Masked): the drawable's material slot, and both sets of its vertex's texture
+// coordinates.
 //
 // The push constants keep their fields in the same order either way, so a define only
 // adds fields: renderer.go's roots match each build.
@@ -73,10 +71,19 @@ layout(push_constant, scalar) uniform PC {
 } pc;
 
 #ifdef USE_MASK
-layout(location = 0) out vec2 vUV;
+layout(location = 0) out vec2 vUV1;
 layout(location = 1) flat out uint vMat;
+layout(location = 2) out vec2 vUV2;
 
 const uint FLAG_UV = 2u;
+const uint FLAG_UV2 = 16u;
+
+// attributeRecordWords is how many 4-byte words one vertex's attribute record takes:
+// 6 for a geometry with a second set of texture coordinates (FLAG_UV2), 4 otherwise
+// (geometries.attributeRecordWords).
+uint attributeRecordWords(uint flags) {
+    return (flags & FLAG_UV2) != 0u ? 6u : 4u;
+}
 #endif
 
 // A depth prepass compares this shader's depth against one written by a DIFFERENT
@@ -102,11 +109,17 @@ void main() {
     vec3 p = vec3(pc.pos.v[pb], pc.pos.v[pb + 1u], pc.pos.v[pb + 2u]);
 
 #ifdef USE_MASK
-    vUV = vec2(0.0);
+    uint ab = g.attributeBase * 4u + vi * attributeRecordWords(g.flags);
+    vec2 uv1 = vec2(0.0);
     if ((g.flags & FLAG_UV) != 0u) {
-        uint ab = g.attributeBase * 4u + vi * 4u;
-        vUV = vec2(uintBitsToFloat(pc.attr.v[ab + 2u]), uintBitsToFloat(pc.attr.v[ab + 3u]));
+        uv1 = vec2(uintBitsToFloat(pc.attr.v[ab + 2u]), uintBitsToFloat(pc.attr.v[ab + 3u]));
     }
+    vec2 uv2 = uv1;
+    if ((g.flags & FLAG_UV2) != 0u) {
+        uv2 = vec2(uintBitsToFloat(pc.attr.v[ab + 4u]), uintBitsToFloat(pc.attr.v[ab + 5u]));
+    }
+    vUV1 = uv1;
+    vUV2 = uv2;
     vMat = d.materialID;
 #endif
 

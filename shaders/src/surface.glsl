@@ -26,6 +26,7 @@ struct Surface {
     vec3 normal;   // world-space, normalized
     vec3 emissive;
     vec4 material; // model-defined; see above
+    vec4 specular; // model-defined, like material: PBR's dielectric reflectance
     uint model;    // shading-model id
 };
 

@@ -18,14 +18,16 @@ struct Material {
     uint colorMap;
     uint samp;
     uint flags;
-    uint pad;
+    uint uv2Maps;    UVTransform uv1Transform;
+    UVTransform uv2Transform;
 };
 layout(buffer_reference, scalar) readonly buffer MatBuf { Material v[]; };
 
 void main() {
     discardCutOut();
     Material m = MatBuf(pc.materials).v[vMat];
-    vec4 base = sampleBase(m.color, m.flags, m.colorMap, m.samp);
+    MaterialUVs uvs = materialUVs(m.uv1Transform, m.uv2Transform);
+    vec4 base = sampleBase(m.color, m.flags, m.colorMap, m.samp, mapUV(uvs, m.uv2Maps, MAT_COLOR_MAP));
     // Unlit, but still fogged: an unlit surface that ignored fog would hang in
     // front of the haze while everything around it receded into it.
     vec3 lit = base.rgb + m.emissive.rgb;

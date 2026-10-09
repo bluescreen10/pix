@@ -142,9 +142,10 @@ func greenAhead(u, v float64) [3]byte {
 // TestEnvironmentReflectionMirrorsAndBlurs: a smooth white metal mirrors the
 // environment: the centre of the sphere shows the green patch straight behind the
 // camera at full strength. A rough one blurs it over the whole hemisphere around its
-// normal, of which the patch is a small part, so the centre keeps less than a tenth of
-// that light, though still green. Merely shrinking the image mip by mip, without the
-// blur, keeps about three times as much.
+// normal, of which the patch is a small part, so the centre keeps about a quarter of
+// what the same metal reflects of an environment green all over, though still green.
+// Merely shrinking the image mip by mip, without the blur, keeps about three times as
+// much.
 func TestEnvironmentReflectionMirrorsAndBlurs(t *testing.T) {
 	var mirror *materials.PBRMaterial
 	r, scene := environmentScene(t, nil, func(r *pix.Renderer) materials.Material {
@@ -166,9 +167,27 @@ func TestEnvironmentReflectionMirrorsAndBlurs(t *testing.T) {
 	mirror.SetRoughness(1)
 	r.Render(scene)
 	rough := pixelAt(r, postSize/2, postSize/2)
-	if rough[1] == 0 || int(rough[1]) >= srgbByte(0.1) {
-		t.Errorf("rough metal centre = %v, want under a tenth of the light the smooth one's %v mirrors, but still green", rough, smooth)
+
+	green := environmentImage(r, 8, 4, uniform([3]byte{0, 255, 0}))
+	allGreen := scenes.NewEnvironment(green)
+	green.Release()
+	defer allGreen.Release()
+	scene.SetEnvironment(allGreen)
+	r.Render(scene)
+	whole := pixelAt(r, postSize/2, postSize/2)
+	if rough[1] == 0 || linearOfByte(rough[1]) >= 0.35*linearOfByte(whole[1]) {
+		t.Errorf("rough metal centre = %v, want under 0.35 of the %v it reflects of an environment green all over, but still green", rough, whole)
 	}
+}
+
+// linearOfByte is the linear light an 8-bit sRGB display target's byte encodes: the
+// inverse of srgbByte.
+func linearOfByte(b byte) float64 {
+	c := float64(b) / 255
+	if c <= 0.04045 {
+		return c / 12.92
+	}
+	return math.Pow((c+0.055)/1.055, 2.4)
 }
 
 // TestEnvironmentRotationTurnsIt: rotating the environment half a turn about the
@@ -372,4 +391,26 @@ func absDiff(a, b int) int {
 		return a - b
 	}
 	return b - a
+}
+
+// TestRoughMetalReflectsTheWholeFurnace: under a uniform grey environment, a white metal
+// reflects all of the grey at any roughness. A single GGX bounce alone loses the light
+// that bounces between microfacets, and the rougher the surface the more: about a third
+// at roughness 1.
+func TestRoughMetalReflectsTheWholeFurnace(t *testing.T) {
+	for _, roughness := range []float32{0.5, 1} {
+		r, scene := environmentScene(t, nil, metal(roughness))
+		grey := environmentImage(r, 8, 4, uniform([3]byte{128, 128, 128}))
+		environment := scenes.NewEnvironment(grey)
+		grey.Release()
+		defer environment.Release()
+		scene.SetEnvironment(environment)
+
+		r.Render(scene)
+
+		want := srgbByte(128.0 / 255)
+		if got := pixelAt(r, postSize/2, postSize/2); !isWithin(got[0], byte(want), 4) {
+			t.Errorf("roughness %v: white metal's centre = %v, want %d: all of the grey environment", roughness, got, want)
+		}
+	}
 }

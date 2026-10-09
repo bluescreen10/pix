@@ -67,15 +67,24 @@ layout(push_constant, scalar) uniform PC {
 } pc;
 
 layout(location = 0) out vec3 vColor;
-layout(location = 1) out vec2 vUV;
+layout(location = 1) out vec2 vUV1;
 layout(location = 2) flat out uint vMat;
 layout(location = 3) out vec3 vWorldPos;
 layout(location = 4) out vec3 vNormal;
 layout(location = 5) flat out uint vFlags;
+layout(location = 6) out vec2 vUV2;
 
 const uint FLAG_NORMAL = 1u;
 const uint FLAG_UV = 2u;
 const uint FLAG_COLOR = 4u;
+const uint FLAG_UV2 = 16u;
+
+// attributeRecordWords is how many 4-byte words one vertex's attribute record takes:
+// 6 for a geometry with a second set of texture coordinates (FLAG_UV2), 4 otherwise
+// (geometries.attributeRecordWords).
+uint attributeRecordWords(uint flags) {
+    return (flags & FLAG_UV2) != 0u ? 6u : 4u;
+}
 
 // A depth prepass compares this shader's depth against one written by a DIFFERENT
 // shader, so the two have to agree bit for bit. Nothing otherwise guarantees that: the
@@ -101,16 +110,25 @@ void main() {
     uint pb = g.positionBase + vi * 3u;
     vec3 p = vec3(pc.pos.v[pb], pc.pos.v[pb + 1u], pc.pos.v[pb + 2u]);
 
-    uint ab = g.attributeBase * 4u + vi * 4u;
+    uint ab = g.attributeBase * 4u + vi * attributeRecordWords(g.flags);
     vColor = vec3(1.0);
     if ((g.flags & FLAG_COLOR) != 0u) {
         uint c = pc.attr.v[ab + 1u];
         vColor = vec3(float(c & 0xFFu), float((c >> 8) & 0xFFu), float((c >> 16) & 0xFFu)) / 255.0;
     }
-    vUV = vec2(0.0);
+    // Both sets of texture coordinates, as the mesh has them: the material moves them, in
+    // its fragment shader (see materials.UVTransform). A geometry without a second set
+    // reads its first in its place.
+    vec2 uv1 = vec2(0.0);
     if ((g.flags & FLAG_UV) != 0u) {
-        vUV = vec2(uintBitsToFloat(pc.attr.v[ab + 2u]), uintBitsToFloat(pc.attr.v[ab + 3u]));
+        uv1 = vec2(uintBitsToFloat(pc.attr.v[ab + 2u]), uintBitsToFloat(pc.attr.v[ab + 3u]));
     }
+    vec2 uv2 = uv1;
+    if ((g.flags & FLAG_UV2) != 0u) {
+        uv2 = vec2(uintBitsToFloat(pc.attr.v[ab + 4u]), uintBitsToFloat(pc.attr.v[ab + 5u]));
+    }
+    vUV1 = uv1;
+    vUV2 = uv2;
 
     // World-space normal: decode glm.Unorm10x3 and remap back to [-1,1] (the
     // inverse of the pack in geometry.go), then turn it as the model turns its surface.

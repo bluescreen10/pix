@@ -13,6 +13,11 @@ const (
 	// AttributeTangent is xyz tangent plus w handedness (±1). Stored for CPU queries
 	// but not uploaded: nothing renders tangents yet.
 	AttributeTangent
+	// AttributeUV2 is a second set of texture coordinates — glTF's TEXCOORD_1 — which a
+	// material's maps may read instead of AttributeUV's (see materials.UVSet): a
+	// lightmap's, or a baked occlusion map's, laid out without the overlaps and repeats
+	// of the first.
+	AttributeUV2
 	attributeCount
 )
 
@@ -41,6 +46,7 @@ var canonicalDataType = [attributeCount]DataType{
 	AttributeSkinIndex:  Uint16x4,
 	AttributeSkinWeight: Float32x4,
 	AttributeTangent:    Float32x4,
+	AttributeUV2:        Float32x2,
 }
 
 // Attribute is one named vertex stream, built with NewAttribute.

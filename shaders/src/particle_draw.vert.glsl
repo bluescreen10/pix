@@ -71,6 +71,14 @@ layout(location = 1) out vec2 vUV;
 layout(location = 2) out vec3 vWorldPos;
 
 const uint FLAG_UV = 2u;
+const uint FLAG_UV2 = 16u;
+
+// attributeRecordWords is how many 4-byte words one vertex's attribute record takes:
+// 6 for a geometry with a second set of texture coordinates (FLAG_UV2), 4 otherwise
+// (geometries.attributeRecordWords).
+uint attributeRecordWords(uint flags) {
+    return (flags & FLAG_UV2) != 0u ? 6u : 4u;
+}
 
 // Standard quaternion-vector rotation (q * v * conj(q)), matching glm.Quat's [x,y,z,w].
 vec3 rotate(vec4 q, vec3 v) {
@@ -93,7 +101,7 @@ void main() {
     uint pb = g.positionBase + vi * 3u;
     vec3 lp = vec3(pc.pos.v[pb], pc.pos.v[pb + 1u], pc.pos.v[pb + 2u]);
 
-    uint ab = g.attributeBase * 4u + vi * 4u;
+    uint ab = g.attributeBase * 4u + vi * attributeRecordWords(g.flags);
     vUV = vec2(0.0);
     if ((g.flags & FLAG_UV) != 0u) {
         vUV = vec2(uintBitsToFloat(pc.attr.v[ab + 2u]), uintBitsToFloat(pc.attr.v[ab + 3u]));

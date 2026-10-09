@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"unsafe"
@@ -405,7 +406,7 @@ func (l *loader) addMesh(parent scenes.Node, nodeIdx int) []scenes.Mesh {
 func (l *loader) buildData(prim primitive) (geometries.GeometryConfig, bool) {
 	var positions, normals []glm.Vec3f
 	var colors []glm.Vec4f
-	var uvs []glm.Vec2f
+	var uvs, uvs2 []glm.Vec2f
 	var joints []glm.Vec4[uint16]
 	var weights []glm.Vec4f
 	var indices []uint32
@@ -420,6 +421,13 @@ func (l *loader) buildData(prim primitive) (geometries.GeometryConfig, bool) {
 			normals = castTo[glm.Vec3f](l.accessorBytes(acc))
 		case "TEXCOORD_0":
 			uvs = castTo[glm.Vec2f](l.accessorBytes(acc))
+		case "TEXCOORD_1":
+			// Only for a material that reads it: exporters write a second set for
+			// lightmaps a scene may never use, and with one every vertex's attribute
+			// record is half as large again, read by every pass that draws it.
+			if prim.Material != nil && *prim.Material < len(l.doc.Materials) && readsUV2(l.doc.Materials[*prim.Material]) {
+				uvs2 = castTo[glm.Vec2f](l.accessorBytes(acc))
+			}
 		case "COLOR_0":
 			if a := l.doc.Accessors[acc]; a.ComponentType == 5126 { // FLOAT only
 				if a.Type == "VEC4" {
@@ -452,6 +460,9 @@ func (l *loader) buildData(prim primitive) (geometries.GeometryConfig, bool) {
 	}
 	if len(uvs) > 0 {
 		attrs = append(attrs, geometries.NewAttribute(geometries.AttributeUV, geometries.Float32x2, uvs))
+	}
+	if len(uvs2) > 0 {
+		attrs = append(attrs, geometries.NewAttribute(geometries.AttributeUV2, geometries.Float32x2, uvs2))
 	}
 	skinned := len(joints) == len(positions) && len(weights) == len(positions) && len(positions) > 0
 	if skinned {
@@ -787,6 +798,22 @@ func (l *loader) materialTextures() []texKey {
 		if gm.Extensions != nil && gm.Extensions.Transmission != nil {
 			add(gm.Extensions.Transmission.TransmissionTexture, textures.Grayscale)
 		}
+		if gm.Extensions != nil && gm.Extensions.Specular != nil {
+			add(gm.Extensions.Specular.SpecularTexture, textures.Linear)
+			add(gm.Extensions.Specular.SpecularColorTexture, textures.SRGB)
+		}
+		if gm.Extensions != nil && gm.Extensions.Clearcoat != nil {
+			add(gm.Extensions.Clearcoat.ClearcoatTexture, textures.Linear)
+			add(gm.Extensions.Clearcoat.ClearcoatRoughnessTexture, textures.Linear)
+			add(gm.Extensions.Clearcoat.ClearcoatNormalTexture, textures.Normal)
+		}
+		if gm.Extensions != nil && gm.Extensions.Sheen != nil {
+			add(gm.Extensions.Sheen.SheenColorTexture, textures.SRGB)
+			add(gm.Extensions.Sheen.SheenRoughnessTexture, textures.Linear)
+		}
+		if gm.Extensions != nil && gm.Extensions.Anisotropy != nil {
+			add(gm.Extensions.Anisotropy.AnisotropyTexture, textures.Linear)
+		}
 		add(gm.NormalTexture, textures.Normal)
 		add(gm.EmissiveTexture, textures.SRGB)
 		if gm.OcclusionTexture != nil {
@@ -911,6 +938,7 @@ func (l *loader) loadMaterials() {
 					if t := l.texture(tt.Index, textures.Grayscale); t.IsValid() {
 						m.SetTransmissionMap(t)
 						m.SetTransmissionMapSampler(samp)
+						m.SetTransmissionMapUV(tt.uvSet())
 					}
 				}
 			}
@@ -936,10 +964,31 @@ func (l *loader) loadMaterials() {
 			}
 			m.SetAttenuation(color, distance)
 		}
+		if ext := gm.Extensions; ext != nil && ext.Specular != nil {
+			l.applySpecular(m, ext.Specular)
+		}
+		if ext := gm.Extensions; ext != nil && ext.Clearcoat != nil {
+			l.applyClearcoat(m, ext.Clearcoat)
+		}
+		if ext := gm.Extensions; ext != nil && ext.Sheen != nil {
+			l.applySheen(m, ext.Sheen)
+		}
+		if ext := gm.Extensions; ext != nil && ext.Anisotropy != nil {
+			m.SetAnisotropy(ext.Anisotropy.AnisotropyStrength)
+			m.SetAnisotropyRotation(ext.Anisotropy.AnisotropyRotation)
+			if ref := ext.Anisotropy.AnisotropyTexture; ref != nil {
+				if t := l.texture(ref.Index, textures.Linear); t.IsValid() {
+					m.SetAnisotropyMap(t)
+					m.SetAnisotropyMapSampler(samp)
+					m.SetAnisotropyMapUV(ref.uvSet())
+				}
+			}
+		}
 		if gm.NormalTexture != nil {
 			if t := l.texture(gm.NormalTexture.Index, textures.Normal); t.IsValid() {
 				m.SetNormalMap(t)
 				m.SetNormalMapSampler(samp)
+				m.SetNormalMapUV(gm.NormalTexture.uvSet())
 			}
 		}
 		// The light the surface emits: its emissive factor, scaled by
@@ -955,12 +1004,14 @@ func (l *loader) loadMaterials() {
 			if t := l.texture(gm.EmissiveTexture.Index, textures.SRGB); t.IsValid() {
 				m.SetEmissiveMap(t)
 				m.SetEmissiveMapSampler(samp)
+				m.SetEmissiveMapUV(gm.EmissiveTexture.uvSet())
 			}
 		}
 		if gm.OcclusionTexture != nil {
 			if t := l.texture(gm.OcclusionTexture.Index, textures.Linear); t.IsValid() {
 				m.SetOcclusionMap(t)
 				m.SetOcclusionMapSampler(samp)
+				m.SetOcclusionMapUV(gm.OcclusionTexture.uvSet())
 			}
 			if gm.OcclusionTexture.Strength != nil {
 				m.SetOcclusionStrength(*gm.OcclusionTexture.Strength)
@@ -980,6 +1031,7 @@ func (l *loader) loadMaterials() {
 				if t := l.texture(pbr.BaseColorTexture.Index, textures.SRGB); t.IsValid() {
 					m.SetColorMap(t)
 					m.SetColorMapSampler(samp)
+					m.SetColorMapUV(pbr.BaseColorTexture.uvSet())
 				}
 			}
 			// One combined metallic-roughness texture (glTF: .b metallic, .g roughness)
@@ -988,13 +1040,167 @@ func (l *loader) loadMaterials() {
 				if t := l.texture(pbr.MetallicRoughnessTexture.Index, textures.Linear); t.IsValid() {
 					m.SetMetallicMap(t)
 					m.SetMetallicMapSampler(samp)
+					m.SetMetallicMapUV(pbr.MetallicRoughnessTexture.uvSet())
 					m.SetRoughnessMap(t)
 					m.SetRoughnessMapSampler(samp)
+					m.SetRoughnessMapUV(pbr.MetallicRoughnessTexture.uvSet())
 				}
 			}
 		}
+		for set, transform := range uvTransformsOf(gm) {
+			m.SetUVTransform(materials.UVSet(set), transform)
+		}
 		l.materials[i+1] = m
 	}
+}
+
+// applySpecular gives m what KHR_materials_specular says of how much it reflects as a
+// dielectric: its intensity, from the factor and the alpha of the texture, and its
+// colour, from the colour factor and texture.
+func (l *loader) applySpecular(m *materials.PBRMaterial, specular *specularExt) {
+	samp := l.renderer.TextureStore.DefaultSampler()
+	if specular.SpecularFactor != nil {
+		m.SetSpecularIntensity(*specular.SpecularFactor)
+	}
+	if ref := specular.SpecularTexture; ref != nil {
+		if t := l.texture(ref.Index, textures.Linear); t.IsValid() {
+			m.SetSpecularIntensityMap(t)
+			m.SetSpecularIntensityMapSampler(samp)
+			m.SetSpecularIntensityMapUV(ref.uvSet())
+		}
+	}
+	if c := specular.SpecularColorFactor; len(c) == 3 {
+		m.SetSpecularColor(colors.RGB32F{c[0], c[1], c[2]})
+	}
+	if ref := specular.SpecularColorTexture; ref != nil {
+		if t := l.texture(ref.Index, textures.SRGB); t.IsValid() {
+			m.SetSpecularColorMap(t)
+			m.SetSpecularColorMapSampler(samp)
+			m.SetSpecularColorMapUV(ref.uvSet())
+		}
+	}
+}
+
+// applyClearcoat gives m the clear coat KHR_materials_clearcoat describes: how much of
+// it, how rough, and its own normal map.
+func (l *loader) applyClearcoat(m *materials.PBRMaterial, clearcoat *clearcoatExt) {
+	samp := l.renderer.TextureStore.DefaultSampler()
+	m.SetClearcoat(clearcoat.ClearcoatFactor)
+	m.SetClearcoatRoughness(clearcoat.ClearcoatRoughnessFactor)
+	if ref := clearcoat.ClearcoatTexture; ref != nil {
+		if t := l.texture(ref.Index, textures.Linear); t.IsValid() {
+			m.SetClearcoatMap(t)
+			m.SetClearcoatMapSampler(samp)
+			m.SetClearcoatMapUV(ref.uvSet())
+		}
+	}
+	if ref := clearcoat.ClearcoatRoughnessTexture; ref != nil {
+		if t := l.texture(ref.Index, textures.Linear); t.IsValid() {
+			m.SetClearcoatRoughnessMap(t)
+			m.SetClearcoatRoughnessMapSampler(samp)
+			m.SetClearcoatRoughnessMapUV(ref.uvSet())
+		}
+	}
+	if ref := clearcoat.ClearcoatNormalTexture; ref != nil {
+		if t := l.texture(ref.Index, textures.Normal); t.IsValid() {
+			m.SetClearcoatNormalMap(t)
+			m.SetClearcoatNormalMapSampler(samp)
+			m.SetClearcoatNormalMapUV(ref.uvSet())
+		}
+	}
+}
+
+// applySheen gives m the sheen KHR_materials_sheen describes: its colour and how far it
+// spreads.
+func (l *loader) applySheen(m *materials.PBRMaterial, sheen *sheenExt) {
+	samp := l.renderer.TextureStore.DefaultSampler()
+	if c := sheen.SheenColorFactor; len(c) == 3 {
+		m.SetSheenColor(colors.RGB32F{c[0], c[1], c[2]})
+	}
+	m.SetSheenRoughness(sheen.SheenRoughnessFactor)
+	if ref := sheen.SheenColorTexture; ref != nil {
+		if t := l.texture(ref.Index, textures.SRGB); t.IsValid() {
+			m.SetSheenColorMap(t)
+			m.SetSheenColorMapSampler(samp)
+			m.SetSheenColorMapUV(ref.uvSet())
+		}
+	}
+	if ref := sheen.SheenRoughnessTexture; ref != nil {
+		if t := l.texture(ref.Index, textures.Linear); t.IsValid() {
+			m.SetSheenRoughnessMap(t)
+			m.SetSheenRoughnessMapSampler(samp)
+			m.SetSheenRoughnessMapUV(ref.uvSet())
+		}
+	}
+}
+
+// textureRefsOf is every texture gm's maps read, the base colour's first.
+func textureRefsOf(gm material) []*textureRef {
+	var refs []*textureRef
+	if pbr := gm.PbrMetallicRoughness; pbr != nil {
+		refs = append(refs, pbr.BaseColorTexture, pbr.MetallicRoughnessTexture)
+	}
+	refs = append(refs, gm.NormalTexture, gm.EmissiveTexture)
+	if gm.OcclusionTexture != nil {
+		refs = append(refs, &gm.OcclusionTexture.textureRef)
+	}
+	if ext := gm.Extensions; ext != nil {
+		if ext.Transmission != nil {
+			refs = append(refs, ext.Transmission.TransmissionTexture)
+		}
+		if ext.Specular != nil {
+			refs = append(refs, ext.Specular.SpecularTexture, ext.Specular.SpecularColorTexture)
+		}
+		if ext.Clearcoat != nil {
+			refs = append(refs, ext.Clearcoat.ClearcoatTexture, ext.Clearcoat.ClearcoatRoughnessTexture, ext.Clearcoat.ClearcoatNormalTexture)
+		}
+		if ext.Sheen != nil {
+			refs = append(refs, ext.Sheen.SheenColorTexture, ext.Sheen.SheenRoughnessTexture)
+		}
+		if ext.Anisotropy != nil {
+			refs = append(refs, ext.Anisotropy.AnisotropyTexture)
+		}
+	}
+	return slices.DeleteFunc(refs, func(ref *textureRef) bool {
+		return ref == nil
+	})
+}
+
+// readsUV2 reports whether any of gm's maps reads the second set of texture
+// coordinates.
+func readsUV2(gm material) bool {
+	return slices.ContainsFunc(textureRefsOf(gm), func(ref *textureRef) bool {
+		return ref.uvSet() == materials.UV2
+	})
+}
+
+// uvTransformsOf is the UV transform of each set of texture coordinates gm's maps read,
+// by KHR_texture_transform: for each set, its base-color texture's, if it reads that set,
+// or failing that the first of its other maps' reading it that has one. pix gives a
+// material one transform for each set, which is how exporters write them in practice;
+// maps that read one set with different transforms get the first's. The transforms'
+// rotation is not applied.
+func uvTransformsOf(gm material) [2]materials.UVTransform {
+	transforms := [2]materials.UVTransform{materials.NoUVTransform, materials.NoUVTransform}
+	var found [2]bool
+	for _, ref := range textureRefsOf(gm) {
+		if ref.Extensions == nil || ref.Extensions.Transform == nil {
+			continue
+		}
+		set := ref.uvSet()
+		if found[set] {
+			continue
+		}
+		found[set] = true
+		transform := ref.Extensions.Transform
+		if len(transform.Scale) == 2 {
+			transforms[set].Scale = glm.Vec2f{transform.Scale[0], transform.Scale[1]}
+		}
+		if len(transform.Offset) == 2 {
+			transforms[set].Offset = glm.Vec2f{transform.Offset[0], transform.Offset[1]}
+		}
+	}
+	return transforms
 }
 
 // materialFor returns the (embedded) Material for a glTF material index; NewMesh

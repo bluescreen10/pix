@@ -14,6 +14,31 @@ type vertexAttributes struct {
 	uv     glm.Vec2f
 }
 
+// vertexAttributesUV2 is the attribute record of a geometry with a second set of texture
+// coordinates (24 bytes): vertexAttributes, then the second set (see FlagUV2).
+type vertexAttributesUV2 struct {
+	vertexAttributes
+	uv2 glm.Vec2f
+}
+
+// attributeRecordWords is how many 4-byte words one vertex's attribute record takes in a
+// geometry with flags: 6 with a second set of texture coordinates, 4 without. The
+// shaders' attributeRecordWords mirrors it.
+func attributeRecordWords(flags uint32) uint32 {
+	if flags&FlagUV2 != 0 {
+		return 6
+	}
+	return 4
+}
+
+// attributeBytes is the size of the attribute stream allocation for n vertices of a
+// geometry with flags: whole records, rounded up to a whole 16-byte element, so that
+// every allocation in the stream starts on one and its base counts elements.
+func attributeBytes(n int, flags uint32) uint32 {
+	bytes := uint32(n) * attributeRecordWords(flags) * 4
+	return (bytes + streamElemSize[streamAttr] - 1) &^ (streamElemSize[streamAttr] - 1)
+}
+
 // vertexSkin is the interleaved per-vertex skin record (16 bytes): 4 skeleton-
 // relative joint indices + 4 unorm16 weights (normalized to sum 1 at pack time).
 // Same 4-word shape as vertexAttributes, so it addresses identically in the GLSL.
@@ -86,7 +111,7 @@ func (e *entry) vec4u16(t AttributeType) []glm.Vec4[uint16] {
 }
 
 func (e *entry) hasVertexAttrs() bool {
-	return e.has(AttributeNormal) || e.has(AttributeColor) || e.has(AttributeUV)
+	return e.has(AttributeNormal) || e.has(AttributeColor) || e.has(AttributeUV) || e.has(AttributeUV2)
 }
 
 // hasSkin reports whether both skin attributes are present. alloc() rejects one
@@ -127,6 +152,9 @@ func (e *entry) flags() uint32 {
 	}
 	if e.hasSkin() {
 		f |= FlagSkinned
+	}
+	if e.has(AttributeUV2) {
+		f |= FlagUV2
 	}
 	return f
 }
@@ -173,7 +201,17 @@ func (e *entry) packAttributes() []byte {
 		}
 		attrs[i] = va
 	}
-	return toBytes(attrs)
+	if !e.has(AttributeUV2) {
+		return toBytes(attrs)
+	}
+	uv2s := e.vec2(AttributeUV2)
+	records := make([]vertexAttributesUV2, n)
+	for i := range n {
+		records[i] = vertexAttributesUV2{vertexAttributes: attrs[i], uv2: uv2s[i]}
+	}
+	// Whole 16-byte elements, as attributeBytes sizes the allocation.
+	b := toBytes(records)
+	return append(b, make([]byte, attributeBytes(n, FlagUV2)-uint32(len(b)))...)
 }
 
 // packSkin builds the packed skin-record stream from the skin index/weight

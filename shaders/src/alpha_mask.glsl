@@ -11,31 +11,60 @@
 
 #include "bindless.glsl"
 
-// AlphaMask is how a material cuts its surface out, matching materials.AlphaMask. A
-// cut-off of 0 keeps every texel.
+// UV1 and UV2 are the values of a UVSet (materials.UV1, materials.UV2).
+const uint UV1 = 0u;
+const uint UV2 = 1u;
+
+// AlphaMask is how a material cuts its surface out, matching materials.AlphaMask: where
+// its map's alpha at the coordinates of uvSet, times alpha, falls below cutoff. A cut-off
+// of 0 keeps every texel.
 struct AlphaMask {
     uint map;
     uint mapSampler;
+    uint uvSet;
     float alpha;
     float cutoff;
 };
 
 // TransmissionMask is how much light a material lets through, matching
-// materials.TransmissionMask. A factor of 0 lets none through.
+// materials.TransmissionMask: factor, times its map's red at the coordinates of uvSet. A
+// factor of 0 lets none through.
 struct TransmissionMask {
     uint map;
     uint mapSampler;
+    uint uvSet;
     float factor;
-    uint pad;
 };
 
+// UVTransform matches materials.UVTransform: coordinates are scaled, then offset.
+struct UVTransform {
+    vec2 scale;
+    vec2 offset;
+};
+
+vec2 transformUV(UVTransform transform, vec2 uv) {
+    return uv * transform.scale + transform.offset;
+}
+
 // Mask is one entry of a material pool's mask table, one per record slot, matching
-// maskEntryOf in materials/pool.go.
+// maskEntry in materials/pool.go: 80 bytes. uv1 and uv2 are the material's transforms of
+// the mesh's two sets of texture coordinates, which both masks' maps are read through.
 struct Mask {
     AlphaMask alpha;
     TransmissionMask transmission;
+    UVTransform uv1;
+    UVTransform uv2;
+    uint pad0;
+    uint pad1;
+    uint pad2;
 };
 layout(buffer_reference, scalar) readonly buffer MaskBuf { Mask v[]; };
+
+// maskUV is the coordinates a mask's map, reading the set uvSet, is read at: the
+// fragment's uv1 or uv2, moved by the entry's transform of that set.
+vec2 maskUV(Mask entry, uint uvSet, vec2 uv1, vec2 uv2) {
+    return uvSet == UV2 ? transformUV(entry.uv2, uv2) : transformUV(entry.uv1, uv1);
+}
 
 // NO_ALPHA_MASK_MAP is the map index of a mask with no map (materials.NoTextureIndex):
 // its factor alone decides.

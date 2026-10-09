@@ -27,6 +27,14 @@ layout(constant_id = 0) const bool MASKED = true;
 // leaves alone, where the alpha would go: set in the opaque pass while ambient occlusion
 // is on.
 layout(constant_id = 1) const bool AMBIENT_OCCLUSION = false;
+// FEATURES is the optional parts of its shader a pipeline's materials use (see
+// materials.Features), one bit each; what each bit means is the material type's own.
+// Unspecialized, every part is in.
+layout(constant_id = 7) const uint FEATURES = 0xFFFFFFFFu;
+// UV_TRANSFORM keeps materialUVs' transforms: set for draws whose materials move the
+// mesh's texture coordinates (see materials.Pool.IsUVTransformedAt), and false for the
+// rest, which then read them as they are.
+layout(constant_id = 8) const bool UV_TRANSFORM = true;
 
 const uint MAT_COLOR_MAP = 1u;
 const uint FLAG_RECEIVES_SHADOW = 4u; // Drawable flag (mirrors pix.DrawableReceivesShadow)
@@ -69,20 +77,48 @@ layout(push_constant, scalar) uniform PC {
 // NO_SCENE_COPY is pc.sceneCopy when there is no scene copy to read (pix.noSceneCopy).
 const uint NO_SCENE_COPY = 0xFFFFFFFFu;
 
-// Vertex → fragment varyings (produced by scene_draw.vert).
+// Vertex → fragment varyings (produced by scene_draw.vert). pix keeps locations 0 to 7
+// for its own; a custom material's vertex shader writes these, and passes its own from
+// location 8.
 layout(location = 0) in vec3 vColor;
-layout(location = 1) in vec2 vUV;
+layout(location = 1) in vec2 vUV1;
 layout(location = 2) flat in uint vMat;
 layout(location = 3) in vec3 vWorldPos;
 layout(location = 4) in vec3 vNormal;
 layout(location = 5) flat in uint vFlags; // drawable flags (FLAG_RECEIVES_SHADOW, …)
+// vUV1 and vUV2 are the mesh's two sets of texture coordinates, as it has them (see
+// materials.UVSet).
+layout(location = 6) in vec2 vUV2;
 
-// sampleBase returns base color × vertex color, modulated by the color map when the
-// MAT_COLOR_MAP flag is set. Fields come from the shader's own material record.
-vec4 sampleBase(vec4 base, uint flags, uint colorMap, uint samp) {
+// MaterialUVs is a fragment's two sets of texture coordinates, moved by its material's
+// transforms (see materials.UVTransform).
+struct MaterialUVs {
+    vec2 uv1;
+    vec2 uv2;
+};
+
+// materialUVs moves the fragment's coordinates by a material's transforms of each set —
+// unless no material of the pipeline's moves them (UV_TRANSFORM).
+MaterialUVs materialUVs(UVTransform uv1Transform, UVTransform uv2Transform) {
+    if (!UV_TRANSFORM) {
+        return MaterialUVs(vUV1, vUV2);
+    }
+    return MaterialUVs(transformUV(uv1Transform, vUV1), transformUV(uv2Transform, vUV2));
+}
+
+// mapUV is the texture coordinates the map flagged mapFlag reads, of uvs: the second set
+// where uv2Maps — the flags of a material's maps that read UV2 (see materials.UVSet) —
+// has it, and the first otherwise.
+vec2 mapUV(MaterialUVs uvs, uint uv2Maps, uint mapFlag) {
+    return (uv2Maps & mapFlag) != 0u ? uvs.uv2 : uvs.uv1;
+}
+
+// sampleBase returns base color × vertex color, modulated by the color map at uv when
+// the MAT_COLOR_MAP flag is set. Fields come from the shader's own material record.
+vec4 sampleBase(vec4 base, uint flags, uint colorMap, uint samp, vec2 uv) {
     vec4 c = base * vec4(vColor, 1.0);
     if ((flags & MAT_COLOR_MAP) != 0u) {
-        c *= texture(sampler2D(gTextures[nonuniformEXT(colorMap)], gSamplers[nonuniformEXT(samp)]), vUV);
+        c *= texture(sampler2D(gTextures[nonuniformEXT(colorMap)], gSamplers[nonuniformEXT(samp)]), uv);
     }
     return c;
 }
@@ -94,7 +130,8 @@ void discardCutOut() {
     if (!MASKED || pc.masks == 0ul) {
         return;
     }
-    if (isCutOut(MaskBuf(pc.masks).v[vMat].alpha, vUV)) {
+    Mask mask = MaskBuf(pc.masks).v[vMat];
+    if (isCutOut(mask.alpha, maskUV(mask, mask.alpha.uvSet, vUV1, vUV2))) {
         discard;
     }
 }

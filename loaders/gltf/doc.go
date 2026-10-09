@@ -1,5 +1,7 @@
 package gltf
 
+import "github.com/bluescreen10/pix/materials"
+
 // glTF 2.0 JSON document types — the subset the loader consumes: static meshes,
 // morph targets, PBR base color + texture, node hierarchy, skins, animations, and
 // cameras.
@@ -149,6 +151,43 @@ type materialExtensions struct {
 	// EmissiveStrength scales the emissive factor past 1, which the core spec clamps
 	// it to.
 	EmissiveStrength *emissiveStrengthExt `json:"KHR_materials_emissive_strength"`
+	Specular         *specularExt         `json:"KHR_materials_specular"`
+	Clearcoat        *clearcoatExt        `json:"KHR_materials_clearcoat"`
+	Sheen            *sheenExt            `json:"KHR_materials_sheen"`
+	Anisotropy       *anisotropyExt       `json:"KHR_materials_anisotropy"`
+}
+
+// anisotropyExt stretches the surface's highlights along one direction.
+type anisotropyExt struct {
+	AnisotropyStrength float32     `json:"anisotropyStrength"` // default 0: none
+	AnisotropyRotation float32     `json:"anisotropyRotation"` // radians, default 0
+	AnisotropyTexture  *textureRef `json:"anisotropyTexture"`  // direction in .rg, strength in .b
+}
+
+// sheenExt is a sheen over the surface, as of cloth.
+type sheenExt struct {
+	SheenColorFactor      []float32   `json:"sheenColorFactor"`      // default black: no sheen
+	SheenColorTexture     *textureRef `json:"sheenColorTexture"`     // sRGB
+	SheenRoughnessFactor  float32     `json:"sheenRoughnessFactor"`  // default 0
+	SheenRoughnessTexture *textureRef `json:"sheenRoughnessTexture"` // alpha channel
+}
+
+// clearcoatExt is a clear coat over the surface.
+type clearcoatExt struct {
+	ClearcoatFactor           float32     `json:"clearcoatFactor"`           // default 0: no coat
+	ClearcoatTexture          *textureRef `json:"clearcoatTexture"`          // red channel
+	ClearcoatRoughnessFactor  float32     `json:"clearcoatRoughnessFactor"`  // default 0
+	ClearcoatRoughnessTexture *textureRef `json:"clearcoatRoughnessTexture"` // green channel
+	ClearcoatNormalTexture    *textureRef `json:"clearcoatNormalTexture"`
+}
+
+// specularExt is how much a dielectric reflects, beside what its index of refraction
+// says.
+type specularExt struct {
+	SpecularFactor       *float32    `json:"specularFactor"`       // default 1
+	SpecularTexture      *textureRef `json:"specularTexture"`      // alpha channel
+	SpecularColorFactor  []float32   `json:"specularColorFactor"`  // default white
+	SpecularColorTexture *textureRef `json:"specularColorTexture"` // sRGB
 }
 
 type emissiveStrengthExt struct {
@@ -184,8 +223,36 @@ type pbr struct {
 }
 
 type textureRef struct {
-	Index    int `json:"index"`
-	TexCoord int `json:"texCoord"`
+	Index      int                `json:"index"`
+	TexCoord   int                `json:"texCoord"`
+	Extensions *textureExtensions `json:"extensions"`
+}
+
+type textureExtensions struct {
+	Transform *textureTransformExt `json:"KHR_texture_transform"`
+}
+
+// textureTransformExt moves a texture's coordinates before it is sampled: scaled, then
+// rotated, then offset. pix applies the scale and offset, not the rotation (see
+// uvTransformsOf). TexCoord, where given, overrides the textureRef's.
+type textureTransformExt struct {
+	Offset   []float32 `json:"offset"`   // default (0, 0)
+	Scale    []float32 `json:"scale"`    // default (1, 1)
+	Rotation float32   `json:"rotation"` // radians; not applied
+	TexCoord *int      `json:"texCoord"`
+}
+
+// uvSet is the set of texture coordinates ref reads: TEXCOORD_1 is UV2, and every other —
+// TEXCOORD_0, and the sets past the second, which pix does not load — UV1.
+func (ref *textureRef) uvSet() materials.UVSet {
+	texCoord := ref.TexCoord
+	if ext := ref.Extensions; ext != nil && ext.Transform != nil && ext.Transform.TexCoord != nil {
+		texCoord = *ext.Transform.TexCoord
+	}
+	if texCoord == 1 {
+		return materials.UV2
+	}
+	return materials.UV1
 }
 
 // occlusionRef is a textureRef with how far the occlusion it holds applies.

@@ -35,6 +35,12 @@ type entry struct {
 	// isTransmissive is whether the instance lets light through (see Transmissive), as
 	// last marked dirty.
 	isTransmissive bool
+	// isUVTransformed is whether the instance moves the mesh's texture coordinates (see
+	// isUVTransformed), as last marked dirty.
+	isUVTransformed bool
+	// features is the optional parts of its shader the instance uses (see Featured), as
+	// last marked dirty.
+	features Features
 }
 
 // Pool holds every material of one kind (one shader). The material system
@@ -61,7 +67,7 @@ type Pool struct {
 	cap    uint32     // records the device buffer holds
 	buf    gpu.Buffer // MemoryDevice; written only by Sync
 	// masks holds, for each record slot, how its material cuts its surface out (see
-	// Masked): what the depth-only passes discard by, whatever the material's type.
+	// maskEntry): what the depth-only passes discard by, whatever the material's type.
 	masks gpu.Buffer
 
 	// rasterRevision counts changes to any instance's cull or blend mode. Those two
@@ -178,12 +184,11 @@ func (s *Pool) Sync(u Uploader) {
 	parts := s.parts[:0]
 	for id := range s.dirty {
 		lo := len(scratch)
-		var alpha AlphaMask
-		var transmission TransmissionMask
+		var mask maskEntry
 		if s.entries.IsAlive(id) {
 			inst := s.entries.Value(id).inst
 			scratch = append(scratch, inst.Bytes()...)
-			alpha, transmission = s.masksOf(inst)
+			mask = maskEntryOf(inst)
 		} else {
 			// A freed slot still gets one last write, of zeros: a draw issued in the
 			// same frame the material was released must not read its old record.
@@ -191,12 +196,9 @@ func (s *Pool) Sync(u Uploader) {
 			clear(scratch[lo:])
 		}
 		parts = append(parts, scatterPart{buffer: s.buf, dstOffset: id * s.stride, data: scratch[lo:]})
-		// Both masks are written as they are: one that does nothing — a cut-off of 0,
-		// which keeps every texel, or a transmission of 0, which lets no light through —
-		// is harmless to read. A slot no longer alive gets zero masks.
+		// A slot no longer alive gets a zero entry, which no draw reads.
 		lo = len(scratch)
-		scratch = append(scratch, alpha.ToBytes()...)
-		scratch = append(scratch, transmission.ToBytes()...)
+		scratch = mask.appendBytes(scratch)
 		parts = append(parts, scatterPart{buffer: s.masks, dstOffset: id * maskEntrySize, data: scratch[lo:]})
 	}
 	for _, p := range parts {
@@ -212,9 +214,9 @@ func (s *Pool) RecordsAddr() uint64 {
 	return s.buf.Addr
 }
 
-// MasksAddr is the device address of the pool's mask table — per record slot, an
-// AlphaMask and a TransmissionMask (see Masked and Transmissive) — resolved at draw
-// time because it moves when the pool grows.
+// MasksAddr is the device address of the pool's mask table, an entry per record slot —
+// Mask in shaders/src/alpha_mask.glsl — resolved at draw time because it moves when the
+// pool grows.
 func (s *Pool) MasksAddr() uint64 {
 	return s.masks.Addr
 }
@@ -253,38 +255,85 @@ func (s *Pool) Live(id, gen uint32) bool {
 // implementation must call it from every setter, or the GPU keeps rendering the
 // previous value indefinitely.
 //
-// It also notes whether the instance is masked and whether it is transmissive now (see
-// IsMaskedAt and IsTransmissiveAt): those decide how the passes draw it, so a change of
-// either counts as a change of rasterization state (see RasterRevision), noticed before
-// the next frame is laid out rather than once its records are uploaded.
+// It also notes whether the instance is masked, whether it is transmissive, and which
+// optional parts of its shader it uses now (see IsMaskedAt, IsTransmissiveAt and
+// FeaturesAt): those decide how the passes draw it, so a change of any counts as a
+// change of rasterization state (see RasterRevision), noticed before the next frame is
+// laid out rather than once its records are uploaded.
 func (s *Pool) MarkDirty(id uint32) {
 	e := s.entries.Value(id)
-	alpha, transmission := s.masksOf(e.inst)
-	isMasked, isTransmissive := alpha.IsMasked(), transmission.IsTransmissive()
-	if isMasked != e.isMasked || isTransmissive != e.isTransmissive {
-		e.isMasked, e.isTransmissive = isMasked, isTransmissive
+	mask := maskEntryOf(e.inst)
+	isMasked, isTransmissive := mask.alpha.IsMasked(), mask.transmission.IsTransmissive()
+	isUVTransformed := isUVTransformed(e.inst)
+	var features Features
+	if featured, ok := e.inst.(Featured); ok {
+		features = featured.Features()
+	}
+	if isMasked != e.isMasked || isTransmissive != e.isTransmissive || isUVTransformed != e.isUVTransformed || features != e.features {
+		e.isMasked, e.isTransmissive, e.isUVTransformed, e.features = isMasked, isTransmissive, isUVTransformed, features
 		s.rasterRevision++
 	}
 	s.markDirty(id)
 }
 
-// masksOf returns inst's alpha mask and transmission mask: what it reports through
-// Masked and Transmissive, and for either it does not implement, a zero mask, which does
-// nothing.
-func (s *Pool) masksOf(inst Instance) (alpha AlphaMask, transmission TransmissionMask) {
+// maskEntry is what the depth-only passes, which cannot read a material's record, know of
+// how it cuts its surface out: by alpha, by the light it lets through, and the
+// transforms of the coordinates both masks' maps are read at. A record's layout is its
+// type's own; the mask table's is one for every type, so that one depth pass reads any
+// material's.
+type maskEntry struct {
+	alpha        AlphaMask
+	transmission TransmissionMask
+	uvTransforms [2]UVTransform
+}
+
+// maskEntryOf returns inst's entry of the mask table: what it reports through Masked,
+// Transmissive and UVTransformer, and for what it does not implement, a mask that does
+// nothing, or NoUVTransform.
+func maskEntryOf(inst Instance) maskEntry {
+	mask := maskEntry{uvTransforms: [2]UVTransform{NoUVTransform, NoUVTransform}}
 	if masked, ok := inst.(Masked); ok {
-		alpha = masked.AlphaMask()
+		mask.alpha = masked.AlphaMask()
 	}
 	if transmissive, ok := inst.(Transmissive); ok {
-		transmission = transmissive.TransmissionMask()
+		mask.transmission = transmissive.TransmissionMask()
 	}
-	return alpha, transmission
+	if transformer, ok := inst.(UVTransformer); ok {
+		mask.uvTransforms = [2]UVTransform{transformer.UVTransform(UV1), transformer.UVTransform(UV2)}
+	}
+	return mask
+}
+
+// appendBytes appends the entry as the shaders read it, maskEntrySize bytes, to b.
+func (m maskEntry) appendBytes(b []byte) []byte {
+	b = append(b, m.alpha.ToBytes()...)
+	b = append(b, m.transmission.ToBytes()...)
+	for _, t := range m.uvTransforms {
+		b = append(b, t.ToBytes()...)
+	}
+	var padding [12]byte
+	return append(b, padding[:]...)
 }
 
 // IsMaskedAt reports whether the instance in slot id cuts its surface out by alpha (see
 // Masked).
 func (s *Pool) IsMaskedAt(id uint32) bool {
 	return s.entries.Value(id).isMasked
+}
+
+// IsUVTransformedAt reports whether the instance in slot id moves either set of the
+// mesh's texture coordinates: whether it implements UVTransformer, with a transform other
+// than NoUVTransform. Like IsMaskedAt, a change of it counts as a change of
+// rasterization state (see MarkDirty).
+func (s *Pool) IsUVTransformedAt(id uint32) bool {
+	return s.entries.Value(id).isUVTransformed
+}
+
+// FeaturesAt reports which optional parts of its shader the instance in slot id uses
+// (see Featured). Like IsMaskedAt, a change of it counts as a change of rasterization
+// state (see MarkDirty).
+func (s *Pool) FeaturesAt(id uint32) Features {
+	return s.entries.Value(id).features
 }
 
 // IsTransmissiveAt reports whether the instance in slot id lets light through (see

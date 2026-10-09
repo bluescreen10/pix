@@ -46,6 +46,9 @@ const (
 	FlagUV
 	FlagColor
 	FlagSkinned
+	// FlagUV2 marks a geometry whose attribute records carry a second set of texture
+	// coordinates, and are 24 bytes rather than 16 (see attributeRecordWords).
+	FlagUV2
 )
 
 const initialStreamBytes uint32 = 1 << 16
@@ -425,7 +428,7 @@ func (g *Store) createDeformOutput(source Geometry) (id, gen uint32) {
 	d.setBase(streamPos, posAlloc.Offset()/streamElemSize[streamPos])
 
 	if e.derivedHasAttr {
-		attrAlloc := g.allocIn(streamAttr, uint32(n)*streamElemSize[streamAttr])
+		attrAlloc := g.allocIn(streamAttr, attributeBytes(n, srcDesc.Flags))
 		e.allocs[streamAttr] = attrAlloc
 		d.setBase(streamAttr, attrAlloc.Offset()/streamElemSize[streamAttr])
 	}
