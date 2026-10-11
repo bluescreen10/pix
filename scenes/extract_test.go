@@ -3,6 +3,7 @@ package scenes_test
 import (
 	"testing"
 
+	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
 )
 
@@ -41,5 +42,36 @@ func TestTransformDirtinessSurvivesSyncUntilExtract(t *testing.T) {
 	scene.Extract(&packet)
 	if packet.TransformsDirty {
 		t.Fatal("TransformsDirty = true without another transform change")
+	}
+}
+
+// TestPreviousTransformsDirtyFollowsAMoveByOneFrame covers what motion vectors need: a
+// consumer keeping last frame's matrices must refresh them on the frame after a move,
+// even though nothing moved on that frame, or a node that stopped keeps appearing to
+// move.
+func TestPreviousTransformsDirtyFollowsAMoveByOneFrame(t *testing.T) {
+	scene := scenes.New()
+	node := scene.NewGroup()
+
+	var packet scenes.FramePacket
+	scene.Extract(&packet)
+	if packet.PreviousTransformsDirty {
+		t.Fatal("PreviousTransformsDirty = true on the first extraction, want false")
+	}
+
+	node.SetPosition(glm.Vec3f{1, 0, 0})
+	scene.Extract(&packet)
+	if !packet.TransformsDirty || !packet.PreviousTransformsDirty {
+		t.Fatalf("frame after creation, then a move: TransformsDirty = %v, PreviousTransformsDirty = %v, want true, true", packet.TransformsDirty, packet.PreviousTransformsDirty)
+	}
+
+	scene.Extract(&packet)
+	if packet.TransformsDirty || !packet.PreviousTransformsDirty {
+		t.Fatalf("frame after the move: TransformsDirty = %v, PreviousTransformsDirty = %v, want false, true", packet.TransformsDirty, packet.PreviousTransformsDirty)
+	}
+
+	scene.Extract(&packet)
+	if packet.TransformsDirty || packet.PreviousTransformsDirty {
+		t.Fatalf("two frames after the move: TransformsDirty = %v, PreviousTransformsDirty = %v, want false, false", packet.TransformsDirty, packet.PreviousTransformsDirty)
 	}
 }

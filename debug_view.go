@@ -10,8 +10,8 @@ import (
 // "what is the geometry pass actually producing?" question, answered without a
 // graphics debugger.
 //
-// Every view but DebugAmbientOcclusion is a real geometry pass, not a re-read of a
-// stored target. That is what makes them uniform: each reads only what the shared
+// Every view but DebugAmbientOcclusion and DebugMotion is a real geometry pass, not a
+// re-read of a stored target. That is what makes them uniform: each reads only what the shared
 // vertex stage provides, so a view behaves identically for a Basic, Blinn-Phong, PBR or
 // custom material, and shows geometry no earlier pass happened to write.
 //
@@ -31,12 +31,13 @@ const (
 	DebugObjectID                          // one flat color per drawable, from a small palette
 	DebugTriangleID                        // one flat color per triangle, from the same palette
 	DebugAmbientOcclusion                  // how open a position is to light
+	DebugMotion                            // how far each pixel moved since the last frame, in pixels: 0.5 + motion/64 in red (right) and green (down)
 
 	debugViewCount
 )
 
 // debugViewNames is the console/round-trip spelling of each view, in enum order.
-var debugViewNames = [...]string{"off", "normal", "depth", "position", "objectid", "triangleid", "ao"}
+var debugViewNames = [...]string{"off", "normal", "depth", "position", "objectid", "triangleid", "ao", "motion"}
 
 // String returns the view's name ("off", "normal", …).
 func (v DebugView) String() string {

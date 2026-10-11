@@ -25,7 +25,13 @@ type renderState struct {
 	// GPU-side mirror.
 	layout drawLayout
 
-	worldBuf       gpu.Buffer // world matrices: nodes, then instance transforms
+	worldBuf gpu.Buffer // world matrices: nodes, then instance transforms
+	// previousWorldBuf is worldBuf as it was the previous frame, what motion is measured
+	// from. The two swap whenever the matrices are rewritten.
+	previousWorldBuf gpu.Buffer
+	// worldNodeCount is how many node matrices lead worldBuf; the instance transforms
+	// follow them.
+	worldNodeCount int
 	drawableBuf    gpu.Buffer // layout.drawables
 	lodTableBuf    gpu.Buffer // layout.lods
 	jointBuf       gpu.Buffer // skinning palettes, rewritten every frame
@@ -53,6 +59,15 @@ type renderState struct {
 	deformOutputs        []deformOutput
 	deformLayoutRevision uint64
 
+	// previousDeformedPositionsBuf holds every deformed mesh's vertices' positions as the
+	// previous frame drew them, mesh after mesh in the packet's order, for measuring their
+	// motion; previousPositionBasesBuf is where each deformed geometry's start in it, by
+	// geometry slot. hasPreviousDeformedPositions says they were written last frame, so
+	// the deform pass copies rather than seeds them (see scene_deform.comp).
+	previousDeformedPositionsBuf gpu.Buffer
+	previousPositionBasesBuf     gpu.Buffer
+	hasPreviousDeformedPositions bool
+
 	// particles is each particle system's simulation, keyed by its stable id.
 	particles map[scenes.ParticleID]*particleState
 
@@ -68,18 +83,22 @@ type renderState struct {
 	previousTime float32
 	hasRendered  bool
 	// previousViewProj is the matrix the source's main view was last drawn with, for
-	// frame steps that reproject what they drew then (see Frame.PreviousViewProj); valid
-	// once hasPreviousView.
+	// what reprojects what was drawn then (see frameViews.previousViewProj); valid once
+	// hasPreviousView.
 	previousViewProj glm.Mat4f
 	hasPreviousView  bool
 }
 
 // deformOutput is what an unskinned deform output was last written from: the
 // generation of the geometry in its slot, so a reused slot is not mistaken for the
-// output it replaced, and the morph revision of its mesh's weights.
+// output it replaced, and the morph revision of its mesh's weights; and whether the
+// mesh's previous positions have caught up with it.
 type deformOutput struct {
 	gen           uint32
 	morphRevision uint64
+	// isPreviousCurrent says the mesh's previous positions match its output: on the frame
+	// after the output changed they do not, and the deform runs once more to catch up.
+	isPreviousCurrent bool
 }
 
 // cullBuffers is what one view's cull writes: each batch's indirect arguments, with the

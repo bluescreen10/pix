@@ -56,7 +56,8 @@ func partlyCoveredPixels(r *pix.Renderer, channel int) int {
 // TestAntiAliasingSmoothsEdges: without anti-aliasing every pixel is either the quad's
 // white or the background's black; with any method, pixels along the quad's edges blend
 // the two, while the flat middle and the empty corner keep their colours exactly. With
-// HDR on, MSAA resolves in linear light before tone mapping and FXAA runs after it.
+// HDR on, MSAA resolves in linear light before tone mapping and FXAA runs after it. TAA
+// blends frames, so it is given enough of them to have sampled the whole pixel.
 func TestAntiAliasingSmoothsEdges(t *testing.T) {
 	methods := []struct {
 		name    string
@@ -67,6 +68,7 @@ func TestAntiAliasingSmoothsEdges(t *testing.T) {
 		{"msaa2x", true, pix.AntiAliasingMSAA2x},
 		{"msaa4x", true, pix.AntiAliasingMSAA4x},
 		{"fxaa", true, pix.AntiAliasingFXAA},
+		{"taa", true, pix.AntiAliasingTAA},
 	}
 	for _, hdr := range []bool{false, true} {
 		for _, m := range methods {
@@ -76,7 +78,13 @@ func TestAntiAliasingSmoothsEdges(t *testing.T) {
 				r.SetToneMapping(pix.ToneMapNone)
 				r.SetAntiAliasing(m.method)
 				r.EnableAntiAliasing(m.enabled)
-				r.Render(scene)
+				frames := 1
+				if m.enabled && m.method == pix.AntiAliasingTAA {
+					frames = jitterFrames
+				}
+				for range frames {
+					r.Render(scene)
+				}
 
 				partial := partlyCoveredPixels(r, 0)
 				if !m.enabled && partial != 0 {

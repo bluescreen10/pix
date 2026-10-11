@@ -263,6 +263,11 @@ func buildDrawables(p *scenes.FramePacket, layout *drawLayout, materialStore *ma
 	}
 	batchOf := make(map[key]uint32)
 
+	isDeformed := make([]bool, len(p.Meshes.Data))
+	for _, deform := range p.Deforms.Data {
+		isDeformed[deform.Mesh] = true
+	}
+
 	for meshIndex, mesh := range p.Meshes.Entries() {
 		layout.meshFirstDrawable = append(layout.meshFirstDrawable, uint32(len(layout.drawables)))
 		lodID := uint32(0)
@@ -282,9 +287,16 @@ func buildDrawables(p *scenes.FramePacket, layout *drawLayout, materialStore *ma
 		for instance := range mesh.Transforms.Count {
 			for level := uint32(0); level <= mesh.LODRange.Count; level++ {
 				geometry, material := mesh.Geometry, mesh.Material
+				drawsDeformedVertices := isDeformed[meshIndex]
 				if level > 0 {
 					coarser := p.LODs.Data[mesh.LODRange.First+level-1]
 					geometry, material = coarser.Geometry, coarser.Material
+					drawsDeformedVertices = coarser.DrawsDeformedVertices
+				}
+
+				drawableFlags := flags
+				if drawsDeformedVertices {
+					drawableFlags |= DrawableDeformed
 				}
 
 				pool := materialStore.PoolAt(material.PoolID)
@@ -329,7 +341,7 @@ func buildDrawables(p *scenes.FramePacket, layout *drawLayout, materialStore *ma
 					materialID:  material.Slot,
 					// Provisional: orderBatches remaps it once the batches are sorted.
 					batchID:  batchID,
-					flags:    flags,
+					flags:    drawableFlags,
 					lodID:    lodID,
 					lodLevel: level,
 				})

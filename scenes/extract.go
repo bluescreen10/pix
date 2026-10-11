@@ -45,7 +45,9 @@ func (s *Scene) Extract(p *FramePacket) {
 	s.packet.Frame++
 	*p = s.packet
 	// Transform dirtiness is edge-triggered: this packet carries it, and later Sync
-	// calls accumulate changes until the next extraction.
+	// calls accumulate changes until the next extraction. The next packet also carries
+	// it a second time, as PreviousTransformsDirty.
+	s.packet.PreviousTransformsDirty = s.packet.TransformsDirty
 	s.packet.TransformsDirty = false
 }
 
@@ -129,9 +131,10 @@ func (s *Scene) addMesh(mp MeshPacket, lods []lodLevel, deformOutput geometries.
 	mp.LODRange = IndexRange{First: uint32(len(s.packet.LODs.Data))}
 	for _, l := range lods[1:] {
 		s.packet.LODs.Data = append(s.packet.LODs.Data, LODLevel{
-			Geometry:    l.drawnGeometry().ID(),
-			Material:    l.material.ID(),
-			MinDistance: l.minDistance,
+			Geometry:              l.drawnGeometry().ID(),
+			Material:              l.material.ID(),
+			MinDistance:           l.minDistance,
+			DrawsDeformedVertices: l.deformedGeometry.IsValid(),
 		})
 		mp.LODRange.Count++
 	}

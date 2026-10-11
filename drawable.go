@@ -13,8 +13,9 @@ const regionAlign uint32 = 64
 // filter shadow casters; ReceivesShadow lets the lit shaders skip shadow sampling for
 // a drawable (both default per-node — see scene flags).
 const (
-	DrawableCastsShadow    uint32 = 1 << 1
-	DrawableReceivesShadow uint32 = 1 << 2
+	DrawableCastsShadow uint32 = 1 << (iota + 1)
+	DrawableReceivesShadow
+	DrawableDeformed
 )
 
 // gpuDrawable is uploaded verbatim to the drawable buffer; matches Drawable in the
@@ -144,6 +145,56 @@ type positionRoot struct {
 	pad0, pad1 uint32
 }
 
+// motionRoot is the root of a position-only pass that also measures motion: the position
+// root plus the previous frame's camera and world matrices (see scene_depth.vert's
+// USE_MOTION). maskedMotionRoot is the same for masked materials, as maskedDepthRoot is
+// for positionRoot.
+type motionRoot struct {
+	viewProj         glm.Mat4f
+	previousViewProj glm.Mat4f
+	pos              uint64
+	descs            uint64
+	models           uint64
+	previousModels   uint64
+	// previousPositions holds deformed vertices' previous positions, and
+	// previousPositionBases where each deformed geometry's start, by geometry slot.
+	previousPositions     uint64
+	previousPositionBases uint64
+	drawables             uint64
+	visible               uint64
+	// jitter is the clip-space offset viewProj draws with this frame, for TAA; motion is
+	// measured without it.
+	jitter glm.Vec2f
+	_      [2]float32
+}
+
+type maskedMotionRoot struct {
+	viewProj              glm.Mat4f
+	previousViewProj      glm.Mat4f
+	pos                   uint64
+	attr                  uint64
+	descs                 uint64
+	models                uint64
+	previousModels        uint64
+	previousPositions     uint64
+	previousPositionBases uint64
+	drawables             uint64
+	visible               uint64
+	masks                 uint64
+	isShadowPass          uint32
+	_                     uint32
+	jitter                glm.Vec2f
+}
+
+// backgroundMotionRoot is the root of scene_background_motion.frag.
+type backgroundMotionRoot struct {
+	// reprojection takes a point in this frame's clip space, without the jitter, to the
+	// previous frame's; jitter is the clip-space offset this frame draws with, for TAA.
+	reprojection glm.Mat4f
+	jitter       glm.Vec2f
+	_            [2]float32
+}
+
 // maskedDepthRoot is the root of the depth-only passes for a span of masked materials:
 // the position root plus what scene_depth_masked.vert and .frag cut the surface out by.
 type maskedDepthRoot struct {
@@ -195,15 +246,22 @@ type deformCmd struct {
 	srcDesc, dstDesc, jointBase       uint32
 	morphWeightBase, morphWeightCount uint32
 	vertexCount                       uint32
+	// previousBase is where the mesh's previous positions start in the state's
+	// previousDeformedPositionsBuf.
+	previousBase uint32
 }
 
 // deformRoot matches PC in scene_deform.comp (scalar; pointers, then plain fields).
 // One per deformed mesh per frame — see Renderer.encodeDeforms.
 type deformRoot struct {
 	pos, attr, skin, morph, descs, joints, morphWeights uint64
-	srcDesc, dstDesc, jointBase                         uint32
-	morphWeightBase, morphWeightCount                   uint32
-	vertexCount                                         uint32
+	// previousPositions is 0 while motion is not measured.
+	previousPositions                 uint64
+	srcDesc, dstDesc, jointBase       uint32
+	morphWeightBase, morphWeightCount uint32
+	vertexCount                       uint32
+	previousBase                      uint32
+	seedsPrevious                     uint32
 }
 
 var (

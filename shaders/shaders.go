@@ -46,6 +46,13 @@ import _ "embed"
 // PBRMaterial's three render paths all come from one source, selected by -D.
 //go:generate go run ../cmd/shadercompile -i src/scene_pbr.frag.glsl -o spv:build/scene_pbr.frag.spv -o metallib:build/scene_pbr.frag.metalbin
 
+//go:generate go run ../cmd/shadercompile -i src/scene_depth.vert.glsl -D USE_MOTION -o spv:build/scene_depth_motion.vert.spv -o metallib:build/scene_depth_motion.vert.metalbin
+//go:generate go run ../cmd/shadercompile -i src/scene_depth.vert.glsl -D USE_MASK -D USE_MOTION -o spv:build/scene_depth_masked_motion.vert.spv -o metallib:build/scene_depth_masked_motion.vert.metalbin
+//go:generate go run ../cmd/shadercompile -i src/scene_depth_masked.frag.glsl -D USE_MOTION -o spv:build/scene_depth_masked_motion.frag.spv -o metallib:build/scene_depth_masked_motion.frag.metalbin
+//go:generate go run ../cmd/shadercompile -i src/scene_motion.frag.glsl -o spv:build/scene_motion.frag.spv -o metallib:build/scene_motion.frag.metalbin
+//go:generate go run ../cmd/shadercompile -i src/scene_background_motion.frag.glsl -o spv:build/scene_background_motion.frag.spv -o metallib:build/scene_background_motion.frag.metalbin
+//go:generate go run ../cmd/shadercompile -i src/taa_resolve.frag.glsl -o spv:build/taa_resolve.frag.spv -o metallib:build/taa_resolve.frag.metalbin
+//go:generate go run ../cmd/shadercompile -i src/scene_motion_view.frag.glsl -o spv:build/scene_motion_view.frag.spv -o metallib:build/scene_motion_view.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/scene_debug_id.vert.glsl -o spv:build/scene_debug_id.vert.spv -o metallib:build/scene_debug_id.vert.metalbin
 //go:generate go run ../cmd/shadercompile -i src/scene_debug_normal.frag.glsl -o spv:build/scene_debug_normal.frag.spv -o metallib:build/scene_debug_normal.frag.metalbin
 //go:generate go run ../cmd/shadercompile -i src/scene_debug_depth.frag.glsl -o spv:build/scene_debug_depth.frag.spv -o metallib:build/scene_debug_depth.frag.metalbin
@@ -159,6 +166,42 @@ var SceneDepthMaskedFrag []byte
 // a stored target. SceneDebugIDVert forwards the drawable index for the object view;
 // the surface views (normal/depth/position) run over the ordinary scene vertex stage
 // and read only its varyings, so they work for every material type.
+
+// SceneDepthMotionVert and SceneMotion are the depth prepass's program while motion
+// vectors are on: the depth-only vertex stage, also projecting each vertex where it was
+// the previous frame, and a fragment stage writing how far it moved.
+// SceneDepthMaskedMotionVert and SceneDepthMaskedMotionFrag are the same for masked
+// materials.
+//
+//go:embed build/scene_depth_motion.vert.spv
+var SceneDepthMotionVert []byte
+
+//go:embed build/scene_motion.frag.spv
+var SceneMotion []byte
+
+//go:embed build/scene_depth_masked_motion.vert.spv
+var SceneDepthMaskedMotionVert []byte
+
+//go:embed build/scene_depth_masked_motion.frag.spv
+var SceneDepthMaskedMotionFrag []byte
+
+// SceneBackgroundMotion is the depth prepass's full-screen pass measuring the camera's
+// motion where no geometry was drawn.
+//
+//go:embed build/scene_background_motion.frag.spv
+var SceneBackgroundMotion []byte
+
+// TAAResolve blends each frame into the history of the frames before it (see
+// pix.AntiAliasingTAA).
+//
+//go:embed build/taa_resolve.frag.spv
+var TAAResolve []byte
+
+// SceneMotionView is the motion debug view: a full-screen pass showing the measured
+// motion.
+//
+//go:embed build/scene_motion_view.frag.spv
+var SceneMotionView []byte
 
 //go:embed build/scene_debug_id.vert.spv
 var SceneDebugIDVert []byte

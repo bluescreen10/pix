@@ -67,10 +67,14 @@ type Frame struct {
 	ViewProj        glm.Mat4f
 	InverseViewProj glm.Mat4f
 	Eye             glm.Vec3f
+	// With TAA, ViewProj moves by a fraction of a pixel from frame to frame (see
+	// AntiAliasingTAA), so that a step drawing into the scene lines up with it.
+	//
 	// PreviousViewProj is the matrix the main view was drawn with the last time the same
 	// scene was rendered, for a step that reuses what it drew then: a point's position on
-	// screen last frame is PreviousViewProj times it. It is ViewProj the first time a
-	// scene is rendered, and zero without a camera.
+	// screen last frame is PreviousViewProj times it. It leaves out TAA's movement within
+	// the pixel, as motion does (see SceneMotion). It is ViewProj the first time a scene is
+	// rendered, and zero without a camera.
 	PreviousViewProj glm.Mat4f
 
 	// Width and Height are the size of the scene images, which is the render target's.
@@ -100,9 +104,19 @@ type Frame struct {
 	// it ends, and everything after it — frame steps included — draws one sample a
 	// pixel.
 	SceneSamples uint8
+	// SceneMotion is how far the surface drawn at each pixel moved since the previous
+	// frame, in screen widths and heights: rightward in red, downward in green, as
+	// FormatRG16F. A pixel's position last frame is its texture coordinate minus its
+	// motion. It is measured with depth, so it is set from FrameStageAfterDepth on, and
+	// only while motion vectors are enabled (see Renderer.EnableMotionVectors). A step must
+	// not write it.
+	SceneMotion gpu.Texture
 
 	// Backend is the GPU backend, for a step creating resources of its own.
 	Backend gpu.Backend
 	// LinearSampler is a linear, clamp-to-edge sampler.
 	LinearSampler gpu.Sampler
+	// Profiler is the renderer's, for a step timing parts of its own work (see
+	// Profiler.StartGPUTimer). The renderer already times each step as a whole.
+	Profiler *Profiler
 }

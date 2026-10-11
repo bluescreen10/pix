@@ -51,6 +51,11 @@ type FramePacket struct {
 	// whole-table flag for now, where the other tables carry revisions: transforms are
 	// rewritten and re-uploaded wholesale, and ranged invalidation is a later phase.
 	TransformsDirty bool
+	// PreviousTransformsDirty says the previous extraction's matrices changed. A consumer
+	// keeping last frame's matrices beside this frame's — for motion vectors — has to
+	// refresh that copy now, though nothing moved since: otherwise a node that stopped
+	// keeps appearing to move.
+	PreviousTransformsDirty bool
 	// Meshes is one entry per renderable OBJECT, not per draw record. A mesh with four
 	// LOD levels drawn at a thousand instances is one entry here; expanding that into
 	// draw records is the renderer's business, and how it does so is not something a
@@ -399,6 +404,9 @@ type LODLevel struct {
 	// MinDistance is the camera distance at which this level takes over from the
 	// previous one. Levels are ordered nearest-first, so these ascend.
 	MinDistance float32
+	// DrawsDeformedVertices says the level draws its mesh's deformed vertices — its
+	// Geometry is a level of the mesh's deform output — rather than vertices of its own.
+	DrawsDeformedVertices bool
 }
 
 // ViewPacket is one camera's worth of a frame. Projection uses Pix's canonical camera

@@ -114,3 +114,33 @@ func TestSkinnedMeshAddLOD(t *testing.T) {
 		t.Errorf("level 1 draws the unskinned level geometry %v, want its triangles over the skinned output", drawn)
 	}
 }
+
+// TestLODLevelsSayWhetherTheyDrawDeformedVertices: a level made from a morphed mesh's
+// geometry draws its morphed vertices, and a level of its own vertices does not. A
+// renderer keeping deformed vertices' previous positions needs to tell them apart.
+func TestLODLevelsSayWhetherTheyDrawDeformedVertices(t *testing.T) {
+	store := newGeometryStore(t)
+	scene := scenes.New()
+	defer scene.Destroy()
+	base := morphedTriangle(t, store)
+	shared := base.CreateLOD([]uint32{0, 1, 2})
+	defer shared.Release()
+	static := plainTriangle(t, store)
+
+	mesh := scene.NewMesh(base, newFakeMaterial())
+	mesh.AddLOD(shared, newFakeMaterial(), 10)
+	mesh.AddLOD(static, newFakeMaterial(), 20)
+
+	var packet scenes.FramePacket
+	scene.Extract(&packet)
+	levels := packet.LODs.Data
+	if len(levels) != 2 {
+		t.Fatalf("%d coarser levels published, want 2", len(levels))
+	}
+	if !levels[0].DrawsDeformedVertices {
+		t.Error("level made with CreateLOD: DrawsDeformedVertices = false, want true")
+	}
+	if levels[1].DrawsDeformedVertices {
+		t.Error("level of its own vertices: DrawsDeformedVertices = true, want false")
+	}
+}

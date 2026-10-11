@@ -20,6 +20,13 @@ type frameViews struct {
 	// projection is the main camera's projection, clip-space Y flipped as main.viewProj
 	// is: what a pass working from the main view's depth unprojects it with.
 	projection glm.Mat4f
+	// previousViewProj is the matrix the main view was drawn with the previous frame,
+	// clip-space Y flipped as main.viewProj is and without the jitter; main.viewProj, as
+	// it is before the jitter, on a source's first frame.
+	previousViewProj glm.Mat4f
+	// jitter is the clip-space offset main.viewProj is moved by this frame, for TAA (see
+	// projectionJitter); zero without it.
+	jitter glm.Vec2f
 }
 
 // view is one camera the frame renders from, and the buffers its cull fills.

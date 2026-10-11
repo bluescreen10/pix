@@ -233,6 +233,12 @@ func (s *Pool) Shader() Shader {
 	return s.sh
 }
 
+// Label is the name the pool was created with (see Store.Pool), such as "PBR
+// Material": what tools show for the pipelines drawing its materials.
+func (s *Pool) Label() string {
+	return s.label
+}
+
 // Index is this pool's dense, stable position in its owning Store — see the field.
 func (s *Pool) Index() uint32 {
 	return s.index

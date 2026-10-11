@@ -23,6 +23,12 @@
 // (the skeleton root node) applies the remaining world transform exactly like static
 // geometry: scene_cull.comp / scene_draw.vert / scene_depth.vert are untouched by
 // deformation. One dispatch per deformed mesh (see Renderer.encodeDeforms).
+//
+// While motion is measured, the output's positions as they were are copied to the
+// mesh's range of previousPositions before being overwritten, which is what its motion
+// is measured from (see scene_depth.vert's USE_MOTION). Where there is nothing earlier to
+// copy — a range just laid out — seedsPrevious writes the new positions there too, so
+// the mesh reads as not moving.
 layout(local_size_x = 64) in;
 
 // MORPHED and SKINNED select which deformations this pipeline applies; with neither,
@@ -62,12 +68,16 @@ layout(push_constant, scalar) uniform PC {
     DescBuf descs;
     JointBuf joints;
     MorphWeightBuf morphWeights;
+    // previousPositions is 0 while motion is not measured.
+    uint64_t previousPositions;
     uint srcDesc;
     uint dstDesc;
     uint jointBase;
     uint morphWeightBase;
     uint morphWeightCount;
     uint vertexCount;
+    uint previousBase;
+    uint seedsPrevious;
 } pc;
 
 const uint FLAG_NORMAL = 1u;
@@ -161,6 +171,17 @@ void main() {
     }
 
     uint dpb = dst.positionBase + vi * 3u;
+    if (pc.previousPositions != 0ul) {
+        vec3 previous = p;
+        if (pc.seedsPrevious == 0u) {
+            previous = vec3(pc.pos.v[dpb], pc.pos.v[dpb + 1u], pc.pos.v[dpb + 2u]);
+        }
+        PosBuf previousPositions = PosBuf(pc.previousPositions);
+        uint ppb = pc.previousBase + vi * 3u;
+        previousPositions.v[ppb] = previous.x;
+        previousPositions.v[ppb + 1u] = previous.y;
+        previousPositions.v[ppb + 2u] = previous.z;
+    }
     pc.pos.v[dpb] = p.x;
     pc.pos.v[dpb + 1u] = p.y;
     pc.pos.v[dpb + 2u] = p.z;

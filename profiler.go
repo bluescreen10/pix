@@ -1,5 +1,5 @@
 // Frame profiling: where a frame's time went, on the CPU and on the GPU, overall and
-// pass by pass. A total says the budget is gone; the breakdown says which pass spent it.
+// timer by timer. A total says the budget is gone; the breakdown says what spent it.
 package pix
 
 import (
@@ -7,57 +7,6 @@ import (
 
 	"github.com/bluescreen10/gamekit/gpu"
 )
-
-// GPUPass names a phase of the frame that is timed separately, listed in the order the
-// frame runs them. No pass is timed inside another, so their times add up to no more
-// than the frame's.
-type GPUPass uint8
-
-const (
-	// GPUPassCull is the compute cull for every view, plus skinning and particle
-	// simulation — everything recorded before the first render pass.
-	GPUPassCull GPUPass = iota
-	// GPUPassShadow is the depth passes that fill the shadow maps, all lights and all
-	// cascades together.
-	GPUPassShadow
-	// GPUPassLightClusters is the compute pass that lists each light cluster's point and
-	// spot lights.
-	GPUPassLightClusters
-	// GPUPassPrepass is the depth-only pass that precedes forward shading, and does not
-	// run unless Renderer.EnableDepthPrepass turned it on.
-	GPUPassPrepass
-	// GPUPassOpaque is the opaque pass: every opaque surface shaded.
-	GPUPassOpaque
-	// GPUPassAmbientOcclusion measures ambient occlusion from the opaque scene's depth,
-	// and darkens the scene by it when that needs a pass of its own. It does not run
-	// unless ambient occlusion is enabled or shown.
-	GPUPassAmbientOcclusion
-	// GPUPassTransparent is everything drawn over the opaque scene: the backgrounds, the
-	// blended surfaces and particles, the frame steps between them, and resolving the
-	// multisampled scene.
-	GPUPassTransparent
-	// GPUPassPostProcessing is an HDR frame's post-processing chain and the tone-map
-	// pass that follows it. Without HDR it does not run.
-	GPUPassPostProcessing
-
-	gpuPassCount
-)
-
-// gpuPassNames is each pass's label, in enum order.
-var gpuPassNames = [gpuPassCount]string{"cull", "shadow", "clusters", "prepass", "opaque", "occlusion", "transparent", "post"}
-
-// String returns the pass's label.
-func (p GPUPass) String() string {
-	if int(p) < len(gpuPassNames) {
-		return gpuPassNames[p]
-	}
-	return "?"
-}
-
-// GPUPassNames lists every pass label, in enum order.
-func GPUPassNames() []string {
-	return gpuPassNames[:]
-}
 
 // Wait names a stretch of a frame the CPU spends blocked rather than working. Each is
 // timed on its own, and none of them counts toward CPUTime.
@@ -96,40 +45,118 @@ const (
 
 	// profileSmoothing is how far each GPU sample moves its average. A figure that
 	// jitters by a factor of two between frames cannot be read off a HUD, and the
-	// question these answer — which pass is worth optimizing — is about the steady
+	// question these answer — which part is worth optimizing — is about the steady
 	// state rather than any one frame.
 	profileSmoothing = 0.1
 )
 
-// The timestamp pool holds a start and an end timestamp for each pass, then the frame's
-// own start and end. One pool for all of it, so the total and the passes are read back
-// together and cannot disagree about which frame they describe.
+// initialGPUTimerSpans is how many GPU timer spans the timestamp pool first holds. A
+// frame that starts more grows it for the frames after.
+const initialGPUTimerSpans = 32
+
+// The timestamp pool holds the frame's start and end, then a start and an end for each
+// GPU timer span, in the order the frame starts them. One pool for all of it, so the
+// total and the timers are read back together and cannot disagree about which frame
+// they describe.
 const (
-	frameStartSlot   = uint32(gpuPassCount) * 2
-	frameEndSlot     = frameStartSlot + 1
-	profileSlotCount = frameEndSlot + 1
+	frameStartSlot    = 0
+	frameEndSlot      = 1
+	firstGPUTimerSlot = 2
 )
 
-// passStartSlot and passEndSlot are where a pass's two timestamps live in the pool.
-func passStartSlot(pass GPUPass) uint32 {
-	return uint32(pass) * 2
+// gpuTimerStartSlot and gpuTimerEndSlot are where the timestamps of the frame's i-th
+// GPU timer span live in the pool.
+func gpuTimerStartSlot(i int) uint32 {
+	return firstGPUTimerSlot + uint32(i)*2
 }
 
-func passEndSlot(pass GPUPass) uint32 {
-	return uint32(pass)*2 + 1
+func gpuTimerEndSlot(i int) uint32 {
+	return firstGPUTimerSlot + uint32(i)*2 + 1
+}
+
+// Timing is how long a timer's work took in recent frames: a CPU timer's averaged as
+// CPUTime is, a GPU timer's smoothed as GPUTime is. A timer started and stopped more
+// than once in a frame counts all of it.
+//
+// IsRecorded reports whether the last frame ran the timer at all, which Time cannot
+// say: a GPU timer can run and still measure zero (see GPUTimings).
+type Timing struct {
+	Name       string
+	Time       time.Duration
+	IsRecorded bool
+}
+
+// CPUTimer is a handle on a named CPU timer; see Profiler.StartCPUTimer.
+type CPUTimer struct {
+	index int
+}
+
+// cpuTimer is a CPU timer's state: its stretch in progress, the time it has measured
+// since the last frame ended, and a ring of the frames before.
+type cpuTimer struct {
+	name        string
+	start       time.Time // zero while stopped
+	pendingTime time.Duration
+
+	times      [profileSamples]time.Duration
+	frameCount int // frames ended since the timer was first started
+	isRecorded bool
+}
+
+// GPUTimer is a handle on a named GPU timer; see Profiler.StartGPUTimer.
+type GPUTimer struct {
+	index int
+}
+
+// gpuTimer is a GPU timer's smoothed time, and what the frame has done with it.
+type gpuTimer struct {
+	name       string
+	averageMS  float64
+	isRecorded bool // whether the last frame read back ran it
+
+	// openSpan is the frame's span of the timer in progress, when hasOpenSpan.
+	openSpan    int
+	hasOpenSpan bool
+
+	// What the frame being read back measured: how many of its spans could be measured,
+	// and their time together.
+	frameMeasuredSpans int
+	frameMS            float64
 }
 
 // Profiler reports where recent frames spent their time.
 //
 // CPU and frame times are rolling averages over the last profileSamples frames. GPU
 // times come from timestamps written into the frame's own command buffer and read back
-// once it has drained, smoothed the same way for the total and for every pass. GPU
+// once it has drained, smoothed the same way for the total and for every timer. GPU
 // profiling runs only while stats are visible (see Renderer.ShowFPS), because a
-// timestamp per pass is not free and a shipped frame should not pay for a HUD nobody is
-// looking at; the GPU figures read zero until then.
+// timestamp per timer is not free and a shipped frame should not pay for a HUD nobody
+// is looking at; the GPU figures read zero until then.
+//
+// Beyond whatever timers its user starts, the renderer times each frame step (see
+// Frame.Profiler) and these parts of the frame on the GPU, none of them within another:
+//
+//   - "cull": the compute cull for every view, plus skinning and particle simulation —
+//     everything recorded before the first render pass.
+//   - "shadow": the depth passes that fill the shadow maps, all lights and all cascades.
+//   - "clusters": listing each light cluster's point and spot lights, and filling the
+//     volumetric fog's volume.
+//   - "prepass": the depth-only pass before forward shading; only with
+//     Renderer.EnableDepthPrepass.
+//   - "opaque": every opaque surface shaded.
+//   - "occlusion": measuring ambient occlusion, and darkening the scene by it when that
+//     needs a pass of its own.
+//   - "transparent": everything drawn over the opaque scene — the backgrounds, the
+//     blended surfaces and particles, the frame steps between them, and resolving the
+//     multisampled scene.
+//   - "post": an HDR frame's post-processing chain and its tone map; only with HDR.
 //
 // The zero value is ready to use.
 type Profiler struct {
+	// cpuTimers are the CPU timers, in the order their names were first started.
+	cpuTimers       []cpuTimer
+	cpuTimersByName map[string]CPUTimer
+
 	// Wall-clock, CPU and wait times, as rings over the last profileSamples frames.
 	frameTimes [profileSamples]time.Duration
 	cpuTimes   [profileSamples]time.Duration
@@ -139,16 +166,19 @@ type Profiler struct {
 	// waitStart is when each wait in progress began; zero when it is not in progress.
 	waitStart [waitCount]time.Time
 
-	// GPU timestamps. passStarted and passEnded record which passes this frame actually
-	// bracketed, which is how a pass that ran is told apart from one that did not — the
-	// timestamps themselves cannot say (see IsPassRecorded).
 	timestampPool gpu.QueryPool
-	passStarted   [gpuPassCount]bool
-	passEnded     [gpuPassCount]bool
 
-	// Smoothed GPU times, and how many frames' timestamps have been read back.
+	// gpuTimers are the GPU timers, in the order their names were first started.
+	// gpuTimerSpans is the timer of each span the frame started, in order: the i-th has
+	// its timestamps at gpuTimerStartSlot(i), when i is within the pool's
+	// gpuTimerSpanCapacity.
+	gpuTimers            []gpuTimer
+	gpuTimersByName      map[string]GPUTimer
+	gpuTimerSpans        []GPUTimer
+	gpuTimerSpanCapacity int
+
+	// The frame's smoothed GPU time, and how many frames' timestamps have been read back.
 	gpuFrameMS    float64
-	gpuPassMS     [gpuPassCount]float64
 	gpuFramesRead int
 }
 
@@ -186,30 +216,115 @@ func (p *Profiler) GPUTime() time.Duration {
 	return durationFromMS(p.gpuFrameMS)
 }
 
-// PassTime is the smoothed GPU time one pass of the frame took. Zero when the pass did
-// not run — and also when it ran but could not be measured; IsPassRecorded tells the
-// two apart.
-func (p *Profiler) PassTime(pass GPUPass) time.Duration {
-	if pass >= gpuPassCount {
-		return 0
+// StartGPUTimer starts timing the GPU work cmd records next, until StopGPUTimer. The
+// first start of a name makes its timer, and every later start of the name returns the
+// same one; timers may run inside one another. Starting a timer that is already started
+// does nothing. A timer's time is part of every timer it runs within.
+//
+// It measures nothing while GPU profiling is off (see Renderer.ShowFPS), and a timer
+// left running when the frame ends stops there.
+func (p *Profiler) StartGPUTimer(name string, cmd gpu.CommandBuffer) GPUTimer {
+	timer := p.gpuTimerNamed(name)
+	t := &p.gpuTimers[timer.index]
+	if !p.isGPUProfilingEnabled() || t.hasOpenSpan {
+		return timer
 	}
-	return durationFromMS(p.gpuPassMS[pass])
+	t.openSpan, t.hasOpenSpan = len(p.gpuTimerSpans), true
+	p.gpuTimerSpans = append(p.gpuTimerSpans, timer)
+	// Neither end may use StageNone: that resolves to the command buffer's start, so
+	// every timer would appear to begin when the frame did, and the later ones would
+	// each measure almost the whole frame. Any real stage samples where the write sits.
+	if t.openSpan < p.gpuTimerSpanCapacity {
+		cmd.WriteTimestamp(p.timestampPool, gpuTimerStartSlot(t.openSpan), gpu.StageCompute)
+	}
+	return timer
 }
 
-// IsPassRecorded reports whether the last frame actually performed a pass, which is not
-// the same as it having a time: a pass can run and still measure zero.
+// StopGPUTimer stops a timer StartGPUTimer started. Stopping a timer that is not
+// started does nothing.
+func (p *Profiler) StopGPUTimer(timer GPUTimer, cmd gpu.CommandBuffer) {
+	t := &p.gpuTimers[timer.index]
+	if !t.hasOpenSpan {
+		return
+	}
+	t.hasOpenSpan = false
+	if t.openSpan < p.gpuTimerSpanCapacity {
+		cmd.WriteTimestamp(p.timestampPool, gpuTimerEndSlot(t.openSpan), gpu.StageAll)
+	}
+}
+
+// GPUTimings lists every GPU timer, in the order their names were first started. Their
+// times are zero while GPU profiling is off (see Renderer.ShowFPS).
 //
+// A timer can run and still measure zero, which is why IsRecorded is not Time > 0.
 // Whether a timestamp resolves where it was written is the backend's business, and not
 // every backend can resolve one everywhere. KosmicKrisp samples only at render-pass
 // boundaries, so a write made outside one is deferred to the next pass's start — which
-// collapses the two ends of a compute-only pass onto the same tick and makes the cull
-// measure exactly zero there. It ran; it cannot be timed. Reporting that as "did not
-// run" would be a lie about the frame.
-func (p *Profiler) IsPassRecorded(pass GPUPass) bool {
-	if pass >= gpuPassCount {
-		return false
+// collapses the two ends of compute-only work onto the same tick, and the cull measures
+// exactly zero there. It ran; it cannot be timed.
+func (p *Profiler) GPUTimings() []Timing {
+	timings := make([]Timing, len(p.gpuTimers))
+	for i := range p.gpuTimers {
+		t := &p.gpuTimers[i]
+		timings[i] = Timing{Name: t.name, Time: durationFromMS(t.averageMS), IsRecorded: t.isRecorded}
 	}
-	return p.passStarted[pass] && p.passEnded[pass]
+	return timings
+}
+
+// gpuTimerNamed returns the GPU timer named name, making it the first time.
+func (p *Profiler) gpuTimerNamed(name string) GPUTimer {
+	if timer, ok := p.gpuTimersByName[name]; ok {
+		return timer
+	}
+	if p.gpuTimersByName == nil {
+		p.gpuTimersByName = map[string]GPUTimer{}
+	}
+	timer := GPUTimer{index: len(p.gpuTimers)}
+	p.gpuTimers = append(p.gpuTimers, gpuTimer{name: name})
+	p.gpuTimersByName[name] = timer
+	return timer
+}
+
+// StartCPUTimer starts timing the CPU work that follows, until StopCPUTimer. The first
+// start of a name makes its timer, and every later start of the name returns the same
+// one. Starting a timer that is already started does nothing.
+//
+// Its time counts toward the frame Render ends next, wherever it was measured.
+func (p *Profiler) StartCPUTimer(name string) CPUTimer {
+	timer, ok := p.cpuTimersByName[name]
+	if !ok {
+		if p.cpuTimersByName == nil {
+			p.cpuTimersByName = map[string]CPUTimer{}
+		}
+		timer = CPUTimer{index: len(p.cpuTimers)}
+		p.cpuTimers = append(p.cpuTimers, cpuTimer{name: name})
+		p.cpuTimersByName[name] = timer
+	}
+	if t := &p.cpuTimers[timer.index]; t.start.IsZero() {
+		t.start = time.Now()
+	}
+	return timer
+}
+
+// StopCPUTimer stops a timer StartCPUTimer started. Stopping a timer that is not
+// started does nothing.
+func (p *Profiler) StopCPUTimer(timer CPUTimer) {
+	t := &p.cpuTimers[timer.index]
+	if t.start.IsZero() {
+		return
+	}
+	t.pendingTime += time.Since(t.start)
+	t.start = time.Time{}
+}
+
+// CPUTimings lists every CPU timer, in the order their names were first started.
+func (p *Profiler) CPUTimings() []Timing {
+	timings := make([]Timing, len(p.cpuTimers))
+	for i := range p.cpuTimers {
+		t := &p.cpuTimers[i]
+		timings[i] = Timing{Name: t.name, Time: averageOfRing(&t.times, t.frameCount), IsRecorded: t.isRecorded}
+	}
+	return timings
 }
 
 // --- CPU side, driven by Render ---
@@ -251,6 +366,19 @@ func (p *Profiler) endFrame() {
 	}
 	p.frameTimes[p.ringIndex()] = frameTime
 	p.cpuTimes[p.ringIndex()] = cpuTime
+	p.endCPUTimerFrames()
+}
+
+// endCPUTimerFrames moves what each CPU timer measured since the last frame ended into
+// its ring.
+func (p *Profiler) endCPUTimerFrames() {
+	for i := range p.cpuTimers {
+		t := &p.cpuTimers[i]
+		t.frameCount++
+		t.times[(t.frameCount-1)%profileSamples] = t.pendingTime
+		t.isRecorded = t.pendingTime > 0
+		t.pendingTime = 0
+	}
 }
 
 // ringIndex is this frame's position in the CPU and frame-time rings.
@@ -261,7 +389,12 @@ func (p *Profiler) ringIndex() int {
 // average is the mean of the filled part of a ring, so the first frames are not
 // diluted by the still-zero tail.
 func (p *Profiler) average(ring *[profileSamples]time.Duration) time.Duration {
-	n := min(p.frameCount, profileSamples)
+	return averageOfRing(ring, p.frameCount)
+}
+
+// averageOfRing is the mean of the part of a ring that frameCount frames have filled.
+func averageOfRing(ring *[profileSamples]time.Duration, frameCount int) time.Duration {
+	n := min(frameCount, profileSamples)
 	if n == 0 {
 		return 0
 	}
@@ -282,79 +415,59 @@ func (p *Profiler) isGPUProfilingEnabled() bool {
 
 // enableGPUProfiling creates the timestamp pool, which is what turns GPU profiling on.
 func (p *Profiler) enableGPUProfiling(backend gpu.Backend) {
-	if !p.timestampPool.IsValid() {
-		p.timestampPool = backend.CreateTimestampPool(profileSlotCount)
+	if p.timestampPool.IsValid() {
+		return
 	}
+	p.gpuTimerSpanCapacity = max(p.gpuTimerSpanCapacity, initialGPUTimerSpans)
+	p.timestampPool = backend.CreateTimestampPool(p.timestampSlotCount())
+}
+
+// timestampSlotCount is how many timestamps the pool holds.
+func (p *Profiler) timestampSlotCount() uint32 {
+	return gpuTimerStartSlot(p.gpuTimerSpanCapacity)
 }
 
 // disableGPUProfiling drops the timestamp pool, which turns GPU profiling off. The
-// figures already gathered are kept, but a pass that stops being measured is not one
-// that stopped running, so no pass is reported as recorded any more.
+// figures already gathered are kept, but a timer that stops being measured is not one
+// that stopped running, so no timer is reported as recorded any more.
 func (p *Profiler) disableGPUProfiling(backend gpu.Backend) {
 	if p.timestampPool.IsValid() {
 		backend.DestroyTimestampPool(p.timestampPool)
 	}
 	p.timestampPool = gpu.QueryPool{}
-	p.passStarted, p.passEnded = [gpuPassCount]bool{}, [gpuPassCount]bool{}
+	p.gpuTimerSpans = p.gpuTimerSpans[:0]
+	for i := range p.gpuTimers {
+		p.gpuTimers[i].hasOpenSpan = false
+		p.gpuTimers[i].isRecorded = false
+	}
 }
 
 // beginGPUFrame resets the pool and stamps the frame's start. Every slot is cleared, so
-// a pass that does not run this frame reads back as unwritten rather than as last
-// frame's value.
+// none reads back as last frame's value.
 //
 // The start uses StageNone, which is not "no particular stage": it means the command
 // buffer's own start, resolved from the submission's GPU boundaries. That is exactly
-// what the frame total wants, and exactly what a pass must never use — see beginPass.
+// what the frame total wants, and exactly what a timer must never use — see
+// StartGPUTimer.
 func (p *Profiler) beginGPUFrame(cmd gpu.CommandBuffer) {
 	if !p.isGPUProfilingEnabled() {
 		return
 	}
-	cmd.ResetTimestamps(p.timestampPool, profileSlotCount)
+	cmd.ResetTimestamps(p.timestampPool, p.timestampSlotCount())
 	cmd.WriteTimestamp(p.timestampPool, frameStartSlot, gpu.StageNone)
-	p.passStarted, p.passEnded = [gpuPassCount]bool{}, [gpuPassCount]bool{}
+	p.gpuTimerSpans = p.gpuTimerSpans[:0]
 }
 
-// beginPass and endPass bracket one pass. endPass is tolerant of a pass that was never
-// begun, so a caller can bracket a block that sometimes does nothing without guarding
-// both ends.
+// stopOpenGPUTimers stops every GPU timer still running, so that none of the frame's
+// spans is left without its end. Required rather than tidy: a backend may read the pool
+// by waiting for all of its results, and a query that was reset but never written never
+// becomes available — leaving one unwritten hangs that read forever.
 //
-// Neither end may use StageNone: that resolves to the command buffer's start, so every
-// pass would appear to begin when the frame did and the later passes would each measure
-// almost the whole frame. Any real stage samples where the write actually sits.
-func (p *Profiler) beginPass(pass GPUPass, cmd gpu.CommandBuffer) {
-	if !p.isGPUProfilingEnabled() {
-		return
-	}
-	p.passStarted[pass] = true
-	cmd.WriteTimestamp(p.timestampPool, passStartSlot(pass), gpu.StageCompute)
-}
-
-func (p *Profiler) endPass(pass GPUPass, cmd gpu.CommandBuffer) {
-	if !p.isGPUProfilingEnabled() || !p.passStarted[pass] {
-		return
-	}
-	p.passEnded[pass] = true
-	cmd.WriteTimestamp(p.timestampPool, passEndSlot(pass), gpu.StageAll)
-}
-
-// writeSkippedPasses writes both timestamps for every pass that did not run. Required
-// rather than tidy: a backend may read the pool by waiting for all of its results, and
-// a query that was reset but never written never becomes available — leaving a skipped
-// pass unwritten hangs that read forever.
-//
-// It must be recorded while the frame's last render pass is still open; see encode for
-// why that placement is load-bearing.
-func (p *Profiler) writeSkippedPasses(cmd gpu.CommandBuffer) {
-	if !p.isGPUProfilingEnabled() {
-		return
-	}
-	for pass := range gpuPassCount {
-		if !p.passStarted[pass] {
-			cmd.WriteTimestamp(p.timestampPool, passStartSlot(pass), gpu.StageCompute)
-		}
-		if !p.passEnded[pass] {
-			cmd.WriteTimestamp(p.timestampPool, passEndSlot(pass), gpu.StageAll)
-		}
+// It must be recorded while the frame's last render pass is still open; see
+// encodeOverlay for why that placement is load-bearing.
+func (p *Profiler) stopOpenGPUTimers(cmd gpu.CommandBuffer) {
+	for i := range p.gpuTimers {
+		p.StopGPUTimer(GPUTimer{index: i}, cmd)
 	}
 }
 
@@ -373,7 +486,13 @@ func (p *Profiler) readGPUTimestamps(backend gpu.Backend) {
 	if !p.isGPUProfilingEnabled() {
 		return
 	}
-	timestamps := backend.ReadTimestamps(p.timestampPool, profileSlotCount)
+	// Only the slots this frame wrote: a timer slot past the spans the frame started was
+	// reset and never written, and a backend may wait forever for it (see
+	// stopOpenGPUTimers).
+	timedSpans := min(len(p.gpuTimerSpans), p.gpuTimerSpanCapacity)
+	timestamps := backend.ReadTimestamps(p.timestampPool, gpuTimerStartSlot(timedSpans))
+	p.growTimestampPoolToFitSpans(backend)
+	p.recordWhichGPUTimersRan()
 	if timestamps == nil {
 		return
 	}
@@ -399,19 +518,60 @@ func (p *Profiler) readGPUTimestamps(backend gpu.Backend) {
 		p.gpuFrameMS = smooth(p.gpuFrameMS, ms, firstSample)
 	}
 
-	for pass := range gpuPassCount {
-		// Whether a pass ran is known from the recording, not inferred from its
-		// timestamps: writeSkippedPasses's two writes for a pass that did NOT run still
-		// land a few nanoseconds apart, and reporting that as a duration lists passes
-		// the frame never performed.
-		if !p.IsPassRecorded(pass) {
-			p.gpuPassMS[pass] = 0
+	p.readGPUTimerTimes(elapsedMS, firstSample)
+}
+
+// growTimestampPoolToFitSpans makes the pool big enough for every span the frame
+// started, for the frames after: one that started more had the rest go untimed.
+func (p *Profiler) growTimestampPoolToFitSpans(backend gpu.Backend) {
+	if len(p.gpuTimerSpans) <= p.gpuTimerSpanCapacity {
+		return
+	}
+	backend.DestroyTimestampPool(p.timestampPool)
+	p.gpuTimerSpanCapacity = len(p.gpuTimerSpans) * 2
+	p.timestampPool = backend.CreateTimestampPool(p.timestampSlotCount())
+}
+
+// recordWhichGPUTimersRan marks the timers the frame started as recorded, and every
+// other as not — from the recording, so that it holds while the times are still
+// warming up, and when they cannot be read.
+func (p *Profiler) recordWhichGPUTimersRan() {
+	for i := range p.gpuTimers {
+		p.gpuTimers[i].isRecorded = false
+	}
+	for _, timer := range p.gpuTimerSpans {
+		p.gpuTimers[timer.index].isRecorded = true
+	}
+}
+
+// readGPUTimerTimes folds each GPU timer's spans this frame into its average. A timer
+// the frame did not run has no time; one it ran but could not measure keeps its last,
+// rather than averaging toward zero. Whether a timer ran is known from the recording,
+// not inferred from its timestamps (see GPUTimings).
+func (p *Profiler) readGPUTimerTimes(elapsedMS func(startSlot, endSlot uint32) (float64, bool), firstSample bool) {
+	for i := range p.gpuTimers {
+		t := &p.gpuTimers[i]
+		t.frameMeasuredSpans, t.frameMS = 0, 0
+	}
+	for i, timer := range p.gpuTimerSpans {
+		t := &p.gpuTimers[timer.index]
+		if i >= p.gpuTimerSpanCapacity {
 			continue
 		}
-		// A missing sample keeps the last good value rather than averaging toward zero.
-		if ms, ok := elapsedMS(passStartSlot(pass), passEndSlot(pass)); ok {
-			// A pass that was not running last frame has no average to continue.
-			p.gpuPassMS[pass] = smooth(p.gpuPassMS[pass], ms, firstSample || p.gpuPassMS[pass] == 0)
+		if ms, ok := elapsedMS(gpuTimerStartSlot(i), gpuTimerEndSlot(i)); ok {
+			t.frameMeasuredSpans++
+			t.frameMS += ms
+		}
+	}
+	for i := range p.gpuTimers {
+		t := &p.gpuTimers[i]
+		if !t.isRecorded {
+			t.averageMS = 0
+			continue
+		}
+		// A timer that was not running last frame has no average to continue.
+		if t.frameMeasuredSpans > 0 {
+			t.averageMS = smooth(t.averageMS, t.frameMS, firstSample || t.averageMS == 0)
 		}
 	}
 }

@@ -46,6 +46,12 @@ type Frame struct {
 	// SceneDepth is the scene's depth, ready to sample: FormatDepth32F, reversed, so 1
 	// is the near plane and 0 the far one. A step must not write it.
 	SceneDepth gpu.Texture
+	// SceneMotion is how far the surface drawn at each pixel moved since the previous
+	// frame, in screen widths and heights: rightward in red, downward in green, as
+	// FormatRG16F. A pixel's position last frame is its texture coordinate minus its
+	// motion. It is zero unless motion vectors are enabled (see
+	// pix.Renderer.EnableMotionVectors). A step must not write it.
+	SceneMotion gpu.Texture
 
 	// Backend is the GPU backend, for a step creating resources of its own.
 	Backend gpu.Backend

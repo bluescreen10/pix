@@ -271,7 +271,7 @@ func TestFrameStepAfterDepthRunsPrepass(t *testing.T) {
 
 	r.Render(scene)
 
-	if !r.Profiler().IsPassRecorded(pix.GPUPassPrepass) {
+	if prepass, _ := gpuTiming(r.Profiler(), "prepass"); !prepass.IsRecorded {
 		t.Error("the depth prepass did not run, but a step after it needs its depth")
 	}
 }

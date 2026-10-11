@@ -1,4 +1,13 @@
 // shadercompile compiles GLSL shaders into one or more runtime formats.
+//
+// TODO: make this a tool we ship, so game implementors compile their own shaders with
+// it (shaderc underneath) the same way pix compiles its own. Ship shaders/src as the
+// include path, and turn pix's shared code into includes written for them: a shader
+// includes one, such as #include "particle_sim", and implements the functions it asks
+// for — a start() that spawns a particle and an update() that advances it — while the
+// include provides main() and the bindings, and calls them. The include owns the entry
+// point and the layout, so a shader written against it keeps working when either
+// changes.
 package main
 
 import (

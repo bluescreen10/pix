@@ -1,8 +1,11 @@
 package pix_test
 
 import (
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/bluescreen10/gamekit/gpu"
 
 	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/colors"
@@ -45,16 +48,16 @@ func TestPassRecordedSeparatesUnrunFromUnmeasured(t *testing.T) {
 	}
 
 	// Rendering forward with shadows on: these happen every frame.
-	for _, p := range []pix.GPUPass{pix.GPUPassCull, pix.GPUPassShadow, pix.GPUPassOpaque} {
-		if !r.Profiler().IsPassRecorded(p) {
-			t.Errorf("%s did not report as recorded, but a forward frame with shadows runs it", p)
+	for _, name := range []string{"cull", "shadow", "opaque"} {
+		if got, _ := gpuTiming(r.Profiler(), name); !got.IsRecorded {
+			t.Errorf("%s did not report as recorded, but a forward frame with shadows runs it", name)
 		}
 	}
 	// These do not — the prepass is off, and without HDR there is no post pass — and
 	// must not merely read as zero.
-	for _, p := range []pix.GPUPass{pix.GPUPassPrepass, pix.GPUPassPostProcessing} {
-		if r.Profiler().IsPassRecorded(p) {
-			t.Errorf("%s reported as recorded, but this frame does not run it", p)
+	for _, name := range []string{"prepass", "post"} {
+		if got, _ := gpuTiming(r.Profiler(), name); got.IsRecorded {
+			t.Errorf("%s reported as recorded, but this frame does not run it", name)
 		}
 	}
 }
@@ -132,8 +135,9 @@ func TestPassTimesAddUpToNoMoreThanTheFrame(t *testing.T) {
 	}
 
 	var passes time.Duration
-	for i := range pix.GPUPassNames() {
-		passes += r.Profiler().PassTime(pix.GPUPass(i))
+	for _, name := range []string{"cull", "shadow", "clusters", "prepass", "opaque", "occlusion", "transparent", "post"} {
+		got, _ := gpuTiming(r.Profiler(), name)
+		passes += got.Time
 	}
 	frame := r.Profiler().GPUTime()
 	t.Logf("passes %v, frame %v", passes, frame)
@@ -142,5 +146,174 @@ func TestPassTimesAddUpToNoMoreThanTheFrame(t *testing.T) {
 	}
 	if passes > frame+frame/100 {
 		t.Errorf("passes add up to %v, more than the frame's %v", passes, frame)
+	}
+}
+
+// TestFrameStepIsTimedUnderItsTypeName: the renderer times each frame step by itself,
+// so a sky or a simulation shows up on its own rather than hidden in a pass or in no
+// pass at all — taking time, but no more than the frame it is part of.
+func TestFrameStepIsTimedUnderItsTypeName(t *testing.T) {
+	r, scene := stepScene(t)
+	r.ShowFPS(true)
+	var log []string
+	clear := &recordingStep{name: "clear", log: &log, clearColor: &[4]float32{0, 0, 0, 1}}
+	r.AddFrameStep(pix.FrameStageAfterOpaque, clear)
+	for range 10 {
+		r.Render(scene)
+	}
+
+	got, ok := gpuTiming(r.Profiler(), "pix_test.recordingStep")
+	if !ok {
+		t.Fatalf("GPUTimings() does not list pix_test.recordingStep: %+v", r.Profiler().GPUTimings())
+	}
+	if !got.IsRecorded {
+		t.Errorf("pix_test.recordingStep = %+v, want recorded", got)
+	}
+	frame := r.Profiler().GPUTime()
+	if frame == 0 {
+		t.Skip("this backend measures no GPU time")
+	}
+	if got.Time <= 0 || got.Time > frame {
+		t.Errorf("pix_test.recordingStep = %+v, want more than 0 and at most the frame's %v", got, frame)
+	}
+}
+
+// TestCPUTimerMeasuresWhatItBrackets: a CPU timer is listed under its name with the
+// time spent between its start and its stop.
+func TestCPUTimerMeasuresWhatItBrackets(t *testing.T) {
+	r, err := pix.NewOffscreenRenderer(64, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	scene := scenes.New()
+	defer scene.Destroy()
+
+	p := r.Profiler()
+	timer := p.StartCPUTimer("work")
+	time.Sleep(2 * time.Millisecond)
+	p.StopCPUTimer(timer)
+	r.Render(scene)
+
+	timings := p.CPUTimings()
+	if len(timings) != 1 {
+		t.Fatalf("CPUTimings() lists %d timers, want 1", len(timings))
+	}
+	got := timings[0]
+	if got.Name != "work" || !got.IsRecorded || got.Time < 2*time.Millisecond {
+		t.Errorf("CPUTimings()[0] = %+v, want work, recorded, at least 2ms", got)
+	}
+}
+
+// TestCPUTimerAddsUpItsStretches: starting a name again is the same timer, so a frame
+// that times the same work twice lists it once, with both stretches.
+func TestCPUTimerAddsUpItsStretches(t *testing.T) {
+	r, err := pix.NewOffscreenRenderer(64, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	scene := scenes.New()
+	defer scene.Destroy()
+
+	p := r.Profiler()
+	for range 2 {
+		timer := p.StartCPUTimer("work")
+		time.Sleep(2 * time.Millisecond)
+		p.StopCPUTimer(timer)
+	}
+	r.Render(scene)
+
+	timings := p.CPUTimings()
+	if len(timings) != 1 {
+		t.Fatalf("CPUTimings() lists %d timers, want 1", len(timings))
+	}
+	if got := timings[0].Time; got < 4*time.Millisecond {
+		t.Errorf("CPUTimings()[0].Time = %v, want at least 4ms", got)
+	}
+}
+
+// gpuTimedStep times the step it wraps with a GPU timer of its own.
+type gpuTimedStep struct {
+	*recordingStep
+	timerName string
+}
+
+func (s *gpuTimedStep) Encode(frame *pix.Frame, cmd gpu.CommandBuffer) {
+	timer := frame.Profiler.StartGPUTimer(s.timerName, cmd)
+	s.recordingStep.Encode(frame, cmd)
+	frame.Profiler.StopGPUTimer(timer, cmd)
+}
+
+// TestGPUTimerMeasuresWhatItBrackets: a frame step can time its own work on the GPU,
+// listed under the timer's name, taking time but no more than the frame it is part of.
+func TestGPUTimerMeasuresWhatItBrackets(t *testing.T) {
+	r, scene := stepScene(t)
+	r.ShowFPS(true)
+	var log []string
+	clear := &recordingStep{name: "clear", log: &log, clearColor: &[4]float32{0, 0, 0, 1}}
+	r.AddFrameStep(pix.FrameStageAfterOpaque, &gpuTimedStep{recordingStep: clear, timerName: "clear"})
+	for range 10 {
+		r.Render(scene)
+	}
+
+	frame := r.Profiler().GPUTime()
+	if frame == 0 {
+		t.Skip("this backend measures no GPU time")
+	}
+	got, ok := gpuTiming(r.Profiler(), "clear")
+	if !ok {
+		t.Fatalf("GPUTimings() does not list clear: %+v", r.Profiler().GPUTimings())
+	}
+	if !got.IsRecorded || got.Time <= 0 || got.Time > frame {
+		t.Errorf("clear = %+v, want recorded, more than 0 and at most the frame's %v", got, frame)
+	}
+}
+
+// gpuTiming finds the GPU timing named name.
+func gpuTiming(p *pix.Profiler, name string) (pix.Timing, bool) {
+	for _, timing := range p.GPUTimings() {
+		if timing.Name == name {
+			return timing, true
+		}
+	}
+	return pix.Timing{}, false
+}
+
+// manyGPUTimersStep times each of count clears with a GPU timer of its own.
+type manyGPUTimersStep struct {
+	*recordingStep
+	count int
+}
+
+func (s *manyGPUTimersStep) Encode(frame *pix.Frame, cmd gpu.CommandBuffer) {
+	for i := range s.count {
+		timer := frame.Profiler.StartGPUTimer(fmt.Sprintf("clear %d", i), cmd)
+		s.recordingStep.Encode(frame, cmd)
+		frame.Profiler.StopGPUTimer(timer, cmd)
+	}
+}
+
+// TestGPUTimersAreNotLimitedInNumber: a frame may start more GPU timers than the
+// profiler first has room for, and all of them are timed.
+func TestGPUTimersAreNotLimitedInNumber(t *testing.T) {
+	r, scene := stepScene(t)
+	r.ShowFPS(true)
+	var log []string
+	clear := &recordingStep{name: "clear", log: &log, clearColor: &[4]float32{0, 0, 0, 1}}
+	const count = 100
+	r.AddFrameStep(pix.FrameStageAfterOpaque, &manyGPUTimersStep{recordingStep: clear, count: count})
+	for range 10 {
+		r.Render(scene)
+	}
+
+	if r.Profiler().GPUTime() == 0 {
+		t.Skip("this backend measures no GPU time")
+	}
+	for i := range count {
+		name := fmt.Sprintf("clear %d", i)
+		if got, ok := gpuTiming(r.Profiler(), name); !ok || !got.IsRecorded || got.Time <= 0 {
+			t.Errorf("%s = %+v (listed %v), want recorded and more than 0", name, got, ok)
+		}
 	}
 }

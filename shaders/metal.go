@@ -54,6 +54,27 @@ var metalSceneDepthMaskedVert []byte
 //go:embed build/scene_depth_masked.frag.metalbin
 var metalSceneDepthMaskedFrag []byte
 
+//go:embed build/scene_depth_motion.vert.metalbin
+var metalSceneDepthMotionVert []byte
+
+//go:embed build/scene_motion.frag.metalbin
+var metalSceneMotion []byte
+
+//go:embed build/scene_depth_masked_motion.vert.metalbin
+var metalSceneDepthMaskedMotionVert []byte
+
+//go:embed build/scene_depth_masked_motion.frag.metalbin
+var metalSceneDepthMaskedMotionFrag []byte
+
+//go:embed build/scene_background_motion.frag.metalbin
+var metalSceneBackgroundMotion []byte
+
+//go:embed build/taa_resolve.frag.metalbin
+var metalTAAResolve []byte
+
+//go:embed build/scene_motion_view.frag.metalbin
+var metalSceneMotionView []byte
+
 //go:embed build/scene_debug_id.vert.metalbin
 var metalSceneDebugIDVert []byte
 
@@ -194,6 +215,13 @@ var metalVariants = []struct{ spirv, metal []byte }{
 	{SceneDepthVert, metalSceneDepthVert},
 	{SceneDepthMaskedVert, metalSceneDepthMaskedVert},
 	{SceneDepthMaskedFrag, metalSceneDepthMaskedFrag},
+	{SceneDepthMotionVert, metalSceneDepthMotionVert},
+	{SceneMotion, metalSceneMotion},
+	{SceneDepthMaskedMotionVert, metalSceneDepthMaskedMotionVert},
+	{SceneDepthMaskedMotionFrag, metalSceneDepthMaskedMotionFrag},
+	{SceneBackgroundMotion, metalSceneBackgroundMotion},
+	{TAAResolve, metalTAAResolve},
+	{SceneMotionView, metalSceneMotionView},
 	{SceneDebugIDVert, metalSceneDebugIDVert},
 	{SceneDebugNormal, metalSceneDebugNormal},
 	{SceneDebugDepth, metalSceneDebugDepth},

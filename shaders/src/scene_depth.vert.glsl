@@ -16,6 +16,11 @@
 // materials.Masked): the drawable's material slot, and both sets of its vertex's texture
 // coordinates.
 //
+// With USE_MOTION defined, it also projects each vertex where it was the previous frame
+// — by the previous frame's camera and model matrix, from the previous frame's position
+// for a vertex the deform pass computes — and hands the fragment stage both clip
+// positions, which is what a motion vector is measured between.
+//
 // The push constants keep their fields in the same order either way, so a define only
 // adds fields: renderer.go's roots match each build.
 
@@ -46,6 +51,9 @@ layout(buffer_reference, scalar) readonly buffer DescBuf { GeoDesc v[]; };
 layout(buffer_reference, scalar) readonly buffer ModelBuf { mat4 v[]; };
 layout(buffer_reference, scalar) readonly buffer DrawableBuf { Drawable v[]; };
 layout(buffer_reference, scalar) readonly buffer VisibleBuf { uint v[]; };
+#ifdef USE_MOTION
+layout(buffer_reference, scalar) readonly buffer BaseBuf { uint v[]; };
+#endif
 
 // Pushed inline rather than behind a device address: it fits in push constants on
 // every backend, so the shader reads its parameters directly instead of chasing a
@@ -53,12 +61,22 @@ layout(buffer_reference, scalar) readonly buffer VisibleBuf { uint v[]; };
 // point at unbounded arrays, so that indirection is inherent.
 layout(push_constant, scalar) uniform PC {
     mat4 viewProj;
+#ifdef USE_MOTION
+    mat4 previousViewProj;
+#endif
     PosBuf pos;
 #ifdef USE_MASK
     AttrBuf attr;
 #endif
     DescBuf descs;
     ModelBuf models;
+#ifdef USE_MOTION
+    ModelBuf previousModels;
+    // previousPositions holds deformed vertices' previous positions; previousPositionBases
+    // is where each deformed geometry's start in it, by geometry slot.
+    PosBuf previousPositions;
+    BaseBuf previousPositionBases;
+#endif
     DrawableBuf drawables;
     VisibleBuf visible;
 #ifdef USE_MASK
@@ -68,7 +86,24 @@ layout(push_constant, scalar) uniform PC {
     uint pad0;
     uint pad1;
 #endif
+#ifdef USE_MOTION
+    // jitter is the clip-space offset viewProj draws with this frame, for TAA; motion is
+    // measured without it.
+    vec2 jitter;
+#ifndef USE_MASK
+    vec2 motionPad;
+#endif
+#endif
 } pc;
+
+#ifdef USE_MOTION
+// FLAG_DEFORMED marks a drawable whose vertices the deform pass computes (mirrors
+// pix.DrawableDeformed).
+const uint FLAG_DEFORMED = 8u;
+
+layout(location = 3) out vec4 vClip;
+layout(location = 4) out vec4 vPreviousClip;
+#endif
 
 #ifdef USE_MASK
 layout(location = 0) out vec2 vUV1;
@@ -124,4 +159,14 @@ void main() {
 #endif
 
     gl_Position = pc.viewProj * (m * vec4(p, 1.0));
+
+#ifdef USE_MOTION
+    vClip = gl_Position - vec4(pc.jitter * gl_Position.w, 0.0, 0.0);
+    vec3 previousP = p;
+    if ((d.flags & FLAG_DEFORMED) != 0u) {
+        uint ppb = pc.previousPositionBases.v[d.geometryID] + vi * 3u;
+        previousP = vec3(pc.previousPositions.v[ppb], pc.previousPositions.v[ppb + 1u], pc.previousPositions.v[ppb + 2u]);
+    }
+    vPreviousClip = pc.previousViewProj * (pc.previousModels.v[d.transformID] * vec4(previousP, 1.0));
+#endif
 }

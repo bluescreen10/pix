@@ -115,9 +115,9 @@ func BenchmarkFrame(b *testing.B) {
 		r.Render(scene)
 	}
 	b.StopTimer()
-	for _, p := range []pix.GPUPass{pix.GPUPassCull, pix.GPUPassShadow, pix.GPUPassPrepass, pix.GPUPassOpaque, pix.GPUPassAmbientOcclusion, pix.GPUPassTransparent, pix.GPUPassPostProcessing} {
-		if d := r.Profiler().PassTime(p); d > 0 {
-			b.Logf("%-8s %.3f ms", p, float64(d.Microseconds())/1000)
+	for _, timing := range r.Profiler().GPUTimings() {
+		if timing.Time > 0 {
+			b.Logf("%-8s %.3f ms", timing.Name, float64(timing.Time.Microseconds())/1000)
 		}
 	}
 	b.Logf("%-8s %.3f ms", "TOTAL", float64(r.Profiler().GPUTime().Microseconds())/1000)

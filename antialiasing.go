@@ -23,12 +23,19 @@ const (
 	// shader detail — at the cost of slightly softening textures. One pass, whatever
 	// the scene, so its cost is fixed by the resolution.
 	AntiAliasingFXAA
+	// AntiAliasingTAA spreads the samples over frames (temporal anti-aliasing): each frame
+	// is drawn from a slightly different spot within the pixel, and blended with the
+	// frames before it, followed to where they moved since (see EnableMotionVectors).
+	// It smooths every edge, inside surfaces too, at the cost of some softness, and of a
+	// trail behind what changes too fast to follow. It needs motion vectors, which it
+	// turns on, and with them the depth prepass.
+	AntiAliasingTAA
 )
 
 // antiAliasingNames is the console/round-trip spelling of each method, in enum order.
-var antiAliasingNames = [...]string{"msaa4x", "msaa2x", "fxaa"}
+var antiAliasingNames = [...]string{"msaa4x", "msaa2x", "fxaa", "taa"}
 
-// String returns the method's name ("msaa4x", "msaa2x", "fxaa").
+// String returns the method's name ("msaa4x", "msaa2x", "fxaa", "taa").
 func (a AntiAliasing) String() string {
 	if int(a) < len(antiAliasingNames) {
 		return antiAliasingNames[a]

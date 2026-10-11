@@ -25,3 +25,16 @@ func TestStoreDedupsEqualBytesFromDistinctSlices(t *testing.T) {
 		t.Fatal("different shaders shared a store")
 	}
 }
+
+// TestPoolLabelIsTheFirstCallersLabel pins what a pool is called: the label it was
+// created with. A later caller sharing its shader gets the same pool, and its label
+// names nothing.
+func TestPoolLabelIsTheFirstCallersLabel(t *testing.T) {
+	store, _ := testStore(t)
+
+	store.Pool(materials.Shader{Fragment: shaders.BasicFragment}, "first")
+	pool := store.Pool(materials.Shader{Fragment: shaders.BasicFragment}, "second")
+	if got, want := pool.Label(), "first"; got != want {
+		t.Errorf("Label() = %q, want %q", got, want)
+	}
+}

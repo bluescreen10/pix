@@ -517,6 +517,22 @@ Delete code that has no callers. Version control remembers it; the reader should
 
 ## Tests
 
+### Test-driven development
+
+Work in small red–green–refactor steps:
+
+1. **Write one small test** for the next piece of behavior — the smallest step that moves the work forward.
+2. **Run it and watch it fail**, and check it fails for the reason you expect. A test that has never failed has not been shown to measure anything.
+3. **Make it green** with the simplest change that passes. Do not write code the test does not need yet.
+4. **Refactor** with the tests green — names, duplication, structure — then run them again.
+5. **Move on** to the next test.
+
+Do not batch: one failing test at a time, never a feature's worth of untested code followed by tests written to match it.
+
+Protip: If a function is difficult to test, it might be indicating a design problem, stop and analyze the current design.
+
+### Test packages
+
 Tests **must use an external `_test` package**:
 
 ```go

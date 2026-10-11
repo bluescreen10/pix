@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"iter"
 	"maps"
 	"math/bits"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -158,6 +160,17 @@ type Renderer struct {
 	fxaaSource          gpu.Texture
 	fxaaPass            *postprocess.FullscreenPass
 
+	// taaHistories are TAA's resolves of the last two frames: each frame reads the one
+	// written last, taaHistories[taaHistoryIndex], and writes over the other (see
+	// encodeTAA). hasTAAHistory says the one written last holds a frame.
+	taaHistories    [2]gpu.Texture
+	taaHistoryIndex int
+	hasTAAHistory   bool
+	taaResolvePass  *postprocess.FullscreenPass
+	// Without HDR the scene is drawn into taaSource, and once resolved into the history,
+	// copied into the target (see encodeDisplayTAA).
+	taaSource gpu.Texture
+
 	// Environment lighting: the sampler environments are read with — linear, mipmapped,
 	// wrapping around the vertical and clamped at the poles — the two passes that derive
 	// an environment's light, the BRDF table they share, computed once, and the pass
@@ -258,7 +271,22 @@ type Renderer struct {
 	maskedShadowPipeline   gpu.Pipeline
 	maskedPrepassPipelines [3]gpu.Pipeline
 	depthPrepass           bool
-	shadowFilter           ShadowFilter
+	// motionVectors says the depth prepass also measures each pixel's motion since the
+	// previous frame into sceneMotion (see EnableMotionVectors).
+	motionVectors bool
+	sceneMotion   gpu.Texture
+	// multisampledMotion is what the prepass measures motion into with MSAA, beside the
+	// multisampled depth, and resolves into sceneMotion as it ends.
+	multisampledMotion gpu.Texture
+	// motionPrepassPipelines and maskedMotionPrepassPipelines are the depth prepass's
+	// pipelines while it measures motion, one per materials.CullMode, built on first use;
+	// motionViewPass shows what it measured (see DebugMotion).
+	motionPrepassPipelines       [3]gpu.Pipeline
+	maskedMotionPrepassPipelines [3]gpu.Pipeline
+	// backgroundMotionPass measures the camera's motion where the prepass drew nothing.
+	backgroundMotionPass *postprocess.FullscreenPass
+	motionViewPass       *postprocess.FullscreenPass
+	shadowFilter         ShadowFilter
 
 	// pendingShot is a queued frame capture, recorded into the frame being built (see
 	// screenshot.go).
@@ -403,8 +431,9 @@ func (r *Renderer) attachTexture(w, h uint32) {
 }
 
 // SetRenderTarget renders into tex (headless). The renderer (re)creates its depth
-// buffer and pipelines to match. tex must have render-target usage (plus transfer
-// usage if you intend to Capture it).
+// buffer and pipelines to match. tex must have render-target usage, plus transfer
+// usage if you intend to Capture it or anti-alias by TAA without HDR, which copies
+// the finished frame into it.
 //
 // The format should be an sRGB one (FormatRGBA8Srgb, FormatBGRA8Srgb): every shader
 // writes linear light and relies on the target to encode it for display. A unorm target
@@ -445,6 +474,8 @@ func (r *Renderer) configure(w, h uint32, format gpu.Format) {
 	r.releaseAmbientOcclusionImages()
 	r.releaseAmbientOcclusionPipelines()
 	r.releaseSceneCopy()
+	r.releaseSceneMotion()
+	r.releaseTAA()
 	r.releaseFXAASource()
 	if r.isFXAAEnabled() {
 		r.fxaaSource = r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: w, Height: h,
@@ -500,12 +531,12 @@ func (r *Renderer) prepareMultisampling() {
 // with MSAA, unless they exist as this frame needs them. The colour is transient when
 // the opaque pass resolves it (see resolvesOpaquePassEarly), as then nothing after it
 // touches it. So is the depth, unless it has to outlive the opaque pass too: when the
-// depth prepass fills it, or frame steps test against it, before that pass, or ambient
-// occlusion reads its samples after it. What the frame needs may change from one frame
+// depth prepass fills it — asked for, or measuring motion — or frame steps test against
+// it, before that pass, or ambient occlusion reads its samples after it. What the frame needs may change from one frame
 // to the next, so it is checked every frame.
 func (r *Renderer) ensureMultisampledImages() {
 	isColorTransient := r.resolvesOpaqueEarly
-	isDepthTransient := r.resolvesOpaqueEarly && !r.depthPrepass && !r.hasFrameStepsAt(FrameStageAfterDepth) && !r.isAmbientOcclusionMeasured()
+	isDepthTransient := r.resolvesOpaqueEarly && !r.depthPrepass && !r.isMotionMeasured() && !r.hasFrameStepsAt(FrameStageAfterDepth) && !r.isAmbientOcclusionMeasured()
 	if r.multisampledColor.IsValid() && r.multisampledColorIsTransient == isColorTransient && r.multisampledDepthIsTransient == isDepthTransient {
 		return
 	}
@@ -525,6 +556,44 @@ func (r *Renderer) ensureMultisampledImages() {
 	r.multisampledDepth = r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: r.width, Height: r.height,
 		Format: gpu.FormatDepth32F, Usage: depthUsage, Samples: r.sceneSamples(), Label: "depth-multisampled"})
 	r.multisampledColorIsTransient, r.multisampledDepthIsTransient = isColorTransient, isDepthTransient
+}
+
+// prepareMotionVectors makes sure the image motion is measured into exists while motion
+// is measured, and frees it while it is not.
+func (r *Renderer) prepareMotionVectors() {
+	if !r.isMotionMeasured() {
+		r.releaseSceneMotion()
+		return
+	}
+	if !r.sceneMotion.IsValid() {
+		r.sceneMotion = r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: r.width, Height: r.height,
+			Format: gpu.FormatRG16F, Usage: gpu.TextureRenderTarget | gpu.TextureSampled, Label: "scene-motion"})
+	}
+	// Nothing reads the samples but the resolve, so they never leave the GPU's tile memory.
+	if r.isMSAAEnabled() && !r.multisampledMotion.IsValid() {
+		r.multisampledMotion = r.backend.CreateTexture(gpu.TextureDescriptor{Kind: gpu.Texture2D, Width: r.width, Height: r.height,
+			Format: gpu.FormatRG16F, Usage: gpu.TextureRenderTarget | gpu.TextureTransient, Samples: r.sceneSamples(), Label: "scene-motion-multisampled"})
+	}
+}
+
+// motionAttachment is where the depth prepass measures motion: straight into
+// sceneMotion, or with MSAA into samples beside the depth's, averaged into sceneMotion
+// as the pass ends.
+func (r *Renderer) motionAttachment() gpu.ColorAttachment {
+	if r.isMSAAEnabled() {
+		return gpu.ColorAttachment{Texture: r.multisampledMotion, Load: gpu.LoadClear, Store: gpu.StoreDontCare, ResolveTexture: r.sceneMotion}
+	}
+	return gpu.ColorAttachment{Texture: r.sceneMotion, Load: gpu.LoadClear, Store: gpu.StoreKeep}
+}
+
+// releaseSceneMotion frees the images motion is measured into.
+func (r *Renderer) releaseSceneMotion() {
+	for _, image := range []*gpu.Texture{&r.sceneMotion, &r.multisampledMotion} {
+		if image.IsValid() {
+			r.backend.DestroyTexture(*image)
+		}
+		*image = gpu.Texture{}
+	}
 }
 
 // afterOpaqueSamples is how many samples a pixel the passes after the opaque pass draw
@@ -621,7 +690,7 @@ func (r *Renderer) opaqueDepthAttachment() gpu.Texture {
 
 // releaseMultisampledImages frees the multisampled scene images, if they exist.
 func (r *Renderer) releaseMultisampledImages() {
-	for _, image := range []*gpu.Texture{&r.multisampledColor, &r.multisampledDepth} {
+	for _, image := range []*gpu.Texture{&r.multisampledColor, &r.multisampledDepth, &r.multisampledMotion} {
 		if image.IsValid() {
 			r.backend.DestroyTexture(*image)
 		}
@@ -821,6 +890,25 @@ func (r *Renderer) DepthPrepassEnabled() bool {
 // either way, and the frame 0.2-1.0 ms longer with the prepass.
 func (r *Renderer) EnableDepthPrepass(on bool) {
 	r.depthPrepass = on
+}
+
+// MotionVectorsEnabled reports whether the frame measures how far each pixel moved
+// since the previous frame (see EnableMotionVectors).
+func (r *Renderer) MotionVectorsEnabled() bool {
+	return r.motionVectors
+}
+
+// EnableMotionVectors turns on measuring how far the surface drawn at each pixel moved
+// since the previous frame, for effects that reuse what earlier frames drew or blur
+// along motion. Frame steps and post-processing read it as SceneMotion.
+//
+// Motion is measured by the depth prepass, which then runs whatever EnableDepthPrepass
+// says — on Apple GPUs a cost of its own (see EnableDepthPrepass). Like depth, it is
+// measured for opaque materials only, and not for one with its own vertex program,
+// whose vertices the prepass cannot place: where those are drawn, it reads the motion
+// of what the prepass drew behind them, or none.
+func (r *Renderer) EnableMotionVectors(on bool) {
+	r.motionVectors = on
 }
 
 // DebugView reports which view is being displayed.
@@ -1398,22 +1486,67 @@ func (r *Renderer) extractTransforms(p *scenes.FramePacket, st *renderState) {
 	// nothing. A state seeing its first packet uploads regardless: the dirty flag reports
 	// change since the last EXTRACTION, which a state created just now never saw, and a
 	// source released and drawn again would otherwise render from an unwritten buffer.
-	if p.TransformsDirty || !st.worldBuf.IsValid() {
-		nodes := p.Transforms.Data
-		instances := p.InstanceTransforms.Data
-
-		r.growBuffer(&st.worldBuf, uint64(len(nodes)+len(instances))*matrixSize, "world")
-		if len(nodes) > 0 {
-			st.worldBuf.Write(utils.ToBytesSlice(nodes), 0)
-		}
-		if len(instances) > 0 {
-			st.worldBuf.Write(utils.ToBytesSlice(instances), uint64(len(nodes))*matrixSize)
-		}
+	// With nothing earlier to move from, its previous matrices are its current ones.
+	if !st.worldBuf.IsValid() {
+		r.uploadWorldMatrices(p, &st.worldBuf)
+		r.uploadWorldMatrices(p, &st.previousWorldBuf)
+	} else if p.TransformsDirty || p.PreviousTransformsDirty {
+		// What was current becomes previous, and the matrices are written over what was
+		// previous. On the frame after a move nothing moved, but they are written again
+		// anyway: that is what brings the previous matrices up to the current ones.
+		st.worldBuf, st.previousWorldBuf = st.previousWorldBuf, st.worldBuf
+		r.uploadWorldMatrices(p, &st.worldBuf)
+		r.alignPreviousWorldMatrices(p, st)
 	}
+	st.worldNodeCount = len(p.Transforms.Data)
 
 	if joints := p.Joints.Data; len(joints) > 0 {
 		r.growBuffer(&st.jointBuf, uint64(len(joints))*matrixSize, "joints")
 		st.jointBuf.Write(utils.ToBytesSlice(joints), 0)
+	}
+}
+
+// uploadWorldMatrices writes the packet's node matrices, then its instance transforms,
+// into buf.
+func (r *Renderer) uploadWorldMatrices(p *scenes.FramePacket, buf *gpu.Buffer) {
+	nodes := p.Transforms.Data
+	instances := p.InstanceTransforms.Data
+
+	r.growBuffer(buf, uint64(len(nodes)+len(instances))*matrixSize, "world")
+	if len(nodes) > 0 {
+		buf.Write(utils.ToBytesSlice(nodes), 0)
+	}
+	if len(instances) > 0 {
+		buf.Write(utils.ToBytesSlice(instances), uint64(len(nodes))*matrixSize)
+	}
+}
+
+// alignPreviousWorldMatrices lines the previous matrices up with this frame's slots
+// when the number of nodes changed, which moves every instance transform to a new slot.
+// From the first slot past the shorter node list on, the previous matrices are this
+// frame's: a node added since has nowhere earlier to move from, and an instance never
+// moves after it is created.
+//
+// A previous buffer too small for this frame's slots has to grow, which discards it,
+// and is then this frame's matrices throughout: for one frame, nothing in the source
+// appears to move.
+func (r *Renderer) alignPreviousWorldMatrices(p *scenes.FramePacket, st *renderState) {
+	nodes := p.Transforms.Data
+	instances := p.InstanceTransforms.Data
+	if len(nodes) == st.worldNodeCount {
+		return
+	}
+	if st.previousWorldBuf.Size < uint64(len(nodes)+len(instances))*matrixSize {
+		r.uploadWorldMatrices(p, &st.previousWorldBuf)
+		return
+	}
+
+	firstNewNode := min(st.worldNodeCount, len(nodes))
+	if firstNewNode < len(nodes) {
+		st.previousWorldBuf.Write(utils.ToBytesSlice(nodes[firstNewNode:]), uint64(firstNewNode)*matrixSize)
+	}
+	if len(instances) > 0 {
+		st.previousWorldBuf.Write(utils.ToBytesSlice(instances), uint64(len(nodes))*matrixSize)
 	}
 }
 
@@ -1446,6 +1579,18 @@ func (r *Renderer) extractViews(p *scenes.FramePacket, st *renderState) frameVie
 		eye:         mainView.Position,
 		projection:  flipClipY(mainView.Projection),
 	}
+	views.previousViewProj = views.main.viewProj
+	if st.hasPreviousView {
+		views.previousViewProj = st.previousViewProj
+	}
+	st.previousViewProj, st.hasPreviousView = views.main.viewProj, true
+
+	// The previous matrix is kept without the jitter: motion is measured without it.
+	if r.isProjectionJittered() {
+		views.jitter = projectionJitter(p.Frame, r.width, r.height)
+		views.main.viewProj = jitterViewProj(views.main.viewProj, views.jitter)
+	}
+
 	if !r.shadowsEnabled {
 		return views
 	}
@@ -1650,6 +1795,7 @@ func (r *Renderer) collectDrawables(p *scenes.FramePacket, st *renderState) {
 	buildDrawables(p, &st.layout, r.MaterialStore)
 	orderBatches(&st.layout, r.GeometryStore)
 	r.uploadLayout(st)
+	r.allocatePreviousDeformedPositions(p, st)
 	st.layout.meshRevision = p.Meshes.Revision
 	st.layout.geometryLayoutRevision = geometryLayoutRevision
 }
@@ -1702,6 +1848,51 @@ func (r *Renderer) uploadLayout(st *renderState) {
 	st.prevLevelBuf.Write(utils.ToBytesSlice(reset), 0)
 }
 
+// allocatePreviousDeformedPositions lays out, whenever the draw layout is rebuilt, where
+// each deformed mesh keeps its vertices' previous positions: mesh after mesh, in the
+// packet's order (encodeDeforms walks it the same way), with the start of each by the
+// slot of every geometry drawing them — the deform output, and the levels of detail made
+// from it. A rebuild may move every range, so their contents are seeded again.
+func (r *Renderer) allocatePreviousDeformedPositions(p *scenes.FramePacket, st *renderState) {
+	slotCount := uint32(0)
+	for _, deform := range p.Deforms.Data {
+		for slot := range deformedGeometrySlots(deform, p) {
+			slotCount = max(slotCount, slot+1)
+		}
+	}
+	bases := make([]uint32, slotCount)
+	positionCount := uint32(0)
+	for _, deform := range p.Deforms.Data {
+		for slot := range deformedGeometrySlots(deform, p) {
+			bases[slot] = positionCount
+		}
+		positionCount += deform.VertexCount * 3
+	}
+
+	r.growBuffer(&st.previousDeformedPositionsBuf, uint64(positionCount)*4, "previous-deformed-positions")
+	r.growBuffer(&st.previousPositionBasesBuf, uint64(len(bases))*4, "previous-position-bases")
+	if len(bases) > 0 {
+		st.previousPositionBasesBuf.Write(utils.ToBytesSlice(bases), 0)
+	}
+	st.hasPreviousDeformedPositions = false
+}
+
+// deformedGeometrySlots yields the slot of every geometry drawing a deform's output: the
+// output itself, and each of its mesh's levels of detail that draws the same vertices.
+func deformedGeometrySlots(deform scenes.DeformPacket, p *scenes.FramePacket) iter.Seq[uint32] {
+	return func(yield func(uint32) bool) {
+		if !yield(deform.Output.Slot) {
+			return
+		}
+		levels := p.Meshes.Data[deform.Mesh].LODRange
+		for _, level := range p.LODs.Data[levels.First : levels.First+levels.Count] {
+			if level.DrawsDeformedVertices && !yield(level.Geometry.Slot) {
+				return
+			}
+		}
+	}
+}
+
 // extractParticles readies every particle system in the packet for this frame's step:
 // its simulation buffers, this frame's births, and a fresh indirect command for the
 // kernel to count survivors into. Systems that left the packet are retired, and their
@@ -1740,40 +1931,59 @@ func (r *Renderer) buildOverlay() {
 	}
 	r.overlay.reset()
 	if r.showFPS {
-		// Logical points, scaled and snapped by the overlay (which rounds down to a
-		// whole multiple of the font's cell, so this is an upper bound, not exact).
-		const pt, gap, inset = 12, 15, 8
-		size := r.scale * pt
-		ms := func(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
-		x, y := r.scale*inset, r.scale*inset
-		step := r.scale * gap
-		r.overlay.text(fmt.Sprintf("FPS %.0f", r.profiler.FPS()), x, y, size, r.fontColor)
-		r.overlay.text(fmt.Sprintf("CPU %.2f ms", ms(r.profiler.CPUTime())), x, y+step, size, r.fontColor)
+		r.drawHUDLine(fmt.Sprintf("FPS %.0f", r.profiler.FPS()), 0)
+		r.drawHUDLine(fmt.Sprintf("CPU %.2f ms", millisecondsOf(r.profiler.CPUTime())), 1)
+		row := r.drawTimings(r.profiler.CPUTimings(), 2)
 		if gpuTime := r.profiler.GPUTime(); gpuTime > 0 {
-			r.overlay.text(fmt.Sprintf("GPU %.2f ms", ms(gpuTime)), x, y+2*step, size, r.fontColor)
-			// The per-pass breakdown is the half of this worth reading: a total says
-			// the budget is gone, the split says which pass spent it.
-			row := 3
-			for p := range gpuPassCount {
-				if !r.profiler.IsPassRecorded(p) {
-					continue
-				}
-				// A pass that ran but measured zero is not the same as one that did not
-				// run, and hiding it says the wrong thing (see Profiler.IsPassRecorded). Plain
-				// ASCII, because the HUD font is a hand-drawn bitmap with no dashes to
-				// spare.
-				line := fmt.Sprintf("  %-11s  n/a", p)
-				if d := r.profiler.PassTime(p); d > 0 {
-					line = fmt.Sprintf("  %-11s %.2f", p, ms(d))
-				}
-				r.overlay.text(line, x, y+float32(row)*step, size, r.fontColor)
-				row++
-			}
+			r.drawHUDLine(fmt.Sprintf("GPU %.2f ms", millisecondsOf(gpuTime)), row)
+			// The breakdown is the half of this worth reading: a total says the budget
+			// is gone, the split says what spent it.
+			r.drawTimings(r.profiler.GPUTimings(), row+1)
 		}
 	}
 	if r.console != nil {
 		r.console.Draw(consolePainter{r.overlay}, float32(r.width), float32(r.height))
 	}
+}
+
+// The HUD's text, in logical points: scaled, and snapped by the overlay, which rounds
+// down to a whole multiple of the font's cell, so the size is an upper bound, not exact.
+const (
+	hudTextPoints  = 12
+	hudLinePoints  = 15
+	hudInsetPoints = 8
+)
+
+// drawHUDLine draws text as the HUD's row-th line.
+func (r *Renderer) drawHUDLine(text string, row int) {
+	inset := r.scale * hudInsetPoints
+	y := inset + float32(row)*r.scale*hudLinePoints
+	r.overlay.text(text, inset, y, r.scale*hudTextPoints, r.fontColor)
+}
+
+// drawTimings lists on the HUD, from its row-th line down, each timing the last frame
+// recorded, and returns the line after them.
+func (r *Renderer) drawTimings(timings []Timing, row int) int {
+	for _, timing := range timings {
+		if !timing.IsRecorded {
+			continue
+		}
+		// A timer that ran but measured zero is not the same as one that did not run,
+		// and hiding it says the wrong thing (see Profiler.GPUTimings). Plain ASCII,
+		// because the HUD font is a hand-drawn bitmap with no dashes to spare.
+		line := fmt.Sprintf("  %-11s  n/a", timing.Name)
+		if timing.Time > 0 {
+			line = fmt.Sprintf("  %-11s %.2f", timing.Name, millisecondsOf(timing.Time))
+		}
+		r.drawHUDLine(line, row)
+		row++
+	}
+	return row
+}
+
+// millisecondsOf is d in milliseconds, to the microsecond.
+func millisecondsOf(d time.Duration) float64 {
+	return float64(d.Microseconds()) / 1000
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1814,12 +2024,15 @@ func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture,
 	// FXAA then smooths into it. The scene is shaded into the HDR scene image, or without
 	// HDR straight into the display image. Tell the frame steps so, then run the ones
 	// that go before everything else.
+	// TAA's images are made before anything else: without HDR, the display image is one.
+	r.prepareTAA()
 	displayImage := r.displayImage(target)
 	sceneImage := displayImage
 	if r.hdr {
 		sceneImage = r.sceneColor
 	}
 	r.prepareMultisampling()
+	r.prepareMotionVectors()
 	r.prepareStepFrame(st, views, sceneImage)
 	r.encodeFrameSteps(FrameStageStart, cmd)
 	r.encodeEnvironment(st, cmd)
@@ -1848,14 +2061,20 @@ func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture,
 
 	// 5f. List each light cluster's lights, then fill the volumetric fog's volume from
 	// them and the shadow maps just filled. Shading reads both.
-	r.profiler.beginPass(GPUPassLightClusters, cmd)
+	lightClustersTimer := r.profiler.StartGPUTimer("clusters", cmd)
 	r.encodeLightClusters(st, cmd)
-	r.profiler.endPass(GPUPassLightClusters, cmd)
+	r.profiler.StopGPUTimer(lightClustersTimer, cmd)
 	r.encodeVolumetricFog(st, views, cmd)
 
 	// 5g. Fill depth first, if enabled, so shading runs once per pixel.
-	depthFilled := r.encodeDepthPrepass(st, views.main, cmd)
+	depthFilled := r.encodeDepthPrepass(st, views, cmd)
 	r.encodeFrameSteps(FrameStageAfterDepth, cmd)
+
+	// The motion view shows what the prepass measured, in place of the frame.
+	if r.debugView == DebugMotion {
+		r.encodeMotionView(target, cmd)
+		return
+	}
 
 	// 5h. Shade. Without HDR that is the finished image.
 	copiesScene := r.isSceneCopyNeeded(st)
@@ -1873,15 +2092,20 @@ func (r *Renderer) encode(st *renderState, views frameViews, target gpu.Texture,
 	// result into the display image.
 	r.encodePostProcessingAndToneMapping(darkening == darkeningInToneMapping, displayImage, cmd)
 
-	// 5j. With FXAA, smooth the display image into the target.
+	// 5j. With FXAA, smooth the display image into the target; without HDR, TAA resolves
+	// it there instead.
 	r.encodeFXAA(target, cmd)
+	r.encodeDisplayTAA(target, cmd)
 }
 
 // displayImage is the image the frame is finished in: target, or with FXAA the image
-// FXAA reads, to smooth it into target.
+// FXAA reads, to smooth it into target — or without HDR, the image TAA reads.
 func (r *Renderer) displayImage(target gpu.Texture) gpu.Texture {
 	if r.isFXAAEnabled() {
 		return r.fxaaSource
+	}
+	if r.isTAAEnabled() && !r.hdr {
+		return r.taaSource
 	}
 	return target
 }
@@ -1905,18 +2129,16 @@ func (r *Renderer) prepareStepFrame(st *renderState, views frameViews, image gpu
 		SceneColor:       r.sceneColorAttachment(image),
 		SceneColorFormat: r.sceneFormat(),
 		SceneSamples:     r.afterOpaqueSamples(),
+		SceneMotion:      r.sceneMotion,
 		Backend:          r.backend,
 		LinearSampler:    r.ensureLinearSampler(),
+		Profiler:         &r.profiler,
 	}
 	if views.hasMainView {
 		r.stepFrame.ViewProj = views.main.viewProj
 		r.stepFrame.InverseViewProj = views.main.viewProj.Inv()
 		r.stepFrame.Eye = views.eye
-		r.stepFrame.PreviousViewProj = views.main.viewProj
-		if st.hasPreviousView {
-			r.stepFrame.PreviousViewProj = st.previousViewProj
-		}
-		st.previousViewProj, st.hasPreviousView = views.main.viewProj, true
+		r.stepFrame.PreviousViewProj = views.previousViewProj
 	}
 }
 
@@ -1926,6 +2148,10 @@ func (r *Renderer) prepareStepFrame(st *renderState, views frameViews, image gpu
 // steps read or draw over; after, whatever they wrote — by compute, by a draw, into a
 // buffer or an image — against everything after them. Between their own passes, the
 // steps order themselves.
+//
+// Each step is timed on the GPU under its type's name (see frameStepTimerName), so
+// that its time is part of whatever pass the stage runs in: steps at
+// FrameStageAfterOpaque and FrameStageAfterTransparent run within the transparent pass.
 func (r *Renderer) encodeFrameSteps(stage FrameStage, cmd gpu.CommandBuffer) {
 	if !r.hasFrameStepsAt(stage) {
 		return
@@ -1934,6 +2160,7 @@ func (r *Renderer) encodeFrameSteps(stage FrameStage, cmd gpu.CommandBuffer) {
 	frame := r.stepFrame
 	if stage < FrameStageAfterDepth {
 		frame.SceneDepth = gpu.Texture{}
+		frame.SceneMotion = gpu.Texture{}
 	}
 	// Until the opaque pass resolves it, the depth is the multisampled one, with MSAA.
 	if stage == FrameStageAfterDepth {
@@ -1947,9 +2174,18 @@ func (r *Renderer) encodeFrameSteps(stage FrameStage, cmd gpu.CommandBuffer) {
 
 	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth, gpu.StageCompute|gpu.StageFragment|gpu.StageColorOutput|gpu.StageDepth, 0)
 	for _, step := range r.frameSteps[stage] {
+		timer := r.profiler.StartGPUTimer(frameStepTimerName(step), cmd)
 		step.Encode(&frame, cmd)
+		r.profiler.StopGPUTimer(timer, cmd)
 	}
 	cmd.Barrier(gpu.StageCompute|gpu.StageFragment|gpu.StageColorOutput, gpu.StageIndirect|gpu.StageVertex|gpu.StageFragment|gpu.StageCompute|gpu.StageColorOutput|gpu.StageDepth, 0)
+}
+
+// frameStepTimerName is the name a frame step is timed under: its type's, such as
+// "sky.tablesStep". Taken from the type rather than formatted, so that timing a step
+// allocates nothing.
+func frameStepTimerName(step FrameStep) string {
+	return strings.TrimPrefix(reflect.TypeOf(step).String(), "*")
 }
 
 // encodeEnvironment derives the scene's environment light from its image, when the
@@ -2016,13 +2252,13 @@ func (r *Renderer) encodeCompute(st *renderState, views frameViews, cmd gpu.Comm
 		return
 	}
 
-	r.profiler.beginPass(GPUPassCull, cmd)
+	cullTimer := r.profiler.StartGPUTimer("cull", cmd)
 	r.encodeDeforms(st, cmd)
 	r.encodeCulling(st, views, cmd)
 	r.encodeParticleSimulation(st, cmd)
 	r.encodeParticleSorting(st, views, cmd)
 	cmd.Barrier(gpu.StageCompute, gpu.StageIndirect|gpu.StageVertex, 0)
-	r.profiler.endPass(GPUPassCull, cmd)
+	r.profiler.StopGPUTimer(cullTimer, cmd)
 }
 
 // encodeDeforms dispatches one deform job per deformed mesh whose output needs writing,
@@ -2030,7 +2266,13 @@ func (r *Renderer) encodeCompute(st *renderState, views frameViews, cmd gpu.Comm
 // whether visible or not — a v1 simplification that a scene with many off-screen
 // characters pays for.
 func (r *Renderer) encodeDeforms(st *renderState, cmd gpu.CommandBuffer) {
-	jobs := r.deformCommands(&r.frame, st)
+	// While motion is measured, each deform keeps its output's previous positions. They
+	// are seeded rather than copied the first frame that measures it, and after their
+	// ranges are laid out again.
+	isMotionMeasured := r.isMotionMeasured()
+	seedsPrevious := isMotionMeasured && !st.hasPreviousDeformedPositions
+	jobs := r.deformCommands(&r.frame, isMotionMeasured, seedsPrevious, st)
+	st.hasPreviousDeformedPositions = isMotionMeasured
 	if len(jobs) == 0 {
 		return
 	}
@@ -2055,6 +2297,13 @@ func (r *Renderer) encodeDeforms(st *renderState, cmd gpu.CommandBuffer) {
 			morphWeightBase:  job.morphWeightBase,
 			morphWeightCount: job.morphWeightCount,
 			vertexCount:      job.vertexCount,
+			previousBase:     job.previousBase,
+		}
+		if isMotionMeasured {
+			root.previousPositions = st.previousDeformedPositionsBuf.Addr
+		}
+		if seedsPrevious {
+			root.seedsPrevious = 1
 		}
 		cmd.Dispatch(utils.ToBytes(&root), (job.vertexCount+63)/64, 1, 1)
 	}
@@ -2063,21 +2312,28 @@ func (r *Renderer) encodeDeforms(st *renderState, cmd gpu.CommandBuffer) {
 // deformCommands builds this frame's deform jobs into a scratch slice reused across
 // frames. A skinned mesh gets a job every frame. An unskinned, morphed mesh gets one
 // only when its output is stale: its weights changed since the output was written, or
-// the geometry store grew and discarded every output's contents.
-func (r *Renderer) deformCommands(p *scenes.FramePacket, st *renderState) []deformCmd {
+// the geometry store grew and discarded every output's contents. While motion is
+// measured it also gets one the frame after, for its previous positions to catch up,
+// and every mesh gets one while they are seeded.
+func (r *Renderer) deformCommands(p *scenes.FramePacket, isMotionMeasured, seedsPrevious bool, st *renderState) []deformCmd {
 	if layoutRevision := r.GeometryStore.LayoutRevision(); layoutRevision != st.deformLayoutRevision {
 		clear(st.deformOutputs)
 		st.deformLayoutRevision = layoutRevision
 	}
 
 	r.deformScratch = r.deformScratch[:0]
+	previousBase := uint32(0)
 	for _, deform := range p.Deforms.Data {
+		// The same walk as allocatePreviousDeformedPositions, so it finds the same bases.
+		base := previousBase
+		previousBase += deform.VertexCount * 3
+
 		isSkinned := deform.Joints.Count > 0
 		if !isSkinned {
-			if isDeformOutputCurrent(deform, st) {
+			if !seedsPrevious && isDeformOutputCurrent(deform, isMotionMeasured, st) {
 				continue
 			}
-			recordDeformOutput(deform, st)
+			recordDeformOutput(deform, seedsPrevious, st)
 		}
 		r.deformScratch = append(r.deformScratch, deformCmd{
 			variant:          deformVariant{isMorphed: deform.MorphWeights.Count > 0, isSkinned: isSkinned},
@@ -2087,29 +2343,38 @@ func (r *Renderer) deformCommands(p *scenes.FramePacket, st *renderState) []defo
 			morphWeightBase:  deform.MorphWeights.First,
 			morphWeightCount: deform.MorphWeights.Count,
 			vertexCount:      deform.VertexCount,
+			previousBase:     base,
 		})
 	}
 	return r.deformScratch
 }
 
 // isDeformOutputCurrent reports whether an unskinned deform's output was last written
-// from the weights it has now.
-func isDeformOutputCurrent(deform scenes.DeformPacket, st *renderState) bool {
+// from the weights it has now — and, when its previous positions are needed, whether
+// they have caught up with it.
+func isDeformOutputCurrent(deform scenes.DeformPacket, needsPrevious bool, st *renderState) bool {
 	slot := int(deform.Output.Slot)
 	if slot >= len(st.deformOutputs) {
 		return false
 	}
-	return st.deformOutputs[slot] == deformOutput{gen: deform.Output.Gen, morphRevision: deform.MorphRevision}
+	output := st.deformOutputs[slot]
+	if output.gen != deform.Output.Gen || output.morphRevision != deform.MorphRevision {
+		return false
+	}
+	return !needsPrevious || output.isPreviousCurrent
 }
 
 // recordDeformOutput notes that an unskinned deform's output is being written from
-// its current weights.
-func recordDeformOutput(deform scenes.DeformPacket, st *renderState) {
+// its current weights. Its previous positions are then its output as it was, which is
+// the same output only when it was already current — or they are seeded from it.
+func recordDeformOutput(deform scenes.DeformPacket, seedsPrevious bool, st *renderState) {
 	slot := int(deform.Output.Slot)
 	if slot >= len(st.deformOutputs) {
 		st.deformOutputs = append(st.deformOutputs, make([]deformOutput, slot+1-len(st.deformOutputs))...)
 	}
-	st.deformOutputs[slot] = deformOutput{gen: deform.Output.Gen, morphRevision: deform.MorphRevision}
+	output := &st.deformOutputs[slot]
+	wasCurrent := output.gen == deform.Output.Gen && output.morphRevision == deform.MorphRevision
+	*output = deformOutput{gen: deform.Output.Gen, morphRevision: deform.MorphRevision, isPreviousCurrent: wasCurrent || seedsPrevious}
 }
 
 // encodeCulling culls every view: the main camera and each shadow camera.
@@ -2256,7 +2521,7 @@ func (r *Renderer) encodeShadowPasses(st *renderState, shadows []view, cmd gpu.C
 		return
 	}
 
-	r.profiler.beginPass(GPUPassShadow, cmd)
+	shadowTimer := r.profiler.StartGPUTimer("shadow", cmd)
 	for start := 0; start < len(shadows); {
 		end := start + 1
 		for end < len(shadows) && !shadows[end].clearsMap {
@@ -2268,7 +2533,7 @@ func (r *Renderer) encodeShadowPasses(st *renderState, shadows []view, cmd gpu.C
 	// Every map is written before anything samples one, so one barrier covers them all:
 	// lit shaders, and the volumetric fog's compute pass.
 	cmd.Barrier(gpu.StageDepth, gpu.StageFragment|gpu.StageCompute, 0)
-	r.profiler.endPass(GPUPassShadow, cmd)
+	r.profiler.StopGPUTimer(shadowTimer, cmd)
 }
 
 // encodeShadowMap fills one shadow map from every view that shares it, in one render
@@ -2430,22 +2695,33 @@ func (r *Renderer) encodeVolumetricFog(st *renderState, views frameViews, cmd gp
 // Frame steps at FrameStageAfterDepth read the depth this pass fills, so adding one
 // turns the pass on. It then runs even with nothing to draw: its clear is what keeps
 // those steps from reading the previous frame's depth.
-func (r *Renderer) encodeDepthPrepass(st *renderState, main view, cmd gpu.CommandBuffer) bool {
-	if !r.hasFrameStepsAt(FrameStageAfterDepth) && (!r.depthPrepass || len(st.layout.batches) == 0) {
+func (r *Renderer) encodeDepthPrepass(st *renderState, views frameViews, cmd gpu.CommandBuffer) bool {
+	isMotionMeasured := r.isMotionMeasured()
+	if !r.hasFrameStepsAt(FrameStageAfterDepth) && !isMotionMeasured && (!r.depthPrepass || len(st.layout.batches) == 0) {
 		return false
 	}
+	if isMotionMeasured {
+		r.ensureMotionPrepassPipelines()
+	}
 
-	r.profiler.beginPass(GPUPassPrepass, cmd)
-	cmd.BeginRenderPass(gpu.RenderTargets{
+	prepassTimer := r.profiler.StartGPUTimer("prepass", cmd)
+	targets := gpu.RenderTargets{
 		Depth: &gpu.DepthAttachment{Texture: r.opaqueDepthAttachment(), Load: gpu.LoadClear, Store: gpu.StoreKeep, Clear: 0.0},
-	})
+	}
+	if isMotionMeasured {
+		targets.Color = []gpu.ColorAttachment{r.motionAttachment()}
+	}
+	cmd.BeginRenderPass(targets)
 	cmd.SetViewport(0, 0, float32(r.width), float32(r.height), 0, 1)
 	cmd.SetScissor(0, 0, int32(r.width), int32(r.height))
 
 	// One root serves every unmasked span: this pass reads positions and transforms,
 	// nothing that varies by material. A masked span adds its pool's mask table.
+	main := views.main
 	root := r.positionRoot(main, st)
 	maskedRoot := r.maskedDepthRoot(main, st)
+	motionRoot := r.motionRoot(views, st)
+	maskedMotionRoot := r.maskedMotionRoot(views, st)
 	drew := false
 	for first, count := range rasterSpans(st.layout.batches) {
 		b := &st.layout.batches[first]
@@ -2462,22 +2738,96 @@ func (r *Renderer) encodeDepthPrepass(st *renderState, main view, cmd gpu.Comman
 		// discard.
 		cull := min(int(b.cull), len(r.prepassPipelines)-1)
 		offset := uint64(first) * uint64(indirectSize)
-		if b.isMasked {
+		var spanRoot []byte
+		switch {
+		case b.isMasked && isMotionMeasured:
+			maskedMotionRoot.masks = b.pool.MasksAddr()
+			cmd.SetPipeline(r.maskedMotionPrepassPipelines[cull])
+			spanRoot = utils.ToBytes(&maskedMotionRoot)
+		case b.isMasked:
 			maskedRoot.masks = b.pool.MasksAddr()
 			cmd.SetPipeline(r.maskedPrepassPipelines[cull])
-			cmd.DrawIndexedIndirect(utils.ToBytes(&maskedRoot), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, main.cull.indirectBuf, offset, uint32(count), indirectSize)
-		} else {
+			spanRoot = utils.ToBytes(&maskedRoot)
+		case isMotionMeasured:
+			cmd.SetPipeline(r.motionPrepassPipelines[cull])
+			spanRoot = utils.ToBytes(&motionRoot)
+		default:
 			cmd.SetPipeline(r.prepassPipelines[cull])
-			cmd.DrawIndexedIndirect(utils.ToBytes(&root), r.GeometryStore.IndexBuffer(), gpu.IndexUint32, main.cull.indirectBuf, offset, uint32(count), indirectSize)
+			spanRoot = utils.ToBytes(&root)
 		}
+		cmd.DrawIndexedIndirect(spanRoot, r.GeometryStore.IndexBuffer(), gpu.IndexUint32, main.cull.indirectBuf, offset, uint32(count), indirectSize)
 		drew = true
 	}
 
+	if isMotionMeasured {
+		r.encodeBackgroundMotion(views, cmd)
+	}
+
 	cmd.EndRenderPass()
-	// The drawing pass tests against this depth, and loads it when drew is set.
-	cmd.Barrier(gpu.StageDepth, gpu.StageDepth, 0)
-	r.profiler.endPass(GPUPassPrepass, cmd)
+	// The drawing pass tests against this depth, and loads it when drew is set. What
+	// reads the motion samples it, after this pass.
+	cmd.Barrier(gpu.StageDepth|gpu.StageColorOutput, gpu.StageDepth|gpu.StageFragment|gpu.StageCompute, 0)
+	r.profiler.StopGPUTimer(prepassTimer, cmd)
 	return drew
+}
+
+// ensureMotionPrepassPipelines builds the depth prepass's pipelines for measuring
+// motion, the first time a frame does. Like the plain prepass, one per cull mode, so it
+// culls exactly as the shading pass will.
+func (r *Renderer) ensureMotionPrepassPipelines() {
+	if r.motionPrepassPipelines[0].H != 0 {
+		return
+	}
+	pipeline := func(vertex, fragment []byte, cull gpu.CullMode, label string) gpu.Pipeline {
+		return r.backend.CreateGraphicsPipeline(gpu.PipelineDescriptor{
+			VertexShader:   shaders.ForBackend(r.backend, vertex),
+			FragmentShader: shaders.ForBackend(r.backend, fragment),
+			Topology:       gpu.TopologyTriangles, ColorFormats: []gpu.Format{gpu.FormatRG16F},
+			DepthFormat: gpu.FormatDepth32F, DepthTest: true, DepthWrite: true, DepthCompare: gpu.CompareGreater,
+			Samples: r.sceneSamples(), CullMode: cull, Label: label,
+		})
+	}
+	r.backgroundMotionPass = postprocess.NewFullscreenPass(r.backend, postprocess.FullscreenPassDescriptor{
+		Fragment: shaders.SceneBackgroundMotion, Format: gpu.FormatRG16F, Samples: r.sceneSamples(),
+		DepthFormat: gpu.FormatDepth32F, DepthCompare: gpu.CompareGreaterEqual, Label: "background-motion",
+	})
+	for i := range r.motionPrepassPipelines {
+		r.motionPrepassPipelines[i] = pipeline(shaders.SceneDepthMotionVert, shaders.SceneMotion, gpu.CullMode(i), "scene-depth-prepass-motion")
+		r.maskedMotionPrepassPipelines[i] = pipeline(shaders.SceneDepthMaskedMotionVert, shaders.SceneDepthMaskedMotionFrag, gpu.CullMode(i), "scene-depth-prepass-masked-motion")
+	}
+}
+
+// releaseMotionPipelines frees the motion prepass's pipelines and the motion view's
+// pass. Both are built for the frame's formats and sample count, and are built again
+// on the next frame that measures motion.
+func (r *Renderer) releaseMotionPipelines() {
+	for i := range r.motionPrepassPipelines {
+		if r.motionPrepassPipelines[i].H != 0 {
+			r.backend.DestroyPipeline(r.motionPrepassPipelines[i])
+			r.backend.DestroyPipeline(r.maskedMotionPrepassPipelines[i])
+		}
+	}
+	r.motionPrepassPipelines = [3]gpu.Pipeline{}
+	r.maskedMotionPrepassPipelines = [3]gpu.Pipeline{}
+	if r.backgroundMotionPass != nil {
+		r.backgroundMotionPass.Release()
+		r.backgroundMotionPass = nil
+	}
+	if r.motionViewPass != nil {
+		r.motionViewPass.Release()
+		r.motionViewPass = nil
+	}
+}
+
+// encodeBackgroundMotion measures, inside the depth prepass and after its geometry, the
+// camera's motion wherever the geometry left the far plane showing.
+func (r *Renderer) encodeBackgroundMotion(views frameViews, cmd gpu.CommandBuffer) {
+	unjitteredViewProj := jitterViewProj(views.main.viewProj, glm.Vec2f{-views.jitter[0], -views.jitter[1]})
+	root := backgroundMotionRoot{
+		reprojection: views.previousViewProj.Mul4x4(unjitteredViewProj.Inv()),
+		jitter:       views.jitter,
+	}
+	r.backgroundMotionPass.DrawInPass(utils.ToBytes(&root), cmd)
 }
 
 // encodeDrawingPass shades the scene into image — the HDR scene image, or the target
@@ -2493,19 +2843,19 @@ func (r *Renderer) encodeDrawingPass(st *renderState, views frameViews, depthFil
 	opaque, transparent := splitByBlend(st.layout.batches)
 	hasTransparentPass := r.hasTransparentPass(st)
 
-	r.profiler.beginPass(GPUPassOpaque, cmd)
+	opaqueTimer := r.profiler.StartGPUTimer("opaque", cmd)
 	r.encodeOpaquePass(opaque, st, views, depthFilled, image, cmd)
-	r.profiler.endPass(GPUPassOpaque, cmd)
+	r.profiler.StopGPUTimer(opaqueTimer, cmd)
 
-	r.profiler.beginPass(GPUPassAmbientOcclusion, cmd)
+	occlusionTimer := r.profiler.StartGPUTimer("occlusion", cmd)
 	r.encodeAmbientOcclusion(views, cmd)
 	r.encodeOpaqueDepthResolve(cmd)
 	if darkening == darkeningInOwnPass {
 		r.encodeOcclusionDarkening(image, cmd)
 	}
-	r.profiler.endPass(GPUPassAmbientOcclusion, cmd)
+	r.profiler.StopGPUTimer(occlusionTimer, cmd)
 
-	r.profiler.beginPass(GPUPassTransparent, cmd)
+	transparentTimer := r.profiler.StartGPUTimer("transparent", cmd)
 	r.encodeFrameSteps(FrameStageAfterOpaque, cmd)
 	r.encodeFogBackground(image, cmd)
 	if copiesScene {
@@ -2516,7 +2866,7 @@ func (r *Renderer) encodeDrawingPass(st *renderState, views frameViews, depthFil
 	}
 	r.encodeFrameSteps(FrameStageAfterTransparent, cmd)
 	r.encodeSceneResolve(image, cmd)
-	r.profiler.endPass(GPUPassTransparent, cmd)
+	r.profiler.StopGPUTimer(transparentTimer, cmd)
 }
 
 // hasTransparentPass reports whether the frame has blended batches or particles to draw
@@ -2602,6 +2952,12 @@ func (r *Renderer) encodeAmbientOcclusion(views frameViews, cmd gpu.CommandBuffe
 // the scene by it, or to show it.
 func (r *Renderer) isAmbientOcclusionMeasured() bool {
 	return r.ambientOcclusionEnabled || r.debugView == DebugAmbientOcclusion
+}
+
+// isMotionMeasured reports whether this frame measures motion: while motion vectors are
+// on, while TAA follows it, and while the motion view shows it.
+func (r *Renderer) isMotionMeasured() bool {
+	return r.motionVectors || r.isTAAEnabled() || r.debugView == DebugMotion
 }
 
 // ensureAmbientOcclusionPipelines builds the passes' pipelines unless they exist. The
@@ -3011,6 +3367,19 @@ func (r *Renderer) encodeAmbientOcclusionView(target gpu.Texture, cmd gpu.Comman
 	cmd.SetPipeline(r.occlusionViewPipeline)
 	cmd.Draw(utils.ToBytes(&root), 3, 1, 0, 0)
 	cmd.EndRenderPass()
+}
+
+// encodeMotionView shows the motion the prepass measured, in place of the frame (see
+// DebugMotion).
+func (r *Renderer) encodeMotionView(target gpu.Texture, cmd gpu.CommandBuffer) {
+	if r.motionViewPass == nil {
+		r.motionViewPass = postprocess.NewFullscreenPass(r.backend, postprocess.FullscreenPassDescriptor{
+			Fragment: shaders.SceneMotionView, Format: r.color, Label: "motion-view",
+		})
+	}
+	frame := r.postProcessingFrame(r.sceneMotion, target)
+	root := frame.Root(r.sceneMotion, r.width, r.height)
+	r.motionViewPass.Draw(target, r.width, r.height, gpu.LoadDontCare, utils.ToBytes(&root), cmd)
 }
 
 // occlusionApplyRoot is the root of a draw of occlusion_apply.frag.glsl producing kind.
@@ -3431,29 +3800,33 @@ func (r *Renderer) encodePostProcessingAndToneMapping(appliesOcclusion bool, dis
 	}
 
 	cmd.Barrier(gpu.StageColorOutput|gpu.StageDepth, gpu.StageFragment, 0)
-	r.profiler.beginPass(GPUPassPostProcessing, cmd)
-	image := r.encodePostProcessing(cmd)
+	postProcessingTimer := r.profiler.StartGPUTimer("post", cmd)
+	// TAA resolves the scene first, so every step works on the smoothed frame.
+	image := r.sceneColor
+	if r.isTAAEnabled() {
+		image = r.encodeTAA(r.sceneColor, cmd)
+	}
+	image = r.encodePostProcessing(image, cmd)
 	r.encodeToneMapping(image, appliesOcclusion, displayImage, cmd)
-	r.profiler.endPass(GPUPassPostProcessing, cmd)
+	r.profiler.StopGPUTimer(postProcessingTimer, cmd)
 }
 
-// encodePostProcessing runs every step of the chain, in order, over the shaded scene,
-// and returns the image the last one wrote. With an empty chain that is the scene image
-// itself.
+// encodePostProcessing runs every step of the chain, in order, over image — the shaded
+// scene, or TAA's resolve of it — and returns the image the last one wrote. With an empty
+// chain that is image itself.
 //
 // The steps ping-pong between the scene image and a second image of the same size: each
 // reads the one the step before it wrote, and writes the other — so between two steps,
 // what one wrote must be ordered before the next samples it, and what one sampled
 // before the next overwrites it.
-func (r *Renderer) encodePostProcessing(cmd gpu.CommandBuffer) gpu.Texture {
+func (r *Renderer) encodePostProcessing(image gpu.Texture, cmd gpu.CommandBuffer) gpu.Texture {
 	if len(r.postProcessing) == 0 {
-		return r.sceneColor
+		return image
 	}
 	if !r.postColor.IsValid() {
 		r.postColor = postprocess.CreateImage(r.backend, r.width, r.height, "post-color")
 	}
 
-	image := r.sceneColor
 	for _, step := range r.postProcessing {
 		next := r.postColor
 		if image == r.postColor {
@@ -3515,6 +3888,7 @@ func (r *Renderer) postProcessingFrame(source, target gpu.Texture) postprocess.F
 		InverseViewProj: r.stepFrame.InverseViewProj,
 		Eye:             r.stepFrame.Eye,
 		SceneDepth:      r.depth,
+		SceneMotion:     r.sceneMotion,
 		Backend:         r.backend,
 		LinearSampler:   r.ensureLinearSampler(),
 	}
@@ -3552,8 +3926,8 @@ func (r *Renderer) recordScreenshot(target gpu.Texture, cmd gpu.CommandBuffer) {
 //
 // It is also where the frame's GPU profile closes, and the placement is load-bearing:
 // the two backends disagree about what is safe, and this is the only arrangement measured
-// to drop nothing on either. writeSkippedPasses goes in while the pass is open — it
-// stands in for passes the frame skipped, and a backend that resolves timestamps at
+// to drop nothing on either. stopOpenGPUTimers goes in while the pass is open — it
+// ends the timers still running, and a backend that resolves timestamps at
 // render-pass boundaries needs something to attach them to. The frame's closing
 // timestamp goes in after the pass ends: written as the last command inside it,
 // KosmicKrisp dropped it intermittently (24 of 40 frames), which froze the HUD.
@@ -3578,7 +3952,7 @@ func (r *Renderer) encodeOverlay(target gpu.Texture, cmd gpu.CommandBuffer) {
 	if r.overlay != nil {
 		r.overlay.draw(cmd, float32(r.width), float32(r.height))
 	}
-	r.profiler.writeSkippedPasses(cmd)
+	r.profiler.stopOpenGPUTimers(cmd)
 	cmd.EndRenderPass()
 
 	r.profiler.endGPUFrame(cmd)
@@ -3709,6 +4083,42 @@ func (r *Renderer) positionRoot(v view, st *renderState) positionRoot {
 		models:    st.worldBuf.Addr,
 		drawables: st.drawableBuf.Addr,
 		visible:   v.cull.visibleBuf.Addr,
+	}
+}
+
+// motionRoot is the root of the depth prepass's unmasked spans while it measures motion.
+func (r *Renderer) motionRoot(views frameViews, st *renderState) motionRoot {
+	return motionRoot{
+		viewProj:              views.main.viewProj,
+		previousViewProj:      views.previousViewProj,
+		pos:                   r.GeometryStore.PositionsAddr(),
+		descs:                 r.GeometryStore.DescriptorsAddr(),
+		models:                st.worldBuf.Addr,
+		previousModels:        st.previousWorldBuf.Addr,
+		previousPositions:     st.previousDeformedPositionsBuf.Addr,
+		previousPositionBases: st.previousPositionBasesBuf.Addr,
+		drawables:             st.drawableBuf.Addr,
+		visible:               views.main.cull.visibleBuf.Addr,
+		jitter:                views.jitter,
+	}
+}
+
+// maskedMotionRoot is the root of the depth prepass's masked spans while it measures
+// motion; the caller sets masks per span.
+func (r *Renderer) maskedMotionRoot(views frameViews, st *renderState) maskedMotionRoot {
+	return maskedMotionRoot{
+		viewProj:              views.main.viewProj,
+		previousViewProj:      views.previousViewProj,
+		pos:                   r.GeometryStore.PositionsAddr(),
+		attr:                  r.GeometryStore.AttributesAddr(),
+		descs:                 r.GeometryStore.DescriptorsAddr(),
+		models:                st.worldBuf.Addr,
+		previousModels:        st.previousWorldBuf.Addr,
+		previousPositions:     st.previousDeformedPositionsBuf.Addr,
+		previousPositionBases: st.previousPositionBasesBuf.Addr,
+		drawables:             st.drawableBuf.Addr,
+		visible:               views.main.cull.visibleBuf.Addr,
+		jitter:                views.jitter,
 	}
 }
 
@@ -4261,6 +4671,7 @@ func (r *Renderer) buildPipelines() {
 		for _, p := range r.maskedPrepassPipelines {
 			r.backend.DestroyPipeline(p)
 		}
+		r.releaseMotionPipelines()
 		for _, p := range r.drawPipelines {
 			r.backend.DestroyPipeline(p)
 		}
@@ -4353,6 +4764,7 @@ func (r *Renderer) buildPipelines() {
 type materialPipeline struct {
 	shaderHash       uint64 // cached (vertex,fragment) identity — the dedup key
 	vertex, fragment []byte // kept only to build the pipeline
+	label            string // the material pool's label, for tools; not part of the key
 	cull             materials.CullMode
 	blend            materials.BlendMode
 	// samples is how many samples a pixel the pass drawing with it has: the scene's in
@@ -4508,6 +4920,7 @@ func (r *Renderer) buildDrawPipe(k materialPipeline) gpu.Pipeline {
 		// the camera faced.
 		CullMode: gpu.CullMode(k.cull), Blend: blend,
 		Constants: k.constants(),
+		Label:     k.label,
 	})
 }
 
@@ -4611,7 +5024,7 @@ func (r *Renderer) pipelineForPool(p *materials.Pool, cull materials.CullMode, b
 	}
 	sh := p.Shader()
 	id := r.pipelineFor(materialPipeline{
-		shaderHash: p.Hash(), vertex: sh.Vertex, fragment: sh.Fragment,
+		shaderHash: p.Hash(), vertex: sh.Vertex, fragment: sh.Fragment, label: p.Label(),
 		cull: cull, blend: blend, samples: max(samples, 1), variant: variant, scene: r.sceneVariant,
 	})
 	*cell = id + 1
@@ -4625,7 +5038,7 @@ func sameKey(a, b materialPipeline) bool {
 
 // debugViewActive reports whether this frame draws a debug view instead of shading.
 func (r *Renderer) isGeometryDebugViewActive() bool {
-	return r.debugView != DebugOff && r.debugView != DebugAmbientOcclusion && int(r.debugView) < len(debugViewNames)
+	return r.debugView != DebugOff && r.debugView != DebugAmbientOcclusion && r.debugView != DebugMotion && int(r.debugView) < len(debugViewNames)
 }
 
 // debugSurfaceView reports whether the active view runs over the ordinary scene vertex
@@ -4887,7 +5300,7 @@ func (r *Renderer) ReleaseSource(id scenes.SourceID) {
 
 // releaseState frees everything one source's state holds.
 func (r *Renderer) releaseState(st *renderState) {
-	buffers := []gpu.Buffer{st.worldBuf, st.drawableBuf, st.lodTableBuf, st.jointBuf, st.morphWeightBuf, st.prevLevelBuf,
+	buffers := []gpu.Buffer{st.worldBuf, st.previousWorldBuf, st.previousDeformedPositionsBuf, st.previousPositionBasesBuf, st.drawableBuf, st.lodTableBuf, st.jointBuf, st.morphWeightBuf, st.prevLevelBuf,
 		st.mainCull.indirectBuf, st.mainCull.visibleBuf}
 	for _, cull := range st.shadowCulls {
 		buffers = append(buffers, cull.indirectBuf, cull.visibleBuf)
@@ -4942,6 +5355,7 @@ func (r *Renderer) Destroy() {
 		for _, p := range r.maskedPrepassPipelines {
 			r.backend.DestroyPipeline(p)
 		}
+		r.releaseMotionPipelines()
 		for _, p := range r.drawPipelines {
 			r.backend.DestroyPipeline(p)
 		}
@@ -4976,6 +5390,8 @@ func (r *Renderer) Destroy() {
 		r.envBackgroundPass.Release()
 	}
 	r.releaseSceneCopy()
+	r.releaseSceneMotion()
+	r.releaseTAA()
 	if r.sceneCopySampler.IsValid() {
 		r.backend.DestroySampler(r.sceneCopySampler)
 	}
