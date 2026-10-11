@@ -10,7 +10,7 @@
 #ifndef PARTICLE_COMMON_GLSL
 #define PARTICLE_COMMON_GLSL
 
-#include "lighting.glsl"
+#include <pix/lighting.glsl>
 
 // Matches ParticleDrawRoot in particle_draw.vert.glsl and particleDrawRoot in
 // particle.go exactly — one shared push-constant block for both stages of a

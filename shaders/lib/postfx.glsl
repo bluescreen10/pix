@@ -13,7 +13,7 @@
 #ifndef PIX_POSTFX_GLSL
 #define PIX_POSTFX_GLSL
 
-#include "bindless.glsl"
+#include <pix/bindless.glsl>
 
 // source is the bindless index of the image to read — the scene, or the previous step's
 // result — and linearSampler a linear, clamp-to-edge sampler. texelSize is 1/size of

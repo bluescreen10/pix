@@ -15,7 +15,7 @@
 // into view space and leaves its sphere in shared memory, and then every thread tests
 // all of them, so a light is transformed once per workgroup rather than once per cell.
 #define PIX_NO_FRAGMENT_FOG
-#include "lighting.glsl"
+#include <pix/lighting.glsl>
 
 #define GROUP_SIZE 64u
 layout(local_size_x = GROUP_SIZE) in;

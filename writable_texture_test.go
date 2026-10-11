@@ -18,9 +18,9 @@ import (
 	"github.com/bluescreen10/pix/textures"
 )
 
-//go:generate go run ./cmd/shadercompile -i testdata/volume_write.comp.glsl -o spv:testdata/build/volume_write.comp.spv -o metallib:testdata/build/volume_write.comp.metalbin
-//go:generate go run ./cmd/shadercompile -i testdata/volume_material.frag.glsl -o spv:testdata/build/volume_material.frag.spv -o metallib:testdata/build/volume_material.frag.metalbin
-//go:generate go run ./cmd/shadercompile -i testdata/image_write.comp.glsl -o spv:testdata/build/image_write.comp.spv -o metallib:testdata/build/image_write.comp.metalbin
+//go:generate go run ./cmd/shaderc -i testdata/volume_write.comp.glsl -o spv:testdata/build/volume_write.comp.spv -o metallib:testdata/build/volume_write.comp.metalbin
+//go:generate go run ./cmd/shaderc -i testdata/volume_material.frag.glsl -o spv:testdata/build/volume_material.frag.spv -o metallib:testdata/build/volume_material.frag.metalbin
+//go:generate go run ./cmd/shaderc -i testdata/image_write.comp.glsl -o spv:testdata/build/image_write.comp.spv -o metallib:testdata/build/image_write.comp.metalbin
 
 // volumeSize is the side of the volume the tests below write and sample.
 const volumeSize = 4

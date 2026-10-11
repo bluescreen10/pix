@@ -96,12 +96,14 @@ type ParticleCurve struct {
 
 // ParticleUpdate selects and parameterizes the per-frame GPU kernel that ages,
 // integrates, and evaluates behavior for every living particle. A nil Shader selects
-// Pix's default kernel, configured by the fields below.
+// Pix's default kernel, configured by Gravity, Drag and the curves.
 //
-// A non-nil Shader is not yet implemented: constructing a container with one panics.
-// The ABI it will need to honor is fixed by ParticleRecord above (the shader reads
-// and writes that exact layout), but the compaction-wrapping machinery the contract
-// requires is not built yet — see docs/particle-system.md.
+// A non-nil Shader is a compute shader for the renderer's backend, written against
+// <pix/particles/simulation.glsl> and compiled with cmd/shaderc: it supplies update(),
+// what a living particle does each step, and the header does the rest. Params holds
+// the fields its PARTICLE_PARAMS declares, in that layout; the fields for the default
+// kernel are then ignored. Both are held by reference: containers sharing one Shader
+// slice share one pipeline.
 type ParticleUpdate struct {
 	Shader []byte
 
@@ -110,8 +112,8 @@ type ParticleUpdate struct {
 	SizeOverLife    ParticleCurve
 	OpacityOverLife ParticleCurve
 
-	// Params is an opaque per-container blob for a custom Shader's own tunables.
-	// Pix does not interpret it. Unused until custom shaders are implemented.
+	// Params is a custom Shader's own parameters, which pix does not interpret. At
+	// most 80 bytes fit every device; see <pix/particles/simulation.glsl>.
 	Params []byte
 }
 
@@ -213,8 +215,8 @@ func (c ParticleContainer) data() *particleData {
 // empty, with emission enabled. Zero capacity is valid; negative capacity is a
 // programming error.
 //
-// ParticleFaceCamera and a non-nil Update.Shader are not yet implemented in this
-// version and panic here rather than silently degrading.
+// ParticleFaceCamera is not yet implemented in this version and panics here rather
+// than silently degrading.
 //
 // config.Material is a *materials.BasicParticleMaterial (see ParticleConfig's doc
 // comment) — its own dedicated type carrying pix's particle shaders directly,
@@ -225,9 +227,6 @@ func (s *Scene) NewParticleContainer(config ParticleConfig, capacity int) Partic
 	}
 	if config.Facing == ParticleFaceCamera {
 		panic("pix: ParticleFaceCamera is not yet implemented")
-	}
-	if config.Update.Shader != nil {
-		panic("pix: custom particle update shaders are not yet implemented")
 	}
 
 	emitters := make([]ParticleEmitter, len(config.Emitters))

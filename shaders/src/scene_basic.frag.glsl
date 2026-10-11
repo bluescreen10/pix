@@ -7,7 +7,7 @@
 #extension GL_GOOGLE_include_directive : require
 
 // BasicMaterial (unlit): base color × vertex color × color map, plus emissive.
-#include "material_common.glsl"
+#include <pix/material_common.glsl>
 
 layout(location = 0) out vec4 outColor;
 

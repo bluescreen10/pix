@@ -6,7 +6,7 @@
 // Bloom, upsample: a 3x3 tent filter over a smaller level, blended additively into the
 // next larger one. Walking the chain back up this way sums every level's blur into the
 // top one, which is what gives bloom its wide, soft falloff.
-#include "postfx.glsl"
+#include <pix/postfx.glsl>
 
 layout(push_constant, scalar) uniform PC {
     POSTFX_ROOT

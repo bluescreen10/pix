@@ -5,7 +5,7 @@
 
 // Bloom, composite: blend the finished bloom into the scene. A mix rather than an add, so
 // the image's total energy is conserved: bloom redistributes light, it does not create it.
-#include "postfx.glsl"
+#include <pix/postfx.glsl>
 
 layout(push_constant, scalar) uniform PC {
     POSTFX_ROOT

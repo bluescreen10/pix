@@ -3,9 +3,9 @@
 #ifndef PIX_LIGHTING_GLSL
 #define PIX_LIGHTING_GLSL
 
-#include "bindless.glsl"
-#include "environment.glsl"
-#include "spherical_harmonics.glsl"
+#include <pix/bindless.glsl>
+#include <pix/environment.glsl>
+#include <pix/spherical_harmonics.glsl>
 
 const uint MAX_DIR = 4u;
 // Fog modes, mirroring scenes.FogNone/FogLinear/FogExp2/FogVolumetric.

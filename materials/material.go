@@ -119,7 +119,7 @@ type Masked interface {
 }
 
 // ToBytes is the mask as the first part of an entry of a pool's mask table: AlphaMask in
-// shaders/src/alpha_mask.glsl, 20 bytes.
+// shaders/lib/alpha_mask.glsl, 20 bytes.
 func (m AlphaMask) ToBytes() []byte {
 	entry := struct {
 		mapIndex uint32
@@ -165,7 +165,7 @@ type Transmissive interface {
 }
 
 // ToBytes is the mask as the second part of an entry of a pool's mask table:
-// TransmissionMask in shaders/src/alpha_mask.glsl, 16 bytes.
+// TransmissionMask in shaders/lib/alpha_mask.glsl, 16 bytes.
 func (m TransmissionMask) ToBytes() []byte {
 	entry := struct {
 		mapIndex uint32
@@ -184,7 +184,7 @@ func (m TransmissionMask) ToBytes() []byte {
 // maskEntrySize is the size of one entry of a pool's mask table: an AlphaMask's 20 bytes,
 // a TransmissionMask's 16, the UVTransform of each UVSet the masks' maps are read
 // through, 32, and 12 of padding, which rounds it to whole 16-byte rows. Mask in
-// shaders/src/alpha_mask.glsl.
+// shaders/lib/alpha_mask.glsl.
 const maskEntrySize = 80
 
 // Features is a set of the optional parts of a material type's fragment shader, as the

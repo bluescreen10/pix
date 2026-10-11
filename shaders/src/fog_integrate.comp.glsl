@@ -8,7 +8,7 @@
 // toward the camera and the fraction of what lies behind it that gets through. At each
 // slice it writes the fog between the camera and that slice's far edge — (light added,
 // fraction let through) — so a lit shader needs a single lookup (see applyFog).
-#include "bindless.glsl"
+#include <pix/bindless.glsl>
 
 layout(local_size_x = 8, local_size_y = 8) in;
 

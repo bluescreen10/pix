@@ -4,7 +4,7 @@
 #ifndef PIX_ENV_SAMPLING_GLSL
 #define PIX_ENV_SAMPLING_GLSL
 
-#include "environment.glsl"
+#include <pix/environment.glsl>
 
 // hammersley is the i-th of n points spread evenly over the unit square, which covers
 // the lobe far more evenly than as many random ones would.

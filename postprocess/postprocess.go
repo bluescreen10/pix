@@ -70,7 +70,7 @@ func (f *Frame) Root(image gpu.Texture, width, height uint32) Root {
 	}
 }
 
-// Root is POSTFX_ROOT in shaders/src/postfx.glsl: what every post-processing pass is told
+// Root is POSTFX_ROOT in shaders/lib/postfx.glsl: what every post-processing pass is told
 // about the image it reads. A pass's own parameters follow it in the root.
 type Root struct {
 	// Source is the bindless index of the image to read, and LinearSampler of the

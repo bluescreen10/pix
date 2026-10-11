@@ -15,7 +15,7 @@
 // Built twice. Plain, it writes nothing else. With USE_MOTION defined, for the prepass
 // while motion vectors are on, it also writes how far the surface moved since the
 // previous frame, over scene_depth.vert built with USE_MOTION too.
-#include "alpha_mask.glsl"
+#include <pix/alpha_mask.glsl>
 #ifdef USE_MOTION
 #include "motion.glsl"
 #endif

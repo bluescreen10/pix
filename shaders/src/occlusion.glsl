@@ -14,7 +14,7 @@
 #ifndef PIX_OCCLUSION_GLSL
 #define PIX_OCCLUSION_GLSL
 
-#include "bindless.glsl"
+#include <pix/bindless.glsl>
 
 // BACKGROUND_DEPTH is the depth chain's depth where no surface is: the largest half
 // float, as XeGTAO clamps its depths to.

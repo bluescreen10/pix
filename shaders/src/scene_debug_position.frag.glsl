@@ -10,7 +10,7 @@
 // Taken from the interpolated varying rather than reconstructed from depth and an
 // inverse view-projection, which is what the G-buffer version had to do. Same picture,
 // no matrix inverse, and correct for geometry the depth buffer never received.
-#include "material_common.glsl"
+#include <pix/material_common.glsl>
 
 layout(location = 0) out vec4 outColor;
 

@@ -6,7 +6,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
 // Depth, curved for readability: near reads dark, far reads bright.
-#include "material_common.glsl"
+#include <pix/material_common.glsl>
 
 layout(location = 0) out vec4 outColor;
 

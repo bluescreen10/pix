@@ -7,7 +7,7 @@
 // the 13-tap filter from Jimenez, "Next Generation Post Processing in Call of Duty:
 // Advanced Warfare". Thirteen bilinear taps cover a 6x6 texel footprint as five
 // overlapping 2x2 boxes, which is what keeps the chain from shimmering as the camera moves.
-#include "postfx.glsl"
+#include <pix/postfx.glsl>
 
 layout(push_constant, scalar) uniform PC {
     POSTFX_ROOT

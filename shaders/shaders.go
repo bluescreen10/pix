@@ -2,13 +2,16 @@
 //
 // Layout:
 //
-//   - src/   the GLSL sources. Every file is .glsl; stage shaders keep the stage in
-//     the name (scene_draw.vert.glsl), and files with no stage suffix
-//     (material_common.glsl, lighting.glsl, gbuffer.glsl) are include-only
-//     headers. Because .glsl implies no stage to glslc, every rule below
-//     passes -fshader-stage explicitly.
-//   - build/ the compiled .spv, embedded from here. Checked in, so building pix needs
-//     no shader toolchain — only editing a shader does.
+//   - lib/   the public GLSL headers, embedded as Library. Pix's own shaders and
+//     applications' shaders alike include them as <pix/name.glsl> (lib/particles/
+//     simulation.glsl is <pix/particles/simulation.glsl>); cmd/shaderc supplies the
+//     include path. What is here is API: a header here includes only other headers
+//     here.
+//   - src/   pix's own shaders, and the private headers only they include (quoted,
+//     "occlusion.glsl"). Stage shaders keep the stage in the name
+//     (scene_draw.vert.glsl); files with no stage suffix are include-only.
+//   - build/ the compiled .spv and .metalbin, embedded from here. Checked in, so
+//     building pix needs no shader toolchain — only editing a shader does.
 //
 // Regenerate with `go generate ./shaders` after editing a source. This requires
 // glslc, spirv-cross, and Xcode with the Metal Toolchain installed.
@@ -34,31 +37,31 @@ import _ "embed"
 
 // --- scene pipeline ---
 
-//go:generate go run ../cmd/shadercompile -i src/scene_cull.comp.glsl -o spv:build/scene_cull.comp.spv -o metallib:build/scene_cull.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_deform.comp.glsl -o spv:build/scene_deform.comp.spv -o metallib:build/scene_deform.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_draw.vert.glsl -o spv:build/scene_draw.vert.spv -o metallib:build/scene_draw.vert.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_depth.vert.glsl -o spv:build/scene_depth.vert.spv -o metallib:build/scene_depth.vert.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_depth.vert.glsl -D USE_MASK -o spv:build/scene_depth_masked.vert.spv -o metallib:build/scene_depth_masked.vert.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_depth_masked.frag.glsl -o spv:build/scene_depth_masked.frag.spv -o metallib:build/scene_depth_masked.frag.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_basic.frag.glsl -o spv:build/scene_basic.frag.spv -o metallib:build/scene_basic.frag.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_lit.frag.glsl -o spv:build/scene_lit.frag.spv -o metallib:build/scene_lit.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_cull.comp.glsl -o spv:build/scene_cull.comp.spv -o metallib:build/scene_cull.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_deform.comp.glsl -o spv:build/scene_deform.comp.spv -o metallib:build/scene_deform.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_draw.vert.glsl -o spv:build/scene_draw.vert.spv -o metallib:build/scene_draw.vert.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_depth.vert.glsl -o spv:build/scene_depth.vert.spv -o metallib:build/scene_depth.vert.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_depth.vert.glsl -D USE_MASK -o spv:build/scene_depth_masked.vert.spv -o metallib:build/scene_depth_masked.vert.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_depth_masked.frag.glsl -o spv:build/scene_depth_masked.frag.spv -o metallib:build/scene_depth_masked.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_basic.frag.glsl -o spv:build/scene_basic.frag.spv -o metallib:build/scene_basic.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_lit.frag.glsl -o spv:build/scene_lit.frag.spv -o metallib:build/scene_lit.frag.metalbin
 
 // PBRMaterial's three render paths all come from one source, selected by -D.
-//go:generate go run ../cmd/shadercompile -i src/scene_pbr.frag.glsl -o spv:build/scene_pbr.frag.spv -o metallib:build/scene_pbr.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_pbr.frag.glsl -o spv:build/scene_pbr.frag.spv -o metallib:build/scene_pbr.frag.metalbin
 
-//go:generate go run ../cmd/shadercompile -i src/scene_depth.vert.glsl -D USE_MOTION -o spv:build/scene_depth_motion.vert.spv -o metallib:build/scene_depth_motion.vert.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_depth.vert.glsl -D USE_MASK -D USE_MOTION -o spv:build/scene_depth_masked_motion.vert.spv -o metallib:build/scene_depth_masked_motion.vert.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_depth_masked.frag.glsl -D USE_MOTION -o spv:build/scene_depth_masked_motion.frag.spv -o metallib:build/scene_depth_masked_motion.frag.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_motion.frag.glsl -o spv:build/scene_motion.frag.spv -o metallib:build/scene_motion.frag.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_background_motion.frag.glsl -o spv:build/scene_background_motion.frag.spv -o metallib:build/scene_background_motion.frag.metalbin
-//go:generate go run ../cmd/shadercompile -i src/taa_resolve.frag.glsl -o spv:build/taa_resolve.frag.spv -o metallib:build/taa_resolve.frag.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_motion_view.frag.glsl -o spv:build/scene_motion_view.frag.spv -o metallib:build/scene_motion_view.frag.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_debug_id.vert.glsl -o spv:build/scene_debug_id.vert.spv -o metallib:build/scene_debug_id.vert.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_debug_normal.frag.glsl -o spv:build/scene_debug_normal.frag.spv -o metallib:build/scene_debug_normal.frag.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_debug_depth.frag.glsl -o spv:build/scene_debug_depth.frag.spv -o metallib:build/scene_debug_depth.frag.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_debug_position.frag.glsl -o spv:build/scene_debug_position.frag.spv -o metallib:build/scene_debug_position.frag.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_debug_object.frag.glsl -o spv:build/scene_debug_object.frag.spv -o metallib:build/scene_debug_object.frag.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_debug_triangle.frag.glsl -o spv:build/scene_debug_triangle.frag.spv -o metallib:build/scene_debug_triangle.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_depth.vert.glsl -D USE_MOTION -o spv:build/scene_depth_motion.vert.spv -o metallib:build/scene_depth_motion.vert.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_depth.vert.glsl -D USE_MASK -D USE_MOTION -o spv:build/scene_depth_masked_motion.vert.spv -o metallib:build/scene_depth_masked_motion.vert.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_depth_masked.frag.glsl -D USE_MOTION -o spv:build/scene_depth_masked_motion.frag.spv -o metallib:build/scene_depth_masked_motion.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_motion.frag.glsl -o spv:build/scene_motion.frag.spv -o metallib:build/scene_motion.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_background_motion.frag.glsl -o spv:build/scene_background_motion.frag.spv -o metallib:build/scene_background_motion.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/taa_resolve.frag.glsl -o spv:build/taa_resolve.frag.spv -o metallib:build/taa_resolve.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_motion_view.frag.glsl -o spv:build/scene_motion_view.frag.spv -o metallib:build/scene_motion_view.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_debug_id.vert.glsl -o spv:build/scene_debug_id.vert.spv -o metallib:build/scene_debug_id.vert.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_debug_normal.frag.glsl -o spv:build/scene_debug_normal.frag.spv -o metallib:build/scene_debug_normal.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_debug_depth.frag.glsl -o spv:build/scene_debug_depth.frag.spv -o metallib:build/scene_debug_depth.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_debug_position.frag.glsl -o spv:build/scene_debug_position.frag.spv -o metallib:build/scene_debug_position.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_debug_object.frag.glsl -o spv:build/scene_debug_object.frag.spv -o metallib:build/scene_debug_object.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_debug_triangle.frag.glsl -o spv:build/scene_debug_triangle.frag.spv -o metallib:build/scene_debug_triangle.frag.metalbin
 
 // --- ambient occlusion (see Renderer.EnableAmbientOcclusion) ---
 //
@@ -103,37 +106,37 @@ var OcclusionApply []byte
 
 // --- particles ---
 
-//go:generate go run ../cmd/shadercompile -i src/fullscreen.vert.glsl -o spv:build/fullscreen.vert.spv -o metallib:build/fullscreen.vert.metalbin
-//go:generate go run ../cmd/shadercompile -i src/bloom_downsample.frag.glsl -o spv:build/bloom_downsample.frag.spv -o metallib:build/bloom_downsample.frag.metalbin
-//go:generate go run ../cmd/shadercompile -i src/bloom_upsample.frag.glsl -o spv:build/bloom_upsample.frag.spv -o metallib:build/bloom_upsample.frag.metalbin
-//go:generate go run ../cmd/shadercompile -i src/bloom_composite.frag.glsl -o spv:build/bloom_composite.frag.spv -o metallib:build/bloom_composite.frag.metalbin
-//go:generate go run ../cmd/shadercompile -i src/tonemap.frag.glsl -o spv:build/tonemap.frag.spv -o metallib:build/tonemap.frag.metalbin
-//go:generate go run ../cmd/shadercompile -i src/fxaa.frag.glsl -o spv:build/fxaa.frag.spv -o metallib:build/fxaa.frag.metalbin
-//go:generate go run ../cmd/shadercompile -i src/halftone.frag.glsl -o spv:build/halftone.frag.spv -o metallib:build/halftone.frag.metalbin
-//go:generate go run ../cmd/shadercompile -i src/env_prefilter.comp.glsl -o spv:build/env_prefilter.comp.spv -o metallib:build/env_prefilter.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_copy.comp.glsl -o spv:build/scene_copy.comp.spv -o metallib:build/scene_copy.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/scene_copy_mip.comp.glsl -o spv:build/scene_copy_mip.comp.spv -o metallib:build/scene_copy_mip.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/env_brdf.comp.glsl -o spv:build/env_brdf.comp.spv -o metallib:build/env_brdf.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/env_irradiance.comp.glsl -o spv:build/env_irradiance.comp.spv -o metallib:build/env_irradiance.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/env_background.frag.glsl -o spv:build/env_background.frag.spv -o metallib:build/env_background.frag.metalbin
-//go:generate go run ../cmd/shadercompile -i src/light_clusters.comp.glsl -o spv:build/light_clusters.comp.spv -o metallib:build/light_clusters.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/fog_inject.comp.glsl -o spv:build/fog_inject.comp.spv -o metallib:build/fog_inject.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/fog_integrate.comp.glsl -o spv:build/fog_integrate.comp.spv -o metallib:build/fog_integrate.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/fog_background.frag.glsl -o spv:build/fog_background.frag.spv -o metallib:build/fog_background.frag.metalbin
-//go:generate go run ../cmd/shadercompile -i src/vbao_depth.comp.glsl -o spv:build/vbao_depth.comp.spv -o metallib:build/vbao_depth.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/vbao_depth_mip.comp.glsl -o spv:build/vbao_depth_mip.comp.spv -o metallib:build/vbao_depth_mip.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/vbao_slices.comp.glsl -o spv:build/vbao_slices.comp.spv -o metallib:build/vbao_slices.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/vbao_denoise.comp.glsl -o spv:build/vbao_denoise.comp.spv -o metallib:build/vbao_denoise.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/vbao_upsample.comp.glsl -o spv:build/vbao_upsample.comp.spv -o metallib:build/vbao_upsample.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/assao_depth.comp.glsl -o spv:build/assao_depth.comp.spv -o metallib:build/assao_depth.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/assao_gather.comp.glsl -o spv:build/assao_gather.comp.spv -o metallib:build/assao_gather.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/assao_blur.comp.glsl -o spv:build/assao_blur.comp.spv -o metallib:build/assao_blur.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/occlusion_apply.frag.glsl -o spv:build/occlusion_apply.frag.spv -o metallib:build/occlusion_apply.frag.metalbin
-//go:generate go run ../cmd/shadercompile -i src/particle_update.comp.glsl -o spv:build/particle_update.comp.spv -o metallib:build/particle_update.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/particle_sort_keys.comp.glsl -o spv:build/particle_sort_keys.comp.spv -o metallib:build/particle_sort_keys.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/particle_sort_step.comp.glsl -o spv:build/particle_sort_step.comp.spv -o metallib:build/particle_sort_step.comp.metalbin
-//go:generate go run ../cmd/shadercompile -i src/particle_draw.vert.glsl -o spv:build/particle_draw.vert.spv -o metallib:build/particle_draw.vert.metalbin
-//go:generate go run ../cmd/shadercompile -i src/particle_basic.frag.glsl -o spv:build/particle_basic.frag.spv -o metallib:build/particle_basic.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/fullscreen.vert.glsl -o spv:build/fullscreen.vert.spv -o metallib:build/fullscreen.vert.metalbin
+//go:generate go run ../cmd/shaderc -i src/bloom_downsample.frag.glsl -o spv:build/bloom_downsample.frag.spv -o metallib:build/bloom_downsample.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/bloom_upsample.frag.glsl -o spv:build/bloom_upsample.frag.spv -o metallib:build/bloom_upsample.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/bloom_composite.frag.glsl -o spv:build/bloom_composite.frag.spv -o metallib:build/bloom_composite.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/tonemap.frag.glsl -o spv:build/tonemap.frag.spv -o metallib:build/tonemap.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/fxaa.frag.glsl -o spv:build/fxaa.frag.spv -o metallib:build/fxaa.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/halftone.frag.glsl -o spv:build/halftone.frag.spv -o metallib:build/halftone.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/env_prefilter.comp.glsl -o spv:build/env_prefilter.comp.spv -o metallib:build/env_prefilter.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_copy.comp.glsl -o spv:build/scene_copy.comp.spv -o metallib:build/scene_copy.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/scene_copy_mip.comp.glsl -o spv:build/scene_copy_mip.comp.spv -o metallib:build/scene_copy_mip.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/env_brdf.comp.glsl -o spv:build/env_brdf.comp.spv -o metallib:build/env_brdf.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/env_irradiance.comp.glsl -o spv:build/env_irradiance.comp.spv -o metallib:build/env_irradiance.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/env_background.frag.glsl -o spv:build/env_background.frag.spv -o metallib:build/env_background.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/light_clusters.comp.glsl -o spv:build/light_clusters.comp.spv -o metallib:build/light_clusters.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/fog_inject.comp.glsl -o spv:build/fog_inject.comp.spv -o metallib:build/fog_inject.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/fog_integrate.comp.glsl -o spv:build/fog_integrate.comp.spv -o metallib:build/fog_integrate.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/fog_background.frag.glsl -o spv:build/fog_background.frag.spv -o metallib:build/fog_background.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/vbao_depth.comp.glsl -o spv:build/vbao_depth.comp.spv -o metallib:build/vbao_depth.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/vbao_depth_mip.comp.glsl -o spv:build/vbao_depth_mip.comp.spv -o metallib:build/vbao_depth_mip.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/vbao_slices.comp.glsl -o spv:build/vbao_slices.comp.spv -o metallib:build/vbao_slices.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/vbao_denoise.comp.glsl -o spv:build/vbao_denoise.comp.spv -o metallib:build/vbao_denoise.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/vbao_upsample.comp.glsl -o spv:build/vbao_upsample.comp.spv -o metallib:build/vbao_upsample.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/assao_depth.comp.glsl -o spv:build/assao_depth.comp.spv -o metallib:build/assao_depth.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/assao_gather.comp.glsl -o spv:build/assao_gather.comp.spv -o metallib:build/assao_gather.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/assao_blur.comp.glsl -o spv:build/assao_blur.comp.spv -o metallib:build/assao_blur.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/occlusion_apply.frag.glsl -o spv:build/occlusion_apply.frag.spv -o metallib:build/occlusion_apply.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/particle_update.comp.glsl -o spv:build/particle_update.comp.spv -o metallib:build/particle_update.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/particle_sort_keys.comp.glsl -o spv:build/particle_sort_keys.comp.spv -o metallib:build/particle_sort_keys.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/particle_sort_step.comp.glsl -o spv:build/particle_sort_step.comp.spv -o metallib:build/particle_sort_step.comp.metalbin
+//go:generate go run ../cmd/shaderc -i src/particle_draw.vert.glsl -o spv:build/particle_draw.vert.spv -o metallib:build/particle_draw.vert.metalbin
+//go:generate go run ../cmd/shaderc -i src/particle_basic.frag.glsl -o spv:build/particle_basic.frag.spv -o metallib:build/particle_basic.frag.metalbin
 
 //go:embed build/scene_cull.comp.spv
 var SceneCull []byte
@@ -263,8 +266,8 @@ var Halftone []byte
 
 // --- overlay (debug HUD) ---
 
-//go:generate go run ../cmd/shadercompile -i src/overlay.vert.glsl -o spv:build/overlay.vert.spv -o metallib:build/overlay.vert.metalbin
-//go:generate go run ../cmd/shadercompile -i src/overlay.frag.glsl -o spv:build/overlay.frag.spv -o metallib:build/overlay.frag.metalbin
+//go:generate go run ../cmd/shaderc -i src/overlay.vert.glsl -o spv:build/overlay.vert.spv -o metallib:build/overlay.vert.metalbin
+//go:generate go run ../cmd/shaderc -i src/overlay.frag.glsl -o spv:build/overlay.frag.spv -o metallib:build/overlay.frag.metalbin
 
 //go:embed build/overlay.vert.spv
 var OverlayVert []byte

@@ -21,7 +21,7 @@
 // Colours are blended compressed, c / (1 + max(c)), so that one very bright sample — a
 // glint caught on one frame and not the next — does not dominate the average and
 // flicker.
-#include "postfx.glsl"
+#include <pix/postfx.glsl>
 
 layout(push_constant, scalar) uniform PC {
     POSTFX_ROOT

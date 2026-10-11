@@ -14,7 +14,7 @@
 // per unit of distance, with the density, into the medium volume, which fog_integrate
 // then accumulates along each column.
 #define PIX_NO_FRAGMENT_FOG
-#include "lighting.glsl"
+#include <pix/lighting.glsl>
 
 layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 

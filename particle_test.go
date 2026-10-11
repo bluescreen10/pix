@@ -1,6 +1,8 @@
 package pix_test
 
 import (
+	"encoding/binary"
+	"math"
 	"testing"
 
 	"github.com/bluescreen10/pix"
@@ -10,6 +12,8 @@ import (
 	"github.com/bluescreen10/pix/materials"
 	"github.com/bluescreen10/pix/scenes"
 )
+
+//go:generate go run ./cmd/shaderc -i testdata/particle_shift.comp.glsl -o spv:testdata/build/particle_shift.comp.spv -o metallib:testdata/build/particle_shift.comp.metalbin
 
 // countEmitter emits n particles on every positive Emit call and records how many
 // times it was reset, for tests that need to observe emission independent of the
@@ -98,17 +102,6 @@ func TestParticleFaceCameraPanics(t *testing.T) {
 	defer func() {
 		if recover() == nil {
 			t.Fatal("expected panic for scenes.ParticleFaceCamera")
-		}
-	}()
-	scene.NewParticleContainer(config, 10)
-}
-
-func TestParticleCustomShaderPanics(t *testing.T) {
-	_, scene, config := newParticleTestScene(t)
-	config.Update.Shader = []byte("kernel void main0() {}")
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected panic for a non-nil scenes.Update.Shader")
 		}
 	}()
 	scene.NewParticleContainer(config, 10)
@@ -474,5 +467,126 @@ func TestParticleSortOrdersEveryPair(t *testing.T) {
 		if got != want {
 			t.Errorf("overlap of particles %d and %d = %v, want %v, particle %d's colour, the nearer", i, i+1, got, want, nearer)
 		}
+	}
+}
+
+// TestParticleCustomUpdateShader runs a container's simulation with an update shader
+// written against <pix/particles/simulation.glsl>: it moves every living particle by the
+// shift in its Params. A newborn renders where Spawn put it; the next step moves it
+// across the screen, from the left quarter to the right.
+func TestParticleCustomUpdateShader(t *testing.T) {
+	r, err := pix.NewOffscreenRenderer(postSize, postSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
+	scene := scenes.New()
+	defer scene.Destroy()
+
+	quad := r.GeometryStore.Create(geometries.GeometryConfig{
+		Attributes: []geometries.Attribute{
+			geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, []glm.Vec3f{{-0.8, -0.8, 0}, {0.8, -0.8, 0}, {0.8, 0.8, 0}, {-0.8, 0.8, 0}}),
+		},
+		Indices: []uint32{0, 1, 2, 0, 2, 3},
+	})
+	var shift []byte
+	for _, component := range []float32{4, 0, 0} {
+		shift = binary.LittleEndian.AppendUint32(shift, math.Float32bits(component))
+	}
+	emitter := &countEmitter{n: 1}
+	container := scene.NewParticleContainer(scenes.ParticleConfig{
+		Geometry: quad,
+		Material: r.NewBasicParticleMaterial(),
+		Emitters: []scenes.ParticleEmitter{emitter},
+		Spawn: SpawnFuncFor(func(p *scenes.Particle) {
+			p.Lifetime = 100
+			p.Position = glm.Vec3f{-2, 0, 0}
+			p.Color = colors.RGBA32F{1, 0, 0, 1}
+		}),
+		Update: scenes.ParticleUpdate{
+			Shader: testShader(t, r, "particle_shift.comp"),
+			Params: shift,
+		},
+	}, 1)
+
+	cam := scene.NewOrthographicCamera(-4, 4, -4, 4, 0.1, 100)
+	cam.SetPosition(glm.Vec3f{0, 0, 5})
+	cam.LookAt(glm.Vec3f{0, 0, 0})
+	left, right := postSize/4, postSize*3/4
+	red, black := [3]byte{255, 0, 0}, [3]byte{0, 0, 0}
+
+	container.Update(1.0 / 60)
+	r.Render(scene)
+	if got := pixelAt(r, left, postSize/2); got != red {
+		t.Errorf("newborn: left = %v, want %v, the particle where Spawn put it", got, red)
+	}
+
+	emitter.n = 0
+	container.Update(1.0 / 60)
+	r.Render(scene)
+	if got := pixelAt(r, left, postSize/2); got != black {
+		t.Errorf("after one step: left = %v, want %v, the particle moved away", got, black)
+	}
+	if got := pixelAt(r, right, postSize/2); got != red {
+		t.Errorf("after one step: right = %v, want %v, the particle moved by its shift", got, red)
+	}
+}
+
+// TestParticleDefaultUpdate steps pix's default update once, by a whole second: gravity
+// carries a particle from the left quarter of the screen to the right, and opacity over
+// life, from 1 to 0 across its two-second life, leaves it half transparent over black.
+// Gravity is the first of the default update's parameters and the opacity curve's end
+// the last, so both ends of their layout are read.
+func TestParticleDefaultUpdate(t *testing.T) {
+	r, err := pix.NewOffscreenRenderer(postSize, postSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	r.SetClearColor(colors.RGBA32F{0, 0, 0, 1})
+	scene := scenes.New()
+	defer scene.Destroy()
+
+	quad := r.GeometryStore.Create(geometries.GeometryConfig{
+		Attributes: []geometries.Attribute{
+			geometries.NewAttribute(geometries.AttributePosition, geometries.Float32x3, []glm.Vec3f{{-0.8, -0.8, 0}, {0.8, -0.8, 0}, {0.8, 0.8, 0}, {-0.8, 0.8, 0}}),
+		},
+		Indices: []uint32{0, 1, 2, 0, 2, 3},
+	})
+	material := r.NewBasicParticleMaterial()
+	material.SetBlend(materials.BlendAlpha)
+	emitter := &countEmitter{n: 1}
+	container := scene.NewParticleContainer(scenes.ParticleConfig{
+		Geometry: quad,
+		Material: material,
+		Emitters: []scenes.ParticleEmitter{emitter},
+		Spawn: SpawnFuncFor(func(p *scenes.Particle) {
+			p.Lifetime = 2
+			p.Position = glm.Vec3f{-2, 0, 0}
+			p.Color = colors.RGBA32F{1, 0, 0, 1}
+		}),
+		Update: scenes.ParticleUpdate{
+			Gravity:         glm.Vec3f{4, 0, 0},
+			OpacityOverLife: scenes.ParticleCurve{Enabled: true, Start: 1, End: 0},
+		},
+	}, 1)
+
+	cam := scene.NewOrthographicCamera(-4, 4, -4, 4, 0.1, 100)
+	cam.SetPosition(glm.Vec3f{0, 0, 5})
+	cam.LookAt(glm.Vec3f{0, 0, 0})
+	left, right := postSize/4, postSize*3/4
+
+	container.Update(1)
+	r.Render(scene)
+	emitter.n = 0
+	container.Update(1)
+	r.Render(scene)
+
+	if got, want := pixelAt(r, left, postSize/2), [3]byte{0, 0, 0}; got != want {
+		t.Errorf("left = %v, want %v, the particle fallen away", got, want)
+	}
+	if got, want := pixelAt(r, right, postSize/2), [3]byte{188, 0, 0}; got != want {
+		t.Errorf("right = %v, want %v, the particle at half opacity", got, want)
 	}
 }

@@ -5,7 +5,7 @@
 
 // volume_write fills a writable 3D texture through the heap's storage array: the near
 // half of its depth red, the far half green.
-#include "../shaders/src/bindless.glsl"
+#include <pix/bindless.glsl>
 
 layout(push_constant, scalar) uniform PC {
     uint volume;

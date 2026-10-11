@@ -5,7 +5,7 @@
 
 // image_fill fills a writable 2D texture through the heap's storage array with the
 // colour its root carries.
-#include "../shaders/src/bindless.glsl"
+#include <pix/bindless.glsl>
 
 layout(push_constant, scalar) uniform PC {
     uint image;

@@ -10,7 +10,7 @@
 // which is what applyFog gives a surface. It gets there through ordinary "over" blending — src * a + dst * (1 - a) —
 // with a = 1 - transmittance and src = light / a, since that is the blend every
 // backend has (see Renderer.encodeFogBackground).
-#include "postfx.glsl"
+#include <pix/postfx.glsl>
 
 layout(push_constant, scalar) uniform PC {
     POSTFX_ROOT

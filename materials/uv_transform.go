@@ -56,7 +56,7 @@ func isUVTransformed(inst Instance) bool {
 }
 
 // ToBytes is the transform as the shaders read it: UVTransform in
-// shaders/src/alpha_mask.glsl, 16 bytes.
+// shaders/lib/alpha_mask.glsl, 16 bytes.
 func (t UVTransform) ToBytes() []byte {
 	return unsafe.Slice((*byte)(unsafe.Pointer(&t)), unsafe.Sizeof(t))
 }

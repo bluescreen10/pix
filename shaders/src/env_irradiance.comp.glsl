@@ -15,9 +15,9 @@
 //
 // One workgroup does the whole cube: a pass of a few thousand texels, run when the
 // environment changes.
-#include "bindless.glsl"
-#include "environment.glsl"
-#include "spherical_harmonics.glsl"
+#include <pix/bindless.glsl>
+#include <pix/environment.glsl>
+#include <pix/spherical_harmonics.glsl>
 
 const uint THREADS = 64u;
 layout(local_size_x = 64) in;

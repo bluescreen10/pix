@@ -7,28 +7,66 @@ package pix
 import (
 	"unsafe"
 
+	"github.com/bluescreen10/gamekit/gpu"
+	"github.com/bluescreen10/gamekit/utils"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/scenes"
 )
 
 var particleRecordSize = uint32(unsafe.Sizeof(scenes.ParticleRecord{}))
 
-// particleUpdateRoot matches PC in particle_update.comp.glsl (scalar; pointers
-// first, then plain fields). One per container per frame — see encodeParticleSimulation.
-type particleUpdateRoot struct {
-	src, dst, pending, indirect uint64
-	capacity, pendingCount      uint32
-	dt                          float32
-	gravity                     glm.Vec3f
-	drag                        float32
-	sizeEnabled                 uint32
-	sizeStart, sizeEnd          float32
-	opacityEnabled              uint32
-	opacityStart, opacityEnd    float32
-	// Padded to a multiple of 16 for the same reason drawable.go's *Root types are:
-	// MSL rounds a struct's size up to its alignment, and a mismatch there makes the
-	// Metal backend hand the shader a short root.
-	pad0, pad1, pad2 uint32
+// particleSimulationRoot matches PC in shaders/lib/particles/simulation.glsl up to
+// PARTICLE_PARAMS: 48 bytes, after which an update shader's own parameters follow. One
+// per container per frame — see encodeParticleSimulation.
+type particleSimulationRoot struct {
+	source, destination, newborns, draw uint64
+	capacity, newbornCount              uint32
+	dt                                  float32
+	_                                   uint32
+}
+
+// appendWithParams appends the root to buf, followed by an update shader's params, and
+// pads the whole to a multiple of 16 bytes for the same reason drawable.go's *Root types
+// are: MSL rounds a struct's size up to its alignment, and a mismatch there makes the
+// Metal backend hand the shader a short root.
+func (root *particleSimulationRoot) appendWithParams(buf, params []byte) []byte {
+	buf = append(buf, utils.ToBytes(root)...)
+	buf = append(buf, params...)
+	if remainder := len(buf) % 16; remainder != 0 {
+		buf = append(buf, make([]byte, 16-remainder)...)
+	}
+	return buf
+}
+
+// defaultParticleParams matches PARTICLE_PARAMS in particle_update.comp.glsl, pix's
+// update for a ParticleUpdate with no Shader of its own.
+type defaultParticleParams struct {
+	gravity                  glm.Vec3f
+	drag                     float32
+	sizeEnabled              uint32
+	sizeStart, sizeEnd       float32
+	opacityEnabled           uint32
+	opacityStart, opacityEnd float32
+}
+
+func defaultParticleParamsFor(update scenes.ParticleUpdate) defaultParticleParams {
+	params := defaultParticleParams{
+		gravity: update.Gravity,
+		drag:    update.Drag,
+	}
+	if update.SizeOverLife.Enabled {
+		params.sizeEnabled, params.sizeStart, params.sizeEnd = 1, update.SizeOverLife.Start, update.SizeOverLife.End
+	}
+	if update.OpacityOverLife.Enabled {
+		params.opacityEnabled, params.opacityStart, params.opacityEnd = 1, update.OpacityOverLife.Start, update.OpacityOverLife.End
+	}
+	return params
+}
+
+// particleUpdatePipeline is the compute pipeline built from one particle update shader.
+type particleUpdatePipeline struct {
+	shader   []byte
+	pipeline gpu.Pipeline
 }
 
 // particleDrawRoot matches PC in particle_common.glsl / particle_draw.vert.glsl
@@ -80,8 +118,6 @@ type particleSortStepRoot struct {
 // sortEntrySize is the size of one entry of a sorted container's order buffer: a
 // float key and a particle index.
 const sortEntrySize = 8
-
-var particleUpdateRootSize = uint32(unsafe.Sizeof(particleUpdateRoot{}))
 
 // cubeFaceDirs/cubeFaceUps are the six 90° cube-face view directions and their up
 // vectors (the ±Y faces use a Z up to avoid a degenerate look-at). Face order matches

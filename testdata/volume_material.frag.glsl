@@ -8,7 +8,7 @@
 
 // volume_material shows one depth of a 3D texture, unlit: the colour at the volume's
 // centre in x and y, at the depth its record asks for.
-#include "../shaders/src/material_common.glsl"
+#include <pix/material_common.glsl>
 
 layout(location = 0) out vec4 outColor;
 

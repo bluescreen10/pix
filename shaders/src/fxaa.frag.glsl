@@ -13,7 +13,7 @@
 // linear light; edges are judged on display brightness, which is what the eye sees as
 // a step, and is what the thresholds below are tuned for. The output is linear light
 // for the sRGB target to encode.
-#include "postfx.glsl"
+#include <pix/postfx.glsl>
 
 layout(push_constant, scalar) uniform PC {
     POSTFX_ROOT

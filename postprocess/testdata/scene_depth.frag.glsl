@@ -5,7 +5,7 @@
 
 // scene_depth draws the scene's depth, which the root hands every post-processing pass,
 // as a grey level: near is bright, the far plane black.
-#include "../../shaders/src/postfx.glsl"
+#include <pix/postfx.glsl>
 
 layout(push_constant, scalar) uniform PC {
     POSTFX_ROOT

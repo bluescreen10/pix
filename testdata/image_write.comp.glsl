@@ -5,7 +5,7 @@
 
 // image_write fills a writable 2D texture through the heap's storage array with one
 // colour, orange — (1, 0.5, 0), which nothing else in its test draws.
-#include "../shaders/src/bindless.glsl"
+#include <pix/bindless.glsl>
 
 layout(push_constant, scalar) uniform PC {
     uint image;

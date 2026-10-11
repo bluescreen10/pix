@@ -215,7 +215,7 @@ func (s *Pool) RecordsAddr() uint64 {
 }
 
 // MasksAddr is the device address of the pool's mask table, an entry per record slot —
-// Mask in shaders/src/alpha_mask.glsl — resolved at draw time because it moves when the
+// Mask in shaders/lib/alpha_mask.glsl — resolved at draw time because it moves when the
 // pool grows.
 func (s *Pool) MasksAddr() uint64 {
 	return s.masks.Addr

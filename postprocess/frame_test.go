@@ -15,7 +15,7 @@ import (
 	"github.com/bluescreen10/pix/shaders"
 )
 
-//go:generate go run ../cmd/shadercompile -i testdata/scene_depth.frag.glsl -o spv:testdata/build/scene_depth.frag.spv -o metallib:testdata/build/scene_depth.frag.metalbin
+//go:generate go run ../cmd/shaderc -i testdata/scene_depth.frag.glsl -o spv:testdata/build/scene_depth.frag.spv -o metallib:testdata/build/scene_depth.frag.metalbin
 
 // depthStep keeps the frames it is given and draws the scene's depth into the chain's
 // image, where it reads as colour: bloom's downsampling shader filters whatever image

@@ -11,7 +11,7 @@
 // It can also darken the scene by its ambient occlusion first, when nothing drew over
 // the opaque scene since (see darkeningInToneMapping in ambient_occlusion.go): the same
 // sum the darkening draws make with blending, but in the read this pass makes anyway.
-#include "postfx.glsl"
+#include <pix/postfx.glsl>
 #include "occlusion_openness.glsl"
 
 layout(push_constant, scalar) uniform PC {

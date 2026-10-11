@@ -8,7 +8,7 @@
 // the average of its samples when it is still multisampled (see
 // pix.resolvesOpaquePassEarly). Materials that show what is behind them read the copy
 // while they draw into the scene itself.
-#include "bindless.glsl"
+#include <pix/bindless.glsl>
 
 layout(local_size_x = 8, local_size_y = 8) in;
 

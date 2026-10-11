@@ -7,7 +7,7 @@ import (
 
 // Select returns the variant of a shader that backend runs: metallib on Metal, spirv on
 // everything else. It is for shaders compiled outside this package — by a package of
-// effects built on pix, say, with cmd/shadercompile — which ForBackend does not know.
+// effects built on pix, say, with cmd/shaderc — which ForBackend does not know.
 func Select(backend any, spirv, metallib []byte) []byte {
 	if format, ok := backend.(interface{ ShaderFormat() string }); ok && format.ShaderFormat() == "metal" {
 		return metallib

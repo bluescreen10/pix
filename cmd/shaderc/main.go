@@ -1,13 +1,24 @@
-// shadercompile compiles GLSL shaders into one or more runtime formats.
+// shaderc compiles GLSL shaders into the formats pix runs: SPIR-V, and a Metal library
+// for macOS.
 //
-// TODO: make this a tool we ship, so game implementors compile their own shaders with
-// it (shaderc underneath) the same way pix compiles its own. Ship shaders/src as the
-// include path, and turn pix's shared code into includes written for them: a shader
-// includes one, such as #include "particle_sim", and implements the functions it asks
-// for — a start() that spawns a particle and an update() that advances it — while the
-// include provides main() and the bindings, and calls them. The include owns the entry
-// point and the layout, so a shader written against it keeps working when either
-// changes.
+// A shader includes pix's public headers as <pix/name.glsl> — <pix/bindless.glsl>,
+// <pix/postfx.glsl>, <pix/material_common.glsl> — with no -I: shaderc carries them
+// inside its binary and puts them on the include path itself. An application gets the
+// tool from the same module version as the pix it links, so the headers always match
+// the renderer that runs the result:
+//
+//	go get -tool github.com/bluescreen10/pix/cmd/shaderc
+//
+//	//go:generate go tool shaderc -i fire.comp.glsl -o spv:build/fire.comp.spv -o metallib:build/fire.comp.metalbin
+//
+// It runs glslc and spirv-cross from PATH, and xcrun's Metal toolchain for metallib.
+//
+// TODO: turn pix's shared code into includes written for applications: a shader
+// includes one, such as <pix/particles/simulation.glsl>, and implements the functions
+// it asks for — a start() that spawns a particle and an update() that advances it —
+// while the include provides main() and the bindings, and calls them. The include owns
+// the entry point and the layout, so a shader written against it keeps working when
+// either changes.
 package main
 
 import (
@@ -69,7 +80,7 @@ func main() {
 }
 
 func run(args []string) error {
-	flags := flag.NewFlagSet("shadercompile", flag.ContinueOnError)
+	flags := flag.NewFlagSet("shaderc", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	input := flags.String("i", "", "input GLSL shader")
 	entry := flags.String("e", "main", "shader entry point")
@@ -77,7 +88,7 @@ func run(args []string) error {
 	var defines stringsFlag
 	flags.Var(&defines, "D", "preprocessor definition (repeatable)")
 	var includes stringsFlag
-	flags.Var(&includes, "I", "directory to search for #include files, after the shader's own (repeatable)")
+	flags.Var(&includes, "I", "directory to search for #include files, after the shader's own and before pix's (repeatable)")
 	var outputs outputs
 	flags.Var(&outputs, "o", "output as format:path; format is spv or metallib (repeatable)")
 	if err := flags.Parse(args); err != nil {
@@ -116,7 +127,7 @@ func shaderStage(path string) string {
 }
 
 func compile(input, entry, stage string, defines, includes []string, outputs []output) error {
-	dir, err := os.MkdirTemp("", "pix-shadercompile-")
+	dir, err := os.MkdirTemp("", "pix-shaderc-")
 	if err != nil {
 		return err
 	}
@@ -133,6 +144,11 @@ func compile(input, entry, stage string, defines, includes []string, outputs []o
 	for _, include := range includes {
 		args = append(args, "-I", include)
 	}
+	library, err := libraryIncludeDir()
+	if err != nil {
+		return err
+	}
+	args = append(args, "-I", library)
 	args = append(args, input, "-o", spvPath)
 	if err := command("glslc", args...); err != nil {
 		return err

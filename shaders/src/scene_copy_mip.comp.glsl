@@ -7,7 +7,7 @@
 // halved. Each texel is one bilinear tap at the corner the four texels it covers share,
 // which averages them exactly. Rough glass reads these: the rougher, the lower the
 // level, and the more what is behind it blurs.
-#include "bindless.glsl"
+#include <pix/bindless.glsl>
 
 layout(local_size_x = 8, local_size_y = 8) in;
 

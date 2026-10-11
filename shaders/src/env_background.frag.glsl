@@ -6,8 +6,8 @@
 // env_background — draws a scene's environment behind it: the image itself, in the
 // direction each pixel looks, wherever no geometry was drawn. The pass's depth test
 // keeps it to those pixels (see Renderer.encodeEnvironmentBackground).
-#include "postfx.glsl"
-#include "environment.glsl"
+#include <pix/postfx.glsl>
+#include <pix/environment.glsl>
 
 layout(push_constant, scalar) uniform PC {
     POSTFX_ROOT

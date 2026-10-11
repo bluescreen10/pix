@@ -9,7 +9,7 @@
 #ifndef PIX_ALPHA_MASK_GLSL
 #define PIX_ALPHA_MASK_GLSL
 
-#include "bindless.glsl"
+#include <pix/bindless.glsl>
 
 // UV1 and UV2 are the values of a UVSet (materials.UV1, materials.UV2).
 const uint UV1 = 0u;

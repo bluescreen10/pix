@@ -10,7 +10,7 @@
 // In pixels, not the screen widths the motion is stored in: a frame's motion is a few
 // pixels, which in widths of a large frame is under one step of an 8-bit colour, and the
 // view would be one flat grey.
-#include "postfx.glsl"
+#include <pix/postfx.glsl>
 
 layout(push_constant, scalar) uniform PC {
     POSTFX_ROOT

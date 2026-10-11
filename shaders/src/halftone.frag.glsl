@@ -10,7 +10,7 @@
 // Dot size is chosen in display space: printed tone is perceptual, and a dot area
 // proportional to linear light would leave every midtone looking far too light. The
 // result is converted back to linear light, like every other pass's output.
-#include "postfx.glsl"
+#include <pix/postfx.glsl>
 
 layout(push_constant, scalar) uniform PC {
     POSTFX_ROOT

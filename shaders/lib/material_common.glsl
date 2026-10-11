@@ -10,8 +10,8 @@
 #define MATERIAL_COMMON_GLSL
 
 // Bindless heap, light table, shadow sampling and fog.
-#include "lighting.glsl"
-#include "alpha_mask.glsl"
+#include <pix/lighting.glsl>
+#include <pix/alpha_mask.glsl>
 
 // Specialization constants: what the renderer compiles in or out of a material's
 // fragment shader for each pipeline (see pix.fragmentVariant), so a pipeline pays only

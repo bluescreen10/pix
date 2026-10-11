@@ -16,7 +16,7 @@ import (
 	"github.com/bluescreen10/pix/textures"
 )
 
-//go:generate go run ./cmd/shadercompile -i testdata/image_fill.comp.glsl -o spv:testdata/build/image_fill.comp.spv -o metallib:testdata/build/image_fill.comp.metalbin
+//go:generate go run ./cmd/shaderc -i testdata/image_fill.comp.glsl -o spv:testdata/build/image_fill.comp.spv -o metallib:testdata/build/image_fill.comp.metalbin
 
 // environmentImage is an equirectangular image, width x height, whose texel at (u, v) —
 // its centre, in [0, 1] — has the linear colour color returns.

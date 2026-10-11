@@ -20,7 +20,7 @@
 
 // Geometry passes: bindless heap + light table + the DrawRoot push constant and the
 // vertex-pull varyings.
-#include "material_common.glsl"
+#include <pix/material_common.glsl>
 #include "surface.glsl"
 #include "ggx.glsl"
 

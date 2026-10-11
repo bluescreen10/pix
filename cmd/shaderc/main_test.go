@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -48,5 +50,23 @@ func TestEncodeDecodeMetal(t *testing.T) {
 	}
 	if _, err := remapMetalBindings([]byte("invalid")); err == nil {
 		t.Fatal("invalid SPIR-V accepted")
+	}
+}
+
+func TestLibraryIncludesNeedNoIncludePath(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "client.comp.glsl")
+	source := `#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#include <pix/bindless.glsl>
+layout(local_size_x = 1) in;
+void main() {}
+`
+	if err := os.WriteFile(input, []byte(source), 0644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(dir, "client.comp.spv")
+	if err := run([]string{"-i", input, "-o", "spv:" + output}); err != nil {
+		t.Fatalf("run() = %v, want the pix library on the include path", err)
 	}
 }

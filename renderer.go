@@ -71,8 +71,13 @@ type Renderer struct {
 	// lives as long as the renderer so its staging arena is reused across frames.
 	uploader *uploader
 
-	cullPipeline           gpu.Pipeline
-	particleUpdatePipeline gpu.Pipeline // compute particle simulation (particle_update.comp) — see encodeParticleSimulation
+	cullPipeline gpu.Pipeline
+	// particleUpdatePipelines hold one pipeline per particle update shader seen so far,
+	// pix's default and each custom one, built on first use — see
+	// encodeParticleSimulation. encodedParticleRoot is the root they are pushed,
+	// reused across containers and frames.
+	particleUpdatePipelines []particleUpdatePipeline
+	encodedParticleRoot     []byte
 	// particleSortKeysPipeline and particleSortStepPipeline sort a container's particles
 	// back to front (particle_sort_keys.comp, particle_sort_step.comp) — see
 	// encodeParticleSorting.
@@ -2432,27 +2437,60 @@ func (r *Renderer) encodeParticleSimulation(st *renderState, cmd gpu.CommandBuff
 		}
 
 		ps := st.particles[pp.ID]
-		var pendingAddr uint64
+		var newbornsAddr uint64
 		if births > 0 {
-			pendingAddr = ps.pendingBuf.Addr
+			newbornsAddr = ps.pendingBuf.Addr
 		}
-		root := particleUpdateRoot{
-			src: ps.buffers[ps.current].Addr, dst: ps.buffers[1-ps.current].Addr,
-			pending: pendingAddr, indirect: ps.indirectBuf.Addr,
-			capacity: pp.Capacity, pendingCount: births, dt: pp.DT,
-			gravity: pp.Update.Gravity, drag: pp.Update.Drag,
+		root := particleSimulationRoot{
+			source:       ps.buffers[ps.current].Addr,
+			destination:  ps.buffers[1-ps.current].Addr,
+			newborns:     newbornsAddr,
+			draw:         ps.indirectBuf.Addr,
+			capacity:     pp.Capacity,
+			newbornCount: births,
+			dt:           pp.DT,
 		}
-		if pp.Update.SizeOverLife.Enabled {
-			root.sizeEnabled, root.sizeStart, root.sizeEnd = 1, pp.Update.SizeOverLife.Start, pp.Update.SizeOverLife.End
-		}
-		if pp.Update.OpacityOverLife.Enabled {
-			root.opacityEnabled, root.opacityStart, root.opacityEnd = 1, pp.Update.OpacityOverLife.Start, pp.Update.OpacityOverLife.End
-		}
+		shader, params := r.particleUpdateFor(pp.Update)
+		r.encodedParticleRoot = root.appendWithParams(r.encodedParticleRoot[:0], params)
 
-		cmd.SetPipeline(r.particleUpdatePipeline)
-		cmd.Dispatch(utils.ToBytes(&root), (pp.Capacity+births+63)/64, 1, 1)
+		cmd.SetPipeline(r.particleUpdatePipelineFor(shader))
+		cmd.Dispatch(r.encodedParticleRoot, (pp.Capacity+births+63)/64, 1, 1)
 		ps.current = 1 - ps.current
 	}
+}
+
+// particleUpdateFor returns the shader a container's particles update with, and the
+// params it is pushed: the container's own, or pix's default update configured by the
+// container's fields.
+func (r *Renderer) particleUpdateFor(update scenes.ParticleUpdate) (shader, params []byte) {
+	if update.Shader != nil {
+		return update.Shader, update.Params
+	}
+	defaults := defaultParticleParamsFor(update)
+	return shaders.ForBackend(r.backend, shaders.ParticleUpdate), utils.ToBytes(&defaults)
+}
+
+// particleUpdatePipelineFor returns the pipeline built from a particle update shader,
+// building it the first time. Shaders are matched by slice identity, so containers
+// sharing one Shader slice share one pipeline.
+func (r *Renderer) particleUpdatePipelineFor(shader []byte) gpu.Pipeline {
+	for _, update := range r.particleUpdatePipelines {
+		if materials.SameSPIRV(update.shader, shader) {
+			return update.pipeline
+		}
+	}
+	pipeline := r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shader, Entry: "main", Label: "particle-update"})
+	r.particleUpdatePipelines = append(r.particleUpdatePipelines, particleUpdatePipeline{shader: shader, pipeline: pipeline})
+	return pipeline
+}
+
+// destroyParticleUpdatePipelines frees every particle update pipeline; the next frame
+// builds again the ones it uses.
+func (r *Renderer) destroyParticleUpdatePipelines() {
+	for _, update := range r.particleUpdatePipelines {
+		r.backend.DestroyPipeline(update.pipeline)
+	}
+	r.particleUpdatePipelines = r.particleUpdatePipelines[:0]
 }
 
 // encodeParticleSorting sorts each back-to-front container's particles for the main
@@ -4652,7 +4690,7 @@ func (r *Renderer) buildPipelines() {
 		for _, p := range r.deformPipelines {
 			r.backend.DestroyPipeline(p)
 		}
-		r.backend.DestroyPipeline(r.particleUpdatePipeline)
+		r.destroyParticleUpdatePipelines()
 		r.backend.DestroyPipeline(r.particleSortKeysPipeline)
 		r.backend.DestroyPipeline(r.particleSortStepPipeline)
 		r.backend.DestroyPipeline(r.envPrefilterPipeline)
@@ -4684,7 +4722,6 @@ func (r *Renderer) buildPipelines() {
 			Constants: variant.constants(),
 		})
 	}
-	r.particleUpdatePipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleUpdate), Entry: "main", Label: "particle-update"})
 	r.particleSortKeysPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleSortKeys), Entry: "main", Label: "particle-sort-keys"})
 	r.particleSortStepPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.ParticleSortStep), Entry: "main", Label: "particle-sort-step"})
 	r.envPrefilterPipeline = r.backend.CreateComputePipeline(gpu.ComputePipelineDescriptor{Shader: shaders.ForBackend(r.backend, shaders.EnvPrefilter), Entry: "main", Label: "env-prefilter"})
@@ -5338,7 +5375,7 @@ func (r *Renderer) Destroy() {
 		for _, p := range r.deformPipelines {
 			r.backend.DestroyPipeline(p)
 		}
-		r.backend.DestroyPipeline(r.particleUpdatePipeline)
+		r.destroyParticleUpdatePipelines()
 		r.backend.DestroyPipeline(r.particleSortKeysPipeline)
 		r.backend.DestroyPipeline(r.particleSortStepPipeline)
 		r.backend.DestroyPipeline(r.envPrefilterPipeline)

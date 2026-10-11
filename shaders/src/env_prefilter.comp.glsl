@@ -10,7 +10,7 @@
 // than the environment, so that a few dozen samples land on an image already smooth
 // enough not to sparkle. Each lobe is only what its mip adds to the blur of the one
 // before (see environmentMipBlurs). One invocation writes one texel of one face.
-#include "bindless.glsl"
+#include <pix/bindless.glsl>
 #include "env_sampling.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;

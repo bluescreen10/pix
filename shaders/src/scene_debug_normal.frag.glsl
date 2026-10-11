@@ -11,7 +11,7 @@
 // target: the normal comes straight from the varying scene_draw.vert interpolates, so
 // this shows what shading would actually receive — for every material type, since
 // nothing here touches a material record.
-#include "material_common.glsl"
+#include <pix/material_common.glsl>
 
 layout(location = 0) out vec4 outColor;
 
