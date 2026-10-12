@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/bluescreen10/pix/shaders"
+	"github.com/bluescreen10/pix/render/shaders"
 )
 
 // libraryIncludeDir writes the embedded pix headers to disk, as pix/<name>.glsl, and

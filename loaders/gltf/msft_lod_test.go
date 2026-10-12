@@ -3,11 +3,11 @@ package gltf_test
 import (
 	"testing"
 
-	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/loaders/gltf"
-	"github.com/bluescreen10/pix/scenes"
+	"github.com/bluescreen10/pix/render"
+	"github.com/bluescreen10/pix/render/scenes"
 )
 
 func avgColor(px []byte) (r, g, b float64, lit int) {
@@ -36,7 +36,7 @@ func avgColor(px []byte) (r, g, b float64, lit int) {
 // in each level's range.
 func TestMSFTLod(t *testing.T) {
 	const size = 128
-	r, err := pix.NewOffscreenRenderer(size, size)
+	r, err := render.NewOffscreenRenderer(size, size)
 	if err != nil {
 		t.Fatal(err)
 	}

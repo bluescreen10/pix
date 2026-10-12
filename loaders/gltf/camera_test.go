@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/loaders/gltf"
-	"github.com/bluescreen10/pix/scenes"
+	"github.com/bluescreen10/pix/render"
+	"github.com/bluescreen10/pix/render/scenes"
 	"github.com/chewxy/math32"
 )
 
@@ -47,9 +47,9 @@ func cameraAsset(t *testing.T) string {
 	return path
 }
 
-func loadCameraAsset(t *testing.T) (*pix.Renderer, *scenes.Scene) {
+func loadCameraAsset(t *testing.T) (*render.Renderer, *scenes.Scene) {
 	t.Helper()
-	r, err := pix.NewOffscreenRenderer(32, 16)
+	r, err := render.NewOffscreenRenderer(32, 16)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,9 +4,9 @@ import (
 	"testing"
 
 	_ "github.com/bluescreen10/gamekit/gpu/vulkan"
-	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/loaders/gltf"
-	"github.com/bluescreen10/pix/scenes"
+	"github.com/bluescreen10/pix/render"
+	"github.com/bluescreen10/pix/render/scenes"
 )
 
 const capoeiraAsset = "../../examples/skinning/assets/capoeira.gltf"
@@ -17,7 +17,7 @@ const capoeiraAsset = "../../examples/skinning/assets/capoeira.gltf"
 // animation clip parsed, and — the actual point of the skinning pipeline — an
 // AnimationMixer pose actually changes a bone's world transform frame to frame.
 func TestLoadSkinnedAnimatedAsset(t *testing.T) {
-	r, err := pix.NewOffscreenRenderer(64, 64)
+	r, err := render.NewOffscreenRenderer(64, 64)
 	if err != nil {
 		t.Fatal(err)
 	}

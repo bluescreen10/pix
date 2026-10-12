@@ -3,7 +3,7 @@
 // loader works against any backend the renderer runs on. Skinning and animation
 // are supported: a glTF skin becomes a scenes.Skeleton (its joint nodes become
 // scenes.Bone nodes, not plain groups — see Load), a mesh referencing that skin
-// becomes a scenes.SkinnedMesh, and glTF animations come back as pix.AnimationClips
+// becomes a scenes.SkinnedMesh, and glTF animations come back as render.AnimationClips
 // ready for a scenes.AnimationMixer. Morph targets load onto their geometries, named
 // from the mesh's (or node's) extras.targetNames, starting at the mesh's (or node's)
 // default weights; "weights" channels animate them. Cameras load hidden, at their
@@ -28,13 +28,13 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/colors"
-	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/materials"
-	"github.com/bluescreen10/pix/scenes"
-	"github.com/bluescreen10/pix/textures"
+	"github.com/bluescreen10/pix/render"
+	"github.com/bluescreen10/pix/render/geometries"
+	"github.com/bluescreen10/pix/render/materials"
+	"github.com/bluescreen10/pix/render/scenes"
+	"github.com/bluescreen10/pix/render/textures"
 )
 
 // LoadResult is what Load made: how many mesh nodes it added to the scene, the
@@ -60,7 +60,7 @@ type Options struct {
 // skin becomes a scenes.Skeleton (see the package doc), and every scenes.AnimationClip
 // in the file comes back in the result, ready to play. options says how; nil loads with
 // the defaults.
-func Load(r *pix.Renderer, scene *scenes.Scene, path string, options *Options) (LoadResult, error) {
+func Load(r *render.Renderer, scene *scenes.Scene, path string, options *Options) (LoadResult, error) {
 	if options == nil {
 		options = &Options{}
 	}
@@ -105,7 +105,7 @@ type texKey struct {
 }
 
 type loader struct {
-	renderer *pix.Renderer
+	renderer *render.Renderer
 	scene    *scenes.Scene
 	options  Options
 	doc      doc

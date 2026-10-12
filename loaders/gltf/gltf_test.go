@@ -13,13 +13,13 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/colors"
-	"github.com/bluescreen10/pix/geometries"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/loaders/gltf"
-	"github.com/bluescreen10/pix/materials"
-	"github.com/bluescreen10/pix/scenes"
+	"github.com/bluescreen10/pix/render"
+	"github.com/bluescreen10/pix/render/geometries"
+	"github.com/bluescreen10/pix/render/materials"
+	"github.com/bluescreen10/pix/render/scenes"
 )
 
 // TestMultiSceneOnlyDefault verifies the loader builds ONLY the default scene's
@@ -65,7 +65,7 @@ func TestMultiSceneOnlyDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r, err := pix.NewOffscreenRenderer(32, 32)
+	r, err := render.NewOffscreenRenderer(32, 32)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func writeTriangleGLTFWithMaterial(t *testing.T, material, extra string) string 
 
 func TestLoadTriangle(t *testing.T) {
 	const size = 160
-	r, err := pix.NewOffscreenRenderer(size, size)
+	r, err := render.NewOffscreenRenderer(size, size)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestLoadTriangle(t *testing.T) {
 // (glTF JSON) and extra top-level members, and returns the PBR material it was given.
 func loadTriangleMaterial(t *testing.T, material, extra string) *materials.PBRMaterial {
 	t.Helper()
-	r, err := pix.NewOffscreenRenderer(8, 8)
+	r, err := render.NewOffscreenRenderer(8, 8)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -578,7 +578,7 @@ func loadTriangleUV2(t *testing.T, material string, uv2 []glm.Vec2f) []glm.Vec2f
 		t.Fatal(err)
 	}
 
-	r, err := pix.NewOffscreenRenderer(8, 8)
+	r, err := render.NewOffscreenRenderer(8, 8)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,0 +1,54 @@
+# baseURL is set per version by .github/workflows/docs.yml.
+baseURL = "http://localhost:1313/"
+title = "pix"
+languageCode = "en-us"
+
+[module]
+  [[module.imports]]
+    path = "github.com/imfing/hextra"
+
+[markup.goldmark.renderer]
+  unsafe = true
+
+[params.navbar.displayTitle]
+  enable = true
+
+[[menu.main]]
+  name = "Docs"
+  pageRef = "/docs"
+  weight = 1
+
+[[menu.main]]
+  name = "API"
+  url = "https://pkg.go.dev/github.com/bluescreen10/pix/render"
+  weight = 2
+
+[[menu.main]]
+  identifier = "version"
+  name = "Version"
+  weight = 3
+
+[[menu.main]]
+  name = "latest"
+  parent = "version"
+  url = "https://bluescreen10.github.io/pix/latest/"
+  weight = 1
+
+[[menu.main]]
+  name = "dev"
+  parent = "version"
+  url = "https://bluescreen10.github.io/pix/dev/"
+  weight = 2
+
+[[menu.main]]
+  name = "Search"
+  weight = 4
+  [menu.main.params]
+    type = "search"
+
+[[menu.main]]
+  name = "GitHub"
+  url = "https://github.com/bluescreen10/pix"
+  weight = 5
+  [menu.main.params]
+    icon = "github"

@@ -7,11 +7,11 @@ import (
 	"os"
 	"testing"
 
-	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/colors"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/loaders/gltf"
-	"github.com/bluescreen10/pix/scenes"
+	"github.com/bluescreen10/pix/render"
+	"github.com/bluescreen10/pix/render/scenes"
 )
 
 // TestCaptureAnimatedFrames renders the capoeira actor at three points in its
@@ -22,7 +22,7 @@ func TestCaptureAnimatedFrames(t *testing.T) {
 	if os.Getenv("PIX_CAPTURE_FRAMES") == "" {
 		t.Skip("set PIX_CAPTURE_FRAMES=1 to run (writes PNGs to /tmp)")
 	}
-	r, err := pix.NewOffscreenRenderer(480, 480)
+	r, err := render.NewOffscreenRenderer(480, 480)
 	if err != nil {
 		t.Fatal(err)
 	}

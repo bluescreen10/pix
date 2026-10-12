@@ -9,10 +9,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bluescreen10/pix"
 	"github.com/bluescreen10/pix/glm"
 	"github.com/bluescreen10/pix/loaders/gltf"
-	"github.com/bluescreen10/pix/scenes"
+	"github.com/bluescreen10/pix/render"
+	"github.com/bluescreen10/pix/render/scenes"
 )
 
 // morphAsset builds a glTF document with one node whose mesh has two identical
@@ -137,7 +137,7 @@ func morphAsset(t *testing.T, nodeWeights []float32) string {
 // loadMorphAsset loads morphAsset and returns the meshes its weight animation drives.
 func loadMorphAsset(t *testing.T, nodeWeights []float32) (*scenes.Scene, gltf.LoadResult, []scenes.Mesh) {
 	t.Helper()
-	r, err := pix.NewOffscreenRenderer(16, 16)
+	r, err := render.NewOffscreenRenderer(16, 16)
 	if err != nil {
 		t.Fatal(err)
 	}

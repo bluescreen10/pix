@@ -1,0 +1,81 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CGO_ENABLED: "1"
+      XDG_RUNTIME_DIR: /tmp
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Install Mesa Vulkan software renderer
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends libvulkan-dev libx11-dev mesa-vulkan-drivers vulkan-tools xauth xvfb
+
+      # The runner has no GPU; lavapipe is Mesa's CPU Vulkan driver.
+      - name: Select lavapipe ICD
+        run: |
+          lavapipe_icd=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)
+          test -n "$lavapipe_icd"
+          echo "VK_DRIVER_FILES=$lavapipe_icd" >> "$GITHUB_ENV"
+          echo "VK_ICD_FILENAMES=$lavapipe_icd" >> "$GITHUB_ENV"
+
+      - name: Verify lavapipe
+        run: vulkaninfo --summary
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      # xvfb supplies the X display gamekit's window code needs.
+      - name: Test
+        run: xvfb-run -a go test ./... -count=1
+
+  macos:
+    name: macOS
+    # Pinned to an Apple Silicon image; Metal is pix's default backend on darwin.
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      CGO_ENABLED: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./... -count=1

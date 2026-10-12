@@ -5,7 +5,7 @@
 //
 // A Console is inert on its own: it holds the registry, the scrollback and the edit
 // line, reads from an Input, and paints through a Painter. The renderer wires those
-// up (pix.Renderer.EnableConsole); nothing here touches the GPU.
+// up (render.Renderer.EnableConsole); nothing here touches the GPU.
 package console
 
 import (
@@ -131,7 +131,7 @@ func (c *Console) SetFontSize(px float32) {
 // Visible reports whether the console is open. An application should skip its own
 // input handling while it is: the console captures typed text but does not and cannot
 // stop a camera controller from polling the same keys. Through the renderer,
-// pix.Renderer.IsConsoleOpen is the same check without needing to hold the Console.
+// render.Renderer.IsConsoleOpen is the same check without needing to hold the Console.
 func (c *Console) Visible() bool {
 	return c.visible
 }

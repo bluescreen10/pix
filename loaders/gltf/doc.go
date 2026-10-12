@@ -1,6 +1,6 @@
 package gltf
 
-import "github.com/bluescreen10/pix/materials"
+import "github.com/bluescreen10/pix/render/materials"
 
 // glTF 2.0 JSON document types — the subset the loader consumes: static meshes,
 // morph targets, PBR base color + texture, node hierarchy, skins, animations, and

@@ -2,7 +2,7 @@ package gltf
 
 import (
 	"github.com/bluescreen10/pix/glm"
-	"github.com/bluescreen10/pix/scenes"
+	"github.com/bluescreen10/pix/render/scenes"
 )
 
 // omittedFarPerNear places the far plane of a perspective camera whose glTF zfar is
